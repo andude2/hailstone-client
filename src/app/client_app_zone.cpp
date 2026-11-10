@@ -18,6 +18,7 @@
 #include "game/option_commands.h"
 #include "game/particles.h"
 #include "nav/zone_nav.h"
+#include "platform/process.h"
 
 namespace hailstone::app::client_internal {
 
@@ -29,8 +30,15 @@ void ClientApp::load_zone(const std::string& short_name) {
     }
     loading_view_.detail = "Loading " + short_name;
     auto t0 = Clock::now();
+    // What each step of the load leaves in memory, so a load that holds much more than its geometry can be read.
+    auto mark = [&](const char* phase) {
+        if (auto rss = platform::resident_memory())
+            log::info("zone load: {}: {:.0f} MB resident", phase, double(*rss) / (1024 * 1024));
+    };
+    mark("start");
     try {
         zone_ = assets::load_zone(game_, short_name);
+        mark("zone data");
         // Hailstone's own flora for a zone without any (assets/zone_flora.h, display.zone_flora).
         if (config_.get_bool("display.zone_flora", true)) {
             // flora/default.txt only where the server calls the zone outdoor (OP_NewZone's time type 1, 2 or 5), so
@@ -40,6 +48,7 @@ void ClientApp::load_zone(const std::string& short_name) {
                 if (const auto& z = conn_->zone_info()) outdoor = z->time_type == 1 || z->time_type == 2 || z->time_type == 5;
             assets::add_zone_flora(game_, *zone_, platform::flora_dir(), outdoor);
         }
+        mark("flora");
         zone_particles_ = std::make_unique<ZoneParticles>(vk_, game_, shader_dir_, *zone_);
         zone_particles_->set_density(environment_particle_density_);
         // PlayerClient::PostBuildInit makes the spawns' lights only with ShowDynamicLights (/dynamiclights: "takes
@@ -60,13 +69,16 @@ void ClientApp::load_zone(const std::string& short_name) {
             if (!fire_renderer_) fire_renderer_ = std::make_unique<render::FireRenderer>(vk_, shader_dir_);
         }
         zone_renderer_ = std::make_unique<render::ZoneRenderer>(vk_, *zone_, shader_dir_, render::zone_render_options(game_));
+        mark("zone renderer");
         flora_renderer_.reset();
         if (!zone_->flora.empty()) flora_renderer_ = std::make_unique<render::FloraRenderer>(vk_, *zone_, shader_dir_);
+        mark("flora renderer");
         point_shadows_.reset();
         if (spell_particles_) spell_particles_->clear();
         if (spell_bolts_) spell_bolts_->clear();
         if (actor_emitters_) actor_emitters_->clear();
         collision_ = game::CollisionMesh::build(*zone_);
+        mark("collision");
         if (conn_) conn_->reground(); // ground_npcs measured the spawns against no floor, or the last zone's
         zone_ladders_ = game::zone_ladders(*zone_);
         if (nav_)
@@ -74,7 +86,9 @@ void ClientApp::load_zone(const std::string& short_name) {
                               platform::cache_dir() / "navmesh" /
                                   (server_profile_.id.empty() ? std::string("default") : server_profile_.id) /
                                   nav::ZoneNav::cache_name(short_name));
+        mark("navigation");
         ambient_probe_ = render::AmbientProbe(*zone_);
+        mark("ambient probe");
         probe_blend_.reset();
         // Zone-line boxes under the terrain (a client addition, game/zone_lines.h): walking over them fires them.
         zone_line_.set_buried(game::find_buried_zone_lines(zone_->regions, *collision_));

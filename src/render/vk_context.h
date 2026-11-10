@@ -213,6 +213,12 @@ public:
     // the one being recorded included. Returns the upload's serial, for retire_after_upload; `staging_bytes` is what
     // the upload keeps alive until it is done (past kMaxStagingInFlight in flight, the oldest uploads are waited for).
     std::uint64_t submit_upload(const std::function<void(VkCommandBuffer)>& record, VkDeviceSize staging_bytes);
+    // The staging the uploads in flight hold (host memory the GPU has not read yet).
+    std::uint64_t upload_staging_in_flight() const { return uploads_.bytes_in_flight(); }
+    // Frees the staging of the uploads the GPU is done with, waiting for the oldest when more than `budget_bytes`
+    // is in flight (0: never wait). The frame loop releases what is done each frame; a long build (the zone's)
+    // calls this too, so the staging of what it has already sent does not pile up until the first frame.
+    void release_finished_uploads(std::uint64_t budget_bytes = 0);
     // Runs `release` (destroying Vulkan objects) once the GPU is done with everything submitted so far and the frame
     // being recorded: for what a frame in flight, or an upload, may still use. `frames_ahead`: frames not begun yet
     // that may use it too (1 for the UI's textures: ImGui's draw lists are built before their frame begins). Main

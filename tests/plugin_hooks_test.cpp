@@ -91,6 +91,17 @@ TEST_CASE("hooks: a plugin's or script's owner cannot take the client's own comm
     CHECK(h.add_command(client, "/who", [&](std::string_view) {}));
 }
 
+TEST_CASE("hooks: /foreground is the client's own command, not one a plugin may take") {
+    Hooks h;
+    auto client = h.new_owner("client"), guest = h.new_guest("plugin:Test");
+    CHECK_FALSE(h.reserved_command("/foreground")); // not in the game's table
+    CHECK(h.add_command(client, "/foreground", [](std::string_view) {}));
+    CHECK(h.reserved_command("/foreground"));
+    CHECK_FALSE(h.add_command(guest, "/foreground", [](std::string_view) {}));
+    std::string line = "/foreground";
+    CHECK(h.command(line)); // the client's handler takes it; no guest can shadow it
+}
+
 TEST_CASE("hooks: line filters rewrite or take a line before the commands") {
     Hooks h;
     auto a = h.new_owner("a");

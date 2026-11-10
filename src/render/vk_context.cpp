@@ -979,6 +979,17 @@ std::uint64_t VkContext::submit_upload(const std::function<void(VkCommandBuffer)
     return serial;
 }
 
+void VkContext::release_finished_uploads(std::uint64_t budget_bytes) {
+    // Over the budget: wait for the oldest upload, so its staging goes now rather than at the next frame.
+    while (budget_bytes > 0 && uploads_.bytes_in_flight() > budget_bytes && uploads_.pending() > 1) {
+        uploads_.wait_oldest(
+            [this](const Upload& w) { vk_check(vkWaitForFences(device_, 1, &w.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences"); },
+            [this](const Upload& w) { recycle_upload(w); });
+        retired_.collect({frames_done_, uploads_.completed()});
+    }
+    collect_retired();
+}
+
 void VkContext::immediate_submit(const std::function<void(VkCommandBuffer)>& record) {
     VkCommandBufferAllocateInfo a{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     a.commandPool = upload_pool_;

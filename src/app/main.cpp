@@ -49,6 +49,7 @@
 #include "app/window_icon.h"
 #include "platform/message_box.h"
 #include "platform/paths.h"
+#include "platform/process.h"
 #include "platform/window.h"
 #include "game/sky_clock.h"
 #include "render/camera.h"
@@ -781,11 +782,19 @@ int main(int argc, char** argv) {
             if (opts.game_dir.empty()) throw std::runtime_error("--zone needs --game-dir or EQ_GAME_DIR");
             GameDir game = open_game_dir(opts.game_dir, opts.classic_dir);
             auto t0 = std::chrono::steady_clock::now();
+            // What each step of the load leaves in memory, so a load that holds much more than its geometry can be read.
+            auto mark = [&](const char* phase) {
+                if (auto rss = platform::resident_memory())
+                    log::info("zone load: {}: {:.0f} MB resident", phase, double(*rss) / (1024 * 1024));
+            };
+            mark("start");
             zone = assets::load_zone(game, opts.zone);
+            mark("zone data");
             if (!opts.no_grass) {
                 const int tt = opts.time_type >= 0 ? opts.time_type : (opts.sky > 0 ? 1 : 0); // as the fog below
                 assets::add_zone_flora(game, *zone, platform::flora_dir(), tt == 1 || tt == 2 || tt == 5);
             }
+            mark("flora");
             auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0);
             log::info("loaded {}: {} terrain meshes, {} objects, {} placements, {} lights in {} ms; bounds {:.0f} {:.0f} "
                       "{:.0f} to {:.0f} {:.0f} {:.0f}",
@@ -834,6 +843,8 @@ int main(int argc, char** argv) {
             zone_renderer = std::make_unique<render::ZoneRenderer>(vk, *zone, shader_dir,
                                                                    render::zone_render_options(open_game_dir(opts.game_dir, opts.classic_dir)));
             zone_renderer->set_hide_flames(opts.modern);
+            if (auto rss = platform::resident_memory())
+                log::info("zone load: zone renderer: {:.0f} MB resident", double(*rss) / (1024 * 1024));
             const auto& s = zone_renderer->stats();
             log::info("zone renderer: {} triangles, {} draws in {} chunks, {} textures ({} missing)", s.triangles,
                       s.draws, s.chunks, s.textures, s.missing_textures);

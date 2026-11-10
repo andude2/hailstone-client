@@ -24,6 +24,7 @@
 #include "plugin/consent.h"
 #include "plugin/hooks.h"
 #include "plugin/policy.h"
+#include "plugin/spell_icon.h"
 
 namespace hailstone::mq { class Registry; struct Context; }
 namespace hailstone::net { class GameConnection; }
@@ -60,6 +61,8 @@ struct NativeEnv {
     std::function<bool(int bar, int page, int button, const std::string& spec)> set_hot_button;
     std::function<int(int bar)> hot_bar_page;
     std::function<void(int bar, int page)> set_hot_bar_page;
+    // A spell icon's cell in the stock A_SpellIcons sheet (the host table's spell_icon); empty: none.
+    std::function<std::optional<SpellIcon>(std::int32_t)> spell_icon;
     std::vector<std::filesystem::path> dirs; // where plugins are looked for, and one level down (plugins/<name>/)
     std::filesystem::path cache_dir;         // the approved copies
     std::filesystem::path config_dir;        // each plugin's own directory is config_dir / name

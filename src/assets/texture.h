@@ -89,6 +89,11 @@ bool remove_color_key(Image& image);
 // draws it. Other formats are left unchanged.
 void make_opaque(Image& image);
 
+// Whether every texel of an RGBA8 image's level 0 is fully opaque. Such an image needs no coverage-aware mip
+// chain: build_color_mips would average it like any other, so the GPU may build the chain itself (render/gpu.cpp
+// UploadBatch::texture), which is what the original's Direct3D 9 did (its hardware mip generation).
+bool is_opaque(const Image& image);
+
 // A DDS cube map (DDSCAPS2_CUBEMAP, the six faces +X, -X, +Y, -Y, +Z, -Z one after another, each with its mips) laid
 // out as one octahedral RGBA8 image `size` texels across: texel uv in 0..1 is the direction octahedral_direction(uv),
 // and each texel the faces' bilinear colour there, as Direct3D's texCUBE picks a face. The game's cube maps stand

@@ -7,9 +7,12 @@
 #include "assets/texture.h"
 #include "core/byte_io.h"
 #include "game_files.h"
+#include "render/gpu.h"
 
 using namespace hailstone::assets;
 using hailstone::ByteWriter;
+using hailstone::render::TextureUse;
+using hailstone::render::prepare_texture_image;
 
 namespace {
 
@@ -724,4 +727,51 @@ TEST_CASE("a DDS cube map becomes an octahedral map, each direction from its fac
     CHECK(at({-1, 0.1f, 0.1f}) == colors[1]);
     CHECK(at({0.1f, 1, 0.1f}) == colors[4]);
     CHECK(at({0.1f, -1, -0.1f}) == colors[5]);
+}
+
+TEST_CASE("is_opaque tells a texture that needs no coverage-aware chain from one that does") {
+    Image img;
+    img.width = 2;
+    img.height = 1;
+    img.format = PixelFormat::RGBA8;
+    img.mips.push_back(std::vector<std::byte>(8, std::byte{0xff}));
+    CHECK(is_opaque(img));
+    img.mips[0][7] = std::byte{0x00}; // one clear texel
+    CHECK_FALSE(is_opaque(img));
+    img.mips[0][7] = std::byte{0x80}; // half clear
+    CHECK_FALSE(is_opaque(img));
+    img.mips[0][7] = std::byte{0xff};
+
+    // A compressed image is not one the chain rule applies to: it keeps the compression it was stored in.
+    Image bc;
+    bc.width = 4;
+    bc.height = 4;
+    bc.format = PixelFormat::BC3;
+    bc.mips.push_back(std::vector<std::byte>(32, std::byte{0xff}));
+    CHECK_FALSE(is_opaque(bc));
+}
+
+TEST_CASE("An opaque texture goes up with the GPU building its mips; a cut-out one keeps the CPU's chain") {
+    Image opaque;
+    opaque.width = 4;
+    opaque.height = 4;
+    opaque.format = PixelFormat::RGBA8;
+    opaque.mips.push_back(std::vector<std::byte>(4 * 4 * 4, std::byte{0xff}));
+
+    // Left alone: the upload generates the levels itself (render/gpu.cpp UploadBatch::texture).
+    CHECK_FALSE(prepare_texture_image(opaque, TextureUse::Color).has_value());
+    CHECK_FALSE(prepare_texture_image(opaque, TextureUse::OpaqueColor).has_value());
+
+    // A cut-out keeps the CPU's chain: its coverage is scaled so alpha-tested foliage does not thin out.
+    Image cutout = opaque;
+    cutout.mips[0][3] = std::byte{0x00};
+    auto prepared = prepare_texture_image(cutout, TextureUse::Color);
+    REQUIRE(prepared.has_value());
+    CHECK(prepared->mips.size() > 1); // 4x4, 2x2, 1x1
+    CHECK(prepared->mips[1].size() == 2 * 2 * 4);
+
+    // A texture with a chain of its own keeps it (a game DDS with mips).
+    Image with_mips = opaque;
+    with_mips.mips.push_back(std::vector<std::byte>(2 * 2 * 4, std::byte{0xff}));
+    CHECK_FALSE(prepare_texture_image(with_mips, TextureUse::Color).has_value());
 }

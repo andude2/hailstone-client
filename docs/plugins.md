@@ -223,7 +223,7 @@ The data types use MQ's member names and inheritance:
   infinity or a number past a 64-bit integer (what MQ gives for those is not checked).
 
 For example `Me.PctHPs`, `Me.Buff[n|name].Duration`, `Me.Gem[n|name]`, `Me.SpellReady[n|name]`, `Me.Casting`,
-`Me.Combat`, `Me.XTarget[n]`, `Me.FreeInventory`, `Me.Inventory[mainhand|pack1|23]`, and on spawns `Target.Distance`,
+`Me.Combat`, `Me.AutoFire`, `Me.XTarget[n]`, `Me.FreeInventory`, `Me.Inventory[mainhand|pack1|23]`, and on spawns `Target.Distance`,
 `Target.HeadingTo`, `Target.ConColor`, `Target.Named`, `Spawn[...].Loc`, `X`/`Y` as MQ's (the server's) coordinates.
 
 For a script that fights:
@@ -500,7 +500,9 @@ same changes as a plugin, with no change to Hailstone itself. With the `extend` 
   `get_player`, `get_spawn` and `next_spawn` (every spawn in the zone), `get_spell`, `get_item` (an inventory
   slot), `get_buff`, `get_xtarget`, `combat_ability` (the character's combat abilities), `skill` (a skill's value as
   the profile holds it), `aa_value` (an owned alternate ability's slot value, by its ability id), and `eqstr` for a
-  game string with its `%1` filled. A spawn also carries its rider, mercenary and GM flags, whether it is one of the
+  game string with its `%1` filled, and `spell_icon` for a spell icon's cell in the stock `A_SpellIcons` sheet (its
+  ImGui texture id and UVs, as `eq.SpellIcon` gives a Lua UI; `HailstoneSpellIcon`); `get_spell`'s `HailstoneSpell`
+  also carries the spell's `spell_icon` index. A spawn also carries its rider, mercenary and GM flags, whether it is one of the
   player's group, its con colour and its body types. Each struct starts with its size; the client fills what both know, so a plugin built
   for an older client keeps working. `server_info` gives the
   server this login is on (the saved server's name, host and port, the world's name and address), so a plugin for
@@ -540,7 +542,7 @@ Compatibility: the host table and the hook table carry their size and only grow 
 older ABI loads in a newer client; one built for a newer ABI does not load in an older client. ABI 3 added the web
 pages (`web_*`, "Web pages" below); a plugin built with this SDK reports ABI 3, so a client older than that does not
 load it. Calls added to the host table since then keep ABI 3: test `HAILSTONE_HOST_HAS(host, open_bank)` before such a
-call, since a client older than the call has a shorter table. The structs a plugin passes to be filled (`HailstonePlayer`, `HailstoneSpawn`,
+call (and likewise `spell_icon`, or any other newer call), since a client older than the call has a shorter table. The structs a plugin passes to be filled (`HailstonePlayer`, `HailstoneSpawn`,
 ..., `HailstoneWebState`) carry their size too and the client fills what both know; `HailstoneWebState`'s `size` is a `size_t`
 (as ABI 3 shipped it), the others' a `uint32_t`.
 

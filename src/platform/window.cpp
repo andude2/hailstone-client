@@ -726,6 +726,39 @@ void Window::set_text_input(bool on) {
 
 bool Window::focused() const { return (SDL_GetWindowFlags(window_) & SDL_WINDOW_INPUT_FOCUS) != 0; }
 
+void Window::raise() {
+#ifdef _WIN32
+    // SDL's forced raise restores the window with ShowWindow(SW_RESTORE),
+    // which also un-maximizes a maximized client. Do the foreground dance
+    // here instead and leave the window's size and maximized state alone.
+    SDL_PropertiesID props = SDL_GetWindowProperties(window_);
+    HWND hwnd = static_cast<HWND>(SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+    if (!hwnd) return;
+    WINDOWPLACEMENT placement{}; placement.length = sizeof placement;
+    if (::GetWindowPlacement(hwnd, &placement) && placement.showCmd == SW_SHOWMINIMIZED) {
+        // A minimized window keeps its pre-minimize restore state; do not
+        // turn a maximized client into its smaller normal size.
+        const bool restore_maximized = (placement.flags & WPF_RESTORETOMAXIMIZED) != 0;
+        ::ShowWindow(hwnd, restore_maximized ? SW_SHOWMAXIMIZED : SW_RESTORE);
+    }
+    HWND foreground = ::GetForegroundWindow();
+    const DWORD foreground_thread = foreground ? ::GetWindowThreadProcessId(foreground, nullptr) : 0;
+    const DWORD self_thread = ::GetCurrentThreadId();
+    if (foreground_thread && foreground_thread != self_thread)
+        ::AttachThreadInput(foreground_thread, self_thread, TRUE);
+    // Size is never touched: only the z-order and the focus change.
+    ::SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOOWNERZORDER);
+    ::SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOOWNERZORDER);
+    ::SetForegroundWindow(hwnd);
+    ::SetFocus(hwnd);
+    ::SetActiveWindow(hwnd);
+    if (foreground_thread && foreground_thread != self_thread)
+        ::AttachThreadInput(foreground_thread, self_thread, FALSE);
+#else
+    if (!SDL_RaiseWindow(window_)) log::warn("window raise failed: {}", SDL_GetError());
+#endif
+}
+
 WindowMode Window::mode() const {
     if (!(SDL_GetWindowFlags(window_) & SDL_WINDOW_FULLSCREEN)) return WindowMode::Windowed;
     return SDL_GetWindowFullscreenMode(window_) ? WindowMode::Fullscreen : WindowMode::Borderless;

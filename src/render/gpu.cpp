@@ -75,12 +75,46 @@ Buffer UploadBatch::buffer(std::span<const std::byte> data, VkBufferUsageFlags u
     Buffer target;
     vk_check(vmaCreateBuffer(vk_.allocator(), &info, &ai, &target.buffer, &target.allocation, nullptr), "create buffer");
     target.size = info.size;
-    buffers_.push_back({staging(data), target});
+    buffers_.push_back({staging(data), target, 0, 0});
     return target;
+}
+
+Buffer UploadBatch::buffer_pieces(std::span<const std::byte> data, VkBufferUsageFlags usage, std::size_t piece_bytes) {
+    VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    info.size = std::max<VkDeviceSize>(data.size(), 4);
+    info.usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VmaAllocationCreateInfo ai{};
+    ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    Buffer target;
+    vk_check(vmaCreateBuffer(vk_.allocator(), &info, &ai, &target.buffer, &target.allocation, nullptr), "create buffer");
+    target.size = info.size;
+    if (data.empty() || piece_bytes == 0) return target;
+    // Each piece is submitted on its own, so its staging is released as the GPU reads it and the next piece is
+    // staged; the whole buffer is never held twice.
+    for (std::size_t off = 0; off < data.size(); off += piece_bytes) {
+        const std::size_t n = std::min(piece_bytes, data.size() - off);
+        buffers_.push_back({staging(data.subspan(off, n)), target, off, n});
+        submit();
+        // The piece's staging goes once the GPU has read it, so the next piece does not pile up behind it.
+        vk_.release_finished_uploads(piece_bytes);
+    }
+    return target;
+}
+
+std::size_t UploadBatch::staging_bytes() const {
+    std::size_t n = 0;
+    for (const auto& b : buffers_) n += b.staging.size;
+    for (const auto& t : textures_) n += t.staging.size;
+    return n;
 }
 
 std::optional<assets::Image> prepare_texture_image(const assets::Image& source, TextureUse use) {
     if (use != TextureUse::Data && source.mips.size() == 1 && (source.width > 1 || source.height > 1)) {
+        // A fully opaque image needs no coverage-aware chain: build_color_mips would average it like any other, so
+        // the GPU may build the chain itself (UploadBatch::texture generates the levels when the image goes up with
+        // one). It filters in the stored (sRGB) space, where the original's Direct3D 9 hardware mip generation
+        // filtered too; the CPU chain filters in linear light. A deliberate difference (docs/graphics.md).
+        if (source.format == assets::PixelFormat::RGBA8 && assets::is_opaque(source)) return std::nullopt;
         assets::Image converted = assets::to_rgba8(source);
         if (use == TextureUse::OpaqueColor) assets::make_opaque(converted);
         else assets::remove_color_key(converted);
@@ -176,7 +210,7 @@ void UploadBatch::submit() {
     for (const auto& t : textures_) staged += t.staging.size;
     const std::uint64_t serial = vk_.submit_upload([&](VkCommandBuffer cmd) {
         for (auto& b : buffers_) {
-            VkBufferCopy copy{0, 0, b.target.size};
+            VkBufferCopy copy{0, b.target_offset, b.size ? b.size : b.staging.size};
             vkCmdCopyBuffer(cmd, b.staging.buffer, b.target.buffer, 1, &copy);
         }
         for (auto& t : textures_) {

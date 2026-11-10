@@ -1015,6 +1015,18 @@ std::uint32_t h_combat_ability(void* h, std::int32_t index) {
     return c ? c->combat_ability(index) : 0;
 }
 
+int h_spell_icon(void* h, std::int32_t icon, HailstoneSpellIcon* out) {
+    Loaded& l = Loaded::of(h);
+    if (!out || !l.can(kCapUi) || !l.host->env.spell_icon) return 0;
+    auto cell = l.host->env.spell_icon(icon);
+    if (!cell || !cell->texture) return 0;
+    HailstoneSpellIcon v{};
+    v.size = sizeof v;
+    v.texture = cell->texture;
+    v.u0 = cell->u0; v.v0 = cell->v0; v.u1 = cell->u1; v.v1 = cell->v1;
+    return give(out, v);
+}
+
 int h_server_info(void* h, HailstoneServer* out) {
     const net::GameConnection* c = readable(Loaded::of(h), "server_info");
     if (!c || c->ticket().world_host.empty()) return 0;
@@ -1083,6 +1095,7 @@ int h_get_spell(void* h, std::uint32_t id, HailstoneSpell* out) {
     v.skill = s->skill;
     v.is_skill = s->is_skill ? 1 : 0;
     v.gem_icon = static_cast<std::uint32_t>(s->gem_icon);
+    v.spell_icon = static_cast<std::uint32_t>(s->spell_icon);
     return give(out, v);
 }
 
@@ -1721,6 +1734,7 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
     p.table.web_state = main_only<h_web_state>;
     p.table.web_view = main_only<h_web_view>;
     p.table.open_bank = main_only<h_open_bank>;
+    p.table.spell_icon = main_only<h_spell_icon>;
     p.owner = m.env.hooks->new_guest("plugin:" + name);
 
     Hooks& hooks = *m.env.hooks;

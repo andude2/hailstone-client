@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Plugins and scripts can read `${Me.AutoFire}`, the ranged auto-fire toggle (`Me.Combat` remains auto-attack)
+- Compiled plugins can draw the game's spell icons: a new `spell_icon` host call gives a spell's cell in the `A_SpellIcons` sheet (the client's ImGui texture id and UVs), the same art `eq.SpellIcon` gives a Lua UI, and `get_spell` now also fills the spell's `spell_icon` index in `HailstoneSpell`
+- `/foreground` raises this client's window above the others and gives it the keyboard focus, as MacroQuest's command of the same name does, without changing its size or un-maximizing it, so a crew UI can bring a clicked client to the front
+- A zone takes less memory while it loads: the world's fully opaque textures get their mip chain built by the graphics card instead of on the CPU, and the zone's own uploads are staged to the card in pieces rather than all at once. On a large zone (dragonscale) the peak falls by about 115 MB (1,468 MB → 1,353 MB of commit, 740 MB → 625 MB of working set); a small classic zone holds about the same
 - A mace, dagger, staff, rod or book in the off hand is held in the hand again: some weapons shared a model with a shield and were strapped to the forearm. The Haunting and Grim Nightmares Shield Ornaments are worn on the forearm like other shield ornaments
 - Bazaar trader: a ware's price can now go up to 4,294,967 platinum (4,294,967p 2g 9s 5c, the most the server can store), instead of the original client's 1,000,000 platinum
 - `/camp` can be stopped again by standing with the sit/stand key or by moving forward, as on the original client. Before, only the Stand button or a second `/camp` stopped it

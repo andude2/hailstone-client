@@ -270,7 +270,19 @@ typedef struct HailstoneSpell {
     uint32_t target_type, skill;
     int32_t is_skill;
     uint32_t gem_icon;
+    /* The A_SpellIcons cell (eq.SpellIcon); 0 when the spell has none. Added at the end: an older
+     * client fills the fields above and leaves this 0. */
+    uint32_t spell_icon;
 } HailstoneSpell;
+
+/* A spell icon's cell in the client's A_SpellIcons sheet, as eq.SpellIcon gives a Lua UI: the
+ * client's ImGui texture id and its UVs for ImGui::Image. 0 from spell_icon when the sheet is
+ * missing. `texture` is an ImTextureID (reinterpret_cast it in the plugin). */
+typedef struct HailstoneSpellIcon {
+    uint32_t size;
+    void* texture;
+    float u0, v0, u1, v1;
+} HailstoneSpellIcon;
 
 typedef struct HailstoneItem {
     uint32_t size;
@@ -581,6 +593,10 @@ typedef struct PluginHostApi {
      * class and range checks: `banker` a spawn id, 0 for the player itself (as the NMS patch's vault Bank button);
      * the window closes when that spawn is out of reach. 1 open (or already open), 0 not (HAILSTONE_CAP_ACTIONS). */
     int (*open_bank)(void* host, uint32_t banker);
+    /* A spell icon's cell in A_SpellIcons, as eq.SpellIcon gives a Lua UI: the client's ImTextureID
+     * and UVs for ImGui::Image. 1 and `out` filled, 0 when the sheet is missing or the icon is
+     * unknown (HAILSTONE_CAP_UI). */
+    int (*spell_icon)(void* host, int32_t icon, HailstoneSpellIcon* out);
 } PluginHostApi;
 /* Whether this client's host table has `field` (one added after the plugin's ABI) and it is set. */
 #define HAILSTONE_HOST_HAS(h, field)                                                                                   \

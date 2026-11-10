@@ -730,6 +730,7 @@ void register_character() {
         return cast.casting() ? spell_value(ctx, cast.spell) : V::nil();
     });
     me_member("Combat", [](const Context&, const GameConnection& c, std::string_view) { return V::boolean(c.auto_attack()); });
+    me_member("AutoFire", [](const Context&, const GameConnection& c, std::string_view) { return V::boolean(c.auto_fire()); });
     me_member("CombatState", [](const Context&, const GameConnection& c, std::string_view) {
         if (c.in_combat()) return V::string("COMBAT");
         if (c.resting_for_fast_regen()) return V::string("RESTING");

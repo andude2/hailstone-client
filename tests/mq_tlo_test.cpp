@@ -73,6 +73,9 @@ TEST_CASE("TLO: Me's own state") {
     CHECK(f.p("${Me.Class}") == "Cleric");
     CHECK(f.p("${Me.Class.ShortName}") == "CLR");
     CHECK(f.p("${Me.Combat}") == "TRUE");
+    CHECK(f.p("${Me.AutoFire}") == "FALSE");
+    f.world.conn->set_auto_fire(true);
+    CHECK(f.p("${Me.AutoFire}") == "TRUE");
     CHECK(f.p("${Me.Sitting}") == "FALSE");
     CHECK(f.p("${Me.Platinum}p ${Me.Cash}") == "12p 12345");
     CHECK(f.p("${Me.AAPoints}") == "7");

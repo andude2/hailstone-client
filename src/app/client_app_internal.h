@@ -496,6 +496,14 @@ public:
         aenv.set_hot_bar_page = [this](int bar, int page) {
             if (actions_ui_) actions_ui_->set_hot_bar_page(bar, page);
         };
+        // The stock A_SpellIcons sheet for compiled plugins: the same cell eq.SpellIcon gives a
+        // Lua UI (UiTextures::spell_icon), exposed through the host table's spell_icon.
+        aenv.spell_icon = [this](std::int32_t icon) -> std::optional<plugin::SpellIcon> {
+            if (!ui_textures_) return std::nullopt;
+            auto cell = ui_textures_->spell_icon(icon);
+            if (!cell) return std::nullopt;
+            return plugin::SpellIcon{cell->id, cell->u0, cell->v0, cell->u1, cell->v1};
+        };
         aenv.ability = [this](mq::AbilityKind kind, std::string_view name) {
             return ability_state(eq_host_, kind, name);
         };
@@ -516,6 +524,10 @@ public:
         perf_ui_.set_open(config_.get_bool("ui.perf_window", false));
         perf_ui_.set_log_hitches(config_.get_bool("ui.perf_log_hitches", false));
         automation_->hooks().add_command(plugin::Hooks::kClient, "/perf", [this](std::string_view) { perf_ui_.toggle(); });
+        // /foreground: raise this client's window above the others, as MacroQuest's command does. A crew UI
+        // runs it on the client whose name was clicked.
+        automation_->hooks().add_command(plugin::Hooks::kClient, "/foreground",
+                                         [this](std::string_view) { window_.raise(); });
         // /neighbourzones [on | off]: the zones past the outdoor zone lines (display.neighbour_zones).
         automation_->hooks().add_command(plugin::Hooks::kClient, "/neighbourzones", [this](std::string_view args) {
             while (!args.empty() && args.front() == ' ') args.remove_prefix(1);

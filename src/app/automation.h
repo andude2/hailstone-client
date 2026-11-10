@@ -28,6 +28,7 @@
 #include "plugin/consent.h"
 #include "plugin/hooks.h"
 #include "plugin/policy.h"
+#include "plugin/spell_icon.h"
 
 namespace hailstone::net { class GameConnection; }
 namespace hailstone::mq { class ScriptHost; class Registry; struct Context; }
@@ -68,6 +69,9 @@ struct AutomationEnv {
     std::function<bool(mq::AbilityKind, std::string_view)> use_ability; // hailstone.use_ability; null: none
     std::function<std::optional<bool>(std::uint32_t spawn)> can_see;
     std::function<std::optional<bool>(const std::array<float, 3>&, const std::array<float, 3>&)> line_of_sight;
+    // A spell icon's cell in the stock A_SpellIcons sheet for compiled plugins (the host table's
+    // spell_icon); null: no UI art (a plugin draws its own placeholder).
+    std::function<std::optional<plugin::SpellIcon>(std::int32_t)> spell_icon;
 };
 
 class Automation {

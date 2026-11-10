@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -28,8 +29,20 @@
 #include "render/material_state.h"
 #include "render/shadow_chunks.h"
 #include "render/vk_util.h"
+#include "platform/process.h"
 
 namespace hailstone::render {
+
+namespace {
+// What a step of the zone's build leaves in memory, so a build that holds much more than its geometry can be read.
+void mark(const char* phase) {
+    static const auto start = std::chrono::steady_clock::now();
+    if (auto rss = platform::resident_memory())
+        log::info("zone build: {}: {:.0f} MB resident (+{:.2f}s)",
+                  phase, double(*rss) / (1024 * 1024),
+                  std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+}
+} // namespace
 
 namespace {
 
@@ -277,16 +290,34 @@ std::size_t ZoneRenderer::prepared_bytes(const Prepared& p) {
 void ZoneRenderer::upload(Prepared& p) {
     UploadBatch upload(vk_);
     textures_.reserve(p.images.size());
+    // What the zone's textures and geometry cost, so a load that holds much more than this can be read (the
+    // textures are held twice on the way up: decoded on the CPU, then in the staging buffers).
+    std::size_t texture_bytes = 0;
+    // A big zone has thousands of textures and a vertex buffer as big as its geometry: their staging is released
+    // as the GPU reads it, so the load does not hold the zone twice over.
+    constexpr std::size_t kStagingBudget = 32u * 1024 * 1024;
     for (auto& i : p.images) {
+        for (const auto& level : i.image.mips) texture_bytes += level.size();
         textures_.push_back(upload.texture(i.image, i.use));
         i.image = {}; // freed as it goes
+        if (upload.staging_bytes() >= kStagingBudget) {
+            upload.submit();
+            vk_.release_finished_uploads(kStagingBudget);
+        }
     }
+    mark("textures staged");
     light_grid_buffers_[0] = upload.buffer(p.lights, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     light_grid_buffers_[1] = upload.buffer(p.grid_cells, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     light_grid_buffers_[2] = upload.buffer(p.grid_indices, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    vertex_buffer_ = upload.buffer(std::as_bytes(std::span(p.vertices)), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-    index_buffer_ = upload.buffer(std::as_bytes(std::span(p.indices)), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+    vertex_buffer_ = upload.buffer_pieces(std::as_bytes(std::span(p.vertices)), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                          kStagingBudget);
+    index_buffer_ = upload.buffer_pieces(std::as_bytes(std::span(p.indices)), VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                                         kStagingBudget);
     upload.submit();
+    mark("submitted");
+    log::info("zone renderer prepared: {} textures ({} MB), {} vertices ({} MB), {} indices ({} MB)", textures_.size(),
+              texture_bytes / (1024 * 1024), p.vertices.size(), p.vertices.size() * sizeof(GpuVertex) / (1024 * 1024),
+              p.indices.size(), p.indices.size() * sizeof(std::uint32_t) / (1024 * 1024));
     draws_ = std::move(p.draws);
     chunks_ = std::move(p.chunks);
     solid_ = p.solid;
@@ -438,6 +469,7 @@ ZoneRenderer::PreparedPtr ZoneRenderer::prepare(const assets::Zone& zone, const 
                                                 std::uint32_t max_images) {
     PreparedPtr prepared(new Prepared);
     Prepared& prep = *prepared;
+    mark("prepare start");
     prep.behind = options.behind;
     std::vector<GpuVertex>& vertices = prep.vertices;
     std::map<MaterialKey, std::vector<std::uint32_t>> by_material;
@@ -629,6 +661,7 @@ ZoneRenderer::PreparedPtr ZoneRenderer::prepare(const assets::Zone& zone, const 
         log::info("multi-pass lighting: {} lights reach {} zone vertices", zone.lights.size(), lit_vertices);
     if (liquid_triangles) log::info("zone renderer: {} water and lava surface triangles", liquid_triangles);
     if (detail_triangles) log::info("zone renderer: {} detail texture triangles", detail_triangles);
+    mark("mesh loop done");
 
     // A neighbouring zone: moved into the current zone's coordinates, then cut to what lies past the zone line.
     if (options.offset != glm::vec3(0.0f) || !options.keep.empty()) {
@@ -986,6 +1019,7 @@ ZoneRenderer::PreparedPtr ZoneRenderer::prepare(const assets::Zone& zone, const 
                                   grid.width, grid.height, grid.cell);
     }
     prep.indices = std::move(indices);
+    mark("prepared");
     return prepared;
 }
 

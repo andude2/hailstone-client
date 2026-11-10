@@ -59,6 +59,13 @@ public:
     UploadBatch& operator=(const UploadBatch&) = delete;
 
     Buffer buffer(std::span<const std::byte> data, VkBufferUsageFlags usage);
+    // A buffer filled in pieces: the target is created once, and each piece is staged and copied on its own, so
+    // the staging holds one piece at a time. A zone's vertex buffer is as big as the zone's geometry, and staging
+    // it whole would double that while the copy is made.
+    Buffer buffer_pieces(std::span<const std::byte> data, VkBufferUsageFlags usage, std::size_t piece_bytes);
+
+    // The staging this batch holds (host memory the GPU has not read yet).
+    std::size_t staging_bytes() const;
 
     // BCn images are uploaded compressed when the device supports it and
     // decompressed otherwise. Single-level RGBA8 images get a full mip chain; single-level colour images of any format
@@ -68,7 +75,12 @@ public:
     void submit();
 
 private:
-    struct PendingBuffer { Buffer staging; Buffer target; };
+    struct PendingBuffer {
+        Buffer staging;
+        Buffer target;
+        VkDeviceSize target_offset = 0; // where in the target the staging goes
+        VkDeviceSize size = 0;           // how many bytes (0: the staging's whole size)
+    };
     struct PendingTexture {
         Buffer staging;
         VkImage image;

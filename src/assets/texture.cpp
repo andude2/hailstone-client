@@ -1040,6 +1040,15 @@ void make_opaque(Image& image) {
         for (std::size_t i = 3; i < level.size(); i += 4) level[i] = std::byte{0xff};
 }
 
+bool is_opaque(const Image& image) {
+    if (image.format != PixelFormat::RGBA8 || image.mips.empty()) return false;
+    const auto& level = image.mips[0];
+    if (level.size() < std::size_t(image.width) * image.height * 4) return false;
+    for (std::size_t i = 3; i < level.size(); i += 4)
+        if (level[i] != std::byte{0xff}) return false;
+    return true;
+}
+
 void build_color_mips(Image& image, float coverage_ref, bool grow_transparent) {
     if (image.format != PixelFormat::RGBA8 || image.mips.empty() || image.width == 0 || image.height == 0) return;
     std::uint32_t w = image.width, h = image.height;

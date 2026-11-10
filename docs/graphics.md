@@ -52,7 +52,12 @@ of their own and submits it on the frame's queue with a fence of its own (`VkCon
 it ends with (copy writes to vertex input, index, vertex and fragment shader reads; images to shader-read layout) make
 the results visible to every later submission on the queue, so a model, texture or icon sheet put up while a frame is
 recorded is drawn by that frame. Its staging buffers go once its fence signals, checked at each frame's start and each
-upload; past 256 MB of staging in flight the oldest uploads are waited for. `VkContext::immediate_submit` stays
+upload; past 256 MB of staging in flight the oldest uploads are waited for. A zone's own uploads are staged in pieces
+rather than in one lot: its vertex and index buffers are as big as the zone's geometry, and staging one of them whole
+doubled it in host memory while the copy was made. `UploadBatch::buffer_pieces` makes the target once and stages and
+copies each piece on its own, and `VkContext::release_finished_uploads` frees the staging of what the GPU has already
+read, so a long build (the zone's) holds at most a budget of it (32 MB) rather than all of it until the first frame.
+`VkContext::immediate_submit` stays
 synchronous, for the context's own one-off work. What a frame in flight (or an upload) may still use is handed to
 `VkContext::retire` instead of destroyed after `vkDeviceWaitIdle`: it goes once the frame being recorded, every
 upload submitted before and any `frames_ahead` more are done (`render/retire_queue.h`; the UI's textures take one
@@ -91,6 +96,14 @@ chains are built on the CPU by `assets::build_color_mips`. Each level is filtere
 by alpha. Transparent texels take their opaque neighbours' colour, so palette index 0 (often magenta or black) no
 longer fringes leaves. Cut-outs keep level 0's coverage on every level, so trees stay full at a distance. DDS files
 shipped without mips get a chain too.
+
+A fully opaque image needs none of that: its chain would be a plain average, so it goes up as it is and the GPU builds
+the levels itself (`assets::is_opaque`, `render::prepare_texture_image`). The GPU filters in the stored (sRGB) space,
+where the original's Direct3D 9 hardware mip generation filtered too; the CPU chain above filters in linear light. A
+deliberate difference (docs/plan.md: faithful mechanics, modern graphics), and it saves the host memory the chain and
+its copy would have held: the baked terrain tiles (uncompressed A8R8G8B8 DDS) are opaque where they are a zone's base
+layer. An image with a cut-out keeps the CPU's chain, as the GPU's own levels would blend the colour key into the edges
+and bring back the cyan fringe `assets::remove_color_key` takes out.
 
 A material that never reads its texture's alpha (opaque, no alpha test: EQG `Opaque_*` classes and the classic opaque
 methods, `MaterialState::alpha_unused`) uploads it as `TextureUse::OpaqueColor` in the actor and object renderers: made
@@ -382,6 +395,11 @@ Measured on a dev server, zone connect to the first frame shown, before and afte
 → 3.0-3.3 s, qeynos2 1.6 → 2.0 s, commonlands (EQG) 4.6 → 4.9 s. Before, the first frames showed spawns undressed
 for up to 3 s in poknowledge, a large EQG object missing for a frame in commonlands and the HUD without the
 character's buffs and stats; after, the first frame shown matches those a few seconds later.
+
+The zone build says what it costs as it goes, so a heavy zone can be read from the log: `zone load: <phase>: <N> MB
+resident` after the zone data, the flora, the zone renderer, the flora renderer, the collision, the navigation and the
+ambient probe, and `zone renderer prepared: N textures (X MB), N vertices (X MB), N indices (X MB)` for what the zone's
+meshes and textures took. The numbers are the log's only; nothing is kept of them.
 
 ## Culling
 
