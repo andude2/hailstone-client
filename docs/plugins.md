@@ -553,7 +553,7 @@ Compatibility: the host table and the hook table carry their size and only grow 
 older ABI loads in a newer client; one built for a newer ABI does not load in an older client. ABI 3 added the web
 pages (`web_*`, "Web pages" below); a plugin built with this SDK reports ABI 3, so a client older than that does not
 load it. Calls added to the host table since then keep ABI 3: test `HAILSTONE_HOST_HAS(host, open_bank)` before such a
-call (and likewise `spell_icon`, or any other newer call), since a client older than the call has a shorter table. The structs a plugin passes to be filled (`HailstonePlayer`, `HailstoneSpawn`,
+call (and likewise `spell_icon`, `use_ability`, or any other newer call), since a client older than the call has a shorter table. The structs a plugin passes to be filled (`HailstonePlayer`, `HailstoneSpawn`,
 ..., `HailstoneWebState`) carry their size too and the client fills what both know; `HailstoneWebState`'s `size` is a `size_t`
 (as ABI 3 shipped it), the others' a `uint32_t`.
 
