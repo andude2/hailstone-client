@@ -9,6 +9,13 @@
 - Stuns follow the original client: a stun that lands while you are already stunned no longer restarts it, a stun under 1 second lasts 1 second, stun immunity is respected, a stun that ends while you are mesmerized lasts until the mez ends, "You are stunned!" and "You are unstunned." are printed, and sounds take on the dazed echo while you are stunned
 - Merchants: the merchant window can show only the goods you can use, as on the original client. Items your class or race cannot use, and spell scrolls you already have (or have a higher rank of), are hidden. It is on when you start. Untick **Usable only** beside the search box to see everything; in the gamepad UI, press X on the Buy page
 - Chat: a message with line breaks in it (such as a server's message of the day) is shown on separate lines, instead of its words being thrown across the window
+- Scripts and plugins can read the aggro meter (`Target.PctAggro`, `Me.XTarget[n].PctAggro`), the target's target (`Target.TargetOfTarget`), the active discipline (`Me.ActiveDisc`), an item's click recast timer (`FindItem[name].TimerReady`) and a spell's endurance cost (`Spell[name].EnduranceCost`)
+- Compiled plugins can use a skill, combat ability (discipline) or activated AA by name through a new `use_ability` host call, the same path the Ability Book and `hailstone.use_ability` use
+- Scripts and plugins can read the raid through MQ's `Raid` TLO: `Raid.Member[n|name]`, `MainAssist`, `Leader`, `Target`, `MarkNPC`, `LootType`, `Looters`, `Looter[n]`, `Locked`, `Invited` and the totals, with raid members inheriting the spawn TLO
+- Plugins and scripts can read `${Me.AutoFire}`, the ranged auto-fire toggle (`Me.Combat` remains auto-attack)
+- Compiled plugins can draw the game's spell icons: a new `spell_icon` host call gives a spell's cell in the `A_SpellIcons` sheet (the client's ImGui texture id and UVs), the same art `eq.SpellIcon` gives a Lua UI, and `get_spell` now also fills the spell's `spell_icon` index in `HailstoneSpell`
+- `/foreground` raises this client's window above the others and gives it the keyboard focus, as MacroQuest's command of the same name does, without changing its size or un-maximizing it, so a crew UI can bring a clicked client to the front
+- A zone takes less memory while it loads: the world's fully opaque textures get their mip chain built by the graphics card instead of on the CPU, and the zone's own uploads are staged to the card in pieces rather than all at once. On a large zone (dragonscale) the peak falls by about 115 MB (1,468 MB → 1,353 MB of commit, 740 MB → 625 MB of working set); a small classic zone holds about the same
 
 ## 0.7.0-beta (2026-11-09)
 
