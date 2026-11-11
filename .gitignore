@@ -8,16 +8,3 @@ __pycache__/
 # What a local release writes in the checkout (docs/updater.md "Making a release", docs/addons.md "For authors").
 /dist/
 /release/
-/plugins/PORTING.md
-/.vs/CMake Overview
-/.vs/hailstone-client.slnx/FileContentIndex/898fa2c3-2156-4911-86be-2ab18116be47.vsidx
-/.vs/hailstone-client.slnx/FileContentIndex/999d7091-c82f-4774-8646-26664ca12f3f.vsidx
-/.vs/hailstone-client.slnx/FileContentIndex/bb62b9b9-caeb-4a62-b7a9-233f2c6ac933.vsidx
-/.vs/hailstone-client.slnx/v18/.wsuo
-/.vs/hailstone-client.slnx/v18/Browse.VC.db
-/.vs/hailstone-client.slnx/v18/DocumentLayout.json
-/.vs/hailstone-client/v18/workspaceFileList.bin
-/.vs/ProjectSettings.json
-/.vs/slnx.sqlite
-/.vs/VSWorkspaceState.json
-/CMakeSettings.json
