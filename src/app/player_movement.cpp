@@ -525,6 +525,15 @@ PlayerMovement::Frame PlayerMovement::update(const MovementKeys& keys, float yaw
     body.heading = game::yaw_to_heading(yaw);
     body.camera_angle = pitch * 256.0f / glm::pi<float>();
     const float camera_angle_in = body.camera_angle;
+    // A stun starting, sitting, looting or lying down stops the body (GameConnection::speed_stops): ProcessControls
+    // only stops asking for speed while it cannot move, so the speed the body had would carry it on.
+    if (conn.speed_stops() != speed_stops_) body.speed_run = 0.0f;
+    if (conn.turn_stops() != turn_stops_) body.speed_heading = 0.0f;
+    // StunMe's lean: the turn rate 32, which turns the stunned player until it can move again.
+    if (conn.stun_leans() != stun_leans_) body.speed_heading = 32.0f;
+    speed_stops_ = conn.speed_stops();
+    turn_stops_ = conn.turn_stops();
+    stun_leans_ = conn.stun_leans();
 
     // Vehicle_BeforeStep @0x8d2220 / Vehicle_AfterStep @0x8d22e0 around the vehicle's step: a body standing on a
     // vehicle (+0x150) goes into the vehicle's frame as it was and back into the world as it is now, so it keeps its

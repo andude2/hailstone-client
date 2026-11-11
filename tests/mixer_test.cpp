@@ -474,6 +474,27 @@ TEST_CASE("Audio settings: SoundMixAhead (SoundManager::SetMixAhead's 4..96 frag
     CHECK(out.get_int("audio.mix_ahead", 0) == 20);
 }
 
+TEST_CASE("Audio settings: audio.npc_hits and the volume factor of a volume option") {
+    Config c;
+    CHECK(load_audio_settings(c).npc_hits == 100);
+    c.set_int("audio.npc_hits", 150);
+    CHECK(load_audio_settings(c).npc_hits == 100); // clamped to 0..100
+    c.set_int("audio.npc_hits", 40);
+    AudioSettings s = load_audio_settings(c);
+    CHECK(s.npc_hits == 40);
+    Config out;
+    store_audio_settings(s, out);
+    CHECK(out.get_int("audio.npc_hits", 0) == 40);
+    // A 2D sound's volume is its amplitude; a positional one's goes through the 5/3 curve, so the factor undoes it.
+    CHECK(option_volume_factor(100, false) == 1.0f);
+    CHECK(option_volume_factor(50, false) == doctest::Approx(0.5f));
+    CHECK(option_volume_factor(0, true) == 0.0f);
+    CHECK(option_volume_factor(-5, true) == 0.0f);
+    CHECK(option_volume_factor(100, true) == doctest::Approx(1.0f));
+    for (int p : {10, 25, 50, 75})
+        CHECK(miles_volume_curve(option_volume_factor(p, true)) == doctest::Approx(static_cast<float>(p) / 100.0f));
+}
+
 TEST_CASE("Mixer: a NaN or infinite volume or sample never reaches the reverb or the device") {
     const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
     std::vector<float> out(2 * 4800);

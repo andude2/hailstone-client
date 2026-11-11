@@ -623,6 +623,38 @@ TEST_CASE("auras: add, remove and clear (OP_UpdateAura)") {
     CHECK(encode(AuraUpdate{kAuraClear, 0, 0, 0, {}}).data.size() == 4);
 }
 
+TEST_CASE("OP_SpellEffect is the 28-byte SpellEffect_Struct; the nimbus packets are {u32 spawn, i32 effect}") {
+    // EQEmu's Mob::SendSpellEffect for a nimbus: {effect, caster, caster, 500, 0, 3000, 1, 1, 0}.
+    AppPacket p = encode(SpellEffectPacket{468, 1234, 1234, 500, 0, 3000, true, true, 0});
+    CHECK(from_wire(p.opcode) == Op::SpellEffect);
+    REQUIRE(p.data.size() == 28);
+    ByteReader r(p.data);
+    CHECK(r.le<std::uint32_t>() == 468);
+    CHECK(r.le<std::uint32_t>() == 1234);
+    CHECK(r.le<std::uint32_t>() == 1234);
+    CHECK(r.le<std::uint32_t>() == 500);
+    CHECK(r.le<std::uint32_t>() == 0);
+    CHECK(r.le<std::uint32_t>() == 3000);
+    CHECK(r.le<std::uint8_t>() == 1); // +0x18 full
+    CHECK(r.le<std::uint8_t>() == 1); // +0x19 add
+    auto d = decode_spell_effect(p);
+    REQUIRE(d);
+    CHECK(d->effect == 468);
+    CHECK(d->stage2_length_ms == 3000);
+    CHECK(d->full);
+    CHECK(d->add);
+    CHECK_FALSE(decode_spell_effect(AppPacket{p.opcode, std::vector<std::byte>(p.data.begin(), p.data.end() - 3)}));
+
+    AppPacket add = encode(NimbusEffect{1234, 468}, true), remove = encode(NimbusEffect{1234, 468}, false);
+    CHECK(from_wire(add.opcode) == Op::AddNimbusEffect);
+    CHECK(from_wire(remove.opcode) == Op::RemoveNimbusEffect);
+    REQUIRE(add.data.size() == 8);
+    auto n = decode_nimbus_effect(remove);
+    REQUIRE(n);
+    CHECK(n->spawn_id == 1234);
+    CHECK(n->effect == 468);
+}
+
 TEST_CASE("spells_us.txt: the live client's layout is told from RoF2's") {
     auto line = [](int carets) {
         std::string l = "1";

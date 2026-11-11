@@ -37,6 +37,7 @@ AudioSettings load_audio_settings(const Config& c) {
     s.master = std::clamp(c.get_int("audio.master", s.master), 0, 100);
     s.music = std::clamp(c.get_int("audio.music", s.music), 0, 100);
     s.effects = std::clamp(c.get_int("audio.effects", s.effects), 0, 100);
+    s.npc_hits = std::clamp(c.get_int("audio.npc_hits", s.npc_hits), 0, 100);
     s.mute = c.get_bool("audio.mute", s.mute);
     s.environment = c.get_bool("audio.environment", s.environment);
     s.soundfont = c.get_string("audio.soundfont", s.soundfont);
@@ -55,6 +56,7 @@ void store_audio_settings(const AudioSettings& s, Config& c) {
     c.set_int("audio.master", s.master);
     c.set_int("audio.music", s.music);
     c.set_int("audio.effects", s.effects);
+    c.set_int("audio.npc_hits", s.npc_hits);
     c.set_bool("audio.mute", s.mute);
     c.set_bool("audio.environment", s.environment);
     c.set("audio.soundfont", s.soundfont);

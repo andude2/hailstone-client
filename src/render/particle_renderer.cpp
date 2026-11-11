@@ -12,6 +12,7 @@
 #include "core/game_dir.h"
 #include "core/log.h"
 #include "game/particles.h"
+#include "game/sine_table.h"
 #include "render/culling.h"
 #include "render/scene_lighting.h"
 #include "render/vk_util.h"
@@ -72,22 +73,36 @@ std::string lower(std::string s) {
 
 } // namespace
 
-void particle_basis(std::uint32_t billboard, const glm::mat3& axes, const glm::vec3& from_eye, glm::vec3& right,
-                    glm::vec3& up) {
-    if (billboard == 2) {
-        // Flat in the emitter's transverse plane: rings, rune circles, ripples on water.
-        right = glm::normalize(axes[0]);
-        up = glm::normalize(axes[1]);
-        return;
-    }
+bool particle_corners(const game::Particle& p, std::uint32_t billboard, const glm::vec3& right, const glm::vec3& up,
+                      std::array<glm::vec3, 4>& corners) {
+    if (p.hidden) return false;
+    const float c = game::cmath_cos(p.rotation), sn = game::cmath_sin(p.rotation);
+    const glm::vec3& at = p.position;
     if (billboard == 1) {
-        // Standing along the emitter's axis, turned about it towards the eye: rays, columns, flames.
-        glm::vec3 axis = glm::normalize(axes[2]);
-        glm::vec3 side = glm::cross(axis, from_eye);
-        if (glm::dot(side, side) < 1e-8f) return; // looking straight down the axis: faces the camera
-        right = glm::normalize(side);
-        up = axis;
+        // A streak along the particle's axis (0x10074b48, corners 0x100750d2): its ends half its length either side,
+        // widened on the screen's x only by the half width x (dy cos + dx sin) / the streak's screen length.
+        const glm::vec3 half = p.axis * (0.5f * p.length);
+        const float ar = glm::dot(p.axis, right), au = glm::dot(p.axis, up);
+        const float len = std::sqrt(ar * ar + au * au) * std::max(p.ramp_width, 1e-3f);
+        if (!(len > 1e-6f)) return false;
+        const float hw = 0.5f * p.width * p.size_factor * p.ramp_height;
+        const glm::vec3 o = right * (hw * (-au * c + ar * sn) / len);
+        corners = {at + half - o, at + half + o, at - half + o, at - half - o};
+        return true;
     }
+    const float hw = 0.5f * p.width * p.size_factor * p.ramp_width, hh = 0.5f * p.height * p.size_factor * p.ramp_height;
+    glm::vec3 ax, ay; // half extents towards the texture's right and top
+    if (billboard == 2) {
+        // Flat on the world's horizontal plane, turned by the rotation (0x10074d6b..0x100750cd).
+        ay = glm::vec3(c, sn, 0.0f) * hh;
+        ax = glm::vec3(sn, -c, 0.0f) * hw;
+    } else {
+        // Facing the camera; the rotation turns it clockwise on the screen (0x100751d8).
+        ax = (right * c - up * sn) * hw;
+        ay = (right * sn + up * c) * hh;
+    }
+    corners = {at - ax + ay, at + ax + ay, at + ax - ay, at - ax - ay};
+    return true;
 }
 
 // The modern light on a puff of smoke or dust at `p`, as the objects' shading (shaders/object.frag) without a normal:
@@ -302,26 +317,43 @@ void ParticleRenderer::draw(const FrameInfo& frame, const glm::mat4& view_proj, 
     const glm::vec3 eye = -glm::transpose(glm::mat3(view)) * glm::vec3(view[3]);
     auto* out = static_cast<GpuVertex*>(mapped_[slot]);
     std::uint32_t count = 0;
-    // One particle's quad.
+    const glm::vec3 forward = glm::cross(up, right);
+    // One particle's quad: the corners top-left, top-right, bottom-right, bottom-left (particle_corners), the
+    // depth offset (+0xd0) taking it that much nearer along the view (the DLL subtracts it from the view depth
+    // before projecting, so it keeps its place on the screen and its pixels grow).
     auto quad = [&](const game::Particle& p, std::uint32_t tex, glm::uvec2 grid, const glm::vec4& shade,
-                    const glm::vec4& haze, const glm::mat3& axes, std::uint32_t billboard) {
-        // Full-size quads (EDD widths are full sizes, OpenEQ).
-        float hw = p.width * 0.5f * p.size_factor, hh = p.height * 0.5f * p.size_factor;
-        float a = p.rotation * 2.0f * 3.14159265f / 512.0f;
-        glm::vec3 qr = right, qu = up;
-        particle_basis(billboard, axes, p.position - eye, qr, qu);
-        glm::vec3 ax = (qr * std::cos(a) + qu * std::sin(a)) * hw;
-        glm::vec3 ay = (-qr * std::sin(a) + qu * std::cos(a)) * hh;
+                    const glm::vec4& haze, std::uint32_t billboard, float depth_offset) {
+        std::array<glm::vec3, 4> corners;
+        if (!particle_corners(p, billboard, right, up, corners)) return;
+        if (depth_offset != 0.0f) {
+            const float z = glm::dot(p.position - eye, forward);
+            if (z > 0.0f) {
+                const float k = (z - depth_offset) / z;
+                if (k <= 0.0f) return;
+                for (auto& v : corners) v = eye + (v - eye) * k;
+            }
+        }
         glm::vec2 cell(static_cast<float>(p.frame % grid.x), static_cast<float>(p.frame / grid.x));
         glm::vec2 cs(1.0f / static_cast<float>(grid.x), 1.0f / static_cast<float>(grid.y));
-        auto v = [&](float sx, float sy) {
-            float row = rows_bottom_up_ ? (sy + 1.0f) * 0.5f : (1.0f - sy) * 0.5f;
-            glm::vec2 uv = (cell + glm::vec2((sx + 1.0f) * 0.5f, row)) * cs;
-            return GpuVertex{p.position + ax * sx + ay * sy, uv, p.color, tex, shade, haze};
+        auto v = [&](int i, float u, bool top) {
+            float row = (top != rows_bottom_up_) ? 0.0f : 1.0f;
+            return GpuVertex{corners[static_cast<std::size_t>(i)], (cell + glm::vec2(u, row)) * cs, p.color, tex, shade,
+                             haze};
         };
-        for (auto [sx, sy] : {std::pair{-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f}})
-            out[count++] = v(sx, sy);
+        out[count++] = v(0, 0.0f, true);
+        out[count++] = v(1, 1.0f, true);
+        out[count++] = v(2, 1.0f, false);
+        out[count++] = v(0, 0.0f, true);
+        out[count++] = v(2, 1.0f, false);
+        out[count++] = v(3, 0.0f, false);
     };
+    // The classic lighting draws what the DLL draws: nothing nearer than 2 units or beyond 500 along the view
+    // (0x100721d2: the camera's far distance, at most 500).
+    auto classic_in_range = [&](const game::Particle& p) {
+        const float z = glm::dot(p.position - eye, forward);
+        return z >= 2.0f && z <= 500.0f;
+    };
+    auto extent = [](const game::Particle& p) { return std::max(p.width, p.length); };
     std::vector<Batch>& batches = batches_;
     batches.clear();
     // Only what can show: a particle outside the camera's view is not lit, sorted or built (it was, every one of
@@ -348,7 +380,7 @@ void ParticleRenderer::draw(const FrameInfo& frame, const glm::mat4& view_proj, 
             const auto& ps = particles.emitters()[ei].particles;
             for (std::size_t pi = 0; pi < ps.size(); ++pi) {
                 const auto& p = ps[pi];
-                if (!particle_in_view(frustum, p.position, p.width, p.height, p.size_factor)) continue;
+                if (p.hidden || !particle_in_view(frustum, p.position, extent(p), p.height, p.size_factor)) continue;
                 glm::vec3 d = p.position - camera;
                 order.push_back({glm::dot(d, d), static_cast<std::uint32_t>(ei), static_cast<std::uint32_t>(pi)});
             }
@@ -374,8 +406,8 @@ void ParticleRenderer::draw(const FrameInfo& frame, const glm::mat4& view_proj, 
             // A flat one lying on what it meets (a rune circle on the ground) would fade away whole: it fades over
             // a quarter unit.
             if (d.billboard == 2) soft = 0.25f;
-            quad(p, tex, dl.grid, glm::vec4(light, std::max(soft, 0.25f)),
-                 glm::vec4(h.color, h.through), e.axes, d.billboard);
+            quad(p, tex, dl.grid, glm::vec4(light, std::max(soft, 0.25f)), glm::vec4(h.color, h.through),
+                 d.billboard, d.depth_offset);
         }
         if (count > 0) batches.push_back({0, count, -1});
     } else {
@@ -391,10 +423,15 @@ void ParticleRenderer::draw(const FrameInfo& frame, const glm::mat4& view_proj, 
             std::uint32_t first = count;
             for (const auto& p : e.particles) {
                 if (count + 6 > kMaxVertices) break;
-                if (!particle_in_view(frustum, p.position, p.width, p.height, p.size_factor)) continue;
-                quad(p, tex, grid, shade, glm::vec4(0.0f, 0.0f, 0.0f, 1.0f), e.axes, d.billboard);
+                if (p.hidden || !classic_in_range(p) ||
+                    !particle_in_view(frustum, p.position, extent(p), p.height, p.size_factor))
+                    continue;
+                quad(p, tex, grid, shade, glm::vec4(0.0f, 0.0f, 0.0f, 1.0f), d.billboard, d.depth_offset);
             }
-            if (count > first) batches.push_back({first, count - first, (d.additive ? 1 : 0) | (d.no_zwrite ? 2 : 0)});
+            // The DLL's particle render state (FUN_1009eec0(5)) turns depth writes off for every emitter, +0x64 or
+            // not (its +0x64 branch turns them back on after its own draw, so the emitters after it in that list
+            // write depth: not copied).
+            if (count > first) batches.push_back({first, count - first, d.additive ? 1 : 0});
         }
     }
     if (batches.empty()) return;
@@ -467,12 +504,13 @@ void ParticleRenderer::create_pipelines(const std::filesystem::path& shader_dir)
     ri.colorAttachmentCount = 1;
     ri.pColorAttachmentFormats = &color_format;
     ri.depthAttachmentFormat = vk_.depth_format();
-    // Variants 0..3 classic; 4 the modern stream: premultiplied (an additive particle gives alpha 0), no depth write.
-    for (int variant = 0; variant < 5; ++variant) {
-        const bool modern = variant == 4;
+    // Variants 0..1 classic (1 additive); 2 the modern stream: premultiplied (an additive particle gives alpha 0).
+    // None writes depth.
+    for (int variant = 0; variant < 3; ++variant) {
+        const bool modern = variant == 2;
         VkPipelineDepthStencilStateCreateInfo dss{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
         dss.depthTestEnable = VK_TRUE;
-        dss.depthWriteEnable = (modern || (variant & 2)) ? VK_FALSE : VK_TRUE;
+        dss.depthWriteEnable = VK_FALSE;
         dss.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
         VkPipelineColorBlendAttachmentState ba{};
         ba.colorWriteMask = 0xf;

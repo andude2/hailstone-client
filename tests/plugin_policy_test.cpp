@@ -219,7 +219,7 @@ TEST_CASE("caps text round trip") {
 
 TEST_CASE("settings packets: request layout, answer round trip, later fields ignored") {
     auto req = net::encode_hailstone_settings_request();
-    CHECK(req.opcode == 0x1424);
+    CHECK(req.opcode == 0x1432);
     REQUIRE(req.data.size() == 6);
     CHECK(req.data[0] == std::byte{'N'});
     CHECK(req.data[4] == std::byte{1});
@@ -227,7 +227,7 @@ TEST_CASE("settings packets: request layout, answer round trip, later fields ign
     net::HailstoneSettings v;
     v.flags = 0x5; // no flag is defined now; any value goes through
     auto p = net::encode(v);
-    CHECK(p.opcode == 0x1425);
+    CHECK(p.opcode == 0x1433);
     REQUIRE(p.data.size() == 10);
     auto d = net::decode_hailstone_settings(p);
     REQUIRE(d);

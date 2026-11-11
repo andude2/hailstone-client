@@ -380,6 +380,9 @@ void ClientApp::reload_server_files(bool at_login) {
     item_ui_.reset();
     item_ui_ = std::make_unique<ItemUi>(vk_, game_);
     spell_particles_ = std::make_unique<SpellParticles>(vk_, game_, shader_dir_);
+    spell_particles_->set_floor([this](const glm::vec3& p) -> std::optional<float> {
+        return collision_ ? collision_->floor_below(p, 0.0f) : std::nullopt;
+    });
     spell_bolts_ = std::make_unique<SpellBolts>(vk_, shader_dir_);
     actor_emitters_ = std::make_unique<ActorEmitters>(vk_, game_, shader_dir_);
 }

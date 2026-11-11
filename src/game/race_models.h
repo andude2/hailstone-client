@@ -31,8 +31,13 @@ inline constexpr std::uint8_t kHasAnimationFallback = 0x04;
 const RaceModel* find_race_model(std::uint16_t race, std::uint8_t gender);
 
 // Model code that `code` borrows animation clips from (LanternExtractor's
-// animationsources.txt), or empty.
-std::string_view animation_source(std::string_view code);
+// animationsources.txt), or empty. `tunic_point`: the actor has a
+// TUNIC_POINT dag (the Luclin player models), which InitAnimationTracks
+// @0x407800 passes to GetAlternateAnimTag @0x406a60 as its flag: then a
+// human or erudite (HU*, ER*) and the skeleton take the human's clips
+// (HUM / HUF; a human its own), a barbarian only its own, where without it
+// they all take the wood elf's.
+std::string_view animation_source(std::string_view code, bool tunic_point = false);
 
 // The model code whose EQG animations `code` uses when it lacks one
 // (FindAnimationTrackForModel @00406830 retries "<anim>_<CODE>" with the

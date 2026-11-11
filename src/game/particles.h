@@ -1,8 +1,6 @@
 #pragma once
 
-// Spell particle emitters: the graphics DLL's CParticleSystem as far as
-// the analysis of the original client and OpenEQ's
-// docs/SPELL_EFFECT_FORMAT.md describe it.
+// Spell particle emitters: the graphics DLL's CParticleSystem (EQGraphicsDX9.dll), traced from its code.
 //
 // eqgame's SpellEffect_SpawnStageEmitters @0x51aa20 walks the four emitter
 // slots of an effect stage and calls CreateSpellEmitter (effect manager vtable
@@ -15,16 +13,16 @@
 //     (assets/model_points.h; ActorClient +0x148, 0x58cd90): 1 point 0,
 //     2..7 points 1..6 or else point 0, 8 the actor without a point, 9 / 10
 //     the eyes (points 7 / 8; the slot is skipped without them), 11 the mouth
-//     (point 9), 12 the actor without a point at the chest's x and y, scaled
-//     by the actor height;
+//     (point 9), 12 the actor without a point at the chest's x and y and the
+//     floor's z, scaled by the actor's particle scale (vtable +0x218);
 //   - density = eqclient.ini SpellParticleDensity and opacity =
-//     SpellParticleOpacity (clamped to [0, 1]; both 1.0 with the flag);
-//   - density <= 0 creates nothing; the duration is -EDD+0x78 when that is
-//     negative, the requested ms x 0.001 when that is positive, else EDD+0x78;
-//   - the stage's length is the longest emitter duration, in ms.
-// Not traced (docs/unknowns.md): the particle capacity's x87 detail, EDD +0x13c/+0x140/+0x178 and the globals at
-// +0x148..+0x168, and the exact motion integration; the simulation follows
-// OpenEQ's field descriptions.
+//     SpellParticleOpacity (clamped to [0, 1]; both 1.0 with the flag).
+// CreateEmitter (emitter_counts) turns the density into the emitter's tick rate
+// and particle capacity; the per-frame update (FUN_10072160: emission, spawn,
+// motion, ramps) and the quad builder are in ParticleSystem::update and
+// render::ParticleRenderer. Not traced (docs/unknowns.md): EDD +0x13c / +0x140
+// and the globals at +0x148..+0x168, +0x178's orientation, and the DLL's random
+// tables (filled at run time; this client draws from its own generator).
 
 #include <array>
 #include <cstddef>
@@ -71,9 +69,12 @@ struct SpellEmitterRequest {
     glm::vec3 position{0.0f};     // 6
     std::uint32_t actor = 0;      // 7: attach actor (spawn id), 0 = none
     std::int32_t bone_point = -1; // 9: spell point index (0..9), -1 = none
-    float scale = 1.0f;           // 11: 1.0, or the actor height for attach 12
+    float scale = 1.0f;           // 11: 1.0, or the actor's particle scale for attach 12
     // An actor emitter that stays with its actor until stopped (app/actor_emitters.h).
     bool persistent = false;
+    // The DLL's actor-emitter creator (CParticleSystem vtable +0x20, 0x10070640) gives the emitter only the point,
+    // not the actor (emitter +0x68 stays 0): its axes then follow the point (EDD +0x60), not the actor's turn.
+    bool point_only = false;
 };
 
 // An actor a stage can place emitters on.
@@ -86,7 +87,17 @@ struct StageActor {
     // the chest's (point 1's) world position when it has one.
     std::uint16_t points = 0;
     glm::vec3 chest{0.0f};
+    // CDisplay::GetPlayerFloorHeight under the spawn (from 0.1 above it): attach 12's z. Without it, the position's.
+    std::optional<float> floor;
+    // GetParticleScaleFactor (actor vtable +0x218): its model's moddat.ini PESFactor, 1 without one. Attach 12's scale.
+    float particle_scale = 1.0f;
+    // Whether its model is known. Hailstone: a spawn whose model has not loaded yet (an effect sent as it zones in)
+    // has no points to read; the original's actor always has them. Its slots keep the point they ask for, and the
+    // attachment finds it once the model is drawn (or keeps to the spawn's place).
+    bool model_known = true;
     bool has_point(int n) const { return n >= 0 && n < 16 && (points >> n) & 1u; }
+    // has_point, or for a model not known yet any of the ten.
+    bool may_have_point(int n) const { return model_known ? has_point(n) : n >= 0 && n < 10; }
 };
 
 // SpellEffect_SpawnStageEmitters' slot loop for stage 0 (cast), 1
@@ -99,49 +110,66 @@ std::vector<SpellEmitterRequest> spawn_stage_emitters(const assets::SpellEffect&
 
 // The duration a zone fixture's emitter is created with (add_fixture), ms.
 inline constexpr std::int32_t kFixtureDurationMs = 9999000;
+// The duration an actor's own emitter is created with (CActor::vf126 @0x1003a950), ms.
+inline constexpr std::int32_t kActorEmitterDurationMs = 5000000;
 
 // CEmitterDef::CreateEmitter's duration in seconds.
 float emitter_duration_seconds(float edd_duration, std::int32_t requested_ms);
-// The particle capacity: the x87 detail is not traced; here initial + per tick
-// x ticks per second x min(lifetime, duration) + per tick, the EDD's +0x144
-// when set, capped at 100,000.
-std::uint32_t emitter_capacity(const assets::EmitterDefinition& def, float duration);
-// The basis a WLD particle node gives its emitter (columns transverse 1,
-// transverse 2, axial in world), from the node's world rotation `owner`
-// (columns: its local axes in world; normalised here) and the definition's
-// +0xc4 / +0xc8 turns (512ths). The update (0x10072ab0 in OpenEQ's build,
-// docs/WLD_PARTICLE_RUNTIME.md) takes the emitter axes from the node's world
-// matrix rows 2, 0 and -1 as (axial, transverse 1, transverse 2); +0xc8 then
-// turns about transverse 1 (-128 brings the axis onto the node's +Y, the
-// witnessed lamp case) and +0xc4 about transverse 2 (128 onto +X, 256 onto -Z;
-// the sign of this one is inferred from the converter's direction compares,
-// not witnessed).
-glm::mat3 emitter_axes(const glm::mat3& owner, float angle1, float angle2);
 
-// The emission-rate factor for an emitter `distance` from the viewer: the
-// definition's +0xa0 over the distance, at most 1, but not below
-// min(1, 16 / capacity) (the emitter's batch floor).
-float emission_distance_factor(float reduce_distance, std::uint32_t capacity, float distance);
+// What CEmitterDef::CreateEmitter @0x1006c920 works out from the definition, the density and the duration (s).
+struct EmitterCounts {
+    std::int32_t initial = 0;  // emitter +0x18: trunc(+0x80 x density), at least min(16, +0x80)
+    std::int32_t per_tick = 0; // +0x1c: +0x84 below 16, else trunc(+0x84 x density)
+    float rate = 0.0f;         // +0x20: +0x88, times the density when +0x84 is below 16
+    std::int32_t capacity = 0; // +0xc: the particle ring's size, 0..100,000
+    float floor_initial = 1.0f; // +0x30: 16 / initial above 16, else 1 (the initial burst's distance floor)
+    float floor_tick = 1.0f;    // +0x34: the same of the ring past the initial burst (the ticks' floor)
+    std::int32_t length_ms = 0; // the return: how long its particles show, 0 past 600 s
+};
+EmitterCounts emitter_counts(const assets::EmitterDefinition& def, float density, float duration);
+// emitter_counts(def, 1, duration).capacity.
+std::uint32_t emitter_capacity(const assets::EmitterDefinition& def, float duration);
+// The basis a placed node gives its emitter (columns transverse 1, transverse 2, axial in world), from the node's
+// world rotation `owner` (columns: its local axes in world; normalised here), then turned by the definition's
+// +0xc4 / +0xc8 (512ths). The emitter constructor (0x1006c5b5) takes (axial, transverse 1, transverse 2) from the
+// matrix's rows 2, 0 and -1; each particle's spawn (0x10072fe0, 0x100730ea) turns its copy by +0xc4 about transverse
+// 2 (axial' = axial cos + t1 sin, t1' = t1 cos - axial sin), then by +0xc8 about transverse 1 (axial'' = axial'
+// cos + t2 sin, t2' = t2 cos - axial' sin).
+glm::mat3 emitter_axes(const glm::mat3& owner, float angle1, float angle2);
+// Those two turns of a basis already taken (columns transverse 1, transverse 2, axial).
+glm::mat3 turn_axes(const glm::mat3& axes, float angle1, float angle2);
+
+// The update's count factor for an emitter `distance` from the camera: +0xa0 / distance past +0xa0, else 1, but not
+// below `floor` (EmitterCounts' floor_initial for the initial burst, floor_tick for the ticks).
+float emission_distance_factor(float reduce_distance, float floor, float distance);
 
 // The flipbook grid (columns, rows) for a frame count: 1 -> 1x1, 2..4 -> 2x2,
 // 5..8 -> 4x2, 9..16 -> 4x4, other -> 1x1.
 glm::uvec2 flipbook_grid(std::uint32_t frames);
 
+// One particle: the DLL's 0x80-byte ring record (polar about the emitter's axis, plus a world drift) and what the
+// update works out for drawing it.
 struct Particle {
-    glm::vec3 position{0.0f};  // world
-    float azimuth = 0.0f;      // radians: the radial direction while the particle is still on the axis
-    glm::vec3 local{0.0f};     // basis-local position (axial, transverse 1, transverse 2)
-    glm::vec3 velocity{0.0f};  // basis-local: axial, transverse 1, transverse 2
-    float radial_speed = 0.0f, orbit_speed = 0.0f; // units / s, 512ths / s
-    glm::vec3 world_velocity{0.0f}; // gravity and wind
-    glm::vec3 drift{0.0f};          // world displacement from them
-    glm::vec3 anchor{0.0f};         // emitter origin at spawn (particles that do not follow)
-    float age = 0.0f, lifetime = 1.0f;
-    float width = 1.0f, height = 1.0f;
-    float rotation = 0.0f, spin = 0.0f; // 512ths, 512ths / s
-    glm::vec4 color{1.0f}; // rgb, alpha; set by update
-    float size_factor = 1.0f; // grow / shrink ramps; set by update
+    // Drawn.
+    glm::vec3 position{0.0f}; // world
+    float width = 1.0f, height = 1.0f; // drawn once at birth from +0xcc..+0x184
+    glm::vec4 color{1.0f};    // rgb, alpha
+    float size_factor = 1.0f; // +0x16c x the size scale x grow x shrink
+    float ramp_height = 1.0f, ramp_width = 1.0f; // +0x190 / +0x194 ramps
+    float rotation = 0.0f;    // 512ths, turning the quad clockwise on screen
     std::uint32_t frame = 0;
+    glm::vec3 axis{0.0f, 0.0f, 1.0f}; // its axial direction (billboard 1 streaks along it)
+    float length = 1.0f;              // billboard 1's streak: height x the size scale
+    bool hidden = false;              // below the axis (radius < 0) without +0x198
+    // State.
+    glm::vec3 origin{0.0f}; // the emitter's place and offsets at birth
+    glm::mat3 axes{1.0f};   // its basis at birth, turned (transverse 1, transverse 2, axial)
+    float azimuth = 0.0f, radius = 0.0f, axial = 0.0f; // 512ths, units, units
+    glm::vec2 radial_dir{1.0f, 0.0f}; // radial motion's (radius, axial) direction
+    float v_axial = 0.0f, v_t1 = 0.0f, v_t2 = 0.0f, v_radial = 0.0f, v_orbit = 0.0f, v_gravity = 0.0f;
+    glm::vec3 drift{0.0f}; // world: transverse motion, gravity, wind
+    float age = 0.0f, lifetime = 1.0f;
+    float rotation0 = 0.0f, spin = 0.0f; // 512ths, 512ths / s
 };
 
 struct Emitter {
@@ -149,32 +177,37 @@ struct Emitter {
     std::uint32_t key = 0;
     std::uint32_t actor = 0;
     std::int32_t point = -1; // the actor's spell point it hangs from, or -1
+    bool point_only = false;  // SpellEmitterRequest::point_only
     glm::vec3 origin{0.0f};
-    // World directions of the basis-local transverse 1, transverse 2 and axial
-    // coordinates (columns). Spell emitters keep (+X, -Y, +Z); a zone fixture
-    // takes its owner node's (emitter_axes).
-    glm::mat3 axes{glm::vec3(1.0f, 0.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f)};
-    // A zone fixture: emits for as long as it exists (see add_fixture).
+    // The emitter's basis, unturned (columns transverse 1, transverse 2, axial). Without a matrix the constructor's
+    // (+X, +Y, +Z); a zone fixture's from its node (emitter_axes); a spell emitter on an actor takes the actor's
+    // every frame.
+    glm::mat3 axes{1.0f};
+    // A zone fixture or an actor's own emitter: emits for as long as it exists.
     bool persistent = false;
     // Its particles are set from outside (set_still) and drawn as they are: no emission, no ageing.
     bool still = false;
-    float scale = 1.0f;
+    float scale = 1.0f; // the caller's scale (+0x88)
     float density = 1.0f, opacity = 1.0f;
-    float duration = 0.0f, age = 0.0f;
-    float tick_accumulator = 0.0f;
-    bool started = false;
-    std::uint32_t capacity = 0;
+    float duration = 0.0f;
+    double age = 0.0; // s since it was made (a fixture's runs for hours)
+    EmitterCounts counts;
+    std::int32_t emitted = -1;     // +0x10: ticks emitted, -1 before the initial burst
+    std::uint32_t spawn_index = 0; // +0x14
     std::vector<Particle> particles;
 };
 
-// Where an attached emitter is this frame: its actor's spell point (the
-// point's world position and its axes, columns) or, without a point, the
-// actor's origin (no axes). The DLL's update (0x10072160) takes a pointed
-// emitter's position from the point's world matrix and an unpointed one's
-// from the actor (vtable +0x7c) every frame.
+// Where an attached emitter is this frame (the update's per-emitter block, 0x10072478..0x10072a71).
 struct EmitterAttachment {
-    glm::vec3 position{0.0f};
+    // The point's world position and axes (columns, their lengths its scale); nullopt without a point, and then a
+    // spell emitter stays where it was made (an actor's CHierarchicalActor answers vtable +0x2f8 false).
+    std::optional<glm::vec3> position;
     std::optional<glm::mat3> axes;
+    // The actor's world turn (columns; actor vtable +0x2c4): a spell emitter's basis every frame.
+    std::optional<glm::mat3> actor_axes;
+    // GetParticleScaleFactor (+0x218, moddat.ini PESFactor) and the actor's root GetScaleFactor (+0xa0).
+    float particle_scale = 1.0f;
+    float actor_scale = 1.0f;
 };
 using AttachmentFn = std::function<std::optional<EmitterAttachment>(std::uint32_t actor, std::int32_t point)>;
 
@@ -190,8 +223,8 @@ public:
     // ask it of every emitter each frame.
     bool glows(std::size_t definition) const { return definition < glows_.size() && glows_[definition]; }
 
-    // CreateSpellEmitter: the emitter's duration in ms, or 0 when none was
-    // created (index out of range, density <= 0).
+    // CreateSpellEmitter: how long its particles show in ms (EmitterCounts::length_ms), or 0 when none was created
+    // (index out of range, density <= 0).
     std::int32_t create(const SpellEmitterRequest& request);
     // A zone fixture's emitter (a WLD particle node of a placed object): at
     // the node's world matrix, along emitter_axes, scaled by the node's scale
@@ -218,14 +251,11 @@ public:
     // The particles of the still emitter `key` (of `definition`), drawn as given until set again or stopped.
     void set_still(std::uint32_t key, std::size_t definition, std::vector<Particle> particles);
     void clear() { emitters_.clear(); }
-    // Advances by dt seconds; `attachment` places the attached emitters. An
-    // emitter on a point whose definition takes the bone's orientation (+0x60)
-    // turns its axes with the point (emitter_axes of the point's axes and the
-    // definition's +0xc4 / +0xc8 turns).
+    // Advances by dt seconds; `attachment` places the attached emitters (EmitterAttachment).
     void update(float dt, const AttachmentFn& attachment);
 
 private:
-    void spawn(Emitter& e, std::uint32_t count);
+    void spawn(Emitter& e, std::int32_t count, float offset_scale);
     float random(float a, float b);
 
     std::vector<assets::EmitterDefinition> definitions_;

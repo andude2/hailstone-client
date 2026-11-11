@@ -222,14 +222,14 @@ std::optional<GuildInviteAccept> decode_guild_invite_accept(const AppPacket& p);
 // carries an invitation across zones on two opcodes of this client's own that no opcode table lists, so the zone
 // hands them to the script (event_unhandled_opcode) and the script answers with raw packets. Both are 80 bytes:
 // {u32 magic 'NMSG'; u16 version 1; u16 action; char[64] name; u32 guild id; u32 value}.
-//   OP_HailstoneGuild 0x1422, client → zone: action 0 hello (after every zone-in); 1 invite (name: whom, guild: the
+//   OP_HailstoneGuild 0x1430, client → zone: action 0 hello (after every zone-in); 1 invite (name: whom, guild: the
 //     inviter's, value: the rank offered, 8); 2 answer (name: the inviter, guild: the one offered, value: the rank
 //     to accept, or kGuildInviteDecline / kGuildInviteAutoDecline).
-//   OP_HailstoneGuildReply 0x1423, zone → client: action 0 the hello's answer (value: kHailstoneGuildWorldInvites when the
+//   OP_HailstoneGuildReply 0x1431, zone → client: action 0 the hello's answer (value: kHailstoneGuildWorldInvites when the
 //     script takes invitations to other zones); 1 an invitation (name: the inviter, guild, value: the rank).
 // Without the hello's answer the client keeps to the stock packets.
-inline constexpr std::uint16_t kOpHailstoneGuild = 0x1422;
-inline constexpr std::uint16_t kOpHailstoneGuildReply = 0x1423;
+inline constexpr std::uint16_t kOpHailstoneGuild = 0x1430;
+inline constexpr std::uint16_t kOpHailstoneGuildReply = 0x1431;
 inline constexpr std::uint32_t kHailstoneGuildMagic = 0x47534d4e; // "NMSG" on the wire
 inline constexpr std::uint16_t kHailstoneGuildVersion = 1;
 inline constexpr std::size_t kHailstoneGuildSize = 80;

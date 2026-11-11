@@ -59,6 +59,12 @@ constexpr auto kWorldDropWait = std::chrono::seconds(30);
 constexpr auto kZoneDropWait = std::chrono::seconds(120);
 constexpr auto kLogoutDropWait = std::chrono::seconds(3);
 
+// PlayerZoneClient::ChangePosition @0x5a0bc0 stops a spawn (StopMoving: SpeedRun +0x7c and the turn rate +0x8c 0)
+// that sits, loots or lies down.
+bool stops_motion(std::uint8_t state) {
+    return state == kStandSitting || state == kStandLooting || state == kStandLying;
+}
+
 } // namespace
 
 const char* to_string(ConnectionState s) {
@@ -594,7 +600,8 @@ void GameConnection::handle_world(const AppPacket& p) {
         auras_.clear();
         aggro_.lock_id = aggro_.target_id = aggro_.secondary_id = 0;
         aggro_.pct = {};
-        stun_until_ms_ = 0;
+        stun_timer_ms_ = 0;
+        stun_state_ = false;
         controlled_boat_ = standing_on_ = 0;
         spell_book_open_ = false; // MoveToZone closes the book
         respawn_.reset();
@@ -609,6 +616,7 @@ void GameConnection::handle_world(const AppPacket& p) {
         spells_.memorizing.reset();
         spells_.others.clear();
         cast_stage_shown_.clear();
+        effect_packets_.clear();
         spells_.target_buffs.clear();
         spells_.target_buffs_entity = 0;
         loot_.reset();
@@ -1372,6 +1380,9 @@ void GameConnection::handle_zone(const AppPacket& p) {
     case Op::BlockedBuffs:
     case Op::RemoveBlockedBuffs:
     case Op::ClearBlockedBuffs:
+    case Op::SpellEffect:
+    case Op::AddNimbusEffect:
+    case Op::RemoveNimbusEffect:
         handle_spell(op, p);
         break;
     case Op::CharInventory:
@@ -1599,8 +1610,10 @@ void GameConnection::handle_zone(const AppPacket& p) {
         if (auto url = decode_weblink(p)) web_links_.push_back(std::move(*url));
         break;
     case Op::Stun:
-        // The server's own UnStun sends nothing, so the duration ends it.
-        if (auto ms = decode_stun(p)) stun_until_ms_ = now_ms() + *ms;
+        // The case @0x4c7093: StunMe(duration, 0, 0, the lean byte) with a local character. EQEmu's UnStun sends a
+        // duration of 0 too (a fear fading with Combat:EnableFearPathing off, a quest's UnStun): StunMe ignores it
+        // while a stun runs, and makes it a 1000 ms stun otherwise.
+        if (auto s = decode_stun(p)) stun_me(s->duration_ms, s->lean);
         break;
     case Op::ItemPreviewRequest:
         handle_item_preview(p);
@@ -2300,6 +2313,10 @@ bool GameConnection::set_stand_state(std::uint32_t state, bool room_to_stand) {
         remove_mount_affect();
         mount_events(ev);
     }
+    if (stops_motion(want)) {
+        ++speed_stops_;
+        ++turn_stops_;
+    }
     motion_dirty_ = true; // a sit/stand change marks the position dirty
     return true;
 }
@@ -2465,6 +2482,20 @@ void GameConnection::handle_combat(Op op, const AppPacket& p) {
                         game::MountEvents ev;
                         game::dismount(world_, *s, ev);
                         mount_events(ev);
+                    }
+                    // ChangePosition's StopMoving: sitting, looting or lying down clears SpeedRun and the turn
+                    // rate, so a spawn that feigns while it runs stops where it is instead of running on with its
+                    // last update's speed while that update is under 12 s old (mechanics::kSpawnStaleMs).
+                    const bool changed = id == me ? pstatus_.stand_state != want : s && s->stand_state != want;
+                    if (changed && stops_motion(want)) {
+                        if (s) {
+                            s->speed_run = 0.0f;
+                            s->speed_heading = 0.0f;
+                        }
+                        if (id == me) {
+                            ++speed_stops_;
+                            ++turn_stops_;
+                        }
                     }
                     if (s) s->stand_state = want;
                     if (id == me) pstatus_.stand_state = want;

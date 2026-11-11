@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 # The oldest macOS a build runs on (set before project()). 13.3 is the first whose libc++ formats floating-point
 # numbers (std::format of a float, std::to_chars), which the client uses; the bundled MoltenVK needs 12.0.
 set(CMAKE_OSX_DEPLOYMENT_TARGET "13.3" CACHE STRING "The oldest macOS the build runs on")
-project(hailstone VERSION 0.6.0 LANGUAGES C CXX)
+project(hailstone VERSION 0.7.0 LANGUAGES C CXX)
 # The release's pre-release label (SemVer: "0.1.0-alpha"); empty for a final release. With the version it is what the
 # updater compares against a release's manifest (core/version.h, docs/updater.md), so change both with each release.
 set(HAILSTONE_VERSION_LABEL "beta")
@@ -374,6 +374,7 @@ add_library(hailstone_engine STATIC
   src/game/scene_light.cpp
   src/game/cloud_patches.cpp
   src/game/particles.cpp
+  src/game/spell_effect_timers.cpp
   src/game/sine_table.cpp
   src/game/collision.cpp
   src/nav/nav_mesh.cpp
@@ -958,6 +959,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/tcp_socket_test.cpp
     tests/plugin_tcp_test.cpp
     tests/merchant_buy_test.cpp
+    tests/merchant_usable_test.cpp
     tests/ascii_case_test.cpp
     tests/ui_pack_windows_test.cpp
     tests/ui_pack_stale_state_test.cpp
@@ -967,6 +969,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/boats_test.cpp
     tests/npc_collision_test.cpp
     tests/mounts_test.cpp
+    tests/spawn_is_named_test.cpp
     tests/world_state_smooth_test.cpp
     tests/attack_check_test.cpp
     tests/attack_rules_vectors_test.cpp
@@ -1005,6 +1008,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/lua_slot_info_test.cpp
     tests/social_editor_test.cpp
     tests/app_frame_work_test.cpp
+    tests/frame_pace_test.cpp
     tests/alt_currency_ui_test.cpp
     tests/guild_tribute_page_test.cpp
     tests/guild_window_test.cpp
@@ -1078,6 +1082,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/mock_placement_test.cpp
     tests/sky_test.cpp
     tests/particles_test.cpp
+    tests/spell_effect_timers_test.cpp
     tests/wld_particles_test.cpp
     tests/wld_detail_test.cpp
     tests/movement_test.cpp
@@ -1142,6 +1147,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/player_placement_test.cpp
     tests/step_landing_test.cpp
     tests/jump_hang_test.cpp
+    tests/stop_moving_test.cpp
     tests/zone_ladders_test.cpp
     tests/chat_trade_vectors_test.cpp
     tests/hotbutton_tracking_vectors_test.cpp

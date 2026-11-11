@@ -327,7 +327,8 @@ ParsedRegistry parse_registry(const fs::path& file) {
         else if (what == "key") {
             a.key = hex_decode<32>(rest);
             bad = bad || !a.key;
-        } else if (what == "auto") a.auto_update = rest != "0";
+        } else if (what == "autoupdate") a.auto_update = rest == "1";
+        // ("auto", up to 0.7.0-beta, was written as 1 for every install without asking the player: it is read as off)
         else if (what == "author") a.author = std::string(rest);
         else if (what == "description") a.description = std::string(rest);
         else if (what == "notes") a.notes = std::string(rest);
@@ -414,7 +415,7 @@ std::string registry_text(const std::vector<InstalledAddon>& addons) {
         text += "version " + a.version + "\n";
         text += "caps " + plugin::caps_text(a.caps) + "\n";
         if (a.key) text += "key " + hex_encode(*a.key) + "\n";
-        text += std::string("auto ") + (a.auto_update ? "1" : "0") + "\n";
+        text += std::string("autoupdate ") + (a.auto_update ? "1" : "0") + "\n";
         if (!a.author.empty()) text += "author " + a.author + "\n";
         if (!a.description.empty()) text += "description " + a.description + "\n";
         if (!a.notes.empty()) text += "notes " + a.notes + "\n";

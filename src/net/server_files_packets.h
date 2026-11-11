@@ -4,10 +4,10 @@
 // folder, sent to the client through the zone by Hailstone's server script (server/README.md) and kept in
 // servers/<profile>/assets/. Two custom opcodes beside the settings (net/settings_packets.h).
 //
-// OP_HsFilesRequest 0x1426, client -> zone: {u32 magic 'HSFL'; u16 version 1; u16 action; ...}
+// OP_HsFilesRequest 0x1434, client -> zone: {u32 magic 'HSFL'; u16 version 1; u16 action; ...}
 //   action 1, a page of the list: {u32 first (the index of its first entry)}
 //   action 2, a piece of a file: {u32 list id; u32 index; u32 offset; u32 length (at most kServerFilesChunkMax)}
-// OP_HsFiles 0x1427, zone -> client: {u32 magic; u16 version 1; u16 action; ...}
+// OP_HsFiles 0x1435, zone -> client: {u32 magic; u16 version 1; u16 action; ...}
 //   action 1, a page of the list: {u32 list id; u32 total; u32 first; u32 count; count x {u32 size; u8 sha256[32];
 //     u16 length; char path[length] ('/' separators, relative to client_files/)}}. A total of 0: nothing to send.
 //   action 2, the piece: {u32 list id; u32 index; u32 offset; u32 length; u8 data[length]}
@@ -25,8 +25,8 @@
 
 namespace hailstone::net {
 
-inline constexpr std::uint16_t kOpHsFilesRequest = 0x1426;
-inline constexpr std::uint16_t kOpHsFiles = 0x1427;
+inline constexpr std::uint16_t kOpHsFilesRequest = 0x1434;
+inline constexpr std::uint16_t kOpHsFiles = 0x1435;
 inline constexpr std::uint32_t kServerFilesMagic = 0x4c465348; // "HSFL" on the wire
 inline constexpr std::uint16_t kServerFilesVersion = 1;
 inline constexpr std::uint16_t kServerFilesList = 1, kServerFilesChunk = 2, kServerFilesError = 3;

@@ -2,6 +2,7 @@
 // frame settings (window mode, resolution, vertical sync, frame caps, field of view, UI scale).
 
 #include "app/client_app_internal.h"
+#include "app/frame_pace.h"
 #include "game/appearance.h"
 
 namespace hailstone::app {
@@ -94,10 +95,12 @@ bool ClientApp::set_video_option(std::string_view name, int value) {
         int v = std::clamp(value, 0, 2);
         config_.set("display.vsync", kVsyncModes[v]);
         vk_.set_vsync(static_cast<render::VkContext::Vsync>(v));
-    } else if (name == "max_fps" || name == "background_fps") {
-        int fps = value <= 0 ? 0 : std::clamp(value, 10, 1000);
-        (name == "max_fps" ? opts_.max_fps : background_fps_) = fps;
-        config_.set_int(name == "max_fps" ? "display.max_fps" : "display.background_fps", fps);
+    } else if (name == "max_fps") {
+        opts_.max_fps = value <= 0 ? 0 : std::clamp(value, 10, 1000);
+        config_.set_int("display.max_fps", opts_.max_fps);
+    } else if (name == "background_fps") {
+        background_fps_ = background_fps_setting(value);
+        config_.set_int("display.background_fps", background_fps_);
     } else if (name == "fov") {
         // Degrees across (below an aspect of 2); below 0 the original's 90 units (63.3 degrees).
         float units = value < 0 ? game::kStockFovUnits : std::clamp(static_cast<float>(value), 45.0f, 120.0f) / kDegreesPerFovUnit;
@@ -132,7 +135,7 @@ void ClientApp::apply_frame_options() {
     vk_.set_vsync(static_cast<render::VkContext::Vsync>(
         index_of(kVsyncModes, 3, config_.get_string("display.vsync", "on"), 1)));
     opts_.max_fps = max_fps_arg_ ? *max_fps_arg_ : std::max(0, config_.get_int("display.max_fps", 0)); // --max-fps first
-    background_fps_ = std::max(0, config_.get_int("display.background_fps", 0));
+    background_fps_ = background_fps_setting(config_.get_int("display.background_fps", 0));
     float fov = config_float("display.fov", 0.0f);
     camera_.fov_units = fov > 0.0f ? fov : game::kStockFovUnits;
 }
@@ -421,6 +424,7 @@ std::optional<int> ClientApp::option_value(std::string_view o) const {
     if (o == "master") return s.master;
     if (o == "music") return s.music;
     if (o == "effects") return s.effects;
+    if (o == "npc_hits") return s.npc_hits;
     if (o == "realism") return s.realism;
     if (o == "environment") return s.environment ? 1 : 0;
     if (o == "combat_music") return s.combat_music ? 1 : 0;
@@ -625,6 +629,7 @@ void ClientApp::set_option_value(std::string_view o, int v) {
     if (o == "master") s.master = percent;
     else if (o == "music") s.music = percent;
     else if (o == "effects") s.effects = percent;
+    else if (o == "npc_hits") s.npc_hits = percent;
     else if (o == "realism") s.realism = percent;
     else if (o == "environment") s.environment = v != 0;
     else if (o == "combat_music") s.combat_music = v != 0;

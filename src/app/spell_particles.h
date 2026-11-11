@@ -1,7 +1,9 @@
 #pragma once
 
 // Spell stage particles in the game: the cast stage at the caster
-// (OP_BeginCast) and the impact stage at the target (OP_Action 231), through
+// (OP_BeginCast), the impact stage at the target (OP_Action 231) and the
+// effects the server plays by number (OP_SpellEffect, the nimbus packets;
+// game/spell_effect_timers.h), through
 // game::spawn_stage_emitters / game::ParticleSystem, drawn by
 // render::ParticleRenderer. The emitters hang from the actors' spell points
 // (assets/model_points.h) as the actor renderer last posed them. Settings:
@@ -11,6 +13,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -23,12 +26,14 @@
 #include "core/ini_file.h"
 #include "game/light_list.h"
 #include "game/particles.h"
+#include "game/spawn_heights.h"
+#include "game/spell_effect_timers.h"
 #include "render/particle_renderer.h"
 
 namespace hailstone { class GameDir; }
 namespace hailstone::assets { struct CharacterModel; }
 namespace hailstone::render { class ActorRenderer; }
-namespace hailstone::net { class GameConnection; struct SpellEffectCue; }
+namespace hailstone::net { class GameConnection; struct SpellEffectCue; struct EffectPacketCue; }
 
 namespace hailstone::app {
 
@@ -36,10 +41,10 @@ class SpellParticles {
 public:
     SpellParticles(render::VkContext& vk, const GameDir& game, const std::filesystem::path& shader_dir);
 
-    // Plays the frame's spell effect cues (those with a delay when it is up) and advances the emitters; `actors`
-    // (may be null) gives the spawns' poses for their spell points.
+    // Plays the frame's spell effect cues (those with a delay when it is up) and effect packets, and advances the
+    // emitters; `actors` (may be null) gives the spawns' poses for their spell points.
     void update(net::GameConnection& conn, std::span<const net::SpellEffectCue> cues,
-                const render::ActorRenderer* actors, float dt);
+                std::span<const net::EffectPacketCue> effect_packets, const render::ActorRenderer* actors, float dt);
     // Before the frame: loads textures the emitters need.
     void prepare();
     // `modern`: render::ParticleRenderer::draw's.
@@ -57,6 +62,9 @@ public:
         source_density_[static_cast<std::size_t>(source)] = std::clamp(density, 0.0f, 1.0f);
     }
     float source_density(game::SpellFxSource source) const { return source_density_[static_cast<std::size_t>(source)]; }
+    // The floor below a point (attach 12's GetPlayerFloorHeight): the zone's collision, when it is loaded.
+    using FloorFn = std::function<std::optional<float>(const glm::vec3&)>;
+    void set_floor(FloorFn floor) { floor_ = std::move(floor); }
     // The light the glowing effects give off (game::particle_lights), the `max` brightest.
     std::vector<game::LightSource> lights(std::size_t max) const;
 
@@ -67,7 +75,12 @@ private:
     // The point's world matrix on a spawn as last drawn.
     std::optional<glm::mat4> point_world(const render::ActorRenderer& actors, std::uint32_t id, int point);
 
+    // GetParticleScaleFactor: the model's moddat.ini PESFactor.
+    float particle_scale(const assets::CharacterModel& model) const;
+
     std::vector<assets::SpellEffect> effects_;
+    game::HeightTables heights_; // moddat.ini's PESFactors
+    FloorFn floor_;
     IniFile sp_offsets_; // Resources\SPOffsets.ini
     assets::SpellPoints spell_points_;
     game::ParticleSystem particles_;
@@ -87,7 +100,15 @@ private:
     };
     std::vector<Held> held_;
     double clock_ = 0.0;
+    game::SpellEffectTimers timers_; // OP_SpellEffect's
     void play(net::GameConnection& conn, const Held& cue, const render::ActorRenderer* actors);
+    // A stage of an effect by number (SpellEffectTimers_PlayStage, Handle_OP_AddNimbusEffect).
+    void play_effect(net::GameConnection& conn, const game::SpellEffectStagePlay& play,
+                     const render::ActorRenderer* actors);
+    std::optional<game::StageActor> stage_actor(const net::GameConnection& conn, std::uint32_t id,
+                                                const render::ActorRenderer* actors);
+    // The Options window's density for an effect cast by `cast_by` on `struck` (game::spell_fx_source).
+    float source_density_for(const net::GameConnection& conn, std::uint32_t cast_by, std::uint32_t struck) const;
 };
 
 } // namespace hailstone::app

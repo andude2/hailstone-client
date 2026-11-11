@@ -290,6 +290,7 @@ private:
     std::optional<bool> jump_animation_;
     bool trace_ = false;
     bool at_helm_ = false;
+    std::uint32_t speed_stops_ = 0, turn_stops_ = 0, stun_leans_ = 0; // GameConnection's, as last seen
 };
 
 } // namespace hailstone::app

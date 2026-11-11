@@ -308,7 +308,7 @@ TEST_CASE("addon_install: installed.txt reads back, a damaged record is taken fr
     a.version = "2.0.0-beta.1";
     a.caps = plugin::kCapRead | plugin::kCapUi;
     a.key = Keys().pub;
-    a.auto_update = false;
+    a.auto_update = true;
     a.author = "Some One";
     a.description = "Draws a hud.";
     a.notes = "https://github.com/owner/repo/releases/tag/v2";
@@ -327,19 +327,28 @@ TEST_CASE("addon_install: installed.txt reads back, a damaged record is taken fr
     CHECK(back[0].version == a.version);
     CHECK(back[0].caps == a.caps);
     CHECK(back[0].key == a.key);
-    CHECK_FALSE(back[0].auto_update);
+    CHECK(back[0].auto_update);
     CHECK(back[0].author == a.author);
     CHECK(back[0].description == a.description);
     CHECK(back[0].notes == a.notes);
     REQUIRE(back[0].files.size() == 2);
     CHECK(back[0].files[1].path == "ui/modern/my hud.lua");
     CHECK(back[0].files[1].sha256 == a.files[1].sha256);
-    CHECK(back[1].auto_update);
+    CHECK_FALSE(back[1].auto_update); // off unless the player switched it on
     CHECK(find_addon(back, "mq2hud") == &back[0]);
 
     // Written with its backup, which stands in for a damaged record.
     const fs::path reg = addons_dir(dir.path()) / "installed.txt", bak = addons_dir(dir.path()) / "installed.bak.txt";
     CHECK(read_file(bak) == read_file(reg));
+    {
+        // An older client's "auto 1" was written for every install without asking the player: it reads as off.
+        std::string old = read_file(reg);
+        REQUIRE(old.find("autoupdate 1\n") != std::string::npos);
+        old.replace(old.find("autoupdate 1\n"), 13, "auto 1\n");
+        put_file(reg, old);
+        CHECK_FALSE(read_installed_addons(dir.path())[0].auto_update);
+        REQUIRE(write_installed_addons(dir.path(), {a, b}));
+    }
     std::string text = read_file(reg);
     text.replace(text.find("ui/modern/my hud.lua"), 20, "../../escape.lua");
     put_file(reg, text);

@@ -30,7 +30,17 @@ std::uint32_t get32(const AppPacket& p, std::size_t at) {
 TEST_CASE("notices: stun, recast, charm, untargetable, yell, disciplines") {
     AppPacket s = bytes(Op::Stun, 6);
     put32(s, 0, 2500);
-    CHECK(decode_stun(s).value_or(0) == 2500);
+    auto ds = decode_stun(s);
+    REQUIRE(ds);
+    CHECK(ds->duration_ms == 2500);
+    CHECK_FALSE(ds->lean);
+    s.data[4] = std::byte{1};
+    CHECK(decode_stun(s)->lean);
+    // EQEmu's 4-byte Stun_Struct (an older patch): no lean byte.
+    AppPacket s4 = bytes(Op::Stun, 4);
+    put32(s4, 0, 1000);
+    CHECK(decode_stun(s4)->duration_ms == 1000);
+    CHECK_FALSE(decode_stun(s4)->lean);
 
     AppPacket r = bytes(Op::ItemRecastDelay, 12);
     put32(r, 0, 30);

@@ -461,4 +461,50 @@ AppPacket encode(const AuraUpdate& v) {
     return make_packet(Op::UpdateAura, std::move(w));
 }
 
+AppPacket encode(const SpellEffectPacket& v) {
+    ByteWriter w;
+    w.le(v.effect);
+    w.le(v.caster);
+    w.le(v.target);
+    w.le(v.stage1_ms);
+    w.le(v.stage1_length_ms);
+    w.le(v.stage2_length_ms);
+    w.le<std::uint8_t>(v.full ? 1 : 0);
+    w.le<std::uint8_t>(v.add ? 1 : 0);
+    w.le(v.unknown);
+    return make_packet(Op::SpellEffect, std::move(w));
+}
+
+std::optional<SpellEffectPacket> decode_spell_effect(const AppPacket& p) {
+    return detail::decode_with(p, [](ByteReader& r) {
+        SpellEffectPacket v;
+        v.effect = r.le<std::uint32_t>();
+        v.caster = r.le<std::uint32_t>();
+        v.target = r.le<std::uint32_t>();
+        v.stage1_ms = r.le<std::uint32_t>();
+        v.stage1_length_ms = r.le<std::uint32_t>();
+        v.stage2_length_ms = r.le<std::uint32_t>();
+        v.full = r.le<std::uint8_t>() != 0;
+        v.add = r.le<std::uint8_t>() != 0;
+        v.unknown = r.le<std::uint16_t>();
+        return v;
+    });
+}
+
+AppPacket encode(const NimbusEffect& v, bool add) {
+    ByteWriter w;
+    w.le(v.spawn_id);
+    w.le(v.effect);
+    return make_packet(add ? Op::AddNimbusEffect : Op::RemoveNimbusEffect, std::move(w));
+}
+
+std::optional<NimbusEffect> decode_nimbus_effect(const AppPacket& p) {
+    return detail::decode_with(p, [](ByteReader& r) {
+        NimbusEffect v;
+        v.spawn_id = r.le<std::uint32_t>();
+        v.effect = r.le<std::int32_t>();
+        return v;
+    });
+}
+
 } // namespace hailstone::net

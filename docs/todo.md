@@ -132,6 +132,7 @@ Fog, weather, sky, EQG surfaces, lighting and spell particles are a look-and-fee
 - [x] Doors: orientation already matched SetEulerRotation512 (655 of 665 hinged doors in 21 zones fit their doorways); invisible switches now block movement as in the original; harbingers' BCN loads from its .mds (c34ca9e, d59971c; walked live in halas and felwithea). Open: BCN's actordef name, piece and animation; the door-angle sign.
 - [x] Lighting: characters and doors take the light of their place (ambient probe), tinted baked light balanced (192ec47).
 - [x] Spell particles: the EDD billboard modes (flat and axis), animation-started actor emitters (look-surfaces; billboard meanings read from names, not traced).
+- [x] Spell particles traced from EQGraphicsDX9.dll: CreateEmitter's counts and capacity, the update's emission, spawn shapes, motion and ramps, and the quad builder's billboard modes (what the update reads from the actor and the creator's arguments are in unknowns.md).
 - [x] Audio: the local player has no loop sound in the original; `/reversesound` has no effect in RoF2, here it swaps the whole output's channels (our choice) (f7b19af).
 
 ### Updates (docs/updater.md)

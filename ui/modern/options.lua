@@ -234,8 +234,8 @@ end
 -- ---------------------------------------------------------------- Display
 local FPS = { 0, 30, 60, 75, 90, 120, 144, 165, 240 }
 local FPS_NAMES = { "Unlimited", "30", "60", "75", "90", "120", "144", "165", "240" }
-local BG_FPS = { 0, 10, 15, 30, 60 }
-local BG_FPS_NAMES = { "Same as above", "10", "15", "30", "60" }
+local BG_FPS = { 0, -1, 1, 5, 10, 15, 30, 60 }
+local BG_FPS_NAMES = { "Same as above", "0 (draw nothing)", "1", "5", "10", "15", "30", "60" }
 local SCALES = { 0, 75, 100, 125, 150, 175, 200, 250 }
 local SCALE_NAMES = { "Automatic (display)", "75 %", "100 %", "125 %", "150 %", "175 %", "200 %", "250 %" }
 
@@ -271,7 +271,8 @@ local function displayTab()
       .. "Adaptive: syncs, but tears instead of stuttering when a frame is late (where the driver supports it).")
     combo("max_fps", "Frame Rate Limit", FPS_NAMES, "The most frames a second the client draws.", FPS)
     combo("background_fps", "Background Frame Rate", BG_FPS_NAMES,
-      "The frame limit while another window has the focus: saves power and heat with the game in the background.",
+      "The frame limit while another window has the focus: saves power and heat with the game in the background. "
+      .. "At 0 nothing is drawn; the game, chat and scripts keep running.",
       BG_FPS)
   end)
   section("View", function()
@@ -399,6 +400,17 @@ local function displayTab()
       "Hailstone: the part of the ring hidden behind characters and walls shows faintly through them.")
     slider("target_ring_opacity", "Opacity", 25, 200, pct, "How solid the ring is, against the con colour's own.")
     slider("target_ring_glow", "Glow", 0, 100, pct, "How brightly the ring's core shines (with the bloom).")
+    -- Max Size (game::cap_ring_radius): 4 .. 40 units, and the slider's top end (41) is Off, the original's size.
+    local maxSize = eq.Option("target_ring_max_size")
+    if maxSize ~= nil then
+      row("Max Size", "Hailstone: the largest the ring gets, so a giant's or a dragon's does not fill the screen; "
+          .. "a smaller ring is left as it is. About 6 is a human's. All the way right is Off: every ring at its "
+          .. "own size, as on the original client.", function()
+        local v = maxSize == 0 and 41 or maxSize
+        local nv, changed = ui.SliderInt("##target_ring_max_size", v, 4, 41, v > 40 and "Off" or tostring(v))
+        if changed and nv ~= v then eq.SetOption("target_ring_max_size", nv > 40 and 0 or nv) end
+      end)
+    end
     for i, con in ipairs(RING_CONS) do
       local rgb = eq.Option("target_ring_color_" .. (i - 1))
       if rgb then
@@ -663,6 +675,8 @@ local function audioTab()
     slider("master", "Master Volume", 0, 100, pct)
     slider("music", "Music", 0, 100, pct)
     slider("effects", "Sound Effects", 0, 100, pct, "Spells, combat and the world's sounds.")
+    slider("npc_hits", "NPC Hit Sounds", 0, 100, pct,
+      "NPCs being hit, blocking and dodging, on top of Sound Effects (a Hailstone option).")
   end)
   section("Sound", function()
     check("environment", "Environment Sounds", "The zone's ambient sounds: wind, water, birds and the like.")

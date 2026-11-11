@@ -47,6 +47,11 @@ MilesLevels miles_fast2d_levels(const glm::vec3& offset, float min_distance, flo
 // The provider's volume curve: AIL_set_3D_sample_volume's level raised to 5/3.
 float miles_volume_curve(float volume);
 
+// What to multiply a SoundControl's volume by for a volume option of `percent` (0..100) to scale the sound's
+// amplitude linearly, as the mixer's bus volumes do: a positional sound's volume goes through miles_volume_curve,
+// so its factor is the level raised to 3/5.
+float option_volume_factor(int percent, bool positional);
+
 // The MSVC C runtime's rand() (LCG 214013 / 2531011, 15 bits), which the
 // original's emitter timers and sound picks use.
 class CrtRand {

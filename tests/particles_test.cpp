@@ -16,6 +16,7 @@
 #include "core/byte_io.h"
 #include "core/game_dir.h"
 #include "game/particles.h"
+#include "game/spawn_heights.h"
 #include "render/particle_renderer.h"
 #include "game_files.h"
 
@@ -90,11 +91,30 @@ TEST_CASE("CreateSpellEmitter: duration, density and capacity rules") {
     d.per_tick = 2;
     d.ticks_per_second = 5.0f;
     d.lifetime = 1.0f;
-    CHECK(game::emitter_capacity(d, 4.0f) == 10u + 2u * 6u);
+    // CEmitterDef::CreateEmitter: emitting longer than a lifetime holds initial + trunc(life x rate) x per tick.
+    CHECK(game::emitter_capacity(d, 4.0f) == 10u + 5u * 2u);
+    // Density: the initial count keeps at least min(16, n); fewer than 16 per tick tick less often instead.
+    auto half = game::emitter_counts(d, 0.5f, 4.0f);
+    CHECK(half.initial == 10);
+    CHECK(half.per_tick == 2);
+    CHECK(half.rate == doctest::Approx(2.5f));
+    CHECK(half.capacity == 10 + 2 * 2);
+    CHECK(half.length_ms == 5000); // trunc(4 x 2.5) / 2.5 + delay + lifetime
+    d.per_tick = 40;
+    auto many = game::emitter_counts(d, 0.5f, 4.0f);
+    CHECK(many.per_tick == 20); // 16 or more per tick: trunc(n x density), the rate kept
+    CHECK(many.rate == doctest::Approx(5.0f));
+    d.initial_count = 100;
+    CHECK(game::emitter_counts(d, 0.1f, 4.0f).initial == 16);
+    d.initial_count = 10;
+    d.per_tick = 2;
     d.capacity = 7; // +0x144 replaces the computed count
     CHECK(game::emitter_capacity(d, 4.0f) == 7u);
     d.capacity = 200000;
     CHECK(game::emitter_capacity(d, 4.0f) == 100000u);
+    d.capacity = 0;
+    d.delay = 5.0f; // its delay outlasts it: no ring
+    CHECK(game::emitter_capacity(d, 4.0f) == 0u);
     CHECK(game::flipbook_grid(1) == glm::uvec2(1, 1));
     CHECK(game::flipbook_grid(3) == glm::uvec2(2, 2));
     CHECK(game::flipbook_grid(6) == glm::uvec2(4, 2));
@@ -111,14 +131,34 @@ TEST_CASE("CreateSpellEmitter: duration, density and capacity rules") {
     CHECK(ps.create(r) == 0);
     r.density = 0.5f;
     r.duration_ms = 0;
-    CHECK(ps.create(r) == 1500);
+    CHECK(ps.create(r) == 1500); // lifetime < 0: the duration
     r.emitter = 2; // out of range
     CHECK(ps.create(r) == 0);
     REQUIRE(ps.emitters().size() == 1);
     ps.update(0.01f, {});
-    CHECK(ps.emitters()[0].particles.size() == 2); // the initial count x density
+    CHECK(ps.emitters()[0].particles.size() == 4); // the initial count: at least min(16, n) at any density
     ps.update(2.0f, {});
+    REQUIRE(ps.emitters().size() == 1); // its particles (living the emitter's 1.5 s) leave the ring's head next frame
+    ps.update(0.01f, {});
     CHECK(ps.emitters().empty()); // duration and particles over
+}
+
+TEST_CASE("CreateEmitter's counts for Burst of Flame's cast flame (spellsnew.edd 1468)") {
+    assets::EmitterDefinition d; // flame: initial 10, 10 per tick at 25/s, lifetime 1.25 s
+    d.initial_count = 10;
+    d.per_tick = 10;
+    d.ticks_per_second = 25.0f;
+    d.lifetime = 1.25f;
+    auto none = game::emitter_counts(d, 1.0f, 0.0f);
+    CHECK(none.capacity == 10);
+    CHECK(none.length_ms == 1250);
+    auto three = game::emitter_counts(d, 1.0f, 3.0f);
+    CHECK(three.capacity == 320); // (trunc(1.25 x 25) + 1) x 10
+    CHECK(three.length_ms == 4250);
+    auto half = game::emitter_counts(d, 0.5f, 3.0f);
+    CHECK(half.initial == 10);
+    CHECK(half.per_tick == 10);
+    CHECK(half.rate == doctest::Approx(12.5f));
 }
 
 TEST_CASE("A box-surface particle draws its two free axes, then its face, as the graphics DLL does") {
@@ -142,7 +182,7 @@ TEST_CASE("A box-surface particle draws its two free axes, then its face, as the
         // The same draws by hand: the azimuth (drawn for every shape), r1, r2, the face.
         std::mt19937 rng(seed);
         auto draw = [&](float lo, float hi) { return lo + (hi - lo) * std::uniform_real_distribution<float>(0.0f, 1.0f)(rng); };
-        draw(0.0f, 2.0f * std::numbers::pi_v<float>);
+        draw(0.0f, 512.0f);
         const float r1 = draw(-1.0f, 1.0f);
         const float r2 = draw(-1.0f, 1.0f);
         const int face = static_cast<int>(std::nearbyint(draw(0.0f, 1.0f) * 6.0f));
@@ -152,11 +192,14 @@ TEST_CASE("A box-surface particle draws its two free axes, then its face, as the
                       : face == 3 ? glm::vec3(r1, 1.0f, r2)
                       : face == 4 ? glm::vec3(r1, r2, -1.0f)
                                   : glm::vec3(r1, r2, 1.0f);
-        const glm::vec3 want = v * glm::vec3(2.0f, 3.0f, 4.0f), got = ps.emitters()[0].particles[0].local;
+        const glm::vec3 want = v * glm::vec3(2.0f, 3.0f, 4.0f);
+        const auto& got = ps.emitters()[0].particles[0];
         INFO("seed " << seed << " face " << face);
-        CHECK(got.x == doctest::Approx(want.x));
-        CHECK(got.y == doctest::Approx(want.y));
-        CHECK(got.z == doctest::Approx(want.z));
+        // The polar record: the radius in the transverse plane, the axial coordinate, and the radial motion's
+        // direction along the surface's normal (shapes 5 and 6).
+        CHECK(got.radius == doctest::Approx(std::sqrt(want.x * want.x + want.y * want.y)));
+        CHECK(got.axial == doctest::Approx(want.z));
+        CHECK(got.radial_dir.y == doctest::Approx(want.z / glm::length(want)));
     }
 }
 
@@ -208,12 +251,14 @@ TEST_CASE("Spell particle sources: self, other players and NPCs") {
 }
 
 TEST_CASE("SpellEffect_SpawnStageEmitters: the attach ids and their spell point fallbacks") {
-    auto run = [](std::int32_t attach, std::uint16_t points) {
+    auto run = [](std::int32_t attach, std::uint16_t points, std::optional<float> floor = std::nullopt) {
         assets::SpellEffect fx;
         fx.stages[0].slots[0] = {10, 0, 1, attach};
         game::StageActor caster{7, {1, 2, 3}, 10, 6.0f};
         caster.points = points;
         caster.chest = {8, 9, 10};
+        caster.floor = floor;
+        caster.particle_scale = 0.6f;
         return game::spawn_stage_emitters(fx, 0, 1, &caster, nullptr, {}, 0, {});
     };
     // A WLD human: default, chest, head, hands, feet and mouth; no eyes.
@@ -233,7 +278,8 @@ TEST_CASE("SpellEffect_SpawnStageEmitters: the attach ids and their spell point 
     REQUIRE(feet.size() == 1);
     CHECK(feet[0].bone_point == -1);
     CHECK(feet[0].position == glm::vec3(8, 9, 3)); // the chest's x and y
-    CHECK(feet[0].scale == 6.0f);                  // the actor height
+    CHECK(feet[0].scale == 0.6f);                  // the actor's particle scale (moddat.ini PESFactor)
+    CHECK(run(12, human, 0.5f)[0].position == glm::vec3(8, 9, 0.5f)); // on the floor below
     CHECK(run(13, human).empty());
     CHECK(run(0, human)[0].actor == 0u);
 }
@@ -394,17 +440,39 @@ TEST_CASE("NMS actor emitters: a fire elemental and a glowing sword" * doctest::
     CHECK(e[0].emitter >= defs.size());
 }
 
-TEST_CASE("particle billboard modes: facing, standing on the axis, flat") {
-    glm::mat3 axes(glm::vec3(1, 0, 0), glm::vec3(0, -1, 0), glm::vec3(0, 0, 1));
-    glm::vec3 right(0, 1, 0), up(0.3f, 0, 0.95f);
-    render::particle_basis(0, axes, glm::vec3(10, 0, 0), right, up);
-    CHECK(right == glm::vec3(0, 1, 0)); // mode 0 keeps the camera's
-    render::particle_basis(1, axes, glm::vec3(10, 0, -2), right, up);
-    CHECK(up == glm::vec3(0, 0, 1));
-    CHECK(std::abs(glm::dot(right, glm::vec3(1, 0, 0))) < 1e-5f); // turned to face the eye along +x
-    render::particle_basis(2, axes, glm::vec3(10, 0, -2), right, up);
-    CHECK(right == glm::vec3(1, 0, 0));
-    CHECK(up == glm::vec3(0, -1, 0)); // lying in the ground plane
+TEST_CASE("particle billboard modes: facing and turning clockwise, streaking along the axis, flat on the ground") {
+    game::Particle p;
+    p.position = {10, 20, 30};
+    p.width = 2.0f;
+    p.height = 4.0f;
+    const glm::vec3 right(0, 1, 0), up(0, 0, 1);
+    std::array<glm::vec3, 4> c;
+    // Mode 0 faces the camera: the texture's top-left first.
+    REQUIRE(render::particle_corners(p, 0, right, up, c));
+    CHECK(glm::length(c[0] - glm::vec3(10, 19, 32)) < 1e-5f);
+    CHECK(glm::length(c[2] - glm::vec3(10, 21, 28)) < 1e-5f);
+    // A quarter turn (128 512ths) turns it clockwise on the screen: its top edge now on the right.
+    p.rotation = 128.0f;
+    REQUIRE(render::particle_corners(p, 0, right, up, c));
+    CHECK(glm::length(c[0] - glm::vec3(10, 22, 31)) < 1e-5f);
+    // Mode 2 lies on the world's horizontal plane, its top towards +x at no rotation, whatever the camera.
+    p.rotation = 0.0f;
+    REQUIRE(render::particle_corners(p, 2, right, up, c));
+    for (const auto& v : c) CHECK(v.z == doctest::Approx(30.0f));
+    CHECK(glm::length(c[0] - glm::vec3(12, 21, 30)) < 1e-5f);
+    // Mode 1 streaks along the particle's axis, its length the particle's, widened on the screen's x only.
+    p.axis = {0, 0, 1};
+    p.length = 6.0f;
+    REQUIRE(render::particle_corners(p, 1, right, up, c));
+    CHECK(c[0].z == doctest::Approx(33.0f));
+    CHECK(c[3].z == doctest::Approx(27.0f));
+    CHECK(std::abs(c[1].y - c[0].y) == doctest::Approx(2.0f)); // the full width across a streak upright on screen
+    p.axis = {0, 1, 0}; // lying across the screen: no width
+    REQUIRE(render::particle_corners(p, 1, right, up, c));
+    CHECK(glm::length(c[1] - c[0]) < 1e-5f);
+    // Below the axis without +0x198: not drawn.
+    p.hidden = true;
+    CHECK_FALSE(render::particle_corners(p, 0, right, up, c));
 }
 
 namespace {
@@ -456,7 +524,7 @@ TEST_CASE("an environment emitter's fixture holds a lifetime of particles") {
     // at 10 ticks a second. With its own duration of 0 it held 7, and burnt in puffs.
     game::ParticleSystem ps({assets::EmitterDefinition{}, rising_flame(5.0f, 2.0f)});
     REQUIRE(ps.add_fixture(1, glm::mat4(1.0f)));
-    CHECK(ps.emitters()[0].capacity == 1u + 6u * 51u);
+    CHECK(ps.emitters()[0].counts.capacity == 6 * 51); // (trunc(5 x 10) + 1) x 6
     for (int i = 0; i < 100; ++i) ps.update(0.05f, {});
     CHECK(ps.emitters()[0].particles.size() > 250u);
 }
@@ -465,14 +533,158 @@ TEST_CASE("a long frame fills an emitter to its capacity at once, its leftover t
     using namespace hailstone;
     game::ParticleSystem ps({assets::EmitterDefinition{}, rising_flame(5.0f, 2.0f)});
     REQUIRE(ps.add_fixture(1, glm::mat4(1.0f)));
-    const auto cap = ps.emitters()[0].capacity;
+    const auto cap = static_cast<std::size_t>(ps.emitters()[0].counts.capacity);
     ps.update(0.05f, {}); // the initial count
-    ps.update(1.0e6f, {}); // ten million ticks: the full emitter stops asking for more
+    ps.update(1.0e6f, {}); // ten million ticks, counted from the next frame (the time before this step's)
+    ps.update(0.05f, {});  // what does not fit is dropped at once
     CHECK(ps.emitters()[0].particles.size() <= cap);
-    CHECK(ps.emitters()[0].tick_accumulator < 1.0f);
-    CHECK(ps.emitters()[0].tick_accumulator >= 0.0f);
+    CHECK(ps.emitters()[0].emitted == 10000000);
     // The glow test is worked out per definition.
     CHECK(ps.glows(1));
     CHECK_FALSE(ps.glows(0));
     CHECK_FALSE(ps.glows(7));
+}
+
+TEST_CASE("the particle update as EQGraphicsDX9's: offsets, radius, drift, wind, ramps and the actor's frame") {
+    using namespace hailstone;
+    auto one = [](assets::EmitterDefinition d) {
+        d.initial_count = 1;
+        if (d.lifetime == -1.0f) d.lifetime = 2.0f;
+        return game::ParticleSystem({assets::EmitterDefinition{}, d});
+    };
+    auto start = [](game::ParticleSystem& ps, std::uint32_t actor = 0, std::int32_t point = -1) {
+        game::SpellEmitterRequest r;
+        r.emitter = 1;
+        r.duration_ms = 1000;
+        r.position = {10, 20, 30};
+        r.actor = actor;
+        r.bone_point = point;
+        REQUIRE(ps.create(r) > 0);
+    };
+    {
+        // +0xb8 is along the axis, +0xbc transverse 1 (+X), +0xc0 transverse 2 (+Y without a matrix).
+        assets::EmitterDefinition d;
+        d.offset = {1.0f, 2.0f, 3.0f};
+        auto ps = one(d);
+        start(ps);
+        ps.update(0.01f, {});
+        const auto& p = ps.emitters()[0].particles.at(0);
+        CHECK(glm::length(p.position - glm::vec3(12, 23, 31)) < 1e-4f);
+    }
+    {
+        // A disk pulled in (radial -4 /s from radius 2): through the axis after half a second, then not drawn.
+        assets::EmitterDefinition d;
+        d.shape = 9;
+        d.shape_size = {2.0f, 0.0f, 0.0f};
+        d.motion[3] = {-4.0f, -4.0f, 0.0f};
+        auto ps = one(d);
+        start(ps);
+        ps.update(0.25f, {});
+        CHECK_FALSE(ps.emitters()[0].particles.at(0).hidden);
+        CHECK(ps.emitters()[0].particles.at(0).radius == doctest::Approx(1.0f));
+        ps.update(0.5f, {});
+        CHECK(ps.emitters()[0].particles.at(0).radius == doctest::Approx(-1.0f));
+        CHECK(ps.emitters()[0].particles.at(0).hidden);
+    }
+    {
+        // The wind is a steady velocity, gravity an acceleration; transverse motion drifts in the world.
+        assets::EmitterDefinition d;
+        d.wind_x = 2.0f;
+        d.gravity = 4.0f;
+        d.motion[2] = {1.0f, 1.0f, 0.0f};
+        auto ps = one(d);
+        start(ps);
+        ps.update(0.5f, {}); // born and moved half a second
+        ps.update(0.5f, {});
+        const auto& p = ps.emitters()[0].particles.at(0);
+        CHECK(p.position.x == doctest::Approx(12.0f));      // 2 /s for 1 s
+        CHECK(p.position.y == doctest::Approx(21.0f));      // transverse 2 at 1 /s
+        CHECK(p.position.z == doctest::Approx(27.0f)); // semi-implicit: (2 + 4) x 0.5 s
+    }
+    {
+        // Ramps near the end: +0x190 on the height, +0x194 on the width; the flipbook rounds.
+        assets::EmitterDefinition d;
+        d.lifetime = 1.0f;
+        d.shrink_x = 0.5f;
+        d.shrink_y = 0.25f;
+        d.frames = 4;
+        d.frames_per_second = 4.0f;
+        auto ps = one(d);
+        start(ps);
+        ps.update(0.8f, {});
+        const auto& p = ps.emitters()[0].particles.at(0);
+        CHECK(p.ramp_height == doctest::Approx(0.4f)); // 0.2 s left of 0.5
+        CHECK(p.ramp_width == doctest::Approx(0.8f));  // of 0.25
+        CHECK(p.frame == 3u);                          // round(4 x 0.8) = 3 (floor would agree; 0.9 s would not)
+    }
+    {
+        // A spell emitter on an actor takes the actor's turn every frame (axial = its +Z, transverse 1 its +X,
+        // transverse 2 its -Y); one without a point stays where it was made.
+        assets::EmitterDefinition d;
+        d.offset = {0.0f, 1.0f, 0.0f};
+        auto ps = one(d);
+        start(ps, 7, -1);
+        const glm::mat3 turned(glm::vec3(0, 1, 0), glm::vec3(-1, 0, 0), glm::vec3(0, 0, 1)); // a quarter turn left
+        ps.update(0.01f, [&](std::uint32_t, std::int32_t) {
+            game::EmitterAttachment a;
+            a.actor_axes = turned;
+            return std::optional<game::EmitterAttachment>(a);
+        });
+        const auto& p = ps.emitters()[0].particles.at(0);
+        CHECK(glm::length(p.position - glm::vec3(10, 21, 30)) < 1e-4f); // +0xbc along the actor's +X (world +Y)
+    }
+    {
+        // A lifetime below 0: each particle lives what is left of its emitter.
+        assets::EmitterDefinition d;
+        d.lifetime = -1.0f;
+        d.per_tick = 1;
+        d.ticks_per_second = 2.0f;
+        game::ParticleSystem ps({assets::EmitterDefinition{}, d});
+        start(ps);
+        ps.update(0.6f, {});
+        ps.update(0.01f, {});
+        REQUIRE(ps.emitters()[0].particles.size() == 2);
+        CHECK(ps.emitters()[0].particles[1].lifetime == doctest::Approx(0.4f));
+    }
+}
+
+TEST_CASE("moddat.ini PESFactor: the particle scale of a model") {
+    auto t = hailstone::game::parse_height_tables({}, "[BAS]\nPESFactor=0.5\nROffset=0.577\n[HUM]\nROffset=3\n");
+    CHECK(t.pes_factor("BAS") == 0.5f);
+    CHECK(t.pes_factor("bas") == 0.5f);
+    CHECK(t.pes_factor("HUM") == 1.0f);
+}
+
+TEST_CASE("an actor's own emitter is made for 5,000 s, not its entry's 5 s") {
+    // CActor::vf126 passes 5,000,000 ms whatever the .prt entry's +0x58 (5000) says: a lifetime below 0 then lasts
+    // the emitter's time, and the ring holds a lifetime of ticks, not five seconds' worth.
+    hailstone::assets::EmitterDefinition d;
+    d.initial_count = 1;
+    d.per_tick = 4;
+    d.ticks_per_second = 10.0f;
+    d.lifetime = 8.0f;
+    const float duration = hailstone::game::emitter_duration_seconds(0.0f, hailstone::game::kActorEmitterDurationMs);
+    CHECK(duration == doctest::Approx(5000.0f));
+    CHECK(hailstone::game::emitter_counts(d, 1.0f, duration).capacity == (80 + 1) * 4);
+    CHECK(hailstone::game::emitter_counts(d, 1.0f, 5.0f).capacity == 1 + 50 * 4);
+}
+
+TEST_CASE("SpellEffect_SpawnStageEmitters: an actor whose model is not known yet keeps the point a slot asks for") {
+    // A nimbus sent as the spawn zones in, before its model has loaded (Hailstone; the original's actor has its
+    // points from the start).
+    auto run = [](std::int32_t attach) {
+        assets::SpellEffect fx;
+        fx.stages[2].slots[0] = {10, 0, 1, attach};
+        game::StageActor caster{7, {1, 2, 3}, 10, 6.0f};
+        caster.model_known = false;
+        return game::spawn_stage_emitters(fx, 2, 468, &caster, &caster, {1, 2, 3}, 0, {});
+    };
+    auto chest = run(2);
+    REQUIRE(chest.size() == 1);
+    CHECK(chest[0].bone_point == 1);
+    CHECK(chest[0].actor == 7u);
+    CHECK(run(10)[0].bone_point == 8); // an eye: kept too, found or not once the model is drawn
+    auto at12 = run(12);
+    REQUIRE(at12.size() == 1);
+    CHECK(at12[0].position == glm::vec3(1, 2, 3)); // no chest known: the spawn's place
 }

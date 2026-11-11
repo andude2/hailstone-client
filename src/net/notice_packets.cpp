@@ -24,8 +24,13 @@ AppPacket echo(const AppPacket& offer, std::size_t at, bool yes, Op op) {
 
 } // namespace
 
-std::optional<std::uint32_t> decode_stun(const AppPacket& p) {
-    return decode_with(p, [](ByteReader& r) { return r.le<std::uint32_t>(); });
+std::optional<Stun> decode_stun(const AppPacket& p) {
+    return decode_with(p, [](ByteReader& r) {
+        Stun s;
+        s.duration_ms = r.le<std::uint32_t>();
+        if (r.remaining() >= 1) s.lean = r.le<std::uint8_t>() != 0;
+        return s;
+    });
 }
 
 std::optional<ItemRecastDelay> decode_item_recast_delay(const AppPacket& p) {

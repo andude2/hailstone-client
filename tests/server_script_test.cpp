@@ -158,7 +158,7 @@ end
 local function send(c, p) T.handlers[Event.unhandled_opcode]({ self = c, packet = p }) end
 
 function list_request(c, first)
-  local p = Packet(0x1426, 12)
+  local p = Packet(0x1434, 12)
   p:WriteInt32(0, 0x4c465348); p:WriteInt16(4, 1); p:WriteInt16(6, 1); p:WriteInt32(8, first or 0)
   send(c, p)
   return c.sent[#c.sent]
@@ -166,7 +166,7 @@ end
 
 function chunk_request(c, id, index, offset)
   local before = #c.sent
-  local p = Packet(0x1426, 24)
+  local p = Packet(0x1434, 24)
   p:WriteInt32(0, 0x4c465348); p:WriteInt16(4, 1); p:WriteInt16(6, 2)
   p:WriteInt32(8, id); p:WriteInt32(12, index); p:WriteInt32(16, offset); p:WriteInt32(20, 32768)
   send(c, p)
@@ -181,7 +181,7 @@ end
 
 function guild_hello(c)
   local before = #c.sent
-  local p = Packet(0x1422, 80)
+  local p = Packet(0x1430, 80)
   p:WriteInt32(0, 0x47534d4e); p:WriteInt16(4, 1); p:WriteInt16(6, 0)
   send(c, p)
   return #c.sent > before
@@ -189,7 +189,7 @@ end
 
 function settings_request(c)
   local before = #c.sent
-  local p = Packet(0x1424, 6)
+  local p = Packet(0x1432, 6)
   p:WriteInt32(0, 0x50534d4e); p:WriteInt16(4, 1)
   send(c, p)
   return #c.sent > before
@@ -668,7 +668,7 @@ TEST_CASE("Server script: settings requests without the magic are counted before
 add_files(1, 100)
 load_script()
 local a = client(1, "Alpha")
-local p = Packet(0x1424, 6)
+local p = Packet(0x1432, 6)
 p:WriteInt32(0, 0x12345678)
 for _ = 1, 50 do T.handlers[Event.unhandled_opcode]({ self = a, packet = p }) end
 local bad = 0
@@ -718,3 +718,47 @@ assert(names[1] == "hailstone.cfg" and names[2] == "scripts/a.lua", table.concat
 )lua").c_str());
 }
 #endif
+
+TEST_CASE("Server script: clients on the old opcodes 0x1422-0x1427 are answered on them") {
+    check_run(R"lua(
+add_files(1, 100)
+load_script()
+local old, new = client(1, "Old"), client(2, "New")
+local function send(c, p) T.handlers[Event.unhandled_opcode]({ self = c, packet = p }) end
+local function ask(c, op, size, magic, action, first)
+  local p = Packet(op, size)
+  p:WriteInt32(0, magic); p:WriteInt16(4, 1); p:WriteInt16(6, action or 0)
+  if first then p:WriteInt32(8, first) end
+  local before = #c.sent
+  send(c, p)
+  assert(#c.sent == before + 1, string.format("0x%04x is answered", op))
+  return c.sent[#c.sent]
+end
+
+-- Hailstone 0.7.0: settings, the guild hello, a page of the file list and a piece, all on the old numbers.
+assert(ask(old, 0x1424, 6, 0x50534d4e).op == 0x1425, "settings")
+assert(ask(old, 0x1422, 80, 0x47534d4e).op == 0x1423, "guild hello")
+local page = ask(old, 0x1426, 12, 0x4c465348, 1, 0)
+assert(page.op == 0x1427 and page:ReadInt16(6) == 1 and page:ReadInt32(12) == 1, "the file list")
+local p = Packet(0x1426, 24)
+p:WriteInt32(0, 0x4c465348); p:WriteInt16(4, 1); p:WriteInt16(6, 2)
+p:WriteInt32(8, page:ReadInt32(8)); p:WriteInt32(12, 0); p:WriteInt32(16, 0); p:WriteInt32(20, 32768)
+send(old, p)
+assert(old.sent[#old.sent].op == 0x1427 and old.sent[#old.sent]:ReadInt16(6) == 2, "a piece")
+
+-- A current client, and the old one once it asks on the new numbers (an update between logins).
+assert(ask(new, 0x1432, 6, 0x50534d4e).op == 0x1433, "settings, new")
+assert(ask(new, 0x1430, 80, 0x47534d4e).op == 0x1431, "guild hello, new")
+assert(list_request(new, 0).op == 0x1435, "the file list, new")
+assert(ask(old, 0x1432, 6, 0x50534d4e).op == 0x1433, "a client asking on the new numbers is answered on them")
+
+-- 0x1423, 0x1425 and 0x1427 are the server's own answers: a client sending them gets nothing.
+for _, op in ipairs({0x1423, 0x1425, 0x1427}) do
+  local q = Packet(op, 80)
+  q:WriteInt32(0, 0x50534d4e)
+  local before = #new.sent
+  send(new, q)
+  assert(#new.sent == before, string.format("0x%04x is not answered", op))
+end
+)lua");
+}

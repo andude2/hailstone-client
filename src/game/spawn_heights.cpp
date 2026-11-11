@@ -98,6 +98,7 @@ std::string_view HeightTables::racedata_code(std::int32_t race, std::uint8_t gen
 float HeightTables::fpc_offset(std::string_view code) const { return by_code(fpc_offsets, code, 0.0f); }
 float HeightTables::ccc_distance(std::string_view code) const { return by_code(ccc_distances, code, kDefaultCccDistance); }
 float HeightTables::ccc_height(std::string_view code) const { return by_code(ccc_heights, code, kDefaultCccHeight); }
+float HeightTables::pes_factor(std::string_view code) const { return by_code(pes_factors, code, 1.0f); }
 
 HeightTables parse_height_tables(std::string_view racedata, std::string_view moddat) {
     HeightTables t;
@@ -173,11 +174,13 @@ HeightTables parse_height_tables(std::string_view racedata, std::string_view mod
                                                         : key == "FPCOFFSET" ? &t.fpc_offsets
                                                         : key == "CCCDIS"    ? &t.ccc_distances
                                                         : key == "CCCHT"     ? &t.ccc_heights
+                                                        : key == "PESFACTOR" ? &t.pes_factors
                                                                              : nullptr;
         if (!table || table->contains(section)) continue;
         const float fallback = key == "ROFFSET" ? kDefaultROffset
                                : key == "CCCDIS" ? kDefaultCccDistance
                                : key == "CCCHT"  ? kDefaultCccHeight
+                               : key == "PESFACTOR" ? 1.0f
                                                  : 0.0f;
         std::string value(trim(line.substr(eq + 1)));
         char* end = nullptr;

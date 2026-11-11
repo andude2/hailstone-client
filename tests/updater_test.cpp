@@ -12,6 +12,7 @@
 #include "app/update_install.h"
 #include "app/updater.h"
 #include "core/atomic_file.h"
+#include "core/config.h"
 #include "core/ed25519.h"
 #include "core/sha256.h"
 #include "core/update_manifest.h"
@@ -103,6 +104,7 @@ UpdaterEnv env_for(const fs::path& dir, Feed& feed, const Keys& k, const std::st
     env.platform = "test-x64";
     env.key = k.pub;
     env.fetch = feed.fetch();
+    env.auto_download = true; // update.download switched on: most cases test the download itself
     return env;
 }
 
@@ -273,6 +275,40 @@ TEST_CASE("updater: check, download, install, start and the next update") {
     CHECK(!fs::exists(inst / "shaders/b.spv"));
     CHECK(get(inst / "update/previous/shaders/b.spv") == "b");
     CHECK(get(inst / "plugins/nms/nms.so") == "new nms");
+}
+
+TEST_CASE("updater: nothing is downloaded or installed unless the player asks") {
+    const UpdateSettings defaults = update_settings(Config{});
+    CHECK(defaults.check);
+    CHECK_FALSE(defaults.download);
+    CHECK_FALSE(update_installs_at_quit(defaults, false)); // a package an earlier run left: Restart now only
+    CHECK(update_installs_at_quit(defaults, true));         // Download pressed in this run
+    UpdateSettings on = defaults;
+    on.download = true;
+    CHECK(update_installs_at_quit(on, false));
+    UpdateSettings never = defaults;
+    never.install_on_quit = false;
+    CHECK_FALSE(update_installs_at_quit(never, true));
+
+    test::ScratchDir dir("updater_ask");
+    const fs::path inst = dir.path();
+    Keys k;
+    Feed feed;
+    const std::string core = zip_of({{"hailstone", "x"}});
+    feed.files[kBase + std::string("core.zip")] = core;
+    feed.files[kFeed] = sign(k, "hailstone-update 1\nversion 0.2.0\n" + package_line("core", "core.zip", core));
+    auto env = env_for(inst, feed, k, "0.1.0");
+    env.auto_download = defaults.download;
+    Updater u(env);
+    u.check();
+    u.wait();
+    CHECK(u.status().state == UpdateState::Available);
+    CHECK(feed.fetches == 1); // the manifest only
+    CHECK(!fs::exists(inst / "update/download/core.zip"));
+    u.download();
+    u.wait();
+    CHECK(u.status().state == UpdateState::Ready);
+    CHECK(feed.fetches == 2);
 }
 
 TEST_CASE("updater: up to date, older, skipped, refused and missing") {

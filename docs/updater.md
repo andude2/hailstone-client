@@ -1,7 +1,8 @@
 # The updater
 
-Hailstone looks for a new release when it starts, downloads it in the background and installs it when the player
-quits. This is a Hailstone feature with no counterpart in the original client: the original was kept up to date by
+Hailstone looks for a new release when it starts and says when one is out. Nothing is downloaded or installed
+unless the player asks: **Download** fetches it in the background, and it is installed when they quit (or at once
+with **Restart now**). `update.download=1` makes the download automatic, for a player who wants that. This is a Hailstone feature with no counterpart in the original client: the original was kept up to date by
 a separate patcher before the game started. The code is `src/app/updater.*` (check and download),
 `src/app/update_install.*` (install and rollback), `src/app/client_app_update.cpp` (the client's part),
 `src/core/update_manifest.*`, `src/core/zip_read.*`, `src/core/ed25519.*` and `src/platform/http_get.*`.
@@ -17,10 +18,12 @@ a separate patcher before the game started. The code is `src/app/updater.*` (che
   The Modern pack draws it as a small card; the Gamepad pack shows the two lines there and puts What's new (a page)
   and the GitHub link under More, About Hailstone; the client's own ImGui screen draws a small window.
 - When a newer release is out, the corner says so in a sentence ("Hailstone 0.2.0-alpha is out (this
-  is 0.1.0-alpha).") with **Download**, **Release notes** and **Skip** (the Gamepad pack: under Log in). With `update.download` on (the default) the
-  download starts by itself and the notice shows its progress.
+  is 0.1.0-alpha).") with **Download**, **Release notes** and **Skip** (the Gamepad pack: under Log in). Download starts the download
+  and the notice shows its progress; with `update.download` on (off by default) it starts by itself.
 - Once downloaded: "Hailstone 0.2.0-alpha is downloaded: it is installed when you quit." with **Restart now**, which
-  quits, installs and starts the new version.
+  quits, installs and starts the new version. A plain quit installs only an update the player asked for in this run
+  (Download pressed, or `update.download` on, `update_installs_at_quit`). A package an earlier run left downloaded,
+  as clients up to 0.7.0-beta did without asking, shows "Hailstone 0.2.0-alpha is downloaded." and waits for Restart now.
 - **Skip** writes `update.skip=<version>`: that release is not offered again, a newer one is. Skip pressed while the
   notice shows, before its automatic download has begun, stops that download from starting.
 - A release with no package for the player's system (say, no Linux arm64 build) is shown with its Release notes only.
@@ -34,8 +37,8 @@ a separate patcher before the game started. The code is `src/app/updater.*` (che
 | Key | Default | |
 |---|---|---|
 | `update.check` | 1 | look for a release at start |
-| `update.download` | 1 | download a newer one without asking |
-| `update.install_on_quit` | 1 | install a downloaded one at a plain quit (Restart now always installs) |
+| `update.download` | 0 | download a newer one without asking (1: automatic, and a plain quit installs it) |
+| `update.install_on_quit` | 1 | install a downloaded one the player asked for at a plain quit (Restart now always installs) |
 | `update.feed` | the build's | the manifest's address, for testing a release before it is published |
 | `update.skip` | | a release not to offer |
 

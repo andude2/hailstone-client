@@ -70,6 +70,10 @@ Nothing runs at the login screen (docs/plugins.md), and plugins load from copies
 or an update never changes a file under a running script or plugin. One downloaded while in the world waits for the
 next login screen. A run that quits first finds it again at the next start, and the package is not downloaded twice.
 
+**Auto-update is off** for every add-on until the player switches it on in its row: nothing updates unasked.
+Installed by a client up to 0.7.0-beta, whose installs switched it on without asking (`auto 1` in `installed.txt`), an
+add-on reads as off; the switch is now written as `autoupdate`.
+
 **Updates at start.** A worker thread looks for a newer version of each add-on with auto-update on, at most every
 `addons.check_hours`. A newer version is installed only when nothing stands in its way:
 
@@ -334,7 +338,7 @@ whoever holds the key, not merely from whoever can push to the repository.
 
 ```
 addons/
-  installed.txt   each add-on: name, kind, source, version, the caps accepted, its key, auto-update, author,
+  installed.txt   each add-on: name, kind, source, version, the caps accepted, its key, auto-update (`autoupdate 0|1`), author,
                   description, notes, and every file it put in with its size and SHA-256
   installed.bak.txt installed.txt's copy, written with it (a lost or damaged record is read from it)
   checked.txt     when the last check at start ran (addons.check_hours)

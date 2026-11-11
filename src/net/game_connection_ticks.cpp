@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <functional>
 
+#include "game/mechanics/character.h"
 #include "game/mechanics/sheet_builder.h"
 #include "game/mechanics/tables.h"
 #include "game/passage_of_time.h"
@@ -28,6 +29,32 @@ struct FunctionPassageHost final : game::PassageHost {
 };
 
 } // namespace
+
+void GameConnection::stun_me(std::uint32_t duration_ms, bool lean) {
+    // CharacterZoneClient::StunMe @0x4432c0: nothing without a spawn or under stun immunity (TotalEffect(40) > 0).
+    if (!world_.player()) return;
+    std::int32_t immune = 0;
+    with_character([&](game::mechanics::Character& ch) { immune = ch.total_effect(40, true, 0, true, true); });
+    if (immune > 0) return;
+    // Below 1000 ms a player's stun is 1000 ms (another spawn's would be nothing); nothing while one runs.
+    duration_ms = std::max<std::uint32_t>(duration_ms, 1000);
+    if (stun_timer_ms_ != 0) return;
+    stun_timer_ms_ = now_ms() + duration_ms;
+    stun_state_ = true;
+    // The display's special environment 0x17 (the app's listener), the spawn's and its mount's SpeedRun 0.
+    ++speed_stops_;
+    // "You are stunned!" (0x30bf, colour 0x154) unless the chat filter 0x1a hides it.
+    if (chat_filters_.mode(0x1a) == 0) system(0x30bf, {}, 0x154);
+    if (lean) ++stun_leans_;
+}
+
+void GameConnection::end_stun() {
+    // CharacterZoneClient_EndStun @0x4433d0: the listener environment updated (the app's), the timer and the stun
+    // state cleared, "You are unstunned." (0x30c0, colour 0x154) unless the chat filter 0x1a hides it.
+    stun_timer_ms_ = 0;
+    stun_state_ = false;
+    if (chat_filters_.mode(0x1a) == 0) system(0x30c0, {}, 0x154);
+}
 
 game::mechanics::LiveState GameConnection::live_state() const {
     game::mechanics::LiveState live;
@@ -63,6 +90,15 @@ void GameConnection::passage_of_time(std::int64_t now) {
     if (!is_sitting) sat_down_ms_ = 0;
     was_sitting_ = is_sitting;
 
+    // DoPassageOfTime's stun check: the timer passing clears it, and ends the stun unless TotalEffect(31) (a mez,
+    // whose removal ends it then).
+    if (stun_timer_ms_ != 0 && now >= stun_timer_ms_ && world_.player()) {
+        stun_timer_ms_ = 0;
+        std::int32_t mez = 0;
+        with_character([&](game::mechanics::Character& ch) { mez = ch.total_effect(31, true, 0, true, true); });
+        if (mez == 0) end_stun();
+    }
+
     if (!profile_ || !spell_table_ || !world_.player()) return;
     // Without the game folder's BaseData.txt row for the character the regen and the maxima the pools are clamped
     // to have nothing to work with: the ticks wait rather than clamp the server's values to nothing.
@@ -87,12 +123,7 @@ void GameConnection::passage_of_time(std::int64_t now) {
     };
     // CharacterZoneClient_StopCurrentSpellCast(1): the flag-0 port (docs/unknowns.md).
     host.on_stop_cast = [this] { stop_current_spell_cast(); };
-    host.on_end_stun = [this] {
-        // CharacterZoneClient_EndStun @0x4433d0: the stun ends; "You are unstunned." (0x30c0, colour 0x154)
-        // unless the chat filter 0x1a hides it.
-        stun_until_ms_ = 0;
-        system(0x30c0, {}, 0x154);
-    };
+    host.on_end_stun = [this] { end_stun(); };
     host.on_summon_mount = [this] {
         // ProcessAffects' SPA 113 case @0x43cc48: with a summon mount buff and no mount, the mount is looked for.
         game::MountEvents ev;

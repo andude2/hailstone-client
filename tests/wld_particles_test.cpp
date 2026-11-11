@@ -307,12 +307,12 @@ TEST_CASE("emitter_axes: the owner basis and the converter's turns") {
     CHECK(near(game::emitter_axes(glm::mat3(2.5f), 0.0f, 0.0f)[2], {0, 0, 1}));
 }
 
-TEST_CASE("emission_distance_factor: 80 / distance, floored at min(1, 16 / capacity)") {
-    CHECK(game::emission_distance_factor(80.0f, 40, 10.0f) == 1.0f);
-    CHECK(game::emission_distance_factor(80.0f, 40, 160.0f) == doctest::Approx(0.5f));
-    CHECK(game::emission_distance_factor(80.0f, 40, 1000.0f) == doctest::Approx(0.4f));
-    CHECK(game::emission_distance_factor(80.0f, 10, 1000.0f) == 1.0f);
-    CHECK(game::emission_distance_factor(80.0f, 40, 0.0f) == 1.0f);
+TEST_CASE("emission_distance_factor: +0xa0 / distance past +0xa0, floored at the batch floor") {
+    CHECK(game::emission_distance_factor(80.0f, 0.4f, 10.0f) == 1.0f);
+    CHECK(game::emission_distance_factor(80.0f, 0.4f, 160.0f) == doctest::Approx(0.5f));
+    CHECK(game::emission_distance_factor(80.0f, 0.4f, 1000.0f) == doctest::Approx(0.4f));
+    CHECK(game::emission_distance_factor(80.0f, 1.0f, 1000.0f) == 1.0f);
+    CHECK(game::emission_distance_factor(80.0f, 0.4f, 0.0f) == 1.0f);
 }
 
 TEST_CASE("a zone fixture emitter: persistent, along its axis, spreading all round") {
@@ -343,7 +343,7 @@ TEST_CASE("a zone fixture emitter: persistent, along its axis, spreading all rou
     const auto& e = ps.emitters()[0];
     CHECK(e.persistent);
     CHECK(e.scale == doctest::Approx(1.5f));
-    CHECK(e.capacity == 40u);
+    CHECK(e.counts.capacity == 40);
     bool left = false, right = false;
     for (int i = 0; i < 100; ++i) {
         ps.update(0.05f, {});

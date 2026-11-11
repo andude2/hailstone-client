@@ -83,7 +83,7 @@ void ClientApp::update_updater() {
     n.notes = s.notes;
     n.error = s.error;
     n.has_package = s.has_package;
-    n.install_on_quit = update_settings_.install_on_quit;
+    n.install_on_quit = update_installs_at_quit();
     n.can_restart = box_clients_.running() == 0;
     n.progress = s.total ? static_cast<float>(static_cast<double>(s.done) / static_cast<double>(s.total)) : -1.0f;
     switch (s.state) {
@@ -109,7 +109,10 @@ void ClientApp::update_login_action(ui::LoginAction action) {
     if (!updater_) return;
     const UpdateStatus s = updater_->status();
     switch (action) {
-    case ui::LoginAction::UpdateDownload: updater_->download(); break;
+    case ui::LoginAction::UpdateDownload:
+        update_asked_ = true;
+        updater_->download();
+        break;
     case ui::LoginAction::UpdateRestart:
         if (s.state == UpdateState::Ready && box_clients_.running() == 0) {
             update_restart_ = true;
@@ -129,6 +132,8 @@ void ClientApp::update_login_action(ui::LoginAction action) {
     }
 }
 
+bool ClientApp::update_installs_at_quit() const { return app::update_installs_at_quit(update_settings_, update_asked_); }
+
 ClientApp::UpdateExit ClientApp::update_exit() {
     UpdateExit e;
     if (!updater_ || updater_->status().state != UpdateState::Ready) return e;
@@ -139,7 +144,7 @@ ClientApp::UpdateExit ClientApp::update_exit() {
         return e;
     }
     e.restart = update_restart_;
-    e.install = update_restart_ || update_settings_.install_on_quit;
+    e.install = update_restart_ || update_installs_at_quit();
     return e;
 }
 

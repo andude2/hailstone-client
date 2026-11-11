@@ -1,9 +1,9 @@
 #pragma once
 
-// Draws game::ParticleSystem's particles as camera-facing quads. Textures
+// Draws game::ParticleSystem's particles as quads (particle_corners). Textures
 // come from the game directory's SpellEffects\, EnvEmitterEffects\ and
 // ActorEffects\ (searched in that order). EDD +0x68 picks DESTBLEND ONE
-// (additive) over INVSRCALPHA; +0x64 turns depth writes off.
+// (additive) over INVSRCALPHA; no particle writes depth (the DLL's render state).
 //
 // The modern lighting (docs/graphics.md, Particles) draws them its own way: one stream sorted back to front, no depth
 // writes, soft where they meet the scene (VkContext::begin_translucent's depth copy, so drawn after it), in the haze,
@@ -31,7 +31,7 @@
 #include "render/vk_context.h"
 
 namespace hailstone { class GameDir; }
-namespace hailstone::game { class ParticleSystem; }
+namespace hailstone::game { class ParticleSystem; struct Particle; }
 
 namespace hailstone::render {
 
@@ -70,12 +70,12 @@ struct SceneLighting;
 // The modern lighting's scale for additive (glowing) particles: spells and fires light up past white and bloom.
 constexpr float kParticleGlow = 2.5f;
 
-// The quad's axes for an EDD billboard mode (+0x70; this client's reading of the names that use them): 0 facing the
-// camera (right and up left as they are), 1 standing along the emitter's axial direction (axes column 2) and turned
-// about it towards the eye ("ray", "teleport", torch fires), 2 lying flat in the emitter's transverse plane (columns
-// 0 and 1: rune circles, rings, "_horz" water ripples). `from_eye` is the particle's position less the eye's.
-void particle_basis(std::uint32_t billboard, const glm::mat3& axes, const glm::vec3& from_eye, glm::vec3& right,
-                    glm::vec3& up);
+// A particle's quad corners (top-left, top-right, bottom-right, bottom-left: the texture's top edge first) for an
+// EDD billboard mode (+0x70), as EQGraphicsDX9's quad builder (in FUN_10072160) places them: 1 a streak along the
+// particle's axis, widened on the screen's x; 2 flat on the world's horizontal plane; anything else facing the
+// camera (`right`, `up`). The rotation turns modes 0 and 2. False when it is not drawn (below the axis).
+bool particle_corners(const game::Particle& p, std::uint32_t billboard, const glm::vec3& right, const glm::vec3& up,
+                      std::array<glm::vec3, 4>& corners);
 
 struct Frustum;
 // Whether a particle's quad can show in the camera's view volume (render/culling.h): the sphere it may turn in, its
@@ -109,12 +109,9 @@ public:
     // live in <zone>_obj.s3d).
     using TextureReader = std::function<std::optional<std::vector<std::byte>>(const std::string&)>;
     void set_texture_reader(TextureReader reader) { reader_ = std::move(reader); }
-    // Texture rows top to bottom as the DLL's quad corners take them: its
-    // particle vertices carry v = 1 at the top corners and v = 0 at the bottom
-    // (OpenEQ docs/WLD_PARTICLE_SAMPLER.md, captured from the CPU quad
-    // builder), so a top-origin DDS shows its last row at the top. Set for the
-    // WLD clouds (a flame texture's tail then points up); the spell particles
-    // keep the first row at the top until that is checked against them.
+    // The texture's last row at the quad's top: the DLL's quad builder swaps top and bottom when its fourth argument
+    // is set (0x10075614), which FUN_100759a0 passes only for the WLD clouds' list (a flame texture's tail then
+    // points up). The EDD emitters (spells, actors, environment) keep the first row at the top.
     void set_rows_bottom_up(bool on) { rows_bottom_up_ = on; }
     // Asks for the textures the live emitters need, and puts up those the loader thread has finished (a frame or
     // more later: until then their particles are not drawn); call outside a frame.
@@ -150,7 +147,7 @@ private:
     VkDescriptorPool pool_ = VK_NULL_HANDLE;
     std::array<VkDescriptorSet, VkContext::kFramesInFlight> sets_{};
     VkPipelineLayout layout_ = VK_NULL_HANDLE;
-    VkPipeline pipelines_[4]{}; // bit 0: additive, bit 1: no depth write
+    VkPipeline pipelines_[2]{}; // classic: 1 additive
     VkPipeline modern_pipeline_ = VK_NULL_HANDLE; // premultiplied: both kinds in one sorted stream, no depth write
 
     // draw()'s lists, kept so their memory is reused frame to frame: the modern stream's particles in order, each

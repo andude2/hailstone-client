@@ -79,6 +79,11 @@ struct HeightTables {
     std::unordered_map<std::string, float> ccc_distances, ccc_heights;
     float ccc_distance(std::string_view code) const;
     float ccc_height(std::string_view code) const;
+    // ModDat_GetPESFactor @0x56dfc0: [code] PESFactor, 1.0 when there is none. CreateActorDefinition keeps it in the
+    // ActorAnimation's +0x38 and the actor's particle scale (vtable +0x214 / +0x218) takes it: spell emitters on the
+    // actor scale by it.
+    std::unordered_map<std::string, float> pes_factors;
+    float pes_factor(std::string_view code) const;
 };
 // racedata.txt (RaceManager_LoadFile @0x7f47d0: lines starting with a digit, '^'-separated; columns 89 / 90 are
 // the male / female heights, atof, a value below 1.0 becomes 6.0) and Resources/moddat.ini.

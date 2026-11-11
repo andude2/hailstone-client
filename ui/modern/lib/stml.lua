@@ -77,24 +77,32 @@ function stml.Lines(raw, color)
 end
 
 -- A line of several pieces word-wrapped to width, the way stml.DrawLine draws it: into `out`, four entries a piece
--- (the text, its colour, its link, whether it starts a row).
+-- (the text, its colour, its link, whether it starts a row). A new line in the text (a chat line can hold several:
+-- a server's MOTD) starts a row; an empty one is an empty piece, a row of its own; one at the end adds nothing.
 local function wrap(segments, width, out)
-  local n, x, first = 0, 0, true
+  local n, x, first, broken = 0, 0, true, false
+  local function put(piece, seg, row)
+    out[n + 1], out[n + 2], out[n + 3], out[n + 4] = piece, seg[2], seg[3], row
+    n = n + 4
+    first = false
+  end
   for _, seg in ipairs(segments) do
-    for word, space in seg[1]:gmatch("([^ ]*)( *)") do
-      if word ~= "" or space ~= "" then
-        local piece = word .. space
-        local w = ui.CalcTextSize(piece)
-        local row = false
-        if not first and x + ui.CalcTextSize(word) > width and x > 0 then
-          x = 0 -- wrap: next row
-          row = true
+    local text, from = seg[1], 1
+    while true do
+      local nl = text:find("\n", from, true)
+      for word, space in text:sub(from, (nl or #text + 1) - 1):gmatch("([^ ]*)( *)") do
+        if word ~= "" or space ~= "" then
+          local row = broken
+          if not first and not row and x + ui.CalcTextSize(word) > width and x > 0 then row = true end -- wrap: next row
+          if row then x = 0 end
+          put(word .. space, seg, row and not first)
+          x = x + ui.CalcTextSize(word .. space)
+          broken = false
         end
-        out[n + 1], out[n + 2], out[n + 3], out[n + 4] = piece, seg[2], seg[3], row
-        n = n + 4
-        x = x + w
-        first = false
       end
+      if not nl then break end
+      if broken or first then put("", seg, not first) end -- (an empty line)
+      broken, from = true, nl + 1
     end
   end
   for i = #out, n + 1, -1 do out[i] = nil end

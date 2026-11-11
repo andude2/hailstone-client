@@ -345,8 +345,7 @@ void ClientApp::update_listener() {
     audio_->set_weather(weather_.raining(), weather_.windy());
 
     // PlayerZoneClient's HeadWet change: under water (5) sets room type 0x16 and the special flag
-    // (0x48a480); coming out runs UpdateListenerEnvironment again. (The stun's 0x17 needs a stun state the
-    // client does not keep.)
+    // (0x48a480); coming out runs UpdateListenerEnvironment again.
     std::uint8_t head_wet = motion_head_wet_;
     if (head_wet != head_wet_) {
         if (head_wet == 5) {
@@ -357,6 +356,12 @@ void ClientApp::update_listener() {
             special_room_ = false;
         }
         head_wet_ = head_wet;
+    }
+    // StunMe sets room type 0x17 and the special flag the same way; EndStun runs UpdateListenerEnvironment.
+    if (const bool stunned = conn_ && conn_->stunned(); stunned != stun_room_) {
+        audio_->set_special_room(stunned ? std::optional<std::int32_t>(audio::kRoomDrugged) : std::nullopt);
+        special_room_ = stunned;
+        stun_room_ = stunned;
     }
     if (special_room_) return; // RealRender_World skips the update while +0x2d68 is set
 
@@ -441,6 +446,7 @@ void ClientApp::enter_zone() {
     head_wet_ = 0;
     if (audio_ && special_room_) audio_->set_special_room(std::nullopt);
     special_room_ = false;
+    stun_room_ = false;
     yaw_ = game::heading_to_yaw(me->heading);
     pitch_ = 0.0f;
     movement_.reset(feet_, yaw_);

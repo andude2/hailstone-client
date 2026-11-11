@@ -470,6 +470,21 @@ ui.window("Wrap", function()
   if skipped then ui.SetCursorPos(x0, y); ui.Dummy(0, 0) end
   out["ref" .. frame] = select(2, ui.GetCursorPos())
   ui.EndChild()
+  if frame == 4 then -- (last: the rows drawn would push the outputs above out of the window's sight)
+    -- a chat line holding new lines (a server's MOTD): each starts a row, an empty one is a blank row, one at the
+    -- end adds nothing
+    local motd = stml.Parse('<c "#808080">[06:53:16] </c>Be Free! \n\nDo Not Pay\n')
+    stml.DrawLine(motd, 2000, nil, "k")
+    out.motd = kept(motd)
+    local gp = G.layout(G.parse('<c "#808080">[06:53:16] </c>Be Free! \n\nDo Not Pay\n'), 2000)
+    local gr = {}
+    for _, r in ipairs(gp) do
+      local t = {}
+      for _, p in ipairs(r) do t[#t + 1] = p[1] end
+      gr[#gr + 1] = table.concat(t)
+    end
+    out.gpMotd = table.concat(gr, "|")
+  end
   ui.End()
 end)
 )lua";
@@ -501,6 +516,8 @@ end)
         CHECK(get("narrowSame") == "true");
         CHECK(get("narrowRows") != "0");
         CHECK(get("measuredSame") == "true");
+        CHECK(get("motd") == "[06:53:16] ,Be ,Free! ,|row,Do |row,Not ,Pay");
+        CHECK(get("gpMotd") == "[06:53:16] Be Free! ||Do Not Pay");
         CHECK(get("gpSame") == "true");
         CHECK(get("gpNew") == "true");
         CHECK(get("blockSame") == "true");

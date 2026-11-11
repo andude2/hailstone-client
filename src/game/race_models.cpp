@@ -45,7 +45,14 @@ const RaceModel* find_race_model(std::uint16_t race, std::uint8_t gender) {
     return nullptr;
 }
 
-std::string_view animation_source(std::string_view code) {
+std::string_view animation_source(std::string_view code, bool tunic_point) {
+    if (tunic_point && code.size() == 3) {
+        const std::string_view two = code.substr(0, 2);
+        if (two == "HU") return {};
+        if (two == "ER") return code[2] == 'F' ? "HUF" : "HUM";
+        if (two == "BA") return {};
+        if (code == "SKE") return "HUM";
+    }
     for (const auto& a : kAnimSources)
         if (a.model == code) return a.donor;
     return {};

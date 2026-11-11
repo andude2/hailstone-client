@@ -709,6 +709,12 @@ const assets::CharacterModel* ActorRenderer::drawn_model(std::uint32_t id) const
     return it == last_draws_.end() ? nullptr : it->second.model;
 }
 
+const assets::CharacterModel* ActorRenderer::spawn_model(std::uint32_t id) const {
+    if (const assets::CharacterModel* m = drawn_model(id)) return m;
+    auto it = spawns_.find(id);
+    return it == spawns_.end() ? nullptr : it->second.model.get();
+}
+
 const assets::CharacterMesh* ActorRenderer::drawn_mesh(std::uint32_t id) const {
     auto it = last_draws_.find(id);
     return it == last_draws_.end() ? nullptr : it->second.mesh;
@@ -753,6 +759,13 @@ bool ActorRenderer::playing(const ActorDraw& a, std::string_view code, float& ti
 bool ActorRenderer::drawn_bone(std::uint32_t id, int bone, glm::mat4& world) const {
     auto it = last_draws_.find(id);
     return it != last_draws_.end() && bone_world(it->second, bone, world);
+}
+
+bool ActorRenderer::drawn_transform(std::uint32_t id, glm::mat4& world) const {
+    auto it = last_draws_.find(id);
+    if (it == last_draws_.end() || !it->second.model) return false;
+    world = instance_matrix(it->second);
+    return true;
 }
 
 bool ActorRenderer::bone_world(const ActorDraw& a, int bone, glm::mat4& world) {

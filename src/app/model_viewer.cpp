@@ -352,6 +352,7 @@ int run_model_viewer(const ModelViewerOptions& opts) {
                     actor.height = opts.size;
                     actor.points = spell_points.of(*draws[i].model).mask;
                     if (auto chest = point_world(i, 1)) actor.chest = glm::vec3((*chest)[3]);
+                    actor.particle_scale = heights_data.pes_factor(draws[i].model->code);
                     for (const auto& r : game::spawn_stage_emitters(effects[static_cast<std::size_t>(opts.spell_effect)],
                                                                     opts.spell_stage, 1, &actor, &actor, actor.position,
                                                                     2500, {}, true))
@@ -360,8 +361,15 @@ int run_model_viewer(const ModelViewerOptions& opts) {
             }
             particles.update(dt, [&](std::uint32_t id, std::int32_t point) -> std::optional<game::EmitterAttachment> {
                 if (id == 0 || id > draws.size()) return std::nullopt;
-                if (auto m = point_world(id - 1, point)) return game::EmitterAttachment{glm::vec3((*m)[3]), glm::mat3(*m)};
-                return game::EmitterAttachment{draws[id - 1].position, std::nullopt};
+                const auto& draw = draws[id - 1];
+                game::EmitterAttachment a;
+                a.particle_scale = heights_data.pes_factor(draw.model->code);
+                a.actor_axes = glm::mat3(render::ActorRenderer::draw_matrix(draw));
+                if (auto m = point_world(id - 1, point)) {
+                    a.position = glm::vec3((*m)[3]);
+                    a.axes = glm::mat3(*m);
+                } else if (point >= 0) a.position = draw.position;
+                return a;
             });
             particle_renderer->prepare(particles);
         }

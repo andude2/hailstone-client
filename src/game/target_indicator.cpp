@@ -46,6 +46,17 @@ float target_ring_radius(float avatar_height, float actor_scale, bool has_actor)
     return std::max(r, 2.0f);
 }
 
+int clamp_ring_max_size(int max_size) {
+    if (max_size <= kTargetRingMaxSizeOff || max_size > kTargetRingMaxSizeMax) return kTargetRingMaxSizeOff;
+    return std::max(max_size, kTargetRingMaxSizeMin);
+}
+
+float cap_ring_radius(float radius, int max_size) {
+    max_size = clamp_ring_max_size(max_size);
+    if (max_size == kTargetRingMaxSizeOff) return radius;
+    return std::min(radius, static_cast<float>(max_size));
+}
+
 std::optional<std::uint32_t> parse_ring_rgb(std::string_view text) {
     if (!text.empty() && text.front() == '#') text.remove_prefix(1);
     if (text.size() != 6) return std::nullopt;

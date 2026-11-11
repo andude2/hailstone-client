@@ -31,6 +31,8 @@ void ClientApp::draw_target_ring(const render::FrameInfo& frame, const glm::mat4
 
     bool has_actor = actor_renderer_ && actor_renderer_->model_for(s);
     float radius = game::target_ring_radius(s.heights.avatar_height, s.heights.model_scale, has_actor);
+    // Hailstone, a deliberate difference: the player's Max Size, off by default (game::cap_ring_radius).
+    radius = game::cap_ring_radius(radius, ring_max_size_);
     glm::vec3 base = s.display_valid ? s.display_position : s.position;
     glm::vec3 feet = base - glm::vec3(0, 0, s.heights.avatar_height);
 
@@ -100,10 +102,11 @@ void ClientApp::load_ring_colors() {
     ring_colors_.opacity = std::clamp(config_.get_int("display.target_ring_opacity", game::kTargetRingOpacityDefault),
                                       game::kTargetRingOpacityMin, game::kTargetRingOpacityMax);
     ring_colors_.glow = std::clamp(config_.get_int("display.target_ring_glow", game::kTargetRingGlowDefault), 0, 100);
+    ring_max_size_ = game::clamp_ring_max_size(config_.get_int("display.target_ring_max_size", game::kTargetRingMaxSizeOff));
 }
 
 // The Options window's Target Ring rows: a section's colour (0xRRGGBB, the player's or the ini's; set -1 for the
-// ini's again), the opacity and the glow.
+// ini's again), the opacity, the glow and the max size (0 off).
 std::optional<int> ClientApp::ring_option(std::string_view name) const {
     if (auto n = ring_color_option(name)) {
         auto i = static_cast<std::size_t>(*n);
@@ -113,6 +116,7 @@ std::optional<int> ClientApp::ring_option(std::string_view name) const {
     }
     if (name == "target_ring_opacity") return ring_colors_.opacity;
     if (name == "target_ring_glow") return ring_colors_.glow;
+    if (name == "target_ring_max_size") return ring_max_size_;
     return std::nullopt;
 }
 
@@ -132,6 +136,9 @@ bool ClientApp::set_ring_option(std::string_view name, int value) {
     } else if (name == "target_ring_glow") {
         ring_colors_.glow = std::clamp(value, 0, 100);
         config_.set_int("display.target_ring_glow", ring_colors_.glow);
+    } else if (name == "target_ring_max_size") {
+        ring_max_size_ = game::clamp_ring_max_size(value);
+        config_.set_int("display.target_ring_max_size", ring_max_size_);
     } else {
         return false;
     }

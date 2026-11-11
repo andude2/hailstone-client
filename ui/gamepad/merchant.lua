@@ -7,7 +7,8 @@
 --            button: a stack asks how many), or money: A on a coin of your purse (the inventory's coin buttons: the
 --            quantity dialog asks how much) picks it, and Send money sends what is picked, else asks the platinum
 --            on the keyboard (eq.SendParcelMoney)
--- Y inspects the focused item. The price and the merchant's rules are the stock window's.
+-- Y inspects the focused item. On Buy, X switches "Usable only" (the stock MW_UsableButton, on to start). The price
+-- and the merchant's rules are the stock window's.
 local T = dofile("lib/theme.lua")
 local pad = dofile("lib/pad.lua")
 local W = dofile("lib/window.lua")
@@ -70,6 +71,8 @@ ui.window("Merchant", function()
   local title = eq.WindowTitle(MW) or ""
   local pp, gp, sp, cp = eq.Money()
   local hints = { { "a", page == 1 and "Buy" or "Sell" }, { "y", "Inspect" }, { "lb", "Previous page" }, { "rb", "Next page" }, { "b", "Close" } }
+  local _, usableOnly = eq.ChildState(MW, "MW_UsableButton")
+  if page == 1 then table.insert(hints, 3, { "x", usableOnly and "Show everything" or "Usable only" }) end
   if kb.open then
     hints = K.HINTS
   elseif page == 3 and sendMode then
@@ -96,7 +99,14 @@ ui.window("Merchant", function()
     ui.SetCursorPos(x0 - wx, top - wy)
     local focusedItem, focusedWhere, focusedRow
     if page == 1 then
+      if not kb.open and W.pressed("x") then
+        eq.ClickChild(MW, "MW_UsableButton", "left")
+        buyList.focusNext, buyList.lastFocus = 1, nil
+      end
       local rows = eq.ListInfo(MW, "ItemList") or 0
+      if rows == 0 then
+        T.draw(x0, top, usableOnly and "Nothing here you can use. X shows everything." or "Nothing for sale.", C.dim)
+      end
       local rowH = 64
       local visible = math.max(1, math.floor((y1 - top) / T.px(rowH + 10)))
       W.list("buy", buyList, rows, visible, rowH, listX1 - x0, function(i, rx0, ry0, rx1, ry1, focused)

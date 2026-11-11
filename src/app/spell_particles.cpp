@@ -30,6 +30,9 @@ SpellParticles::SpellParticles(render::VkContext& vk, const GameDir& game, const
     settings_ = game::spell_particle_settings(value("SpellParticleDensity"), value("SpellParticleOpacity"));
     eqclient_density_ = settings_.density;
     if (auto path = game.find("Resources/SPOffsets.ini")) sp_offsets_.load(*path);
+    if (auto moddat = game.read("Resources/moddat.ini"))
+        heights_ = game::parse_height_tables({}, std::string_view(reinterpret_cast<const char*>(moddat->data()),
+                                                                  moddat->size()));
     spell_points_ = assets::SpellPoints([this](std::string_view section, std::string_view key) {
         std::optional<float> v;
         if (auto text = sp_offsets_.get(section, key)) v = std::strtof(text->c_str(), nullptr);
@@ -53,13 +56,44 @@ std::optional<glm::mat4> SpellParticles::point_world(const render::ActorRenderer
 }
 
 void SpellParticles::update(net::GameConnection& conn, std::span<const net::SpellEffectCue> cues,
-                            const render::ActorRenderer* actors, float dt) {
+                            std::span<const net::EffectPacketCue> effect_packets, const render::ActorRenderer* actors,
+                            float dt) {
     clock_ += dt;
     for (const auto& cue : cues) {
         Held h{clock_ + cue.delay, cue.stage, cue.caster, cue.target, cue.spell, cue.source, cue.duration_ms};
         if (cue.delay > 0.0) held_.push_back(h);
         else play(conn, h, actors);
     }
+    const auto now_ms = static_cast<std::uint64_t>(clock_ * 1000.0);
+    using Kind = net::EffectPacketCue::Kind;
+    for (const auto& e : effect_packets) {
+        log::info("effect packet {}: effect {} caster {} target {} ({} / {} / {} ms, full {})", static_cast<int>(e.kind),
+                  e.effect, e.caster, e.target, e.stage1_ms, e.stage1_length_ms, e.stage2_length_ms, e.full);
+        switch (e.kind) {
+        case Kind::Add:
+            timers_.add(e.caster, e.target, e.effect, e.stage1_ms, e.stage1_length_ms, e.stage2_length_ms, e.full,
+                        now_ms);
+            break;
+        case Kind::Remove:
+            // SpellEffectTimers_Remove: the emitters stop only when an entry was dropped. A nimbus (EQEmu sends
+            // it as an OP_SpellEffect add) outlives its entry, so its removal is OP_RemoveNimbusEffect's.
+            if (timers_.remove(e.caster, e.target, e.effect)) {
+                particles_.stop(e.caster << 16 | (e.effect & 0xffffu));
+                if (e.target != 0xffffffffu) particles_.stop(e.target << 16 | (e.effect & 0xffffu));
+            }
+            break;
+        case Kind::AddNimbus:
+            // Handle_OP_AddNimbusEffect @0x4bce70: the impact stage, the spawn as caster and target, duration 0.
+            play_effect(conn, {e.caster, e.caster, e.effect, 2, 0, false}, actors);
+            break;
+        case Kind::RemoveNimbus:
+            // Handle_OP_RemoveNimbusEffect @0x4b7a10.
+            particles_.stop(e.caster << 16 | (e.effect & 0xffffu));
+            break;
+        }
+    }
+    timers_.update(now_ms);
+    for (const auto& play : timers_.take()) play_effect(conn, play, actors);
     for (std::size_t i = 0; i < held_.size();) {
         if (held_[i].at > clock_) {
             ++i;
@@ -78,11 +112,35 @@ void SpellParticles::update(net::GameConnection& conn, std::span<const net::Spel
         return s.display_valid ? s.display_position : s.position;
     };
     particles_.update(dt, [&](std::uint32_t id, std::int32_t pt) -> std::optional<game::EmitterAttachment> {
-        if (pt >= 0 && actors)
-            if (auto m = point_world(*actors, id, pt)) return game::EmitterAttachment{glm::vec3((*m)[3]), glm::mat3(*m)};
-        if (auto p = position(id)) return game::EmitterAttachment{*p, std::nullopt};
-        return std::nullopt;
+        auto it = world.spawns.find(id);
+        if (it == world.spawns.end()) return std::nullopt;
+        game::EmitterAttachment a;
+        // The actor's root GetScaleFactor (its model scale) and GetParticleScaleFactor (moddat.ini PESFactor).
+        if (it->second.heights.model_scale > 0.0f) a.actor_scale = it->second.heights.model_scale;
+        if (actors) {
+            if (const assets::CharacterModel* model = actors->spawn_model(id)) a.particle_scale = particle_scale(*model);
+            if (pt >= 0)
+                if (auto m = point_world(*actors, id, pt)) {
+                    a.position = glm::vec3((*m)[3]);
+                    a.axes = glm::mat3(*m);
+                }
+            glm::mat4 t;
+            if (actors->drawn_transform(id, t)) a.actor_axes = glm::mat3(t);
+        }
+        // A point the model turned out not to have (asked for before it loaded): point 0, as the slot's own fallback
+        // would have chosen. Without its model drawn, a pointed emitter keeps to the spawn's place.
+        if (pt > 0 && !a.position && actors)
+            if (auto m = point_world(*actors, id, 0)) {
+                a.position = glm::vec3((*m)[3]);
+                a.axes = glm::mat3(*m);
+            }
+        if (pt >= 0 && !a.position) a.position = position(id);
+        return a;
     });
+}
+
+float SpellParticles::particle_scale(const assets::CharacterModel& model) const {
+    return heights_.pes_factor(model.code);
 }
 
 namespace {
@@ -178,48 +236,58 @@ void SpellParticles::update_path(net::GameConnection& conn) {
         }
 }
 
-void SpellParticles::play(net::GameConnection& conn, const Held& cue, const render::ActorRenderer* actors) {
-    if (particles_.empty()) return;
+std::optional<game::StageActor> SpellParticles::stage_actor(const net::GameConnection& conn, std::uint32_t id,
+                                                            const render::ActorRenderer* actors) {
     const auto& world = conn.world();
-    auto position = [&](std::uint32_t id) -> std::optional<glm::vec3> {
-        auto it = world.spawns.find(id);
-        if (it == world.spawns.end()) return std::nullopt;
-        const auto& s = it->second;
-        return s.display_valid ? s.display_position : s.position;
-    };
-    auto actor = [&](std::uint32_t id) -> std::optional<game::StageActor> {
-        auto it = world.spawns.find(id);
-        if (it == world.spawns.end()) return std::nullopt;
-        const auto& s = it->second;
-        game::StageActor a;
-        a.id = id;
-        a.position = *position(id);
-        a.level = s.level > 0 ? s.level : 1;
-        a.height = s.heights.height; // Height (+0x13c): the size, or racedata's default
-        if (actors)
-            if (const assets::CharacterModel* model = actors->drawn_model(id)) {
-                a.points = spell_points_.of(*model).mask;
-                if (auto chest = point_world(*actors, id, 1)) a.chest = glm::vec3((*chest)[3]);
-            }
-        return a;
-    };
-    const game::SpellData* sp = conn.spell_table().get(cue.spell);
-    if (!sp || sp->spell_anim < 1 || static_cast<std::size_t>(sp->spell_anim) >= effects_.size()) return;
-    // Hailstone: the Options window's density for whose spell it is (the impact stage's caster is the cue's source).
+    auto it = world.spawns.find(id);
+    if (it == world.spawns.end()) return std::nullopt;
+    const auto& s = it->second;
+    game::StageActor a;
+    a.id = id;
+    a.position = s.display_valid ? s.display_position : s.position;
+    a.level = s.level > 0 ? s.level : 1;
+    a.height = s.heights.height; // Height (+0x13c): the size, or racedata's default
+    // The points are the model's, drawn or not: a spawn not drawn this frame (the player in first person, one out of
+    // view) still has them in the original, and an emitter made without a point would stay where it was made.
+    a.model_known = false;
+    if (actors)
+        if (const assets::CharacterModel* model = actors->spawn_model(id)) {
+            a.model_known = true;
+            a.points = spell_points_.of(*model).mask;
+            if (auto chest = point_world(*actors, id, 1)) a.chest = glm::vec3((*chest)[3]);
+            a.particle_scale = particle_scale(*model);
+        }
+    if (floor_) {
+        // Attach 12's z: GetPlayerFloorHeight at the chest's x and y (the spawn's without a chest), from 0.1 above
+        // the spawn.
+        const glm::vec3 at = a.points & 2u ? glm::vec3(a.chest.x, a.chest.y, a.position.z) : a.position;
+        a.floor = floor_(at + glm::vec3(0.0f, 0.0f, 0.1f));
+    }
+    return a;
+}
+
+float SpellParticles::source_density_for(const net::GameConnection& conn, std::uint32_t cast_by,
+                                         std::uint32_t struck) const {
+    const auto& world = conn.world();
     auto is_npc = [&](std::uint32_t id) -> std::optional<bool> {
         auto it = world.spawns.find(id);
         if (id == 0 || it == world.spawns.end()) return std::nullopt;
         return it->second.is_npc;
     };
+    return source_density(game::spell_fx_source(cast_by, struck, world.player_id, is_npc(cast_by), is_npc(struck)));
+}
+
+void SpellParticles::play(net::GameConnection& conn, const Held& cue, const render::ActorRenderer* actors) {
+    if (particles_.empty()) return;
+    const game::SpellData* sp = conn.spell_table().get(cue.spell);
+    if (!sp || sp->spell_anim < 1 || static_cast<std::size_t>(sp->spell_anim) >= effects_.size()) return;
+    // Hailstone: the Options window's density for whose spell it is (the impact stage's caster is the cue's source).
     const std::uint32_t cast_by = cue.stage == 2 ? cue.source : cue.caster;
-    const game::SpellFxSource source =
-        game::spell_fx_source(cast_by, cue.target != 0 ? cue.target : cue.caster, world.player_id, is_npc(cast_by),
-                              is_npc(cue.target != 0 ? cue.target : cue.caster));
     game::SpellParticleSettings settings = settings_;
-    settings.density *= source_density(source);
+    settings.density *= source_density_for(conn, cast_by, cue.target != 0 ? cue.target : cue.caster);
     if (settings.density <= 0.0f) return;
-    auto caster = actor(cue.caster);
-    auto target = actor(cue.target);
+    auto caster = stage_actor(conn, cue.caster, actors);
+    auto target = stage_actor(conn, cue.target, actors);
     glm::vec3 point = caster ? caster->position : target ? target->position : glm::vec3(0.0f);
     std::int32_t longest = 0;
     for (const auto& r : game::spawn_stage_emitters(effects_[static_cast<std::size_t>(sp->spell_anim)], cue.stage,
@@ -227,6 +295,29 @@ void SpellParticles::play(net::GameConnection& conn, const Held& cue, const rend
                                                      target ? &*target : nullptr, point, cue.duration_ms, settings))
         longest = std::max(longest, particles_.create(r));
     log::debug("spell {} stage {}: effect {} ({} ms)", cue.spell, cue.stage, sp->spell_anim, longest);
+}
+
+void SpellParticles::play_effect(net::GameConnection& conn, const game::SpellEffectStagePlay& play,
+                                 const render::ActorRenderer* actors) {
+    // SpellEffectTimers_PlayStage / Handle_OP_AddNimbusEffect: an effect in 1..count-1 on a caster that exists, at
+    // the caster's position; the target may be missing.
+    if (particles_.empty() || play.effect < 1 || play.effect >= effects_.size()) return;
+    auto caster = stage_actor(conn, play.caster, actors);
+    if (!caster) return;
+    auto target = stage_actor(conn, play.target, actors);
+    // The packet's flag puts the emitters at density and opacity 1 (SpawnStageEmitters' `full`), past
+    // SpellParticleDensity. Hailstone: the Options window's per-source density still scales them, and Off hides them.
+    game::SpellParticleSettings settings = settings_;
+    const float source = source_density_for(conn, play.caster, play.target != 0 ? play.target : play.caster);
+    if (play.full) settings = {source, 1.0f};
+    else settings.density *= source;
+    if (settings.density <= 0.0f) return;
+    std::int32_t longest = 0;
+    for (const auto& r : game::spawn_stage_emitters(effects_[play.effect], play.stage, play.effect, &*caster,
+                                                     target ? &*target : nullptr, caster->position, play.duration_ms,
+                                                     settings))
+        longest = std::max(longest, particles_.create(r));
+    log::debug("effect {} stage {} on {}: {} ms", play.effect, play.stage, play.caster, longest);
 }
 
 void SpellParticles::prepare() {
@@ -241,6 +332,7 @@ void SpellParticles::draw(const render::FrameInfo& frame, const glm::mat4& view_
 void SpellParticles::clear() {
     particles_.clear();
     held_.clear();
+    timers_.clear();
     path_movers_.clear();
 }
 

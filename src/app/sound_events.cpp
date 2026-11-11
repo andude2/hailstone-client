@@ -44,11 +44,13 @@ SoundEvents::SoundEvents(audio::AudioSystem& audio, const GameDir& game) : audio
 
 void SoundEvents::reset() { spawns_.clear(); }
 
-void SoundEvents::play_at(const game::Spawn& s, std::int32_t wave, bool local) {
+void SoundEvents::play_at(const game::Spawn& s, std::int32_t wave, bool local, int volume_percent) {
     if (wave == 0) return;
     // PlayerClient::PlaySound: the spawn's position, its height for the distances.
-    audio_.play_wave(wave, audio::spawn_sound_control(s.display_valid ? s.display_position : s.position, height_of(s),
-                                                      local));
+    audio::SoundControl c =
+        audio::spawn_sound_control(s.display_valid ? s.display_position : s.position, height_of(s), local);
+    if (volume_percent < 100) c.volume *= audio::option_volume_factor(volume_percent, c.positional());
+    audio_.play_wave(wave, c);
 }
 
 void SoundEvents::animation(const game::Spawn& s, std::int32_t action, bool local, const LocalMotion* me,
@@ -113,6 +115,8 @@ void SoundEvents::update(net::GameConnection& conn, const LocalMotion& me, std::
             const game::Spawn* d = spawn(c.target);
             if (!d) break;
             bool local = c.target == my_id;
+            // Hailstone, not in the original: audio.npc_hits turns an NPC's hit, block and dodge sounds down.
+            int volume = d->is_npc && !local ? audio_.settings().npc_hits : 100;
             if (c.damage > 0) {
                 game::HitInput in;
                 in.damage = c.damage;
@@ -123,15 +127,15 @@ void SoundEvents::update(net::GameConnection& conn, const LocalMotion& me, std::
                 in.environment = c.environment;
                 for (std::int32_t w :
                      game::hit_sounds(audio_.spawn_sounds(d->race, d->gender), in, rand_.between(1, 4)))
-                    play_at(*d, w, local);
+                    play_at(*d, w, local, volume);
             } else if (c.damage == -1) {
                 const game::Spawn* a = spawn(c.source);
                 std::int32_t right = a ? game::held_type(a->appearance.material[7]) : 0;
                 play_at(*d, game::block_sound(right, game::held_type(d->appearance.material[7]),
                                               game::held_type(d->appearance.material[8]), rand_() & 1),
-                        local);
+                        local, volume);
             } else if (auto w = game::miss_sound(c.damage)) {
-                play_at(*d, *w, local);
+                play_at(*d, *w, local, volume);
             }
             break;
         }

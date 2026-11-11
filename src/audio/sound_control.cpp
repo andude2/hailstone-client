@@ -45,6 +45,12 @@ MilesLevels miles_fast2d_levels(const glm::vec3& offset, float min_distance, flo
     return out;
 }
 
+float option_volume_factor(int percent, bool positional) {
+    float level = static_cast<float>(std::clamp(percent, 0, 100)) / 100.0f;
+    if (!positional || level <= 0.0f) return level;
+    return static_cast<float>(std::pow(static_cast<double>(level), 3.0 / 5.0));
+}
+
 float miles_volume_curve(float volume) {
     if (volume <= 0.0f) return 0.0f;
     return static_cast<float>(std::pow(static_cast<double>(volume), 5.0 / 3.0));

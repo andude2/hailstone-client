@@ -958,7 +958,13 @@ CharacterModel CharacterLibrary::build_actor(const std::string& code, const wld:
     // own bones and for the donor's equivalent bones (donor code + the same
     // suffix). A clip the model has any track for uses only its own tracks;
     // otherwise the whole clip is borrowed. Missing bones keep the rest pose.
-    m.animation_donor = std::string(game::animation_source(code));
+    // InitAnimationTracks @0x407800 asks GetAlternateAnimTag for the donor with whether the actor has a
+    // TUNIC_POINT dag: the Luclin player models do, and their erudites take the human's clips, not the wood elf's.
+    bool tunic_point = false;
+    for (const auto& b : m.bone_names)
+        if (b.size() > code.size() && b.starts_with(code) && std::string_view(b).substr(code.size()) == "TUNIC_POINT_TRACK")
+            tunic_point = true;
+    m.animation_donor = std::string(game::animation_source(code, tunic_point));
     std::vector<std::string> donor_names(n);
     if (!m.animation_donor.empty())
         for (std::size_t i = 0; i < n; ++i)
@@ -1042,15 +1048,8 @@ CharacterModel CharacterLibrary::build_actor(const std::string& code, const wld:
             }
             found = true;
             if (!own && !donor_rival(loc)) lent = true;
-            // A borrowed track of a face bone (<code>FA..: lips, jaw, brows, eyes, nose) keeps the model's own place
-            // for the bone and takes only the donor's turn and size. The Wood Elf's clips key every face bone at the
-            // elf's own rest place, which on the Luclin Erudite parted the lips over the teeth, slid the beard in
-            // front of the mouth and pulled the brows into a frown; the original client shows that face closed.
-            // How the original keeps it is not traced (docs/unknowns.md); the body bones still take the donor's.
-            const bool keep_place = !own && m.bone_names[i].compare(code.size(), 2, "FA") == 0;
             for (const auto& f : def->frames) {
                 BonePose p = to_pose(f);
-                if (keep_place) p.translation = rest.tracks[i].front().translation;
                 // A bone the model hides by scaling it to nearly nothing at rest stays hidden in a borrowed track:
                 // the Luclin Erudite folds a robe flap away so (ERMPEBUTTR at 0.02), which the Wood Elf's tracks
                 // (scale 1) would unfold into a long wedge from the hip. Other rest sizes (1.3, 0.9...) are left to

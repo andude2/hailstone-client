@@ -94,6 +94,16 @@ TEST_CASE("race model table") {
     // The RoF2 client's GetAlternateAnimTag for codes LanternExtractor's list leaves out.
     CHECK(game::animation_source("FRF") == "FRM");
     CHECK(game::animation_source("GHF") == "ELF");
+    // With a TUNIC_POINT dag (the Luclin player models) humans, erudites and the skeleton take the human's clips and
+    // a barbarian only its own; the other races still take the wood elf's.
+    CHECK(game::animation_source("ERM", true) == "HUM");
+    CHECK(game::animation_source("ERF", true) == "HUF");
+    CHECK(game::animation_source("ERM") == "ELM");
+    CHECK(game::animation_source("HUM", true).empty());
+    CHECK(game::animation_source("BAF", true).empty());
+    CHECK(game::animation_source("SKE", true) == "HUM");
+    CHECK(game::animation_source("HIF", true) == "ELF");
+    CHECK(game::animation_source("DAM", true) == "ELM");
 }
 
 TEST_CASE("the female froglok takes the male's clips: she sits instead of holding the rest pose" *
@@ -236,33 +246,26 @@ TEST_CASE("a borrowed clip keeps the bones a Luclin model hides at rest hidden" 
     CHECK(reach < 6.0f);
 }
 
-TEST_CASE("a borrowed clip leaves a Luclin model's face bones in their own place" * doctest::skip(!hailstone::test::game_dir())) {
-    // The Wood Elf's clips key the face bones at the elf's rest places: the Erudite's lips parted over its teeth and
-    // its brows dropped into a frown. Face bones keep their own translation; the body still takes the donor's.
+TEST_CASE("a Luclin erudite plays the human's clips" * doctest::skip(!hailstone::test::game_dir())) {
+    // GetAlternateAnimTag with the tunic-point flag. With the wood elf's clips the erudite's face bones took the
+    // elf's places (lips parted over the teeth, brows in a frown) and its beard point, which the elf has no track
+    // for, stayed at its rest place in front of the mouth, so the beard hung there.
     auto lib = CharacterLibrary::load(*hailstone::test::game_dir(), "", true);
     auto m = lib.model("ERM");
     REQUIRE(m);
-    const auto& rest = m->clips.at("");
+    CHECK(m->animation_donor == "HUM");
     auto clip = m->clips.find("P01");
     REQUIRE(clip != m->clips.end());
     REQUIRE(clip->second.borrowed);
-    int faces = 0;
-    for (std::size_t i = 0; i < m->bone_names.size(); ++i) {
-        if (m->bone_names[i].rfind("ERMFA", 0) != 0) continue;
-        ++faces;
-        CAPTURE(m->bone_names[i]);
-        for (const auto& p : clip->second.tracks[i]) {
-            CHECK(p.translation.x == doctest::Approx(rest.tracks[i].front().translation.x));
-            CHECK(p.translation.y == doctest::Approx(rest.tracks[i].front().translation.y));
-            CHECK(p.translation.z == doctest::Approx(rest.tracks[i].front().translation.z));
-        }
-    }
-    CHECK(faces >= 10);
-    // The neck is no face bone: the elf's (0.996 long, the erudite's own is 0.867).
-    int neck = m->find_bone("NENECK_TRACK");
-    REQUIRE(neck >= 0);
-    CHECK(clip->second.tracks[static_cast<std::size_t>(neck)].front().translation.x ==
-          doctest::Approx(0.996f).epsilon(0.01));
+    // The human's P01 keys the beard point on the head, as the hair point.
+    int beard = m->find_bone("BEARD_POINT_TRACK");
+    REQUIRE(beard >= 0);
+    CHECK(glm::length(clip->second.tracks[static_cast<std::size_t>(beard)].front().translation) < 0.01f);
+    // The jaw keeps the erudite's place, the human's being the same.
+    int jaw = m->find_bone("FAJAW_TRACK");
+    REQUIRE(jaw >= 0);
+    CHECK(clip->second.tracks[static_cast<std::size_t>(jaw)].front().translation.y ==
+          doctest::Approx(m->clips.at("").tracks[static_cast<std::size_t>(jaw)].front().translation.y).epsilon(0.01));
 }
 
 TEST_CASE("a Luclin model borrows nothing from the classic donor's skeleton" * doctest::skip(!hailstone::test::game_dir())) {

@@ -895,8 +895,8 @@ leaving it out holds them to the zone-in.
 Two custom opcodes that EQEmu's `patch_RoF2.conf` does not list (`src/net/settings_packets.h`); the server's Lua
 script handles them by their wire values. Both are little-endian:
 
-- Settings request **0x1424**, client → zone, after every zone-in: `{u32 magic; u16 version 1}`
-- Settings **0x1425**, zone → client: `{u32 magic; u16 version 1; u32 flags}`. No flag is defined now
+- Settings request **0x1432**, client → zone, after every zone-in: `{u32 magic; u16 version 1}`
+- Settings **0x1433**, zone → client: `{u32 magic; u16 version 1; u32 flags}`. No flag is defined now
   (bit 0 hid the world's player count on the server list, which no UI shows any more). Later fields go after these
   and are ignored by clients that do not know them.
 

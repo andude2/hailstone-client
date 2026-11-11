@@ -6,9 +6,9 @@
 -- hailstone.cfg the client sets no rules.
 --
 -- It also carries guild invitations across zones. EQEmu's own /guildinvite finds the invitee only in the inviter's
--- zone. Hailstone sends OP_HailstoneGuild (raw 0x1422) instead when the invitee is not in its zone and the zone answered
+-- zone. Hailstone sends OP_HailstoneGuild (raw 0x1430) instead when the invitee is not in its zone and the zone answered
 -- its hello; every packet both ways is {u32 magic 'NMSG'; u16 version 1; u16 action; char name[64]; u32 guild id;
--- u32 value}, 80 bytes. Actions: 0 the hello after every zone-in (answered with OP_HailstoneGuildReply 0x1423 action 0,
+-- u32 value}, 80 bytes. Actions: 0 the hello after every zone-in (answered with OP_HailstoneGuildReply 0x1431 action 0,
 -- value 1: world-wide invitations); 1 an invitation (name: whom) -> the script checks the inviter's permission,
 -- leaves the invitation in a data bucket and signals the invitee's zone, which sends the invitee's client
 -- OP_HailstoneGuildReply action 1 (name: the inviter); 2 the invitee's answer (value: the rank to accept, 9 or 11 to
@@ -16,14 +16,14 @@
 -- to its hello, and any other client, keeps to EQEmu's own same-zone invitation.
 --
 -- And it sends the server's settings for the client: after every zone-in Hailstone sends OP_HailstoneSettingsRequest (raw
--- 0x1424): {u32 magic 'NMSP'; u16 version 1}, and this answers OP_HailstoneSettings (0x1425): {u32 magic; u16 version 1;
+-- 0x1432): {u32 magic 'NMSP'; u16 version 1}, and this answers OP_HailstoneSettings (0x1433): {u32 magic; u16 version 1;
 -- u32 flags (none defined now; bit 0 hid the player count, which no Hailstone UI shows any more)}. Clients older
 -- than it never ask, so they never get it.
 --
 -- And it sends the server's client files: what the server owner puts in client_files/ (beside eqemu_config.json:
 -- hailstone.cfg, spells_us.txt, eqstr_us.txt ..., and the folders assets/, plugins/ and scripts/). At its first
--- zone-in of a login Hailstone asks for the list (OP_HsFilesRequest raw 0x1426 action 1) and downloads what it lacks a piece at a time (action 2), answered with
--- OP_HsFiles 0x1427 (the client's net/server_files_packets.h has the layout). The list is SHA-256 hashed with
+-- zone-in of a login Hailstone asks for the list (OP_HsFilesRequest raw 0x1434 action 1) and downloads what it lacks a piece at a time (action 2), answered with
+-- OP_HsFiles 0x1435 (the client's net/server_files_packets.h has the layout). The list is SHA-256 hashed with
 -- sha256sum (GNU find and xargs; on Windows PowerShell's Get-FileHash) when the zone starts (and at #reloadquest),
 -- and again when a client asks and it is older than files_rescan seconds (300; never under 30); the hashes are kept
 -- in client_files/.hailstone-cache, so only new or changed files are hashed again. Names starting with '.' are not
@@ -48,9 +48,24 @@ local settings = {
 	files_chunks_per_second_zone = 1024, -- the same for all of the zone's clients together; 0: no limit
 }
 
-local OP_SETTINGS_REQUEST = 0x1424
-local OP_SETTINGS         = 0x1425
+local OP_SETTINGS_REQUEST = 0x1432
+local OP_SETTINGS         = 0x1433
 local MAGIC      = 0x50534d4e
+
+-- Hailstone 0.7.0 and older send the same packets 0x0e lower (0x1422-0x1427). They are still answered, on the
+-- opcodes the client asked on, so a server that updates this script keeps serving clients that have not updated.
+-- (On Project Triune's servers the old 0x1422 is its own opcode and never comes here: those old clients get no
+-- cross-zone guild invitations, as before.) Kept per client entity, which a zone-in makes anew.
+local OLD_OPCODES_VAR   = "hailstone_old_opcodes"
+local OLD_OPCODES_SHIFT = 0x0e
+
+-- The opcode to answer `client` on: `op`, or its old number for a client that asked on the old ones.
+local function reply_op(client, op)
+	if client:GetEntityVariable(OLD_OPCODES_VAR) == "1" then
+		return op - OLD_OPCODES_SHIFT
+	end
+	return op
+end
 
 local function log(msg)
 	eq.debug("[hailstone] " .. msg)
@@ -123,8 +138,8 @@ end
 
 -- ---------------------------------------------------------------- guild invitations across zones
 
-local OP_GUILD       = 0x1422
-local OP_GUILD_REPLY = 0x1423
+local OP_GUILD       = 0x1430
+local OP_GUILD_REPLY = 0x1431
 local GUILD_MAGIC    = 0x47534d4e
 local GUILD_SIZE     = 80
 local GUILD_HELLO, GUILD_INVITE, GUILD_ANSWER = 0, 1, 2
@@ -139,8 +154,8 @@ local HAILSTONE_VAR  = "hailstone_client"
 
 local encounter -- for the delivery timers
 
-local function guild_packet(action, name, guild_id, value)
-	local p = Packet(OP_GUILD_REPLY, GUILD_SIZE, true)
+local function guild_packet(client, action, name, guild_id, value)
+	local p = Packet(reply_op(client, OP_GUILD_REPLY), GUILD_SIZE, true)
 	p:WriteInt32(0, GUILD_MAGIC)
 	p:WriteInt16(4, 1)
 	p:WriteInt16(6, action)
@@ -246,7 +261,7 @@ local function guild_deliver(client)
 	end
 	i.state = "d"
 	write_invite(id, i)
-	client:QueuePacket(guild_packet(GUILD_INVITE, i.inviter, i.guild_id, i.rank))
+	client:QueuePacket(guild_packet(client, GUILD_INVITE, i.inviter, i.guild_id, i.rank))
 end
 
 -- What EQEmu sends a new member (EntityList::SendGuildMemberAdd: Client::SendGuildRanks, SendGuildRankNames,
@@ -405,7 +420,7 @@ local function on_guild_packet(client, packet)
 	if action == GUILD_HELLO then
 		client:SetEntityVariable(HAILSTONE_VAR, "1")
 		local on = setting("enabled") ~= 0 and setting("guild_invites_world") ~= 0 and Database ~= nil
-		client:QueuePacket(guild_packet(GUILD_HELLO, "", 0, on and 1 or 0))
+		client:QueuePacket(guild_packet(client, GUILD_HELLO, "", 0, on and 1 or 0))
 		return
 	end
 	if setting("enabled") == 0 or setting("guild_invites_world") == 0 or Database == nil then
@@ -493,8 +508,8 @@ end
 
 -- ---------------------------------------------------------------- the server's client files
 
-local OP_FILES_REQUEST = 0x1426
-local OP_FILES         = 0x1427
+local OP_FILES_REQUEST = 0x1434
+local OP_FILES         = 0x1435
 local FILES_MAGIC      = 0x4c465348 -- "HSFL"
 local FILES_DIR        = "client_files" -- the zones' working folder is the server folder
 local FILES_PAGE       = 64             -- list entries a packet
@@ -796,7 +811,7 @@ local function send_files_page(client, first)
 	for i = first + 1, first + count do
 		size = size + 38 + #list[i].path
 	end
-	local p = Packet(OP_FILES, size, true)
+	local p = Packet(reply_op(client, OP_FILES), size, true)
 	files_header(p, 1)
 	p:WriteInt32(8, files.id)
 	p:WriteInt32(12, #list)
@@ -817,7 +832,7 @@ local function send_files_page(client, first)
 end
 
 local function send_files_error(client, id, index, code)
-	local p = Packet(OP_FILES, 20, true)
+	local p = Packet(reply_op(client, OP_FILES), 20, true)
 	files_header(p, 3)
 	p:WriteInt32(8, id)
 	p:WriteInt32(12, index)
@@ -874,7 +889,7 @@ local function send_files_chunk(client, id, index, offset, length)
 		send_files_error(client, id, index, 2)
 		return
 	end
-	local p = Packet(OP_FILES, 24 + length, true)
+	local p = Packet(reply_op(client, OP_FILES), 24 + length, true)
 	files_header(p, 2)
 	p:WriteInt32(8, id)
 	p:WriteInt32(12, index)
@@ -1090,7 +1105,7 @@ local function send_settings(client)
 		return
 	end
 	local flags = 0
-	local p = Packet(OP_SETTINGS, 10, true)
+	local p = Packet(reply_op(client, OP_SETTINGS), 10, true)
 	p:WriteInt32(0, MAGIC)
 	p:WriteInt16(4, 1)
 	p:WriteInt32(6, flags)
@@ -1105,6 +1120,13 @@ local settings_limit = limiter(SETTINGS_SECONDS)
 local function on_unhandled_opcode(e)
 	local packet = e.packet
 	local op     = packet:GetProtocolOpcode()
+	if op == OP_GUILD - OLD_OPCODES_SHIFT or op == OP_FILES_REQUEST - OLD_OPCODES_SHIFT
+		or op == OP_SETTINGS_REQUEST - OLD_OPCODES_SHIFT then
+		e.self:SetEntityVariable(OLD_OPCODES_VAR, "1")
+		op = op + OLD_OPCODES_SHIFT
+	elseif op == OP_GUILD or op == OP_FILES_REQUEST or op == OP_SETTINGS_REQUEST then
+		e.self:SetEntityVariable(OLD_OPCODES_VAR, "0")
+	end
 	if op == OP_GUILD then
 		on_guild_packet(e.self, packet)
 		return

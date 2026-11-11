@@ -129,7 +129,7 @@ ServerFileSync::State run(const fs::path& profile, FakeServer& server, bool* cha
 TEST_CASE("server files: packets round trip") {
     net::ServerFilesPage page{3, 5, 1, {{4, sha256("abcd"), "Resources/SkillCaps.txt"}}};
     auto p = net::encode(page);
-    CHECK(p.opcode == 0x1427);
+    CHECK(p.opcode == 0x1435);
     auto d = net::decode_server_files(p);
     REQUIRE(d);
     const auto& got = std::get<net::ServerFilesPage>(*d);
@@ -141,7 +141,7 @@ TEST_CASE("server files: packets round trip") {
     CHECK(got.entries[0].sha256 == sha256("abcd"));
 
     auto req = net::encode_server_files_chunk_request(3, 2, 65536, 32768);
-    CHECK(req.opcode == 0x1426);
+    CHECK(req.opcode == 0x1434);
     CHECK(req.data.size() == 24);
     CHECK(req.data[0] == std::byte{'H'});
     CHECK(req.data[3] == std::byte{'L'});

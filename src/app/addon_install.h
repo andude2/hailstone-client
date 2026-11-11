@@ -43,7 +43,7 @@ struct InstalledAddon {
     std::string version;
     std::uint32_t caps = 0; // the capabilities the player accepted (plugin/policy.h): the ceiling
     std::optional<Ed25519PublicKey> key; // pinned at the first install: later versions must carry the same
-    bool auto_update = true;
+    bool auto_update = false; // only when the player switches it on: nothing updates unasked
     std::string author, description, notes;
     std::vector<AddonFile> files;
 };

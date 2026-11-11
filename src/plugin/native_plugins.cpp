@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <format>
 #include <fstream>
@@ -13,6 +14,7 @@
 
 #include <SDL3/SDL_loadso.h>
 
+#include "core/ascii_case.h"
 #include "core/atomic_file.h"
 #include "core/log.h"
 #include "core/sha256.h"
@@ -497,10 +499,14 @@ std::optional<fs::path> NativePlugins::Impl::file_of(std::string_view name) cons
     for (const auto& f : plugin_files(dirs()))
         if (iequal(plugin_name(f), name)) return f;
     return std::nullopt;
+    
 }
 
 namespace {
 
+   
+
+    
 // ---------------------------------------------------------------- the host table
 
 // A string into the plugin's buffer (cut to fit, NUL-terminated); returns its full length.
@@ -1042,6 +1048,520 @@ int h_server_info(void* h, HailstoneServer* out) {
     return give(out, v);
 }
 
+// strcpy_s without MSVC's CRT: copies at most size - 1 bytes and always ends the copy with a 0.
+static void copy_cstr(char* dst, size_t size, const char* src)
+{
+    if (size == 0) return;
+    const size_t n = std::min(std::strlen(src), size - 1);
+    std::memcpy(dst, src, n);
+    dst[n] = 0;
+}
+
+// ***************************************************************************
+// Function:    CleanupName
+// Description: Cleans up NPC names
+//              an_iksar_marauder23 = iksar marauder, an
+// ***************************************************************************
+char* CleanupName(char* szName, size_t BufferSize, bool Article, bool ForWhoList)
+{
+    char szTemp[2048] = { 0 };
+    int j = 0;
+
+    for (size_t i = 0; i < strlen(szName); i++)
+    {
+        switch (szName[i])
+        {
+        case '_':
+            szTemp[j++] = ' ';
+            break;
+        case '0':
+        case '1':
+        case '2':
+        case '3':
+        case '4':
+        case '5':
+        case '6':
+        case '7':
+        case '8':
+        case '9':
+            break;
+        case '#':
+            if (!ForWhoList)
+                break;
+        default:
+            szTemp[j++] = szName[i];
+        }
+    }
+
+    copy_cstr(szName, BufferSize, szTemp);
+
+    if (!Article) return szName;
+
+    if (hailstone::istarts_with(szName, "a "))
+    {
+        std::snprintf(szTemp, sizeof(szTemp), "%s, a", szName + 2);
+        copy_cstr(szName, BufferSize, szTemp);
+    }
+    else if (hailstone::istarts_with(szName, "an "))
+    {
+        std::snprintf(szTemp, sizeof(szTemp), "%s, an", szName + 3);
+        copy_cstr(szName, BufferSize, szTemp);
+    }
+    else if (hailstone::istarts_with(szName, "the "))
+    {
+        std::snprintf(szTemp, sizeof(szTemp), "%s, the", szName + 4);
+        copy_cstr(szName, BufferSize, szTemp);
+    }
+
+    return szName;
+}
+
+int ConColor(int cLevel,int targetlevel)
+{
+  
+    if (targetlevel - cLevel > 3)
+    {
+        return CONCOLOR_RED;
+    }
+    if (targetlevel - cLevel > 0)
+    {
+        return CONCOLOR_YELLOW;
+    }
+    if (targetlevel - cLevel > -6)
+    {
+        return CONCOLOR_BLUE;
+    }
+    if (targetlevel - cLevel > -16)
+    {
+        return CONCOLOR_LIGHTBLUE;
+    }
+    if (targetlevel - cLevel > -26)
+    {
+        return CONCOLOR_LIGHTBLUE;
+    }
+    return CONCOLOR_GREY;
+
+}
+
+//may need to break this up, but you need a sizable buffer for this or boom.
+//for 5,000 spawns, assume 10 megs. now 5k is wayyy higher than it should ever be
+//so can get away with less, but you never know. 
+//there is a safety check that if we get down to our last 4,096 bytes, kick out and just return with what we have.
+// Not registered as a host function yet (e3n will call it), hence [[maybe_unused]].
+[[maybe_unused]] int h_get_spawns_bulk(void* h, unsigned char* data, int datamax)
+{
+    //don't allow a deny just grab the raw connection.
+    const net::GameConnection* c = connection_of(Loaded::of(h));
+    if (!c) return 0;
+    auto spawns = c->world().spawns;
+    int bufferSize = 0;
+    unsigned char* pBuffer = data;
+    for (const auto& [id, spawn] : spawns) {
+       
+        //if we are down to our last 4k of room
+        //kick out, as we may explode
+        if ((bufferSize + 4096) > datamax) break;
+
+        int ID = spawn.id;
+        memcpy(pBuffer, &ID, sizeof(ID));
+        pBuffer += sizeof(ID);
+        bufferSize += sizeof(ID);
+
+        bool isAFK = spawn.afk;
+        memcpy(pBuffer, &isAFK, sizeof(isAFK));
+        pBuffer += sizeof(isAFK);
+        bufferSize += sizeof(isAFK);
+
+        bool isAggressive = (spawn.player_state & 0x4 || spawn.player_state & 0x8);
+        memcpy(pBuffer, &isAggressive, sizeof(isAggressive));
+        pBuffer += sizeof(isAggressive);
+        bufferSize += sizeof(isAggressive);
+
+        bool isAnon = (spawn.anon == 1);
+        memcpy(pBuffer, &isAnon, sizeof(isAnon));
+        pBuffer += sizeof(isAnon);
+        bufferSize += sizeof(isAnon);
+        int isBlind = 0; //not sure exists in the client, so mark as 0 for now.
+        memcpy(pBuffer, &isBlind, sizeof(isBlind));
+        pBuffer += sizeof(isBlind);
+        bufferSize += sizeof(isBlind);
+
+        int BodyTypeID = spawn.body_type;
+        memcpy(pBuffer, &BodyTypeID, sizeof(BodyTypeID));
+        pBuffer += sizeof(BodyTypeID);
+        bufferSize += sizeof(BodyTypeID);
+        
+        const char* BodyDesc;
+
+        if (BodyTypeID >= 0 && static_cast<std::size_t>(BodyTypeID) < std::size(game::szBodyType))
+        {
+            BodyDesc = game::szBodyType[BodyTypeID].data();
+
+        }
+        else
+        {
+            BodyDesc = "";
+        }
+        int BodyDescLength = static_cast<int>(strlen(BodyDesc));
+        //copy the size
+        memcpy(pBuffer, &BodyDescLength, sizeof(BodyDescLength));
+        pBuffer += sizeof(BodyDescLength);
+        bufferSize += sizeof(BodyDescLength);
+        //copy the data
+        memcpy(pBuffer, BodyDesc, BodyDescLength);
+        pBuffer += BodyDescLength;
+        bufferSize += BodyDescLength;
+
+        bool isBuyer = spawn.buyer;
+        memcpy(pBuffer, &isBuyer, sizeof(isBuyer));
+        pBuffer += sizeof(isBuyer);
+        bufferSize += sizeof(isBuyer);
+
+        int ClassID = spawn.class_id;
+        memcpy(pBuffer, &ClassID, sizeof(ClassID));
+        pBuffer += sizeof(ClassID);
+        bufferSize += sizeof(ClassID);
+
+        char tempBuffer[2048];
+        copy_cstr(tempBuffer, sizeof(tempBuffer), spawn.name.c_str());
+        CleanupName(tempBuffer, sizeof(tempBuffer), false, false);
+        std::string tCleanName(tempBuffer);
+        int tCleanNameLength = static_cast<int>(tCleanName.size());
+        //copy the size
+        memcpy(pBuffer, &tCleanNameLength, sizeof(tCleanNameLength));
+        pBuffer += sizeof(tCleanNameLength);
+        bufferSize += sizeof(tCleanNameLength);
+        //copy the data
+        memcpy(pBuffer, tCleanName.c_str(), tCleanNameLength);
+        pBuffer += tCleanNameLength;
+        bufferSize += tCleanNameLength;
+
+        int conColorID = ConColor(c->world().player()->level,spawn.level);
+        memcpy(pBuffer, &conColorID, sizeof(conColorID));
+        pBuffer += sizeof(conColorID);
+        bufferSize += sizeof(conColorID);
+
+        int currentEndurance = 0;
+        memcpy(pBuffer, &currentEndurance, sizeof(currentEndurance));
+        pBuffer += sizeof(currentEndurance);
+        bufferSize += sizeof(currentEndurance);
+
+        int64_t currentHps = spawn.hp_percent;
+        memcpy(pBuffer, &currentHps, sizeof(currentHps));
+        pBuffer += sizeof(currentHps);
+        bufferSize += sizeof(currentHps);
+
+        int currentMana = 0;
+        memcpy(pBuffer, &currentMana, sizeof(currentMana));
+        pBuffer += sizeof(currentMana);
+        bufferSize += sizeof(currentMana);
+
+        bool dead = (spawn.stand_state == STANDSTATE_DEAD);
+        memcpy(pBuffer, &dead, sizeof(dead));
+        pBuffer += sizeof(dead);
+        bufferSize += sizeof(dead);
+        
+        std::string displayName= game::display_name(spawn.name);
+        int displayNameLength = static_cast<int>(displayName.length());
+        //copy the size
+        memcpy(pBuffer, &displayNameLength, sizeof(displayNameLength));
+        pBuffer += sizeof(displayNameLength);
+        bufferSize += sizeof(displayNameLength);
+        //copy the data
+        memcpy(pBuffer, displayName.c_str(), displayNameLength);
+        pBuffer += displayNameLength;
+        bufferSize += displayNameLength;
+
+        bool ducking = (spawn.stand_state == STANDSTATE_DUCK);
+        memcpy(pBuffer, &ducking, sizeof(ducking));
+        pBuffer += sizeof(ducking);
+        bufferSize += sizeof(ducking);
+
+        bool feigning = (spawn.stand_state == STANDSTATE_FEIGN);
+        memcpy(pBuffer, &feigning, sizeof(feigning));
+        pBuffer += sizeof(feigning);
+        bufferSize += sizeof(feigning);
+
+       
+        int genderId = spawn.gender;
+        memcpy(pBuffer, &genderId, sizeof(genderId));
+        pBuffer += sizeof(genderId);
+        bufferSize += sizeof(genderId);
+
+        bool GM = spawn.gm;
+        memcpy(pBuffer, &GM, sizeof(GM));
+        pBuffer += sizeof(GM);
+        bufferSize += sizeof(GM);
+
+        int64_t guildID = spawn.guild_id;
+        memcpy(pBuffer, &guildID, sizeof(guildID));
+        pBuffer += sizeof(guildID);
+        bufferSize += sizeof(guildID);
+
+        float heading = spawn.heading * 0.703125f;
+        memcpy(pBuffer, &heading, sizeof(heading));
+        pBuffer += sizeof(heading);
+        bufferSize += sizeof(heading);
+
+
+        float height = spawn.heights.avatar_height;
+        memcpy(pBuffer, &height, sizeof(height));
+        pBuffer += sizeof(height);
+        bufferSize += sizeof(height);
+
+        bool Invs = 0;
+        memcpy(pBuffer, &Invs, sizeof(Invs));
+        pBuffer += sizeof(Invs);
+        bufferSize += sizeof(Invs);
+
+        bool isSummoned = spawn.summoned;
+        memcpy(pBuffer, &isSummoned, sizeof(isSummoned));
+        pBuffer += sizeof(isSummoned);
+        bufferSize += sizeof(isSummoned);
+
+        int level = spawn.level;
+        memcpy(pBuffer, &level, sizeof(level));
+        pBuffer += sizeof(level);
+        bufferSize += sizeof(level);
+
+        bool levitation = spawn.fly_mode==2;
+        memcpy(pBuffer, &levitation, sizeof(levitation));
+        pBuffer += sizeof(levitation);
+        bufferSize += sizeof(levitation);
+
+        bool linkDead = spawn.linkdead;
+        memcpy(pBuffer, &linkDead, sizeof(linkDead));
+        pBuffer += sizeof(linkDead);
+        bufferSize += sizeof(linkDead);
+
+        float look =0;
+        memcpy(pBuffer, &look, sizeof(look));
+        pBuffer += sizeof(look);
+        bufferSize += sizeof(look);
+
+        int master = spawn.pet_owner_id;
+        memcpy(pBuffer, &master, sizeof(master));
+        pBuffer += sizeof(master);
+        bufferSize += sizeof(master);
+
+        int maxEndurance = 0;
+        memcpy(pBuffer, &maxEndurance, sizeof(maxEndurance));
+        pBuffer += sizeof(maxEndurance);
+        bufferSize += sizeof(maxEndurance);
+
+        game::eSpawnType spawnType = game::Spawn::GetSpawnType(&spawn);
+
+        float maxRange = 0.0;
+        if (spawnType != hailstone::game::eSpawnType::ITEM)
+        {
+            //not quite sure how to get melee range, as there is a different type of spawn object for melee calculations...
+            //and frankly shouldn't relaly use this anyway.
+            maxRange = 14.5;
+        }
+        memcpy(pBuffer, &maxRange, sizeof(maxRange));
+        pBuffer += sizeof(maxRange);
+        bufferSize += sizeof(maxRange);
+
+
+        float maxRanageTo = 0.0;
+        if (spawnType != hailstone::game::eSpawnType::ITEM)
+        {
+            maxRanageTo = 14.5;
+        }
+        memcpy(pBuffer, &maxRanageTo, sizeof(maxRanageTo));
+        pBuffer += sizeof(maxRanageTo);
+        bufferSize += sizeof(maxRanageTo);
+
+        bool mount = false;
+        if (spawn.mount_id>0)
+        {
+            mount = true;
+        }
+        memcpy(pBuffer, &mount, sizeof(mount));
+        pBuffer += sizeof(mount);
+        bufferSize += sizeof(mount);
+
+
+        bool moving = (fabs(spawn.speed_run) > 0.0f);
+        memcpy(pBuffer, &moving, sizeof(moving));
+        pBuffer += sizeof(moving);
+        bufferSize += sizeof(moving);
+
+
+        std::string name(spawn.name);
+        int tNameLength = static_cast<int>(name.size());
+        //copy the size
+        memcpy(pBuffer, &tNameLength, sizeof(tNameLength));
+        pBuffer += sizeof(tNameLength);
+        bufferSize += sizeof(tNameLength);
+        //copy the data
+        memcpy(pBuffer, name.c_str(), tNameLength);
+        pBuffer += tNameLength;
+        bufferSize += tNameLength;
+
+        bool isNamed = game::Spawn::IsNamed(&spawn);
+        memcpy(pBuffer, &isNamed, sizeof(isNamed));
+        pBuffer += sizeof(isNamed);
+        bufferSize += sizeof(isNamed);
+
+        int64_t pctHPs = spawn.hp_percent;
+        memcpy(pBuffer, &pctHPs, sizeof(pctHPs));
+        pBuffer += sizeof(pctHPs);
+        bufferSize += sizeof(pctHPs);
+
+        int pctMana = 0;
+        memcpy(pBuffer, &pctMana, sizeof(pctMana));
+        pBuffer += sizeof(pctMana);
+        bufferSize += sizeof(pctMana);
+
+        int petID = 0;
+        memcpy(pBuffer, &petID, sizeof(petID));
+        pBuffer += sizeof(petID);
+        bufferSize += sizeof(petID);
+
+        int playerState = spawn.player_state;
+        memcpy(pBuffer, &playerState, sizeof(playerState));
+        pBuffer += sizeof(playerState);
+        bufferSize += sizeof(playerState);
+
+
+        int raceID = spawn.race;
+        memcpy(pBuffer, &raceID, sizeof(raceID));
+        pBuffer += sizeof(raceID);
+        bufferSize += sizeof(raceID);
+       
+        std::string raceName(hailstone::game::Spawn::GetRaceIDName(spawn.race));
+        int tRaceNameLength = static_cast<int>(raceName.size());
+        //copy the size
+        memcpy(pBuffer, &tRaceNameLength, sizeof(tRaceNameLength));
+        pBuffer += sizeof(tRaceNameLength);
+        bufferSize += sizeof(tRaceNameLength);
+        //copy the data
+        memcpy(pBuffer, raceName.c_str(), tRaceNameLength);
+        pBuffer += tRaceNameLength;
+        bufferSize += tRaceNameLength;
+
+
+        bool rolePlaying = (spawn.anon == 2);
+        memcpy(pBuffer, &rolePlaying, sizeof(rolePlaying));
+        pBuffer += sizeof(rolePlaying);
+        bufferSize += sizeof(rolePlaying);
+
+        bool sitting = (spawn.stand_state == STANDSTATE_SIT);
+        memcpy(pBuffer, &sitting, sizeof(sitting));
+        pBuffer += sizeof(sitting);
+        bufferSize += sizeof(sitting);
+
+        bool sneaking = false;
+        memcpy(pBuffer, &sneaking, sizeof(sneaking));
+        pBuffer += sizeof(sneaking);
+        bufferSize += sizeof(sneaking);
+
+        bool standing = (spawn.stand_state == STANDSTATE_STAND);
+        memcpy(pBuffer, &standing, sizeof(standing));
+        pBuffer += sizeof(standing);
+        bufferSize += sizeof(standing);
+
+
+        bool stunned = false;
+        if (spawn.player_state & 0x20)
+        {
+            stunned = true;
+        }
+        memcpy(pBuffer, &stunned, sizeof(stunned));
+        pBuffer += sizeof(stunned);
+        bufferSize += sizeof(stunned);
+
+       
+        std::string suffix(spawn.suffix);
+        int tsuffixLength = static_cast<int>(suffix.size());
+        //copy the size
+        memcpy(pBuffer, &tsuffixLength, sizeof(tsuffixLength));
+        pBuffer += sizeof(tsuffixLength);
+        bufferSize += sizeof(tsuffixLength);
+        //copy the data
+        memcpy(pBuffer, suffix.c_str(), tsuffixLength);
+        pBuffer += tsuffixLength;
+        bufferSize += tsuffixLength;
+
+
+        bool targetable = spawn.targetable;
+        memcpy(pBuffer, &targetable, sizeof(targetable));
+        pBuffer += sizeof(targetable);
+        bufferSize += sizeof(targetable);
+
+        int targetoftargetID = 0;
+        memcpy(pBuffer, &targetoftargetID, sizeof(targetoftargetID));
+        pBuffer += sizeof(targetoftargetID);
+        bufferSize += sizeof(targetoftargetID);
+
+
+        bool trader = spawn.trader;
+        memcpy(pBuffer, &trader, sizeof(trader));
+        pBuffer += sizeof(trader);
+        bufferSize += sizeof(trader);
+
+
+        std::string typeDescription(game::Spawn::GetTypeDesc(spawnType));
+        int ttypeDescriptionLength = static_cast<int>(typeDescription.size());
+        //copy the size
+        memcpy(pBuffer, &ttypeDescriptionLength, sizeof(ttypeDescriptionLength));
+        pBuffer += sizeof(ttypeDescriptionLength);
+        bufferSize += sizeof(ttypeDescriptionLength);
+        //copy the data
+        memcpy(pBuffer, typeDescription.c_str(), ttypeDescriptionLength);
+        pBuffer += ttypeDescriptionLength;
+        bufferSize += ttypeDescriptionLength;
+        
+        bool underwater = false;
+        memcpy(pBuffer, &underwater, sizeof(underwater));
+        pBuffer += sizeof(underwater);
+        bufferSize += sizeof(underwater);
+
+        float x = spawn.position.x;
+        memcpy(pBuffer, &x, sizeof(x));
+        pBuffer += sizeof(x);
+        bufferSize += sizeof(x);
+
+        float y = spawn.position.y;
+        memcpy(pBuffer, &y, sizeof(y));
+        pBuffer += sizeof(y);
+        bufferSize += sizeof(y);
+
+        float z = spawn.position.z;
+        memcpy(pBuffer, &z, sizeof(z));
+        pBuffer += sizeof(z);
+        bufferSize += sizeof(z);
+
+
+        //so distance calculations can be done
+        ;
+        float playerx = c->world().player()->position.x;
+        memcpy(pBuffer, &playerx, sizeof(playerx));
+        pBuffer += sizeof(playerx);
+        bufferSize += sizeof(playerx);
+
+        float playery = c->world().player()->position.y;
+        memcpy(pBuffer, &playery, sizeof(playery));
+        pBuffer += sizeof(playery);
+        bufferSize += sizeof(playery);
+
+        float playerz = c->world().player()->position.z;
+        memcpy(pBuffer, &playerz, sizeof(playerz));
+        pBuffer += sizeof(playerz);
+        bufferSize += sizeof(playerz);
+
+        //needed to tell NPC vs PC corpses
+        int deity = spawn.deity;
+        memcpy(pBuffer, &deity, sizeof(deity));
+        pBuffer += sizeof(deity);
+        bufferSize += sizeof(deity);
+
+
+    }
+
+    return bufferSize;
+}
 int h_get_spawn(void* h, std::uint32_t id, HailstoneSpawn* out) {
     const net::GameConnection* c = readable(Loaded::of(h), "get_spawn");
     if (!c) return 0;

@@ -43,20 +43,28 @@ function S.plain(segments)
   return table.concat(t)
 end
 
--- Lays a parsed line out in `width`: a list of rows, each { { text, colour, x } }.
+-- Lays a parsed line out in `width`: a list of rows, each { { text, colour, x } }. A new line in the text (a chat
+-- line can hold several: a server's MOTD) ends the row; an empty one is an empty row; one at the end adds nothing.
 function S.layout(segments, width)
   local rows, row, x = {}, {}, 0
   for _, seg in ipairs(segments) do
-    for word, space in seg[1]:gmatch("([^ ]*)( *)") do
-      if word ~= "" or space ~= "" then
-        local ww = ui.CalcTextSize(word)
-        if x > 0 and x + ww > width then
-          rows[#rows + 1] = row
-          row, x = {}, 0
+    local text, from = seg[1], 1
+    while true do
+      local nl = text:find("\n", from, true)
+      for word, space in text:sub(from, (nl or #text + 1) - 1):gmatch("([^ ]*)( *)") do
+        if word ~= "" or space ~= "" then
+          local ww = ui.CalcTextSize(word)
+          if x > 0 and x + ww > width then
+            rows[#rows + 1] = row
+            row, x = {}, 0
+          end
+          row[#row + 1] = { word .. space, seg[2], x }
+          x = x + ui.CalcTextSize(word .. space)
         end
-        row[#row + 1] = { word .. space, seg[2], x }
-        x = x + ui.CalcTextSize(word .. space)
       end
+      if not nl then break end
+      rows[#rows + 1] = row
+      row, x, from = {}, 0, nl + 1
     end
   end
   if #row > 0 or #rows == 0 then rows[#rows + 1] = row end

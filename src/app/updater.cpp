@@ -44,12 +44,14 @@ bool package_file_ok(const fs::path& path, const UpdatePackage& p) { return pack
 UpdateSettings update_settings(const Config& config) {
     UpdateSettings s;
     s.check = config.get_bool("update.check", true);
-    s.download = config.get_bool("update.download", true);
+    s.download = config.get_bool("update.download", false);
     s.install_on_quit = config.get_bool("update.install_on_quit", true);
     s.feed = config.get_string("update.feed");
     s.skip = config.get_string("update.skip");
     return s;
 }
+
+bool update_installs_at_quit(const UpdateSettings& s, bool asked) { return s.install_on_quit && (asked || s.download); }
 
 std::string default_update_feed() { return HAILSTONE_UPDATE_FEED; }
 

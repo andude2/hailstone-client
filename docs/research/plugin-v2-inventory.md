@@ -212,10 +212,11 @@ Plan: generate the core table from the stock file. The plugin keeps its opcodes 
 passes the raw opcode, and `send_packet` takes one). The one stock opcode missing from the NMS copy,
 MercenarySwitch 0x1b37, already has its own constant (game/mercenary.h:121).
 
-**Not NMS:** `OP_NmsGuild` / `OP_NmsGuildReply` (0x1422/0x1423, magic "NMSG") and `OP_NmsSettings` /
-`OP_NmsSettingsRequest` (0x1424/0x1425, magic "NMSP") belong to Hailstone's own server script (`server/`). They stay
-in the core. Their code names become `Hailstone*` (decision 5); the wire values and magic numbers stay, because
-deployed scripts use them.
+**Not NMS:** `OP_NmsGuild` / `OP_NmsGuildReply` (0x1430/0x1431, magic "NMSG") and `OP_NmsSettings` /
+`OP_NmsSettingsRequest` (0x1432/0x1433, magic "NMSP") belong to Hailstone's own server script (`server/`). They stay
+in the core. Their code names become `Hailstone*` (decision 5); the magic numbers stay, because deployed scripts use
+them. (The opcodes later moved from 0x1422-0x1425 to 0x1430-0x1433, off Project Triune's 0x1422; the script still
+answers the old ones.)
 
 ## 4. Lua and the UI packs
 

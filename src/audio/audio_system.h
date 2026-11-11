@@ -41,6 +41,8 @@ struct AudioSettings {
     int master = 80;            // audio.master, 0..100
     int music = 60;             // audio.music
     int effects = 80;           // audio.effects (event sounds and zone emitters)
+    int npc_hits = 100;         // audio.npc_hits, 0..100: Hailstone, not in the original: the sounds of an NPC being
+                                // hit, blocking or dodging, scaled on top of audio.effects (app/sound_events.cpp)
     bool mute = false;          // audio.mute
     bool environment = true;    // audio.environment: the zone's ambient emitters (EmitterSetUserDisabled)
     std::string soundfont;      // audio.soundfont: SF2 for the XMI music; empty = <game>/synthusr.sf2

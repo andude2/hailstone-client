@@ -572,6 +572,7 @@ public:
         bool selling = m->selected && host.conn->inventory().at(*m->selected);
         if (id == kPurchase[0]) out.shown = page_ == 0 && !selling;
         if (id == kPurchase[1]) out.shown = page_ == 0 && selling;
+        if (id == "MW_UsableButton" || id == "MW_UsableLabel") out.shown = page_ == 0; // children of MW_PurchasePage
         for (auto x : kRecover) if (id == x) out.shown = page_ == 1;
         for (auto x : kParcels) if (id == x) out.shown = page_ == 2;
         if (id == "MW_MerchantName") {
@@ -597,6 +598,8 @@ public:
             out.enabled = false; // buyback is not built; parcels are taken from Hailstone's list (eq.Parcels)
         } else if (id == "MW_Inspect_Button" || id == "MW_Preview_Button") {
             out.enabled = item != nullptr;
+        } else if (id == "MW_UsableButton") {
+            out.checked = !show_all_;
         }
     }
 
@@ -611,8 +614,12 @@ public:
         slots_.clear();
         // While an inventory item is being considered no merchant row is.
         bool selling = m->selected && host.conn->inventory().at(*m->selected);
+        const auto& prof = host.conn->profile();
         int row = 0;
         for (const auto& [mslot, item] : m->items) {
+            if (!show_all_ && prof &&
+                game::merchant_usable_hides(item, prof->class_, prof->race, [&] { return scroll_known(host, item); }))
+                continue;
             ListRow r;
             std::int64_t price = item.price;
             // PurchasePageHandler::UpdateList: the merchant quantity and the level, "--" when there is none.
@@ -705,6 +712,8 @@ public:
                     }
                 }
             }
+        } else if (id == "MW_UsableButton") {
+            show_all_ = !show_all_; // WndNotification: +0x60 = !Checked, the list rebuilt
         } else if (id == "MW_Done_Button") {
             c.close_merchant();
         } else if (id == "MW_Inspect_Button") {
@@ -778,9 +787,30 @@ private:
     void inspect_selected(EqHost& host) {
         if (const net::Item* it = considered(host); it && host.inspect_item) host.inspect_item(*it);
     }
+    // UpdateList's ScrollKnown: the scroll's spell is in the book (SpellBookInfo::IsSpellKnown), or, for a spell of a
+    // group with a rank, one of a higher rank is: from the group's top rank down while above the scroll's.
+    static bool scroll_known(EqHost& host, const net::Item& item) {
+        const auto& book = host.conn->spell_state().book;
+        auto known = [&](std::uint32_t id) { return std::find(book.begin(), book.end(), id) != book.end(); };
+        const std::int32_t id = item.effects[net::kEffectScroll].effect;
+        if (id <= 0) return false;
+        if (known(static_cast<std::uint32_t>(id))) return true;
+        const auto& table = host.conn->spell_table();
+        const game::SpellData* sp = table.get(static_cast<std::uint32_t>(id));
+        if (!sp || sp->spell_group <= 0 || sp->spell_rank < 0) return false;
+        for (const game::SpellData* s = table.by_group_and_rank(sp->spell_group, sp->spell_subgroup, -1, false);
+             s && s->spell_rank > sp->spell_rank;
+             s = table.by_group_and_rank(s->spell_group, s->spell_subgroup, s->spell_rank - 1, true))
+            if (known(s->id)) return true;
+        return false;
+    }
 
     std::optional<std::uint32_t> selected_;
     int page_ = 0;
+    // PurchasePageHandler +0x60, "show every item": the window builds MW_UsableButton checked (CMerchantWnd's
+    // constructor, SetCheck(1)), so the list starts filtered; a click sets it to !Checked. Kept for the session, as
+    // the original's window is.
+    bool show_all_ = false;
     std::vector<std::uint32_t> slots_;
     ListData data_;
     std::string send_to_, note_; // the Parcels page's To and Note boxes

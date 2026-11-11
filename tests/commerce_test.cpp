@@ -474,3 +474,41 @@ TEST_CASE("merchant list: the Qty and Lvl columns (PurchasePageHandler::UpdateLi
     CHECK(game::merchant_list_level(scroll, [] { return std::optional<std::int32_t>(12); }) == 12);
     CHECK(game::merchant_list_level(scroll, [] { return std::optional<std::int32_t>(); }) == -1);
 }
+
+TEST_CASE("merchant list: Show only items I can use (PurchasePageHandler::UpdateList, +0x60 clear)") {
+    auto unknown = [] { return false; };
+    auto known = [] { return true; };
+    net::Item sword;
+    sword.classes = 1u << 0; // Warrior
+    sword.races = 1u << 0;   // Human
+    CHECK_FALSE(game::merchant_usable_hides(sword, 1, 1, unknown));
+    CHECK(game::merchant_usable_hides(sword, 2, 1, unknown)); // a Cleric's class bit is not in the mask
+    CHECK(game::merchant_usable_hides(sword, 1, 2, unknown)); // nor a Barbarian's race bit
+    // the later races take bits 13..16 (0x6f7160), any other race 17
+    sword.races = 1u << 12;
+    CHECK_FALSE(game::merchant_usable_hides(sword, 1, 128, unknown)); // Iksar
+    sword.races = 1u << 15;
+    CHECK_FALSE(game::merchant_usable_hides(sword, 1, 522, unknown)); // Drakkin
+    CHECK(game::merchant_usable_hides(sword, 1, 128, unknown));
+    // bags and books are never left out
+    net::Item bag = sword;
+    bag.item_class = 1;
+    bag.classes = bag.races = 0;
+    CHECK_FALSE(game::merchant_usable_hides(bag, 1, 1, unknown));
+    net::Item book = bag;
+    book.item_class = 2;
+    CHECK_FALSE(game::merchant_usable_hides(book, 1, 1, unknown));
+    // a scroll the character knows is left out; the known check runs only for a scroll it can use
+    net::Item scroll;
+    scroll.item_type = 20;
+    scroll.classes = scroll.races = 0xffff;
+    CHECK_FALSE(game::merchant_usable_hides(scroll, 1, 1, unknown));
+    CHECK(game::merchant_usable_hides(scroll, 1, 1, known));
+    bool asked = false;
+    scroll.classes = 1u << 1;
+    CHECK(game::merchant_usable_hides(scroll, 1, 1, [&] { asked = true; return false; }));
+    CHECK_FALSE(asked);
+    net::Item potion = sword;
+    potion.classes = potion.races = 0xffff;
+    CHECK_FALSE(game::merchant_usable_hides(potion, 1, 1, known)); // not a scroll: what it knows does not matter
+}

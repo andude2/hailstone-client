@@ -286,6 +286,8 @@ TEST_CASE("addon_manager: updates at start") {
     h.publish("1.0.0", "read,ui", "-- v1\n", &k);
     h.start();
     h.install();
+    CHECK_FALSE(h.row("autoloot")->addon.auto_update); // off until the player switches it on
+    h.manager->set_auto_update("autoloot", true);
 
     SUBCASE("asking for nothing more: downloaded and installed") {
         h.publish("1.1.0", "read", "-- v1.1\n", &k);
@@ -437,6 +439,8 @@ TEST_CASE("addon_manager: the player's removal and auto-update switch win over a
     h.install();
     h.install("https://github.com/owner/autobuff");
     REQUIRE(read_installed_addons(h.dir.path()).size() == 2);
+    h.manager->set_auto_update("autoloot", true);
+    h.manager->set_auto_update("autobuff", true);
     h.publish("1.1.0", "read,ui", "-- v1.1\n");
     h.publish_buff("1.1.0");
     const std::string buff_manifest = "https://github.com/owner/autobuff/releases/latest/download/hailstone-addon.txt";
@@ -523,6 +527,7 @@ TEST_CASE("addon_manager: the check at start keeps to addons.check_hours") {
     h.settings.check_hours = 6;
     h.start();
     h.install();
+    h.manager->set_auto_update("autoloot", true);
     h.github.asked.clear();
     h.manager->check_updates(false);
     h.manager->wait_idle();

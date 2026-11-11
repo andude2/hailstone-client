@@ -43,6 +43,18 @@ TEST_CASE("target indicator: the ring's size") {
     CHECK(game::target_ring_radius(1.0f, 1.0f, true) == doctest::Approx(2.0f));
 }
 
+TEST_CASE("target indicator: the player's cap on the ring's size") {
+    CHECK(game::cap_ring_radius(55.0f, game::kTargetRingMaxSizeOff) == doctest::Approx(55.0f)); // off: the original's
+    CHECK(game::cap_ring_radius(55.0f, 12) == doctest::Approx(12.0f));
+    CHECK(game::cap_ring_radius(6.0f, 12) == doctest::Approx(6.0f)); // a smaller ring is left alone
+    CHECK(game::cap_ring_radius(55.0f, 1) == doctest::Approx(4.0f)); // below the range: its least
+    CHECK(game::cap_ring_radius(55.0f, 41) == doctest::Approx(55.0f)); // past the most: off
+    CHECK(game::clamp_ring_max_size(-3) == game::kTargetRingMaxSizeOff);
+    CHECK(game::clamp_ring_max_size(2) == game::kTargetRingMaxSizeMin);
+    CHECK(game::clamp_ring_max_size(20) == 20);
+    CHECK(game::clamp_ring_max_size(game::kTargetRingMaxSizeMax + 1) == game::kTargetRingMaxSizeOff);
+}
+
 TEST_CASE("target indicator: Hailstone's look, the band's width follows the radius within bounds") {
     CHECK(game::target_ring_width(2.0f) == doctest::Approx(0.15f));  // small: kept readable
     CHECK(game::target_ring_width(5.0f) == doctest::Approx(0.3f));

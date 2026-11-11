@@ -2,7 +2,7 @@
 
 // The client's updater (docs/updater.md), a Hailstone feature with no original counterpart: at start it fetches the
 // release feed's signed manifest (core/update_manifest.h) on a worker thread; when the release is newer than this
-// build it tells the login screen, downloads this platform's packages into update/download/ (each checked by size
+// build it tells the login screen and, when the player asks (or update.download is on), downloads this platform's packages into update/download/ (each checked by size
 // and SHA-256) and stages them (update/ready.txt). Nothing in the Hailstone folder changes until the client quits:
 // app/update_install.h installs the staged update then, and the player can restart into it from the login screen.
 // The settings are hailstone.ini's update.* keys (update_settings()).
@@ -28,12 +28,15 @@ namespace hailstone::app {
 // hailstone.ini's update.* keys.
 struct UpdateSettings {
     bool check = true;           // update.check: look for a new release at start
-    bool download = true;        // update.download: download it without asking
+    bool download = false;       // update.download: download it without asking (only when the player sets it)
     bool install_on_quit = true; // update.install_on_quit: install a downloaded one when the client quits
     std::string feed;            // update.feed: the manifest's address ("" the build's, kUpdateFeed)
     std::string skip;            // update.skip: a release the player chose to skip
 };
 UpdateSettings update_settings(const Config& config);
+// Whether a plain quit installs a downloaded update. Only one the player asked for: Download pressed in this run
+// (`asked`), or update.download switched on. A package an earlier run left downloaded waits for Restart now.
+bool update_installs_at_quit(const UpdateSettings& s, bool asked);
 
 // The address of the build's manifest (CMake HAILSTONE_UPDATE_FEED) and its release key (HAILSTONE_UPDATE_KEY, the public key
 // hex; nullopt when the build has none, and then there are no updates).
@@ -60,7 +63,7 @@ struct UpdaterEnv {
     std::string version;        // this build's (release_version())
     std::string platform;       // update_platform()
     Ed25519PublicKey key{};
-    bool auto_download = true;
+    bool auto_download = false;
     std::string skip;           // a version not to offer
     UpdateFetch fetch;          // http_get, or the tests' own
     // Tests: called on the worker once a check shows Available, before it starts a download of its own.

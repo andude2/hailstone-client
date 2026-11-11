@@ -54,7 +54,8 @@ private:
         glm::vec3 last_position{0.0f};
         double last_time = 0.0;
     };
-    void play_at(const game::Spawn& s, std::int32_t wave, bool local);
+    // `volume_percent`: a volume option on top of the sound's own (audio::option_volume_factor).
+    void play_at(const game::Spawn& s, std::int32_t wave, bool local, int volume_percent = 100);
     void animation(const game::Spawn& s, std::int32_t action, bool local, const LocalMotion* me, std::uint32_t now_ms,
                    SpawnState& st);
 

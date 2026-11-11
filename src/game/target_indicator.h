@@ -50,6 +50,15 @@ std::optional<int> target_ring_section(Con con);
 // actor's scale when it has an actor, at least 2.
 float target_ring_radius(float avatar_height, float actor_scale, bool has_actor);
 
+// Hailstone, a deliberate difference: the player's cap on the ring's radius (Options > Display "Target Ring" Max
+// Size, hailstone.ini display.target_ring_max_size), so a giant's or a dragon's ring does not fill the screen.
+// 0 is off, the original's size; otherwise kTargetRingMaxSizeMin .. kTargetRingMaxSizeMax world units.
+inline constexpr int kTargetRingMaxSizeOff = 0;
+inline constexpr int kTargetRingMaxSizeMin = 4, kTargetRingMaxSizeMax = 40;
+// The setting kept in range: 0 (and anything past the most) off, the rest at least the least.
+int clamp_ring_max_size(int max_size);
+float cap_ring_radius(float radius, int max_size);
+
 // Hailstone's look (not the original's): a soft band with dashes turning round it, a notch where the target faces,
 // and, with the cues on (hailstone.ini display.target_ring_cues), a sweep in from outside when the target changes
 // and a faster turn and a pulse while the player's auto attack is on.

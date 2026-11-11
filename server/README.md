@@ -109,8 +109,8 @@ so the script removes and renames its scratch files through those commands too.
 
 Hailstone asks at the first zone-in of each login and holds the zone-in, with "Downloading server files" on the
 loading screen, until what changed has come; then it reads the files again and the zone loads. Players are sent
-the files from the zone they enter, a 32 KB piece at a time as the client asks (`OP_HsFilesRequest` 0x1426,
-`OP_HsFiles` 0x1427; the layout is in the client's `src/net/server_files_packets.h`). The zone keeps up to eight
+the files from the zone they enter, a 32 KB piece at a time as the client asks (`OP_HsFilesRequest` 0x1434,
+`OP_HsFiles` 0x1435; the layout is in the client's `src/net/server_files_packets.h`). The zone keeps up to eight
 files open for this, so players fetching different files do not make it reopen them at every piece. A player may
 ask for `files_chunks_per_second` pieces a second (768, 24 MB/s; one download was measured at about 16 MB/s, so
 this leaves it room), and all of a zone's players together for `files_chunks_per_second_zone` (1024, 32 MB/s: two
@@ -134,22 +134,25 @@ archives are compressed inside.
 ## How it works
 
 The client sends its requests on custom opcodes no server's opcode table lists (the settings request
-0x1424, the files' `OP_HsFilesRequest` 0x1426, the guild invitation 0x1422), so the zone passes them to the
-`event_unhandled_opcode` quest event, and the script replies with raw packets. The script registers that event
+0x1432, the files' `OP_HsFilesRequest` 0x1434, the guild invitation 0x1430), so the zone passes them to the
+`event_unhandled_opcode` quest event, and the script replies with raw packets. Hailstone 0.7.0 and older send the
+same requests 0x0e lower (0x1422, 0x1424, 0x1426); the script answers those on the old numbers too, so updating the
+script first leaves older clients working. (On Project Triune's server 0x1422 is its own opcode and never reaches
+the script, so those older clients get no cross-zone guild invitations there.) The script registers that event
 through an encounter loaded from `global/script_init.lua`, which EQEmu runs from every quest folder, so the server's
 own `global_player` scripts keep running.
 
 ## Guild invitations across zones
 
 The inviter's client sends `/guildinvite <name>` (or the guild window's Invite) as EQEmu's own `OP_GuildInvite` when
-the player is in its zone, and as a custom guild packet (wire opcode 0x1422) otherwise, once the zone has answered the
+the player is in its zone, and as a custom guild packet (wire opcode 0x1430) otherwise, once the zone has answered the
 client's hello after the zone-in. The script then:
 
 1. in the inviter's zone, makes EQEmu's checks with EQEmu's words: in a guild, the rank's invite permission
    (`guild_permissions`), the name is a character ("could not be found"), not in a guild, no invitation pending;
 2. leaves the invitation in the data bucket `hailstone:guildinvite:<character id>` (20 s) and signals the
    character (`eq.cross_zone_signal_client_by_char_id`);
-3. in the invitee's zone, sends the client the invitation (wire opcode 0x1423), which asks the usual
+3. in the invitee's zone, sends the client the invitation (wire opcode 0x1431), which asks the usual
    question ("%1 is interested in having you join %2.", 10 s). A client that is not Hailstone could only answer
    EQEmu's same-zone invitation, so the inviter gets EQEmu's "must be in zone" instead. If no zone takes the
    invitation within 3 s the invitee is not online, and the inviter is told so;

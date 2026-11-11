@@ -1,6 +1,6 @@
 -- Merchant: replaces the game's MerchantWnd. The merchant's goods as a table (icon, name, how many the merchant
--- has, the price in coins, the level) with a search box, sorting by any column (the price by its whole value) and
--- "Affordable only"; prices you cannot pay are dimmed. Below it the item being considered (the merchant's, or
+-- has, the price in coins, the level) with a search box, sorting by any column (the price by its whole value),
+-- "Usable only" (the game's MW_UsableButton, on to start) and "Affordable only"; prices you cannot pay are dimmed. Below it the item being considered (the merchant's, or
 -- one of yours picked in your bags to sell) with its price, Buy or Sell, Inspect, and your purse.
 -- The rows, the selection and the buttons are the game's (eq.ListRow / eq.ListClick / eq.ClickChild on ItemList,
 -- MW_Buy_Button, MW_Sell_Button, ...): a row click selects in the original, a right click inspects, Buy and Sell
@@ -88,7 +88,12 @@ local function goods(s, h)
     sortKey = KEYS[sortCol]
     table.sort(view, byKey)
   end
-  if #all == 0 then TC.Empty("This merchant has nothing for sale.", h) return end
+  if #all == 0 then
+    local _, usableOnly = W.State(WINDOW, "MW_UsableButton")
+    TC.Empty(usableOnly and "Nothing here you can use. Untick Usable only to see everything."
+      or "This merchant has nothing for sale.", h)
+    return
+  end
   local flags = ui.TableFlags.RowBg | ui.TableFlags.ScrollY | ui.TableFlags.BordersInnerV | ui.TableFlags.Sortable
       | ui.TableFlags.SizingFixedFit
   if not ui.BeginTable("##goods", 4, flags, 0, h) then return end
@@ -194,9 +199,12 @@ end
 
 local function purchasePage(s, h, btnH)
   -- search and filter
-  local fw = T.TextSize("Affordable only", T.font.normal) + 34 * s
+  local fw = T.TextSize("Usable only", T.font.normal) + T.TextSize("Affordable only", T.font.normal) + 68 * s
   ui.SetNextItemWidth(-fw)
   search = ui.InputTextWithHint("##merchantsearch", "Search goods", search, 64)
+  ui.SameLine()
+  W.Check(WINDOW, "MW_UsableButton", "Usable only", { hidden = false,
+    tooltip = "Hide what your class or race cannot use, and spell scrolls you already know" })
   ui.SameLine()
   local _, ch = ui.Checkbox("Affordable only##aff", affordable)
   if ch then affordable = not affordable end

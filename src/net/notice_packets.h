@@ -14,8 +14,13 @@
 
 namespace hailstone::net {
 
-// OP_Stun (RoF2 Stun_Struct): u32 duration (ms), then two bytes EQEmu fills (163, 67).
-std::optional<std::uint32_t> decode_stun(const AppPacket& p);
+// OP_Stun (RoF2 Stun_Struct, 8 bytes): u32 duration (ms), then a byte the case @0x4c7093 hands StunMe as its last
+// argument (the lean: the turn rate set to 32), then two EQEmu fills (163, 67). EQEmu sends the lean byte 0.
+struct Stun {
+    std::uint32_t duration_ms = 0;
+    bool lean = false;
+};
+std::optional<Stun> decode_stun(const AppPacket& p);
 
 // OP_ItemRecastDelay (12 bytes, ItemRecastDelay_Struct): u32 delay (s), u32 recast type, bool
 // ignore_casting_requirement (the case @0x4c70e8 reads its byte at +8).

@@ -251,4 +251,33 @@ inline constexpr std::uint32_t kAuraAdd = 0, kAuraRemove = 1, kAuraClear = 2;
 std::optional<AuraUpdate> decode_aura_update(const AppPacket& p);
 AppPacket encode(const AuraUpdate& v); // both directions (the remove), and the server's for tests
 
+// OP_SpellEffect, zone → client (28 bytes, eq_packet_structs.h SpellEffect_Struct, passed through for RoF2): an
+// effect of spellsnew.eff by number (not a spell) played on spawns. CEverQuest::HandleWorldMessage @0x4d0087: `add`
+// (+0x19) set gives SpellEffectTimers_Add(caster, target, effect, stage1_ms, stage1_length_ms, stage2_length_ms,
+// full); clear, SpellEffectTimers_Remove(caster, target, effect). EQEmu's Mob::SendSpellEffect sends a spell's
+// nimbus (spells_new column 193) this way, {500, 0, 3000, 1, 1}.
+struct SpellEffectPacket {
+    std::uint32_t effect = 0;           // +0x00 spellsnew.eff index
+    std::uint32_t caster = 0;           // +0x04 spawn id
+    std::uint32_t target = 0;           // +0x08 spawn id
+    std::uint32_t stage1_ms = 0;        // +0x0c EQEmu "Duration": when the projectile stage plays
+    std::uint32_t stage1_length_ms = 0; // +0x10 "FinishDelay": the impact stage plays this long after it
+    std::uint32_t stage2_length_ms = 0; // +0x14 the impact stage's duration
+    bool full = false;                  // +0x18 the emitters at density and opacity 1 (SpawnStageEmitters' flag)
+    bool add = false;                   // +0x19 0: remove
+    std::uint16_t unknown = 0;          // +0x1a not read by the client
+};
+AppPacket encode(const SpellEffectPacket& v); // server direction, for tests
+std::optional<SpellEffectPacket> decode_spell_effect(const AppPacket& p);
+
+// OP_AddNimbusEffect / OP_RemoveNimbusEffect, zone → client (8 bytes, RemoveNimbusEffect_Struct for both): u32 spawn
+// id, i32 spellsnew.eff index. Handle_OP_AddNimbusEffect @0x4bce70 plays the effect's impact stage on the spawn;
+// Handle_OP_RemoveNimbusEffect @0x4b7a10 stops spawn << 16 | effect.
+struct NimbusEffect {
+    std::uint32_t spawn_id = 0;
+    std::int32_t effect = 0;
+};
+AppPacket encode(const NimbusEffect& v, bool add); // server direction, for tests
+std::optional<NimbusEffect> decode_nimbus_effect(const AppPacket& p);
+
 } // namespace hailstone::net

@@ -918,7 +918,8 @@ void GameConnection::handle_spell(Op op, const AppPacket& p) {
                     //Play the animation for the spell that was specified
                     play_animation(source, sp->casting_anim);
                     //if this is us doing a local play, broadcast the animation out to the rest of the zone
-                    //as the server won't send it out by default.
+                    //as the server won't send it out by default, if they have 'chat filters' on for whatever reason.
+                    //doing this twice won't hurt anything as it won't interrupt a playing animation and is still limited in range.
                     if (source == world_.player_id)
                     {
                         Animation za;
@@ -949,6 +950,20 @@ void GameConnection::handle_spell(Op op, const AppPacket& p) {
                     
             }
         }
+        break;
+    case Op::SpellEffect:
+        // CEverQuest::HandleWorldMessage @0x4d0087: +0x19 set adds a timed effect, clear removes it.
+        if (auto e = decode_spell_effect(p))
+            effect_packets_.push_back({e->add ? EffectPacketCue::Kind::Add : EffectPacketCue::Kind::Remove, e->effect,
+                                       e->caster, e->target, e->stage1_ms, e->stage1_length_ms, e->stage2_length_ms,
+                                       e->full});
+        break;
+    case Op::AddNimbusEffect:
+    case Op::RemoveNimbusEffect:
+        if (auto n = decode_nimbus_effect(p))
+            effect_packets_.push_back({op == Op::AddNimbusEffect ? EffectPacketCue::Kind::AddNimbus
+                                                                 : EffectPacketCue::Kind::RemoveNimbus,
+                                       static_cast<std::uint32_t>(n->effect), n->spawn_id, n->spawn_id});
         break;
     case Op::DeleteSpell:
         if (auto d = decode_delete_spell(p); d && d->success && d->book_slot >= 0 && d->book_slot < game::kSpellBookSize)

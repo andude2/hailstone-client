@@ -814,6 +814,7 @@ private:
     bool ring_cues_ = true;  // display.target_ring_cues: the sweep on a new target, the pulse while attacking
     bool ring_xray_ = false; // display.target_ring_xray: the hidden part shows faintly through
     game::TargetRingColors ring_colors_; // display.target_ring_color.*, _opacity, _glow (Options > Display "Target Ring")
+    int ring_max_size_ = game::kTargetRingMaxSizeOff; // display.target_ring_max_size, 0 off (Hailstone's cap)
     void load_ring_colors();
     const game::TargetIndicatorSettings& target_indicator() const; // read on first use
     std::optional<int> ring_option(std::string_view name) const;
@@ -1102,6 +1103,8 @@ private:
     std::unique_ptr<Updater> updater_;
     UpdateSettings update_settings_;
     bool update_restart_ = false;   // Restart now: install at the end of the run, then start the new version
+    bool update_asked_ = false;     // the player pressed Download this run (a quit may then install it)
+    bool update_installs_at_quit() const;
     bool update_confirmed_ = false; // the login screen was shown: a pending update started fine
     // The add-on manager (app/client_app_addons.cpp): null when nothing can be fetched this run. The lists beside the
     // add-ons (the picked server's own, the ones put in by hand, that server's rules) are read every few seconds.
@@ -1272,6 +1275,7 @@ private:
     bool listener_indoors_ = false;
     std::uint8_t head_wet_ = 0;
     bool special_room_ = false;
+    bool stun_room_ = false; // the stun's room 0x17 is set (StunMe), until the stun ends
     // The global music selections made (EqSoundManager::SetMusicSelection's callers).
     bool music_attack_ = false, music_bank_ = false, music_merchant_ = false, music_trainer_ = false, music_loot_ = false;
     bool music_dead_ = false, music_select_ = false;

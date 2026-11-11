@@ -550,7 +550,7 @@ void AddonManager::install_offer(bool older_ok) {
     post([this, offer = std::move(*offer), s, update]() mutable {
         std::string error;
         auto a = download(offer.manifest, offer.manifest_url, offer.source, offer.caps,
-                          update ? s.addon.auto_update : true, &error);
+                          update && s.addon.auto_update, &error);
         if (!a) {
             s.state = AddonState::Failed;
             s.error = error;
