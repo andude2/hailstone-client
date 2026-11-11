@@ -1,6 +1,8 @@
 // mq/tlo.h, mq/spawn_search.h and mq/parse.h: MacroQuest's TLOs over a small world (tests/mq_test_world.h).
 #include <doctest/doctest.h>
 
+#include <string>
+
 #include "mq/parse.h"
 #include "mq/spawn_search.h"
 #include "mq/tlo.h"
@@ -201,6 +203,104 @@ TEST_CASE("TLO: Group, items, Zone and the rest") {
     CHECK(f.p("${Select[b,a,b,c]}") == "2");
     CHECK(f.p("${Heading[90].ShortName}") == "E");
     CHECK(f.p("${Heading[0].ShortName}") == "N");
+}
+
+TEST_CASE("TLO: Raid members, leader, main assist and loot") {
+    Fixture f;
+    using A = net::GameConnectionTestAccess;
+    auto& r = A::raid(*f.world.conn);
+    f.world.add(14, "Third", false, 45, game::server_to_world({-20, 0, 0}));
+    r.active = true;
+    r.leader = "Groupie";
+    r.locked = true;
+    r.loot_type = 3;
+    r.looters = {"Tester"};
+    r.target = "Tester";
+    r.members = {
+        {"Groupie", 0, 2, 48, true, true, false, false, ""},
+        {"Tester", 0, 2, 50, false, false, true, false, ""},
+        {"Third", 1, 1, 45, true, false, false, false, ""},
+    };
+    auto& l = A::leadership(*f.world.conn);
+    l.raid_assist_names[0] = "Groupie";
+    l.raid_assist_names[1] = "Third";
+
+    CHECK(f.p("${Raid.Members}") == "3");
+    CHECK(f.p("${Raid.Leader.Name}") == "Groupie");
+    CHECK(f.p("${Raid.Member[1]}") == "Groupie");
+    CHECK(f.p("${Raid.Member[2].Name}") == "Tester");
+    CHECK(f.p("${Raid.Member[Groupie].Group}") == "1");
+    CHECK(f.p("${Raid.Member[Third].Group}") == "2");
+    CHECK(f.p("${Raid.Member[Groupie].Level}") == "48");
+    CHECK(f.p("${Raid.Member[Groupie].Class.ShortName}") == "CLR");
+    CHECK(f.p("${Raid.Member[Groupie].GroupLeader}") == "TRUE");
+    CHECK(f.p("${Raid.Member[Groupie].RaidLeader}") == "TRUE");
+    CHECK(f.p("${Raid.Member[Groupie].Spawn.CleanName}") == "Groupie");
+    CHECK(f.p("${Raid.Member[Groupie].CleanName}") == "Groupie"); // raidmember inherits spawn
+    CHECK(f.p("${Raid.Member[Groupie].Distance}") == "20.00"); // raidmember inherits spawn
+    CHECK(f.p("${Raid.Member[Groupie].Looter}") == "TRUE");    // the raid leader
+    CHECK(f.p("${Raid.Member[Tester].Looter}") == "TRUE");     // an assigned looter
+    CHECK(f.p("${Raid.Member[Third].Looter}") == "FALSE");
+    CHECK(f.p("${Raid.Target.Name}") == "Tester");
+    CHECK(f.p("${Raid.TotalLevels}") == "143");
+    CHECK(f.p("${Raid.AverageLevel}") == "47.67");
+    CHECK(f.p("${Raid.LootType}") == "3");
+    CHECK(f.p("${Raid.Looters}") == "1");
+    CHECK(f.p("${Raid.Looter[1]}") == "Tester");
+    CHECK(f.p("${Raid.Looter[2]}") == "NULL");
+    CHECK(f.p("${Raid.Locked}") == "TRUE");
+    CHECK(f.p("${Raid.Invited}") == "FALSE");
+    r.inviter = "Someone";
+    CHECK(f.p("${Raid.Invited}") == "TRUE");
+    r.inviter.clear();
+    CHECK(f.p("${Raid.MainAssist.Name}") == "Groupie");
+    CHECK(f.p("${Raid.MainAssist[1].Name}") == "Groupie");
+    CHECK(f.p("${Raid.MainAssist[2].Name}") == "Third");
+    CHECK(f.p("${Raid.MainAssist[Groupie].Name}") == "Groupie");
+    CHECK(f.p("${Raid.MarkNPC.Name}") == "Tester");
+    CHECK(f.p("${Raid.MarkNPC[1].Name}") == "Tester");
+    CHECK(f.p("${Raid.MasterLooter}") == "NULL"); // Hailstone does not track the client's master-looter flag
+    CHECK(f.p("${Raid.Member[NoSuch]}") == "NULL");
+    CHECK(f.p("${Raid.Member[0]}") == "NULL");
+
+    r.clear();
+    CHECK(f.p("${Raid.Members}") == "0");
+    CHECK(f.p("${Raid.Locked}") == "FALSE");
+    CHECK(f.p("${Raid.Member[1]}") == "NULL");
+    CHECK(f.p("${Raid.MainAssist}") == "NULL");
+}
+
+TEST_CASE("TLO: target aggro, target of target, item timer and active disc") {
+    Fixture f;
+    using A = net::GameConnectionTestAccess;
+    auto& a = A::aggro(*f.world.conn);
+    a.target_id = 10;
+    a.pct[net::kAggroPlayer] = 65;
+    auto& x = A::xtargets(*f.world.conn);
+    x.slots.resize(1);
+    x.slots[0].spawn_id = 10;
+    x.slots[0].type = 1;
+    x.slots[0].status = 1;
+    a.pct[net::kAggroXTarget1] = 40;
+    CHECK(f.p("${Target.ID}") == "10");
+    CHECK(f.p("${Target.PctAggro}") == "65");
+    CHECK(f.p("${Me.XTarget[1].ID}") == "10");
+    CHECK(f.p("${Me.XTarget[1].PctAggro}") == "40");
+    A::target_of_target(*f.world.conn) = 11;
+    CHECK(f.p("${Target.TargetOfTarget.ID}") == "11");
+    CHECK(f.p("${Target.TargetOfTarget.Class.ShortName}") == "WAR");
+
+    auto& inv = A::inventory(*f.world.conn);
+    net::Item* potion = inv.at(net::ItemSlot::possessions(net::kSlotGeneral1));
+    REQUIRE(potion != nullptr);
+    f.world.conn->set_item_recast_timer(potion, 30, -1);
+    const int left = std::stoi(f.p("${FindItem[Healing Potion].TimerReady}"));
+    CHECK(left >= 29);
+    CHECK(left <= 30);
+
+    auto& spells = A::spells(*f.world.conn);
+    spells.buffs.back().spell = 11; // Holy Armor in the discipline slot
+    CHECK(f.p("${Me.ActiveDisc.Name}") == "Holy Armor");
 }
 
 TEST_CASE("parse: strings, nesting, unknowns") {

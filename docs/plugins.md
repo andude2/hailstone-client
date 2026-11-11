@@ -210,17 +210,26 @@ Left out on purpose:
 
 ### TLOs
 
-`Me`, `Target`, `Spawn[...]`, `SpawnCount[...]`, `NearestSpawn[n, ...]`, `Group`, `Zone`, `Spell[id|name]`, `Cursor`,
+`Me`, `Target`, `Spawn[...]`, `SpawnCount[...]`, `NearestSpawn[n, ...]`, `Group`, `Raid`, `Zone`, `Spell[id|name]`, `Cursor`,
 `FindItem[name|=exact]`, `FindItemCount[...]`, `Pet`, `Window[name]` (`.Open`), `Plugin[name]` (`.IsLoaded`), `Time`,
 `GameTime`, the game TLO (`.GameState`, `.Server`), `Heading[deg]`, `Int`, `Float`, `Bool`, `String`, `Select`. Compiled
 plugins can add more.
 
 The data types use MQ's member names and inheritance:
-- `character` → `spawn`, `buff` → `spell`, `groupmember` → `spawn`.
+- `character` → `spawn`, `buff` → `spell`, `groupmember` → `spawn`, `raidmember` → `spawn`.
 - `class`, `race`, `heading` (`Degrees`, `ShortName`, ...), `timestamp` (`TotalSeconds`, `TimeHMS`, ...), `item`.
 - MQ's pure types: `int`, `float` (`Deci`, `Precision`, `Int`), `string` (`Length`, `Upper`, `Left`, `Mid`,
   `Find`, `Arg`, `Token`, `Equal`, ...), `bool`. `Int[...]` and `float.Int` cut toward zero, and are NULL for NaN, an
   infinity or a number past a 64-bit integer (what MQ gives for those is not checked).
+
+- A raid: `Raid.Members`, `Raid.Member[n|name]` (a `raidmember`: `.Name`, `.Group`, `.GroupLeader`, `.RaidLeader`,
+  `.Spawn`, `.Looter`, `.Class`, `.Level`, and the spawn members), `Raid.Leader`, `Raid.Target`,
+  `Raid.MainAssist[n|name]`, `Raid.MarkNPC[n|name]`, `Raid.TotalLevels`, `Raid.AverageLevel`, `Raid.LootType`,
+  `Raid.Looters`, `Raid.Looter[n]`, `Raid.Locked`, `Raid.Invited`. `Raid.MasterLooter` is not available: the
+  client does not track the master-looter flag.
+- The aggro meter and combat: `Target.PctAggro`, `Me.XTarget[n].PctAggro` (the meter's player and XTarget
+  entries), `Target.TargetOfTarget` (OP_TargetHoTT), `Me.ActiveDisc`, `FindItem[name].TimerReady` (seconds until the
+  click is ready) and `Spell[name].EnduranceCost`.
 
 For example `Me.PctHPs`, `Me.Buff[n|name].Duration`, `Me.Gem[n|name]`, `Me.SpellReady[n|name]`, `Me.Casting`,
 `Me.Combat`, `Me.AutoFire`, `Me.XTarget[n]`, `Me.FreeInventory`, `Me.Inventory[mainhand|pack1|23]`, and on spawns `Target.Distance`,
@@ -253,7 +262,7 @@ NoTarget, which servers give portal and trigger NPCs). `Spawn.Targetable` is the
 that filters spawns itself checks `BodyType` too.
 
 Not yet:
-- TLOs: `Raid`, `Mercenary`, `Corpse`, `Merchant`, `Ground`, `Macro` and other MQ plugins' TLOs (`Navigation` is
+- TLOs: `Mercenary`, `Corpse`, `Merchant`, `Ground`, `Macro` and other MQ plugins' TLOs (`Navigation` is
   built in: `docs/navigation.md`)
 - `Math.Calc`, the `AltAbility` type (`Me.AltAbility[...]`)
 
@@ -514,7 +523,9 @@ same changes as a plugin, with no change to Hailstone itself. With the `extend` 
   bank window at any spawn or at the player itself, without a banker's class and range checks (`open_bank`), change the
   camera's zoom limit (`set_max_camera_distance`), and change the hot buttons: `hot_button` reads any button of
   any bar and page as the stock character ini's string (with `read`), `set_hot_button` puts one, `hot_bar_page`
-  and `set_hot_bar_page` a bar's page; a change is saved with the character. Before the use of a skill
+  and `set_hot_bar_page` a bar's page; a change is saved with the character. `use_ability` uses one of the
+  player's abilities by name: kind 0 a skill, 1 a combat ability (discipline), 2 an activated AA, the same path
+  `hailstone.use_ability` and the Ability Book use. Before the use of a skill
   `before_use_skill` may refuse it, and `command_line` may rewrite a typed or scripted line before the client runs
   it (hooks).
 - **put spawns on the maps**: the game's maps (the map window, the minimap, the zone map) show only the group, as

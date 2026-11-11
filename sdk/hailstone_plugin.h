@@ -597,6 +597,10 @@ typedef struct PluginHostApi {
      * and UVs for ImGui::Image. 1 and `out` filled, 0 when the sheet is missing or the icon is
      * unknown (HAILSTONE_CAP_UI). */
     int (*spell_icon)(void* host, int32_t icon, HailstoneSpellIcon* out);
+    /* The player's ability by name, as its hot button uses it: kind 0 a skill, 1 a combat ability
+     * (discipline), 2 an activated AA. 1 used, 0 none such or refused. The name may omit a
+     * discipline's rank and may be an AA's group. (HAILSTONE_CAP_ACTIONS) */
+    int (*use_ability)(void* host, int32_t kind, const char* name);
 } PluginHostApi;
 /* Whether this client's host table has `field` (one added after the plugin's ABI) and it is set. */
 #define HAILSTONE_HOST_HAS(h, field)                                                                                   \

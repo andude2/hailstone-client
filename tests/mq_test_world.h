@@ -24,6 +24,11 @@ struct GameConnectionTestAccess {
     static PlayerStatus& status(GameConnection& c) { return c.pstatus_; }
     static game::SpellState& spells(GameConnection& c) { return c.spells_; }
     static game::GroupState& group(GameConnection& c) { return c.group_; }
+    static game::RaidState& raid(GameConnection& c) { return c.raid_; }
+    static GameConnection::Leadership& leadership(GameConnection& c) { return c.leadership_; }
+    static GameConnection::Aggro& aggro(GameConnection& c) { return c.aggro_; }
+    static std::uint32_t& target_of_target(GameConnection& c) { return c.target_of_target_; }
+    static game::XTargetState& xtargets(GameConnection& c) { return c.xtargets_; }
     static game::Inventory& inventory(GameConnection& c) { return c.inventory_; }
     static Coins& coins(GameConnection& c) { return c.coins_; }
     static std::optional<PlayerProfile>& profile(GameConnection& c) { return c.profile_; }

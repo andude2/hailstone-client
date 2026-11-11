@@ -1227,6 +1227,19 @@ int h_open_bank(void* h, std::uint32_t banker) {
     return c->activate_bank(banker) ? 1 : 0;
 }
 
+int h_use_ability(void* h, std::int32_t kind, const char* name) {
+    Loaded& l = Loaded::of(h);
+    if (!name || !*name || !l.can(kCapActions) || !l.host->env.use_ability) return 0;
+    mq::AbilityKind ability;
+    switch (kind) {
+    case 0: ability = mq::AbilityKind::Skill; break;
+    case 1: ability = mq::AbilityKind::Discipline; break;
+    case 2: ability = mq::AbilityKind::AltAbility; break;
+    default: return 0;
+    }
+    return l.host->env.use_ability(ability, name) ? 1 : 0;
+}
+
 int h_hot_button(void* h, std::int32_t bar, std::int32_t page, std::int32_t button, char* out, std::size_t size) {
     Loaded& l = Loaded::of(h);
     if (!readable(l, "hot_button") || !l.host->env.hot_button) return -1;
@@ -1735,6 +1748,7 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
     p.table.web_view = main_only<h_web_view>;
     p.table.open_bank = main_only<h_open_bank>;
     p.table.spell_icon = main_only<h_spell_icon>;
+    p.table.use_ability = main_only<h_use_ability>;
     p.owner = m.env.hooks->new_guest("plugin:" + name);
 
     Hooks& hooks = *m.env.hooks;

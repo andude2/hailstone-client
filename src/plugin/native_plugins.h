@@ -26,7 +26,7 @@
 #include "plugin/policy.h"
 #include "plugin/spell_icon.h"
 
-namespace hailstone::mq { class Registry; struct Context; }
+namespace hailstone::mq { class Registry; struct Context; enum class AbilityKind : std::uint8_t; }
 namespace hailstone::net { class GameConnection; }
 namespace hailstone::game { class ExtensionChain; }
 namespace hailstone::plugin { class UiBridge; class WebAccess; }
@@ -61,6 +61,9 @@ struct NativeEnv {
     std::function<bool(int bar, int page, int button, const std::string& spec)> set_hot_button;
     std::function<int(int bar)> hot_bar_page;
     std::function<void(int bar, int page)> set_hot_bar_page;
+    // The player's skill, discipline or activated AA by name, as its hot button uses it (hailstone.use_ability):
+    // false when the player has none such. Empty: none.
+    std::function<bool(mq::AbilityKind, std::string_view)> use_ability;
     // A spell icon's cell in the stock A_SpellIcons sheet (the host table's spell_icon); empty: none.
     std::function<std::optional<SpellIcon>(std::int32_t)> spell_icon;
     std::vector<std::filesystem::path> dirs; // where plugins are looked for, and one level down (plugins/<name>/)

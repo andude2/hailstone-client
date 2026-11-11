@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Scripts and plugins can read the aggro meter (`Target.PctAggro`, `Me.XTarget[n].PctAggro`), the target's target (`Target.TargetOfTarget`), the active discipline (`Me.ActiveDisc`), an item's click recast timer (`FindItem[name].TimerReady`) and a spell's endurance cost (`Spell[name].EnduranceCost`)
+- Compiled plugins can use a skill, combat ability (discipline) or activated AA by name through a new `use_ability` host call, the same path the Ability Book and `hailstone.use_ability` use
+- Scripts and plugins can read the raid through MQ's `Raid` TLO: `Raid.Member[n|name]`, `MainAssist`, `Leader`, `Target`, `MarkNPC`, `LootType`, `Looters`, `Looter[n]`, `Locked`, `Invited` and the totals, with raid members inheriting the spawn TLO
 - Plugins and scripts can read `${Me.AutoFire}`, the ranged auto-fire toggle (`Me.Combat` remains auto-attack)
 - Compiled plugins can draw the game's spell icons: a new `spell_icon` host call gives a spell's cell in the `A_SpellIcons` sheet (the client's ImGui texture id and UVs), the same art `eq.SpellIcon` gives a Lua UI, and `get_spell` now also fills the spell's `spell_icon` index in `HailstoneSpell`
 - `/foreground` raises this client's window above the others and gives it the keyboard focus, as MacroQuest's command of the same name does, without changing its size or un-maximizing it, so a crew UI can bring a clicked client to the front
