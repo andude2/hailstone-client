@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Decoded character WLD data is released after model and appearance construction finishes, including nested and concurrent builds; memory diagnostics now report source releases and retained model, appearance and item cache payloads.
+- Unused character WLDs retain a compact validated resource index instead of all decoded meshes and animation frames; full WLD data loads when a model or material first uses it. Memory logs report each first-use decode and the number of materialized WLDs after zoning.
+- Memory diagnostics log character archive storage and parsed WLD estimates, startup and zone resident memory, and GPU allocation bytes.
+- Blocked buffs are remembered between sessions in the character's UI ini, and **Add to Blocked Buffs** in a buff's right-click menu now removes that buff at the same time
+- `/tar` is the same command as `/target`, so `/tar id <spawn id>` targets by spawn id as `/target id` does
+- The minimap's plugin spawns can be clicked to target them (a click on empty map still opens the map); the gamepad UI's minimap does the same
+- Modern hot bars: drag a bar's right or bottom edge, or its bottom-right corner, to change its shape ("Buttons per row"); the bar's regular right-click menu has **Lock layout** so it cannot be moved or resized by accident
 - For server admins: Hailstone's own packets moved to opcodes 0x1430-0x1435 (guild invitation 0x1430/0x1431, settings 0x1432/0x1433, server files 0x1434/0x1435), because Project Triune's server uses 0x1422. Update `server/quests/global/encounters/hailstone.lua` on the server: the new script still answers Hailstone 0.7.0 and older on their old opcodes (0x1422-0x1427), but this version gets no server files, settings or cross-zone guild invitations from a server with the old script
 - Nothing updates unless you ask. A new Hailstone release is shown on the login screen but downloads only when you press **Download** (set `update.download=1` in hailstone.ini to have it download by itself, as before). An update an older version downloaded on its own is no longer installed when you quit; **Restart now** installs it
 - Add-ons: auto-update is off unless you switch it on in an add-on's row. Add-ons installed before this version had it switched on without asking, so it now starts off for them too; **Check for updates** still shows newer versions, and **Update** takes them
@@ -9,6 +16,7 @@
 - Stuns follow the original client: a stun that lands while you are already stunned no longer restarts it, a stun under 1 second lasts 1 second, stun immunity is respected, a stun that ends while you are mesmerized lasts until the mez ends, "You are stunned!" and "You are unstunned." are printed, and sounds take on the dazed echo while you are stunned
 - Merchants: the merchant window can show only the goods you can use, as on the original client. Items your class or race cannot use, and spell scrolls you already have (or have a higher rank of), are hidden. It is on when you start. Untick **Usable only** beside the search box to see everything; in the gamepad UI, press X on the Buy page
 - Chat: a message with line breaks in it (such as a server's message of the day) is shown on separate lines, instead of its words being thrown across the window
+- Chat: a chat window can be folded away into its tab strip, with the button at the strip's right end (as the combat ability window folds into its title bar). The tabs stay, so the chat is one click away and keeps the lines that came in while it was folded
 - Scripts and plugins can read the aggro meter (`Target.PctAggro`, `Me.XTarget[n].PctAggro`), the target's target (`Target.TargetOfTarget`), the active discipline (`Me.ActiveDisc`), an item's click recast timer (`FindItem[name].TimerReady`) and a spell's endurance cost (`Spell[name].EnduranceCost`)
 - Compiled plugins can use a skill, combat ability (discipline) or activated AA by name through a new `use_ability` host call, the same path the Ability Book and `hailstone.use_ability` use
 - Scripts and plugins can read the raid through MQ's `Raid` TLO: `Raid.Member[n|name]`, `MainAssist`, `Leader`, `Target`, `MarkNPC`, `LootType`, `Looters`, `Looter[n]`, `Locked`, `Invited` and the totals, with raid members inheriting the spawn TLO
@@ -16,6 +24,7 @@
 - Compiled plugins can draw the game's spell icons: a new `spell_icon` host call gives a spell's cell in the `A_SpellIcons` sheet (the client's ImGui texture id and UVs), the same art `eq.SpellIcon` gives a Lua UI, and `get_spell` now also fills the spell's `spell_icon` index in `HailstoneSpell`
 - `/foreground` raises this client's window above the others and gives it the keyboard focus, as MacroQuest's command of the same name does, without changing its size or un-maximizing it, so a crew UI can bring a clicked client to the front
 - A zone takes less memory while it loads: the world's fully opaque textures get their mip chain built by the graphics card instead of on the CPU, and the zone's own uploads are staged to the card in pieces rather than all at once. On a large zone (dragonscale) the peak falls by about 115 MB (1,468 MB → 1,353 MB of commit, 740 MB → 625 MB of working set); a small classic zone holds about the same
+- Character archives no longer hold whole `.s3d` files in the heap: `PfsArchive::open` maps them read-only, so the bytes live in the file cache and only the index is private. The parsed WLDs behind the models stay private as before, so the full historical archive increment is not reclaimed by this alone
 
 ## 0.7.0-beta (2026-11-09)
 

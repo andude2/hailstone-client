@@ -566,6 +566,10 @@ TEST_CASE("MQ commands: /target, ${} for typed lines, /noparse, /squelch") {
     CHECK(h.target == 0);
     h.run("/target id 12");
     CHECK(h.target == 12);
+    h.run("/tar id 11");
+    CHECK(h.target == 11);
+    h.run("/tar fippy");
+    CHECK(h.target == 11);
     h.run("/tell Groupie my hp is ${Me.PctHPs}");
     CHECK(h.sent.back() == "/tell Groupie my hp is 75");
     h.run("/noparse /tell Groupie ${Me.PctHPs}");
@@ -576,7 +580,7 @@ TEST_CASE("MQ commands: /target, ${} for typed lines, /noparse, /squelch") {
     h.run("/target nobody_here");
     CHECK(h.printed.back() == "There are no spawns matching: (nobody_here)");
     h.run("/target");
-    CHECK(h.target == 12); // unchanged
+    CHECK(h.target == 11); // unchanged
     CHECK(h.printed.back().rfind("Usage: /target", 0) == 0);
 }
 

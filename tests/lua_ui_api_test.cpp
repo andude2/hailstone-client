@@ -111,6 +111,22 @@ TEST_CASE("Lua UI: FindWindowRect finds a drawn window by name") {
     ImGui::DestroyContext(ctx);
 }
 
+// LuaUi::setting / set_setting: the client's own menus read and change the UI's layout settings (the hot bar's
+// Lock layout), the same values ui.GetSetting / ui.SetSetting use.
+TEST_CASE("Lua UI: the client reads and writes a layout setting") {
+    hailstone::test::ScratchDir scratch("lua_ui_setting_test");
+    const fs::path dir = scratch.path() / "pack";
+    fs::create_directories(dir);
+    {
+        hailstone::ui::lua::LuaUi lua(dir, scratch.path() / "ui.txt");
+        CHECK(lua.setting("hud.lock.HotButtonWnd") == "");
+        CHECK(lua.set_setting("hud.lock.HotButtonWnd", "1"));
+        CHECK(lua.setting("hud.lock.HotButtonWnd") == "1");
+        CHECK(lua.set_setting("hud.lock.HotButtonWnd", "0"));
+        CHECK(lua.setting("hud.lock.HotButtonWnd") == "0");
+    }
+}
+
 // ui.GetIO: one table a frame (the HUD asks for it from every window), with the frame's values; the next frame's is
 // another, with that frame's.
 TEST_CASE("Lua UI: GetIO gives one table a frame") {

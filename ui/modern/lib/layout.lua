@@ -165,6 +165,8 @@ function L.Solve(W, H, s, frames)
     local w, h = frames.Chat1.w, frames.Chat1.h
     if frames.Chat1.fit then
       h = math.min(L.CHAT_H * s, H * 0.36)
+      -- a chat rolled up (its tab strip only) keeps just that room; the rest of its height is the screen's again
+      if frames.Chat1.rolled then h = frames.Chat1.h end
       w = math.max(L.CHAT_MIN_W * s, math.min(L.CHAT_W * s, stackLeft - g - m))
     end
     choose("Chat1", w, h, { { m, H - m - h }, { m, stackTop - g - h }, { m, H / 2 - h / 2 } })

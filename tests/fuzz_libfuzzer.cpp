@@ -67,7 +67,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         auto a = hailstone::assets::PfsArchive::from_memory(std::vector<std::byte>(in.begin(), in.end()));
         for (const auto& n : a.names()) (void)a.read(n);
 #elif defined(HAILSTONE_FUZZ_WLD)
-        auto w = hailstone::assets::wld::WldFile::parse(in);
+        hailstone::assets::wld::WldFile::ReadScope reads;
+        auto w = hailstone::assets::wld::WldFile::deferred(
+            [in] { return std::vector<std::byte>(in.begin(), in.end()); }, "fuzz");
         for (const auto& f : w.fragments())
             if (const auto* m = std::get_if<hailstone::assets::wld::MeshDef>(&f.data)) (void)hailstone::assets::wld::build_mesh(w, *m, f.name);
 #elif defined(HAILSTONE_FUZZ_TEXTURE)

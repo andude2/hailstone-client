@@ -100,11 +100,13 @@ bool CharacterLibrary::has_item(std::uint32_t number) const {
 }
 
 std::optional<CharacterLibrary::ItemMesh> CharacterLibrary::actor_mesh(const std::string& code) const {
+    Lock lock(*mutex_);
+    wld::WldFile::ReadScope wld_reads;
     std::optional<ItemMesh> out;
     if (const FragmentLoc* loc = actors().find(code)) {
         try {
             const wld::WldFile& w = *loc->first;
-            const auto& actor = std::get<wld::ActorDef>(loc->second->data);
+            const auto& actor = std::get<wld::ActorDef>(loc->fragment()->data);
             CharacterMesh mesh;
             // Static items: 0x2d mesh references, vertices in item space.
             for (wld::Ref s : actor.sprites) {
@@ -136,6 +138,7 @@ std::optional<CharacterLibrary::ItemMesh> CharacterLibrary::actor_mesh(const std
 
 std::optional<CharacterLibrary::ItemMesh> CharacterLibrary::item_mesh(std::uint32_t number) const {
     Lock lock(*mutex_);
+    wld::WldFile::ReadScope wld_reads;
     if (auto it = item_cache_.find(number); it != item_cache_.end()) {
         CharacterLookups::note(it->second.lookups);
         return it->second.value;
@@ -192,6 +195,7 @@ void CharacterLibrary::build_item_mesh(std::uint32_t number, std::optional<ItemM
 std::shared_ptr<const CharacterMesh> CharacterLibrary::dress(const CharacterModel& model,
                                                              const game::Appearance& a) const {
     Lock lock(*mutex_);
+    wld::WldFile::ReadScope wld_reads;
     // A model from its own archive (ModelArchiveStore) is dressed by that archive's library.
     if (!model.eqg && own_ && !actors().contains(model.code))
         if (auto lib = own_->opened(model.code)) return lib->dress(model, a);
@@ -274,7 +278,7 @@ CharacterMesh CharacterLibrary::dress_wld(const CharacterModel& model, const gam
     const FragmentLoc* loc = actors().find(code);
     if (!loc) return model.default_mesh();
     const wld::WldFile& w = *loc->first;
-    const auto& actor = std::get<wld::ActorDef>(loc->second->data);
+    const auto& actor = std::get<wld::ActorDef>(loc->fragment()->data);
     const wld::Skeleton* sk = nullptr;
     for (wld::Ref s : actor.sprites)
         if (const auto* sr = w.get<wld::SkeletonRef>(s))
@@ -292,9 +296,9 @@ CharacterMesh CharacterLibrary::dress_wld(const CharacterModel& model, const gam
                            (head.variant < 100 && meshes().contains(code + "HE" + two_digits(head.variant) + "_DMSPRITEDEF"));
     const bool robe = !body_texture && !model.luclin && game::is_robe(a.material[game::kSlotChest]);
     if (model.luclin) head_variant = 0; // Luclin helms are attached parts
-    auto alternative = [&](const std::string& name) -> std::pair<const wld::WldFile*, const wld::Fragment*> {
+    auto alternative = [&](const std::string& name) -> FragmentLoc {
         const FragmentLoc* found = meshes().find(name);
-        return found ? *found : FragmentLoc{nullptr, nullptr};
+        return found ? *found : FragmentLoc{};
     };
     std::vector<std::pair<wld::Ref, std::int64_t>> sprites;
     for (wld::Ref r : sk->meshes) sprites.emplace_back(r, -1);
@@ -310,14 +314,14 @@ CharacterMesh CharacterLibrary::dress_wld(const CharacterModel& model, const gam
         if (!mf || !std::holds_alternative<wld::MeshDef>(mf->data)) continue;
         const wld::WldFile* mw = &w;
         std::string name = upper(mf->name);
-        std::pair<const wld::WldFile*, const wld::Fragment*> alt{nullptr, nullptr};
+        FragmentLoc alt{};
         if (name == code + "HE00_DMSPRITEDEF" && head_variant > 0 && head_variant < 100)
             alt = alternative(code + "HE" + two_digits(head_variant) + "_DMSPRITEDEF");
         else if (name == code + "_DMSPRITEDEF" && robe)
             alt = alternative(code + "01_DMSPRITEDEF");
-        if (alt.second) {
+        if (const auto* alternate_mesh = alt.fragment()) {
             mw = alt.first;
-            mf = alt.second;
+            mf = alternate_mesh;
         }
         if (!seen.insert(mf).second) continue;
         detail::append_wld_mesh(*mw, *mf, n, owner, out);
@@ -425,11 +429,13 @@ CharacterMesh CharacterLibrary::dress_wld(const CharacterModel& model, const gam
 }
 
 std::vector<std::string> CharacterLibrary::luclin_layers(std::string_view material) const {
+    Lock lock(*mutex_);
+    wld::WldFile::ReadScope wld_reads;
     std::vector<std::string> out;
     const FragmentLoc* loc = luclin_materials().find(upper(material));
     if (!loc) return out;
     const wld::WldFile& w = *loc->first;
-    const auto& def = std::get<wld::MaterialDef>(loc->second->data);
+    const auto& def = std::get<wld::MaterialDef>(loc->fragment()->data);
     const auto* sprite = w.get<wld::BitmapInfoRef>(def.bitmap);
     const auto* info = sprite ? w.get<wld::BitmapInfo>(sprite->info) : nullptr;
     const auto* bmp = info && !info->frames.empty() ? w.get<wld::BitmapName>(info->frames.front()) : nullptr;

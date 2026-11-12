@@ -68,6 +68,11 @@ function hud.Locked(window)
   return Setting("hud.locked") == "1" or Setting(keysOf(window).lock) == "1"
 end
 
+-- Whether a frame is rolled up (only its title bar is drawn) and how to roll it (hud.rolled.<window>, kept until it
+-- is expanded, closing and opening the frame again included).
+function hud.Rolled(window) return Setting(keysOf(window).rolled) == "1" end
+function hud.SetRolled(window, on) ui.SetSetting(keysOf(window).rolled, on and "1" or "") end
+
 -- The scale a window draws at: the display's UI scale (the EQ fonts already carry it), the HUD scale and the
 -- window's own.
 function hud.WindowScale(window)
@@ -79,23 +84,23 @@ end
 -- not drawn). It may also return where the stock window sits (hud.Dialog asks eq.ReplaceWindow when it does not).
 local function gameShown(screen) return eq.WindowShown(screen) end
 
--- The default layout (lib/layout.lua) over the frames drawn in the last frames: window -> { w, h, frame, fit }
+-- The default layout (lib/layout.lua) over the frames drawn in the last frames: window -> { w, h, frame, fit, rolled }
 -- in shared.frames, the solve kept in shared.solved for as long as nothing it was worked out from changes: a frame
 -- shows or changes size (noteFrame), one it placed goes unseen for more than 2 frames (its room is given back), the
 -- screen's size or the HUD's scale changes.
 local defaults = dofile("lib/layout.lua")
 shared.frames = shared.frames or {}
 
-local function noteFrame(key, w, h, fit)
+local function noteFrame(key, w, h, fit, rolled)
   local f, frame = shared.frames[key], ui.GetFrameCount()
   if not f then
     f = {}
     shared.frames[key] = f
     shared.solved = nil
-  elseif frame - f.frame > 2 or f.w ~= w or f.h ~= h or f.fit ~= fit then
+  elseif frame - f.frame > 2 or f.w ~= w or f.h ~= h or f.fit ~= fit or f.rolled ~= rolled then
     shared.solved = nil
   end
-  f.w, f.h, f.frame, f.fit = w, h, frame, fit
+  f.w, f.h, f.frame, f.fit, f.rolled = w, h, frame, fit, rolled
 end
 
 -- The default layout's rectangles on this screen (layout.Solve), and its trayRoom.
@@ -269,6 +274,11 @@ local function menu(window, title, opts)
     ui.SetSetting("hud.size." .. window, "")
     ui.SetSetting("hud.scale." .. window, "")
   end
+  if opts.rollup then
+    if hud.Rolled(window) then
+      if ui.MenuItem("Expand") then hud.SetRolled(window, false) end
+    elseif ui.MenuItem("Roll up") then hud.SetRolled(window, true) end
+  end
   if opts.onClose then
     if ui.MenuItem("Close") then opts.onClose() end
   elseif opts.closable ~= false and opts.screen and ui.MenuItem("Close") then
@@ -318,8 +328,9 @@ function hud.CloseX(id, x, y, size, onClose)
   if clicked then onClose() end
 end
 
--- A resizable frame's right (right = true) or bottom edge: a drag changes its size (design pixels).
-local function frameEdge(st, id, x0, y0, x1, y1, right, s, minW, minH)
+-- A resizable frame's right (right = true) or bottom edge: a drag changes its size (design pixels); `setSize`
+-- applies the new size (hud.size.<window>, or the frame's own reflow).
+local function frameEdge(st, id, x0, y0, x1, y1, right, s, minW, minH, setSize)
   T.Hit(id, x0, y0, x1, y1)
   local active, over = ui.IsItemActive(), ui.IsItemHovered()
   local wx, wy, w, h = st.wx, st.wy, st.w, st.h
@@ -330,10 +341,14 @@ local function frameEdge(st, id, x0, y0, x1, y1, right, s, minW, minH)
     else ui.DrawLine(wx + 6 * s, wy + h - 2 * s, x1, wy + h - 2 * s, c[1], c[2], c[3], a, 2 * s) end
   end
   if active and ui.IsMouseDragging(ui.Mouse.Left) then
-    local io = ui.GetIO()
-    local nw = math.max(minW, right and (w + io.mouseDX) / s or w / s)
-    local nh = math.max(minH, right and h / s or (h + io.mouseDY) / s)
-    ui.SetSetting(st.keys.size, string.format("%.0f,%.0f", nw, nh))
+    if not st.resize then
+      local mx, my = ui.GetMousePos()
+      st.resize = { x = mx, y = my, w = st.w, h = st.h }
+    end
+    local mx, my = ui.GetMousePos()
+    local nw = math.max(minW, right and (st.resize.w + mx - st.resize.x) / s or st.w / s)
+    local nh = math.max(minH, right and st.h / s or (st.resize.h + my - st.resize.y) / s)
+    setSize(nw, nh)
   end
 end
 
@@ -350,7 +365,13 @@ end
 --   opts.hideWhen() -> true      not drawn this frame unless in layout mode (an empty target frame)
 --   opts.resizable = { minW, minH }   its right and bottom edges and its bottom-right corner change its size
 --                                (hud.size.<window>); a frame without it has no grip (its scale is the menu's)
+--   opts.onResize(nw, nh)        with resizable: the drag changes the frame's own layout instead of hud.size (the hot
+--                                bars' buttons per row); opts.size must then give the frame its size from that layout
 --   opts.onClose()               a frame that can be put away (not a HUD piece): an X in its top right corner calls it
+--   opts.rollup = true           the frame rolls up into its title bar (hud.rolled.<window>): rolled up, only the
+--                                title bar is drawn and the frame is as tall as it (opts.titleHeight, design pixels);
+--                                the body draws the title bar itself (the frame does not draw one)
+--   opts.titleHeight = 26        the title bar's height in design pixels (a rolled up frame's height)
 --   body(x, y, w, h, s)          draws into the frame's screen rectangle
 function hud.Window(screen, title, opts, body)
   opts.screen = screen
@@ -367,13 +388,15 @@ function hud.Window(screen, title, opts, body)
   if opts.hideWhen and not layout and not opened[key] and opts.hideWhen() then return end
   local k = keysOf(key)
   local locked = hud.Locked(key)
+  local rolled = opts.rollup and hud.Rolled(key) or false
+  opts.rolled = rolled -- (the body's own: this frame's, as the frame is drawn)
 
   local io = ui.GetIO()
   local hudScale, ownScale = hud.Scale(), num(k.scale, 1.0)
   local s = (io.uiScale or 1) * hudScale * ownScale -- (hud.WindowScale)
   local dw, dh = opts.size(s)
   local fit = false
-  if opts.resizable then
+  if opts.resizable and not opts.onResize then
     local sz = Setting(k.size)
     local sw, sh = (sz or ""):match("([%d.]+),([%d.]+)")
     if sw then
@@ -385,10 +408,11 @@ function hud.Window(screen, title, opts, body)
       if r then dw, dh = r.w / s, r.h / s end
     end
   end
+  if rolled then dh = opts.titleHeight or 26 end -- (the title bar only)
   local w, h = math.floor(dw * s + 0.5), math.floor(dh * s + 0.5)
   local W, H = io.width, io.height
   shared.windows[key] = true
-  noteFrame(key, w, h, fit)
+  noteFrame(key, w, h, fit, rolled)
 
   -- the place: saved, else the default; kept on screen when the resolution shrinks
   local saved = Setting(k.pos)
@@ -421,6 +445,9 @@ function hud.Window(screen, title, opts, body)
   local flags = ui.WindowFlags.NoDecoration | ui.WindowFlags.NoBackground | ui.WindowFlags.NoSavedSettings
       | ui.WindowFlags.NoScrollWithMouse | ui.WindowFlags.NoFocusOnAppearing | ui.WindowFlags.NoMove
   if opts.inputs == false and not layout then flags = flags | ui.WindowFlags.NoInputs end
+  -- a rolled up frame is a title bar, and shorter than ImGui's smallest window (its WindowMinSize): it may be one
+  -- (its size is set here every frame, so the auto-resize has nothing to do)
+  if rolled then flags = flags | ui.WindowFlags.AlwaysAutoResize end
 
   local alpha = windowAlpha(key, k, layout)
   noteRect(key, x, y, w, h)
@@ -447,6 +474,7 @@ function hud.Window(screen, title, opts, body)
     end
     st.x, st.y, st.w, st.h, st.W, st.H, st.wx, st.wy = x, y, w, h, W, H, wx, wy
     st.moving, st.locked = false, locked and not layout
+    if not ui.IsMouseDown(ui.Mouse.Left) then st.resize = nil end
     -- the frame's own drag handle, under its pieces: the empty spots move it
     if not locked or layout then
       T.Hit("##move", wx, wy, wx + w, wy + h)
@@ -477,15 +505,18 @@ function hud.Window(screen, title, opts, body)
         local g = snap.Grid()
         if g then snap.DrawGrid(g, c) end
       end
-      if opts.resizable then
+      if opts.resizable and not rolled then
         -- the right and bottom edges and the corner grip (shown while the frame is hovered) change its size in design
-        -- pixels; the scale is the right-click menu's
+        -- pixels; the scale is the right-click menu's, or opts.onResize changes the frame's own layout
         local g = math.max(12, 14 * s)
         local hovered = ui.IsMouseHoveringRect(wx, wy, wx + w, wy + h)
         local e = math.max(5, 6 * s)
         local minW, minH = opts.resizable[1], opts.resizable[2]
-        frameEdge(st, "##resizeright", wx + w - e, wy, wx + w, wy + h - g, true, s, minW, minH)
-        frameEdge(st, "##resizebottom", wx, wy + h - e, wx + w - g, wy + h, false, s, minW, minH)
+        local setSize = function(nw, nh)
+          if opts.onResize then opts.onResize(nw, nh) else ui.SetSetting(k.size, string.format("%.0f,%.0f", nw, nh)) end
+        end
+        frameEdge(st, "##resizeright", wx + w - e, wy, wx + w, wy + h - g, true, s, minW, minH, setSize)
+        frameEdge(st, "##resizebottom", wx, wy + h - e, wx + w - g, wy + h, false, s, minW, minH, setSize)
         T.Hit("##resize", wx + w - g, wy + h - g, wx + w, wy + h)
         local active, over = ui.IsItemActive(), ui.IsItemHovered()
         if hovered or active then
@@ -498,8 +529,14 @@ function hud.Window(screen, title, opts, body)
         end
         if over and not active then ui.SetTooltip("Drag to resize") end
         if active and ui.IsMouseDragging(ui.Mouse.Left) then
-          local nw, nh = math.max(minW, (w + io.mouseDX) / s), math.max(minH, (h + io.mouseDY) / s)
-          ui.SetSetting(k.size, string.format("%.0f,%.0f", nw, nh))
+          if not st.resize then
+            local mx, my = ui.GetMousePos()
+            st.resize = { x = mx, y = my, w = st.w, h = st.h }
+          end
+          local mx, my = ui.GetMousePos()
+          local nw = math.max(minW, (st.resize.w + mx - st.resize.x) / s)
+          local nh = math.max(minH, (st.resize.h + my - st.resize.y) / s)
+          setSize(nw, nh)
         end
       end
     end

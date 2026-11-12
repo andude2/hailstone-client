@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -21,11 +22,15 @@
 #include <unordered_map>
 #include <vector>
 
+#include "platform/mapped_file.h"
+
 namespace hailstone::assets {
 
 class PfsArchive {
 public:
     // Throws std::runtime_error on a malformed archive.
+    // open() maps the file read-only (platform::MappedFile) instead of copying it into the heap: only the index
+    // below is private memory, and the mapping keeps the bytes it was opened from when the path is replaced.
     static PfsArchive open(const std::filesystem::path& path);
     static PfsArchive from_memory(std::vector<std::byte> data, std::string label = "<memory>");
 
@@ -41,6 +46,14 @@ public:
 
     const std::string& label() const { return label_; }
 
+    // Storage accounting for the archive bytes themselves (the index below and anything parsed from the members,
+    // such as wld::WldFile data, is separate private memory and not counted here). storage_bytes() is the
+    // underlying file or buffer size; owned_bytes() is the part in private heap (the buffer's size, or 0 when
+    // mapped); mapped() is true for a file-backed archive.
+    bool mapped() const;
+    std::size_t storage_bytes() const;
+    std::size_t owned_bytes() const;
+
 private:
     struct Entry {
         std::uint32_t crc = 0;
@@ -48,10 +61,22 @@ private:
         std::uint32_t size = 0;
     };
 
+    // The archive's bytes, shared between copies: an owned buffer (from_memory) or a read-only file mapping
+    // (open). Copies share it; a moved-from archive shares nothing.
+    struct Storage {
+        std::vector<std::byte> owned;
+        platform::MappedFile mapped_file;
+        std::span<const std::byte> view() const {
+            return mapped_file.mapped() ? mapped_file.view() : std::span<const std::byte>(owned);
+        }
+    };
+
+    void parse_index();
     std::vector<std::byte> inflate_entry(const Entry& e) const;
+    std::span<const std::byte> bytes() const { return storage_ ? storage_->view() : std::span<const std::byte>{}; }
 
     std::string label_;
-    std::vector<std::byte> data_;
+    std::shared_ptr<const Storage> storage_;
     std::vector<std::string> names_;
     std::unordered_map<std::string, Entry> by_name_;
 };

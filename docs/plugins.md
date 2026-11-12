@@ -268,7 +268,7 @@ Not yet:
 
 ### MQ commands
 
-`/echo`, `/target` (`id N`, `clear`, `mycorpse`, or a spawn search), `/face` (target, `id`, `heading H`, `loc y,x`,
+`/echo`, `/target` (`id N`, `clear`, `mycorpse`, or a spawn search; `/tar` is the same command), `/face` (target, `id`, `heading H`, `loc y,x`,
 a search; `fast`), `/keypress <command> [hold|release]` (the game's key command names: `forward`, `jump`, `hot1_1`, ...),
 `/squelch <cmd>`, `/docommand <cmd>`, `/noparse <cmd>`, `/lua ...`, `/plugin ...`. `${...}` is parsed in every
 command line, typed or scripted, except `/noparse` and the lines the client's own windows send for a button
@@ -532,7 +532,8 @@ same changes as a plugin, with no change to Hailstone itself. With the `extend` 
   RoF2's map does. `map_spawn` is asked for every other spawn each time a map draws (the minimap: only those
   inside its circle, the only ones it could show) and shows the ones it answers for, with a colour, a map layer (the layer switches and the height filter apply) and a label shown as the map
   shows its labels; the client starts it from the con colour and the name. A Lua plugin's `map_spawn(spawn)`
-  answers true for the defaults or a table with `color`, `layer` and `label`.
+  answers true for the defaults or a table with `color`, `layer` and `label`. On the minimap a left click on
+  one of those spawns makes it the target (`eq.TargetSpawn`); a click elsewhere still opens the map.
 - **keep files** for the server and for the character: `server_config_dir` is
   `servers/<profile>/plugin-config/<name>/` (in the world too on a server without Hailstone's quest script),
   `character_config_dir` is the character's

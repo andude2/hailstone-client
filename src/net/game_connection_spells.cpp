@@ -6,6 +6,7 @@
 
 #include <array>
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <ctime>
@@ -42,6 +43,32 @@ constexpr std::int64_t kProcLandingMs = 500;
 // A bard song's skill (brass, singing, stringed, percussion, wind): its pulses land without a cast of their own.
 bool is_song_skill(std::uint8_t skill) {
     return skill == 12 || skill == 41 || skill == 49 || skill == 54 || skill == 70;
+}
+
+// The UI ini's [BlockedBuffs] lists: spell ids separated by commas, empty for none.
+std::string blocked_buffs_text(const std::vector<std::int32_t>& list) {
+    std::string out;
+    for (std::int32_t id : list) {
+        if (id <= 0) continue;
+        if (!out.empty()) out.push_back(',');
+        out += std::to_string(id);
+    }
+    return out;
+}
+
+void read_blocked_buffs_text(std::string_view text, std::vector<std::int32_t>& out) {
+    out.clear();
+    while (!text.empty() && out.size() < static_cast<std::size_t>(kBlockedBuffSlots)) {
+        const std::size_t comma = text.find(',');
+        std::string_view part = text.substr(0, comma);
+        while (!part.empty() && (part.front() == ' ' || part.front() == '\t')) part.remove_prefix(1);
+        while (!part.empty() && (part.back() == ' ' || part.back() == '\t')) part.remove_suffix(1);
+        std::int32_t id = 0;
+        const auto [end, ec] = std::from_chars(part.data(), part.data() + part.size(), id);
+        if (ec == std::errc() && end == part.data() + part.size() && id > 0) out.push_back(id);
+        if (comma == std::string_view::npos) break;
+        text.remove_prefix(comma + 1);
+    }
 }
 
 } // namespace
@@ -280,6 +307,20 @@ void GameConnection::resend_blocked_buffs() {
         b.initialise = true;
         send_zone(encode(b));
     }
+}
+
+void GameConnection::load_blocked_buffs() {
+    if (blocked_buffs_loaded_) return;
+    blocked_buffs_loaded_ = true;
+    if (!ui_ini_get_) return;
+    read_blocked_buffs_text(ui_ini_get_("BlockedBuffs", "Me").value_or(""), blocked_buffs_[0]);
+    read_blocked_buffs_text(ui_ini_get_("BlockedBuffs", "Pet").value_or(""), blocked_buffs_[1]);
+}
+
+void GameConnection::save_blocked_buffs() {
+    if (!ui_ini_put_) return;
+    ui_ini_put_("BlockedBuffs", "Me", blocked_buffs_text(blocked_buffs_[0]));
+    ui_ini_put_("BlockedBuffs", "Pet", blocked_buffs_text(blocked_buffs_[1]));
 }
 
 void GameConnection::memorize_tick(std::int64_t now) {
@@ -774,16 +815,23 @@ void GameConnection::handle_spell(Op op, const AppPacket& p) {
     }
     case Op::BlockedBuffs:
         // The server's list (EQEmu: the whole list after a change, flags 0x54).
-        if (auto b = decode_blocked_buffs(p)) blocked_buffs_[b->pet ? 1 : 0] = std::move(b->spells);
+        if (auto b = decode_blocked_buffs(p)) {
+            blocked_buffs_[b->pet ? 1 : 0] = std::move(b->spells);
+            save_blocked_buffs();
+        }
         break;
     case Op::ClearBlockedBuffs:
         // EQEmu echoes /blockspell clear's packet once it has cleared the list.
-        if (!p.data.empty()) blocked_buffs_[p.data[0] != std::byte{0} ? 1 : 0].clear();
+        if (!p.data.empty()) {
+            blocked_buffs_[p.data[0] != std::byte{0} ? 1 : 0].clear();
+            save_blocked_buffs();
+        }
         break;
     case Op::RemoveBlockedBuffs:
         if (auto b = decode_blocked_buffs(p)) {
             auto& list = blocked_buffs_[b->pet ? 1 : 0];
             for (auto id : b->spells) std::erase(list, id);
+            save_blocked_buffs();
         }
         break;
     case Op::MemorizeSpell: {

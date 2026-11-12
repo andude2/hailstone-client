@@ -1024,6 +1024,8 @@ void GameConnection::finish_zone_in() {
         death_tip_pending_ = false;
         window_toggle_ = "tip:31";
     }
+    // (the lists are loaded once, before the first resend: the UI ini keeps them between sessions)
+    load_blocked_buffs();
     resend_blocked_buffs();
     // CEverQuest's zone-in (before "Initialization complete."): with /hidecorpses looted on, OP_HideCorpse action 3
     // again (the second word is a stack value in the original).

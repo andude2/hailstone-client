@@ -1,7 +1,9 @@
 #include "assets/wld.h"
 
 #include <algorithm>
+#include <mutex>
 #include <stdexcept>
+#include <type_traits>
 
 #include "core/byte_io.h"
 #include "core/log.h"
@@ -482,7 +484,111 @@ WldFile WldFile::parse(std::span<const std::byte> data, std::string label) {
     return w;
 }
 
+// The compact index never stores pointers into the temporary validation parse. Copies share the immutable
+// source and payload state. Scoped readers keep pointers alive through nested and concurrent builds.
+struct WldFile::Deferred {
+    struct Entry {
+        Ref ref;
+        std::uint32_t type;
+        std::string name;
+        TrackRef track{};
+    };
+    std::vector<Entry> entries;
+    std::function<std::vector<std::byte>()> loader;
+    mutable std::mutex mutex;
+    std::unique_ptr<WldFile> parsed;
+    std::size_t readers = 0, parsed_bytes = 0;
+    bool unscoped = false;
+    DecodeStats stats;
+};
+
+thread_local WldFile::ReadScope* WldFile::ReadScope::current_ = nullptr;
+
+WldFile::ReadScope::ReadScope() : parent_(current_) { current_ = this; }
+
+WldFile::ReadScope::~ReadScope() {
+    current_ = parent_;
+    // Nested scopes put their leases in the root, so a nested return cannot invalidate its caller's pointers.
+    for (const auto& state : held_) {
+        std::lock_guard lock(state->mutex);
+        --state->readers;
+        if (state->readers == 0 && !state->unscoped && state->parsed) {
+            state->stats.released_bytes += state->parsed_bytes;
+            ++state->stats.releases;
+            state->parsed.reset();
+            state->parsed_bytes = 0;
+        }
+    }
+}
+
+WldFile::DecodeStats WldFile::decode_stats() const {
+    if (!deferred_) return {};
+    std::lock_guard lock(deferred_->mutex);
+    return deferred_->stats;
+}
+
+WldFile WldFile::deferred(std::function<std::vector<std::byte>()> loader, std::string label) {
+    auto parsed = parse(loader(), label);
+    WldFile out;
+    out.label_ = std::move(label);
+    out.new_format_ = parsed.new_format_;
+    out.errors_ = std::move(parsed.errors_);
+    out.unknown_ = std::move(parsed.unknown_);
+    out.deferred_ = std::make_shared<Deferred>();
+    out.deferred_->loader = std::move(loader);
+    parsed.visit_character_index([&](Ref ref, std::uint32_t type, const std::string& name, const TrackRef* track) {
+        out.deferred_->entries.push_back({ref, type, name, track ? *track : TrackRef{}});
+    });
+    return out;
+}
+
+void WldFile::visit_character_index(const IndexVisitor& visitor) const {
+    if (deferred_) {
+        for (const auto& e : deferred_->entries)
+            visitor(e.ref, e.type, e.name, e.type == 0x13 ? &e.track : nullptr);
+        return;
+    }
+    for (std::size_t i = 0; i < fragments_.size(); ++i) {
+        const auto& f = fragments_[i];
+        if (f.name.empty()) continue;
+        if (std::holds_alternative<ActorDef>(f.data) || std::holds_alternative<MeshDef>(f.data) ||
+            std::holds_alternative<MaterialDef>(f.data) || std::holds_alternative<TrackRef>(f.data))
+            visitor(static_cast<Ref>(i + 1), f.type, f.name, std::get_if<TrackRef>(&f.data));
+    }
+}
+
+bool WldFile::materialized() const {
+    if (!deferred_) return true;
+    std::lock_guard lock(deferred_->mutex);
+    return deferred_->parsed != nullptr;
+}
+
+const WldFile& WldFile::decoded() const {
+    if (!deferred_) return *this;
+    std::lock_guard lock(deferred_->mutex);
+    if (auto* scope = ReadScope::current_) {
+        while (scope->parent_) scope = scope->parent_;
+        if (std::find(scope->held_.begin(), scope->held_.end(), deferred_) == scope->held_.end()) {
+            scope->held_.push_back(deferred_); // register before incrementing: allocation failure adds no reader
+            ++deferred_->readers;
+        }
+    } else {
+        deferred_->unscoped = true;
+    }
+    if (!deferred_->parsed) {
+        auto parsed = std::make_unique<WldFile>(parse(deferred_->loader(), label_));
+        deferred_->parsed_bytes = parsed->retained_bytes();
+        // A reclaimed file can be decoded often; cumulative counters at zone settle report the churn.
+        log::debug("memory WLD materialized: {}: parsed estimate {:.2f} MiB", label_,
+                   double(deferred_->parsed_bytes) / (1024.0 * 1024.0));
+        deferred_->parsed = std::move(parsed);
+        ++deferred_->stats.decodes;
+    }
+    return *deferred_->parsed;
+}
+
 const Fragment* WldFile::at(Ref ref) const {
+    if (deferred_) return decoded().at(ref);
     if (ref <= 0 || static_cast<std::size_t>(ref) > fragments_.size()) return nullptr;
     return &fragments_[static_cast<std::size_t>(ref) - 1];
 }
@@ -495,11 +601,61 @@ const Fragment* WldFile::resolve(Ref ref) const {
 }
 
 const Fragment* WldFile::find(std::string_view name) const {
+    if (deferred_) return decoded().find(name);
     auto it = by_name_.find(std::string(name));
     return it == by_name_.end() ? nullptr : &fragments_[it->second];
 }
 
+std::size_t WldFile::retained_bytes() const {
+    if (deferred_) {
+        std::lock_guard lock(deferred_->mutex);
+        std::size_t bytes = deferred_->entries.size() * sizeof(Deferred::Entry);
+        for (const auto& e : deferred_->entries) bytes += e.name.size();
+        if (deferred_->parsed) bytes += deferred_->parsed->retained_bytes();
+        return bytes;
+    }
+    std::size_t total = strings_.size() + fragments_.size() * sizeof(Fragment);
+    auto vec = [](auto& v) { return v.size() * sizeof(typename std::decay_t<decltype(v)>::value_type); };
+    auto str = [](const std::string& s) { return s.size(); };
+    for (const auto& f : fragments_) {
+        total += str(f.name);
+        std::visit(
+            [&](const auto& d) {
+                using D = std::decay_t<decltype(d)>;
+                if constexpr (std::is_same_v<D, BitmapName>) {
+                    total += vec(d.files);
+                    for (const auto& s : d.files) total += str(s);
+                } else if constexpr (std::is_same_v<D, BitmapInfo>) {
+                    total += vec(d.frames);
+                } else if constexpr (std::is_same_v<D, MaterialList>) {
+                    total += vec(d.materials);
+                } else if constexpr (std::is_same_v<D, MeshDef>) {
+                    total += vec(d.positions) + vec(d.uvs) + vec(d.normals) + vec(d.colors) + vec(d.polygons) +
+                             vec(d.vertex_pieces) + vec(d.render_groups);
+                } else if constexpr (std::is_same_v<D, ActorDef>) {
+                    total += str(d.callback) + vec(d.sprites);
+                } else if constexpr (std::is_same_v<D, VertexColors>) {
+                    total += vec(d.colors);
+                } else if constexpr (std::is_same_v<D, LightDef>) {
+                    total += vec(d.levels) + vec(d.colors);
+                } else if constexpr (std::is_same_v<D, TrackDef>) {
+                    total += vec(d.frames);
+                } else if constexpr (std::is_same_v<D, Skeleton>) {
+                    total += vec(d.nodes) + vec(d.meshes);
+                    for (const auto& n : d.nodes) total += str(n.name) + vec(n.children);
+                } else if constexpr (std::is_same_v<D, BspTree>) {
+                    total += vec(d.nodes);
+                } else if constexpr (std::is_same_v<D, RegionTag>) {
+                    total += vec(d.regions) + str(d.tag);
+                }
+            },
+            f.data);
+    }
+    return total;
+}
+
 std::string WldFile::string_at(Ref ref) const {
+    if (deferred_) return decoded().string_at(ref);
     if (ref >= 0) return {};
     // Negate in 64 bits so INT32_MIN cannot overflow.
     auto offset = static_cast<std::uint64_t>(-static_cast<std::int64_t>(ref));

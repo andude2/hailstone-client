@@ -158,6 +158,11 @@ public:
     // buff trays' and bars' shapes) and the task window's list width.
     static bool layout_setting(std::string_view key);
 
+    // A saved setting (the same ui.GetSetting reads; "" when it is not set), and setting one (ui.SetSetting's
+    // storage, saved to the character's layout or the shared file as that key asks). For the client's own menus.
+    std::string setting(std::string_view key) const;
+    bool set_setting(std::string_view key, std::string_view value);
+
     struct Impl; // lua_host.cpp
 
 private:

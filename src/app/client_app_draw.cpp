@@ -305,6 +305,10 @@ void ClientApp::update_eq_host() {
         if (const game::Spawn* me = conn_->world().player()) h.player_model = actor_renderer_->model_for(*me);
     h.hot_buttons = actions_ui_ ? &actions_ui_->hot_buttons() : nullptr;
     h.actions = actions_ui_.get();
+    h.layout_setting = [this](std::string_view key) { return lua_ui_ ? lua_ui_->setting(key) : std::string(); };
+    h.set_layout_setting = [this](std::string_view key, std::string_view value) {
+        if (lua_ui_) lua_ui_->set_setting(key, value);
+    };
     h.heading = game::yaw_to_heading(yaw_);
     // CCompassWnd::OnProcessFrame's heading error (game/compass.h), over the base Sense Heading skill.
     if (actions_ui_) {

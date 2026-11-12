@@ -63,6 +63,10 @@ struct EqHost {
     plugin::WebAccess* web = nullptr;
     std::function<std::uint32_t(std::string_view plugin)> plugin_caps;
     game::HotButtonStore* hot_buttons = nullptr;
+    // The Lua UI's layout settings (ui.GetSetting/SetSetting, "hud." keys): read and set, so a client menu can change
+    // one (the hot bar's Lock layout). Empty without a Lua UI.
+    std::function<std::string(std::string_view key)> layout_setting;
+    std::function<void(std::string_view key, std::string_view value)> set_layout_setting;
     // The pet window's command buttons (CPetInfoWnd +0x234.., +0x26c; app/lua_eq_misc.cpp): what each holds, read by
     // the hot buttons it checks (SyncHotButtonStates).
     game::PetButtonLayout pet_buttons;

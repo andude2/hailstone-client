@@ -19,10 +19,12 @@
 #include "game/particles.h"
 #include "nav/zone_nav.h"
 #include "platform/process.h"
+#include <unordered_set>
 
 namespace hailstone::app::client_internal {
 
 void ClientApp::load_zone(const std::string& short_name) {
+    log_memory("zone load: before unload");
     unload_zone();
     if (audio_) {
         audio_->set_zone(short_name);
@@ -31,10 +33,7 @@ void ClientApp::load_zone(const std::string& short_name) {
     loading_view_.detail = "Loading " + short_name;
     auto t0 = Clock::now();
     // What each step of the load leaves in memory, so a load that holds much more than its geometry can be read.
-    auto mark = [&](const char* phase) {
-        if (auto rss = platform::resident_memory())
-            log::info("zone load: {}: {:.0f} MB resident", phase, double(*rss) / (1024 * 1024));
-    };
+    auto mark = [&](const char* phase) { log_memory(std::string("zone load: ") + phase); };
     mark("start");
     try {
         zone_ = assets::load_zone(game_, short_name);
@@ -203,6 +202,32 @@ void ClientApp::update_zone_settle() {
               total, zone_loaded_ms_, zone_in_ms_, zone_settle_.frames(),
               zone_in_ms_ >= 0 && total >= 0 ? total - zone_in_ms_ : -1, zone_settle_.most_waiting(),
               zone_settle_.timed_out() ? "; timed out: " + zone_settle_.detail() : std::string());
+    log_memory("zone-in: settled appearances");
+    if (actor_library_) {
+        std::size_t loaded = 0, count = 0, bytes = 0, decodes = 0, releases = 0;
+        std::unordered_set<const assets::CharacterArchive*> seen;
+        for (const auto& archive : actor_library_->archives()) {
+            if (!seen.insert(archive.get()).second) continue;
+            bytes += archive->parsed_bytes();
+            for (const auto& w : archive->wlds) {
+                ++count;
+                if (w.materialized()) ++loaded;
+                const auto stats = w.decode_stats();
+                decodes += stats.decodes;
+                releases += stats.releases;
+            }
+        }
+        log::info("memory character WLDs: {} / {} materialized, index and decoded estimate {:.2f} MiB",
+                  loaded, count, double(bytes) / (1024.0 * 1024.0));
+        log::info("memory character WLD activity: {} decodes, {} releases (current archives, cumulative)",
+                  decodes, releases);
+        const auto caches = actor_library_->cache_memory();
+        constexpr double mib = 1024.0 * 1024.0;
+        log::info("memory character caches: {} models {:.2f} MiB, {} appearances {:.2f} MiB, "
+                  "{} item copies {:.2f} MiB (payload estimates)",
+                  caches.models, double(caches.model_bytes) / mib, caches.appearances,
+                  double(caches.appearance_bytes) / mib, caches.items, double(caches.item_bytes) / mib);
+    }
     loading_since_.reset();
     // The zone-in clocks (the input script's, the test drivers') start as the world shows.
     zone_entered_ = now;

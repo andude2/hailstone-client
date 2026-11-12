@@ -73,11 +73,29 @@ local function bar(n)
     pager = spinner and 22 or -6
     left, top = vertical and -6 or pager, vertical and pager or -6 -- where the pager goes
   end
+  -- A corner or edge drag changes the shape: the columns from the dragged width, or the rows from its height,
+  -- whichever the mouse moved further. The same shape as "Buttons per row", by dragging the bar instead.
+  local function resizeTo(nw, nh)
+    settings()
+    local curW = left + 6 + perRow * (size + gap) - gap + 14
+    local curH = top + 6 + rows * (size + gap) - gap + 14
+    local cols = perRow
+    if math.abs(nw - curW) >= math.abs(nh - curH) then
+      cols = math.floor((nw - left - 20 + gap) / (size + gap) + 0.5)
+    else
+      local newRows = math.max(1, math.floor((nh - top - 20 + gap) / (size + gap) + 0.5))
+      cols = math.ceil(BUTTONS / newRows)
+    end
+    cols = math.max(1, math.min(BUTTONS, cols))
+    if cols ~= perRow then ui.SetSetting(perRowKey, cols) end
+  end
   local opts = {
     size = function()
       settings()
       return left + 6 + perRow * (size + gap) - gap + 14, top + 6 + rows * (size + gap) - gap + 14
     end,
+    resizable = { 40, 40 }, -- (the drag's floor; the shape snaps to whole buttons)
+    onResize = resizeTo,
     menu = function()
       ui.SetNextItemWidth(180)
       local v, changed = ui.SliderInt("Buttons per row", perRow, 1, BUTTONS)

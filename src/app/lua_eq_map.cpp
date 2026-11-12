@@ -1361,6 +1361,14 @@ struct ZoneView {
     // line wholly outside the square round it is passed over without projecting it.
     float reach = 0.0f;
     glm::vec2 reach_from{0.0f};
+    // The plugin spawn under the mouse, for a click to target it. A hit test in screen pixels, against the marks
+    // drawn (layer and height filter alike), so the clicked dot is the one the player sees.
+    bool hover_test = false;
+    ImVec2 mouse{0.0f, 0.0f};
+    float hover_radius = 8.0f;
+    std::uint32_t hover_id = 0;
+    std::string hover_name;
+    float hover_best = FLT_MAX;
 };
 
 // The map files' colours are chosen for the map window's light background; on a dark view the dark ones are
@@ -1375,7 +1383,7 @@ ImU32 ink(std::uint32_t argb, int alpha = 230) {
     return IM_COL32(mix(rr), mix(gg), mix(bb), alpha);
 }
 
-void draw_zone_view(MapState& s, EqHost& h, const ZoneView& zv) {
+void draw_zone_view(MapState& s, EqHost& h, ZoneView& zv) {
     auto me = s.player_map(h);
     if (!me) return;
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1470,6 +1478,15 @@ void draw_zone_view(MapState& s, EqHost& h, const ZoneView& zv) {
             const float fade = v.z_fade(mk.at.z, feet);
             dl->AddCircleFilled(q, 2.5f * w, faded(color(mk.mark.rgb, 0xff), fade));
             dl->AddCircle(q, 2.5f * w, faded(IM_COL32(0, 0, 0, 160), fade), 0, w * 0.5f);
+            if (zv.hover_test) {
+                const float dx = q.x - zv.mouse.x, dy = q.y - zv.mouse.y;
+                const float d2 = dx * dx + dy * dy;
+                if (d2 <= zv.hover_radius * zv.hover_radius && d2 < zv.hover_best) {
+                    zv.hover_best = d2;
+                    zv.hover_id = mk.spawn ? mk.spawn->id : 0;
+                    zv.hover_name = mk.mark.label;
+                }
+            }
             if (!zv.labels || mk.mark.label.empty()) continue;
             ImFont* f = ImGui::GetFont();
             float fs = ImGui::GetFontSize();
@@ -1536,8 +1553,13 @@ int DrawMinimap(lua_State* L) {
     };
     zv.reach = range; // the circle's radius r is `range` map units, however the map turns
     zv.reach_from = glm::vec2(me->x, me->y);
+    zv.hover_test = true;
+    zv.mouse = ImGui::GetMousePos();
+    zv.hover_radius = std::max(6.0f, 5.0f * zv.width);
     draw_zone_view(s, h, zv);
-    return 2;
+    lua_pushinteger(L, static_cast<lua_Integer>(zv.hover_id));
+    lua_pushlstring(L, zv.hover_name.data(), zv.hover_name.size());
+    return 4;
 }
 
 // scale, cx, cy = eq.DrawZoneMap(x0, y0, x1, y1, zoom [, cx, cy [, labels]])   -- the map in that rectangle, north
@@ -1583,10 +1605,18 @@ int DrawZoneMap(lua_State* L) {
     zv.width = std::max(1.5f, (y1 - y0) / 400.0f);
     zv.labels = lua_isnoneornil(L, 8) || lua_toboolean(L, 8);
     zv.P = [&](float x, float y) { return glm::vec2((x - cx) * k, (y - cy) * k); };
+    const ImVec2 mouse = ImGui::GetMousePos();
+    if (mouse.x >= x0 && mouse.y >= y0 && mouse.x < x1 && mouse.y < y1) {
+        zv.hover_test = true;
+        zv.mouse = mouse;
+        zv.hover_radius = std::max(6.0f, 5.0f * zv.width);
+    }
     ImGui::GetWindowDrawList()->PushClipRect(ImVec2(x0, y0), ImVec2(x1, y1), true);
     draw_zone_view(s, h, zv);
     ImGui::GetWindowDrawList()->PopClipRect();
-    return out;
+    lua_pushinteger(L, static_cast<lua_Integer>(zv.hover_id));
+    lua_pushlstring(L, zv.hover_name.data(), zv.hover_name.size());
+    return out + 2;
 }
 
 // eq.DrawAtlas(x0, y0, x1, y1, scale)   -- the atlas page (AtlasWnd) in that rectangle of the map window, scrolled
@@ -1670,6 +1700,17 @@ int DrawAtlas(lua_State* L) {
         }
     }
     ImGui::EndChild();
+    return 0;
+}
+
+// eq.TargetSpawn(id)   -- make that spawn the target (the minimap's spawn click): nothing for a spawn that is not here.
+int TargetSpawn(lua_State* L) {
+    EqHost& h = *host_of(L);
+    const lua_Integer id = luaL_checkinteger(L, 1);
+    if (!h.conn || id <= 0 || id > 0xffffffffLL) return 0;
+    const auto spawn_id = static_cast<std::uint32_t>(id);
+    if (!h.conn->world().spawns.contains(spawn_id)) return 0;
+    h.conn->set_target(spawn_id);
     return 0;
 }
 
@@ -1908,6 +1949,7 @@ void register_map_api(lua_State* L, EqHost& host, std::vector<std::unique_ptr<St
     static const luaL_Reg fns[] = {{"DrawMap", DrawMap},         {"MapZoom", MapZoom},         {"MapMouseDown", MapMouseDown},
                                    {"MapMouseUp", MapMouseUp},   {"MapPanReset", MapPanReset}, {"MapRightClick", MapRightClick},
                                    {"DrawMinimap", DrawMinimap}, {"DrawZoneMap", DrawZoneMap},
+                                   {"TargetSpawn", TargetSpawn},
                                    {"FindMapLocation", FindMapLocation}, {"DrawAtlas", DrawAtlas}, {"FindPathShown", FindPathShown}, {"EndFind", EndFind}, {"ZoneName", ZoneName}, {"MapAutoZ", MapAutoZ},       {"GameTime", GameTime},
                                    {nullptr, nullptr}};
     lua_pushlightuserdata(L, state);

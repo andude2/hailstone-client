@@ -4,6 +4,7 @@
 // and its collision world. Only those files include it.
 
 #include "app/updater.h"
+#include "platform/process.h"
 #include "core/step_clock.h"
 #include "app/addon_manager.h"
 #include "app/addon_suggest.h"
@@ -337,6 +338,18 @@ enum class Screen { Login, Servers, Characters, Create, Loading, InGame };
 
 class ClientApp {
 public:
+    // Sparse lifecycle snapshots; heap allocation bytes and RSS overlap on shared-memory GPUs.
+    void log_memory(std::string_view phase) const {
+        constexpr double mib = 1024.0 * 1024.0;
+        if (auto rss = platform::resident_memory())
+            log::info("memory checkpoint: {}: resident {:.2f} MiB", phase, double(*rss) / mib);
+        const auto heaps = vk_.heap_use();
+        for (std::size_t i = 0; i < heaps.size(); ++i)
+            log::info("memory GPU: {}: heap {} ({}), allocation bytes {:.2f} MiB, {} allocations",
+                      phase, i, heaps[i].device_local ? "device-local" : "host", double(heaps[i].allocated) / mib,
+                      heaps[i].allocations);
+    }
+
     // The Lua UI goes first: its state's finalizers may still reach what the eq.* functions hold (eq_host_, eq_api_,
     // the views), which members declared after it would already have destroyed.
     ~ClientApp() { lua_ui_.reset(); }
@@ -347,6 +360,7 @@ public:
           ui_(window_, vk_,
               ui::ImGuiLayerDesc{.scale_override = ui_scale_setting(options),
                                  .ini_path = platform::imgui_ini()}) {
+        log_memory("startup: window, Vulkan, fonts");
         apply_window_icon(window_);
         shader_dir_ = platform::shaders_dir();
         config_path_ = default_config_path();
@@ -362,6 +376,7 @@ public:
         // The settings (hailstone.ini's until a character enters, then the character's: apply_settings), before the
         // renderers: their pipelines take the sample count.
         apply_settings();
+        log_memory("startup: settings and render targets");
         // The saved servers (core/server_profile.h), the last one used picked (--server another); the old
         // login.host/port/username keys become the first.
         // The saved passwords (the system keyring); test logins never read or write them.
@@ -374,9 +389,11 @@ public:
         spawn_renderer_ = std::make_unique<render::SpawnRenderer>(vk_, shader_dir_);
         world_objects_ = std::make_unique<WorldObjects>(vk_, game_, shader_dir_);
         neighbours_ = std::make_unique<NeighbourZones>(vk_, game_, shader_dir_);
+        log_memory("startup: world objects");
         spell_ui_ = std::make_unique<SpellUi>(vk_, game_);
         item_ui_ = std::make_unique<ItemUi>(vk_, game_);
         stats_ui_ = std::make_unique<StatsUi>(game_);
+        log_memory("startup: icons and stat tables");
         // The user interface (ui/ui_packs.h): the picked server's (ServerProfile::ui), else hailstone.ini ui.name, a
         // folder of <client>/ui; its scripts' settings in ui/settings/<name>.txt of the data folder (the first-start
         // migration brings the old ones).
@@ -389,6 +406,7 @@ public:
         refresh_game_folders();
         ui_textures_ = std::make_unique<ui::UiTextures>(vk_, game_);
         ui_textures_->set_all_art(pack && pack->game_art);
+        log_memory("startup: Lua and UI textures");
         eq_host_.textures = ui_textures_.get();
         eq_host_.keep_cpp_windows = config_.get_bool("ui.cpp_windows", false);
         // the layout copy brings the UI's window layout of the character copied from (none: the shared layout)
@@ -585,6 +603,7 @@ public:
         social_ui_.set_testing(opts_.auto_accept_invite);
         // Sound (audio/): the settings are hailstone.ini's audio.* keys; no device = silent.
         audio_ = std::make_unique<audio::AudioSystem>(game_, audio::load_audio_settings(config_), !opts_.no_audio);
+        log_memory("startup: audio scheduled");
         sound_events_ = std::make_unique<SoundEvents>(*audio_, game_);
         // A crash last run: its report is made now and its window shown (app/client_app_bugreport.cpp).
         report_last_crash();
@@ -599,6 +618,7 @@ public:
         }
         audio_->music_selection(audio::kMusicLogin, pregame_music_); // CDisplay_InitDisplay
         spell_particles_ = std::make_unique<SpellParticles>(vk_, game_, shader_dir_);
+        log_memory("startup: spell particles");
         spell_bolts_ = std::make_unique<SpellBolts>(vk_, shader_dir_);
         actor_emitters_ = std::make_unique<ActorEmitters>(vk_, game_, shader_dir_);
         apply_particle_densities();

@@ -5,7 +5,10 @@
 #include <algorithm>
 #include <fstream>
 #include <functional>
+#include <map>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include <imgui.h>
 #include <lua.hpp>
@@ -18,6 +21,32 @@
 
 using namespace hailstone;
 using namespace hailstone::test;
+
+TEST_CASE("Blocked buffs: the character's UI ini keeps the player's and pet's lists") {
+    EmptyGameDir dir;
+    GameDir game(dir.path());
+    net::GameConnection conn(game);
+    std::map<std::string, std::string> ini;
+    auto key = [](std::string_view section, std::string_view name) {
+        return std::string(section) + "." + std::string(name);
+    };
+    conn.set_ui_ini(
+        [&](std::string_view section, std::string_view name) -> std::optional<std::string> {
+            auto it = ini.find(key(section, name));
+            return it == ini.end() ? std::nullopt : std::optional<std::string>(it->second);
+        },
+        [&](std::string_view section, std::string_view name, const std::string& value) {
+            ini[key(section, name)] = value;
+        });
+    ini[key("BlockedBuffs", "Me")] = "11, bad, 717,-5";
+    ini[key("BlockedBuffs", "Pet")] = "200";
+    conn.load_blocked_buffs();
+    CHECK(conn.blocked_buffs(false) == std::vector<std::int32_t>{11, 717});
+    CHECK(conn.blocked_buffs(true) == std::vector<std::int32_t>{200});
+    conn.save_blocked_buffs();
+    CHECK(ini[key("BlockedBuffs", "Me")] == "11,717");
+    CHECK(ini[key("BlockedBuffs", "Pet")] == "200");
+}
 
 TEST_CASE("Blocked buffs: a buff's spell id in the window's edit box, then Add, asks the server to block it") {
     ImGuiContext* ctx = ImGui::CreateContext();

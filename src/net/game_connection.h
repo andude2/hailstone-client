@@ -1341,6 +1341,9 @@ public:
     const std::vector<std::int32_t>& blocked_buffs(bool pet) const { return blocked_buffs_[pet ? 1 : 0]; }
     void block_buff(bool pet, std::int32_t spell);
     void unblock_buff(bool pet, std::int32_t spell);
+    // The lists the character keeps in its UI ini ([BlockedBuffs] Me / Pet) and sends again at each zone-in.
+    void load_blocked_buffs();
+    void save_blocked_buffs();
     // ---- using items (net/game_connection_item_use.cpp)
     // A right click on an item slot (CInvSlot::HandleRButtonUp @0x697250): a book is read, a common item in the
     // possessions is used (use_item), a corpse slot looted; what is left to the windows comes back. The server
@@ -3209,6 +3212,7 @@ private:
     std::map<std::uint32_t, AltCurrency> alt_currencies_;
     PointMerchant point_merchant_;
     std::array<std::vector<std::int32_t>, 2> blocked_buffs_; // player, pet
+    bool blocked_buffs_loaded_ = false; // the UI ini's lists read once for this connection
     void resend_blocked_buffs();
     Tribute tribute_;
     GuildTribute guild_tribute_;

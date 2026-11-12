@@ -54,6 +54,28 @@ int marked_vertices(lua_State* L, const std::string& code, std::optional<ImU32> 
     return n;
 }
 
+// Runs `code` in a window with the mouse at `mouse` (the map hit tests use it) and returns its string answer.
+std::string lua_answer(lua_State* L, const std::string& code, ImVec2 mouse) {
+    ImGui::GetIO().DisplaySize = ImVec2(800, 600);
+    ImGui::GetIO().DeltaTime = 1.0f / 60.0f;
+    ImGui::NewFrame();
+    ImGui::GetIO().MousePos = mouse;
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(600, 500));
+    ImGui::Begin("map");
+    std::string out;
+    if (luaL_dostring(L, code.c_str()) == LUA_OK) {
+        if (const char* s = lua_tostring(L, -1)) out = s;
+        lua_settop(L, 0);
+    } else {
+        FAIL(lua_tostring(L, -1));
+        lua_settop(L, 0);
+    }
+    ImGui::End();
+    ImGui::Render();
+    return out;
+}
+
 } // namespace
 
 TEST_CASE("Map spawns: a plugin's marks on the minimap, the zone map and the map window") {
@@ -84,6 +106,14 @@ TEST_CASE("Map spawns: a plugin's marks on the minimap, the zone map and the map
         lua_setglobal(L, "eq");
 
         CHECK(marked_vertices(L, "eq.DrawMinimap(300, 250, 100, 500)") > 0);
+        // The rat is 50 map units from the player, 10 screen pixels on this 500-unit circle; a click there names it.
+        CHECK(lua_answer(L, "local _, _, id, name = eq.DrawMinimap(300, 250, 100, 500) return tostring(id) .. ' ' .. name",
+                         ImVec2(294, 242)) == "10 Rat!");
+        CHECK(lua_answer(L, "local _, _, id = eq.DrawMinimap(300, 250, 100, 500) return tostring(id)",
+                         ImVec2(300, 250)) == "0");
+        world.conn->set_target(0);
+        lua_answer(L, "eq.TargetSpawn(10) return ''", ImVec2(0, 0));
+        CHECK(world.conn->world().target_id == 10);
         CHECK(marked_vertices(L, "eq.DrawZoneMap(0, 0, 600, 500, 1, 0, 0, true)") > 0);
         CHECK(marked_vertices(L, "eq.DrawMap(0, 0, 600, 500)") > 0); // the map window
         // Outside the minimap's reach: not drawn.

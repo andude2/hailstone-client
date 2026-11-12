@@ -175,6 +175,7 @@ public:
     const eqg_character::Layer* layer(std::string_view name);
 
 private:
+    friend class CharacterLibrary; // cache diagnostics include models retained by the persistent EQG store
     struct Source {
         std::string archive; // lower case, e.g. "hnm.eqg"
         std::string member;  // lower case

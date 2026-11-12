@@ -83,42 +83,43 @@ Commands::Commands(CommandEnv env) : env_(std::move(env)) {
         if (env_.run) env_.run(std::string(args));
         --squelch_;
     });
-    h.add_command(
-        owner_, "/target",
-        [this](std::string_view args) {
-            const Context& ctx = env_.context();
-            if (!ctx.conn || !env_.set_target) return;
-            args = trim(args);
-            const game::WorldState& world = ctx.conn->world();
-            if (args.empty()) {
-                say("Usage: /target [id <spawn id> | clear | mycorpse | <spawn search>]");
-                return;
-            }
-            if (iequals(args, "clear")) {
-                env_.set_target(0);
-                return;
-            }
-            if (iequals(args, "mycorpse")) {
-                std::string mine = ctx.conn->character_name() + "'s corpse";
-                SpawnSearch q = parse_spawn_search("pccorpse");
-                for (const game::Spawn* s : search_spawns(q, world, &ctx.conn->group()))
-                    if (icontains(s->name, ctx.conn->character_name())) {
-                        env_.set_target(s->id);
-                        return;
-                    }
-                say("There are no spawns matching: (" + mine + ")");
-                return;
-            }
-            auto found = search_spawns(parse_spawn_search(args), world, &ctx.conn->group());
-            // A plain name means someone else, not the player (MQ skips you unless asked for).
-            for (const game::Spawn* s : found) {
-                if (s->id == world.player_id && found.size() > 1) continue;
-                env_.set_target(s->id);
-                return;
-            }
-            say(std::format("There are no spawns matching: ({})", args));
-        },
-        plugin::kCapTarget);
+    auto target_command = [this](std::string_view args) {
+        const Context& ctx = env_.context();
+        if (!ctx.conn || !env_.set_target) return;
+        args = trim(args);
+        const game::WorldState& world = ctx.conn->world();
+        if (args.empty()) {
+            say("Usage: /target [id <spawn id> | clear | mycorpse | <spawn search>]");
+            return;
+        }
+        if (iequals(args, "clear")) {
+            env_.set_target(0);
+            return;
+        }
+        if (iequals(args, "mycorpse")) {
+            std::string mine = ctx.conn->character_name() + "'s corpse";
+            SpawnSearch q = parse_spawn_search("pccorpse");
+            for (const game::Spawn* s : search_spawns(q, world, &ctx.conn->group()))
+                if (icontains(s->name, ctx.conn->character_name())) {
+                    env_.set_target(s->id);
+                    return;
+                }
+            say("There are no spawns matching: (" + mine + ")");
+            return;
+        }
+        auto found = search_spawns(parse_spawn_search(args), world, &ctx.conn->group());
+        // A plain name means someone else, not the player (MQ skips you unless asked for).
+        for (const game::Spawn* s : found) {
+            if (s->id == world.player_id && found.size() > 1) continue;
+            env_.set_target(s->id);
+            return;
+        }
+        say(std::format("There are no spawns matching: ({})", args));
+    };
+    h.add_command(owner_, "/target", target_command, plugin::kCapTarget);
+    // The game's own /tar prefix reaches /target; on MQ's side it is a command of
+    // its own, so "/tar id 123" gets the same id search as "/target id 123".
+    h.add_command(owner_, "/tar", target_command, plugin::kCapTarget);
     h.add_command(
         owner_, "/face",
         [this](std::string_view args) {

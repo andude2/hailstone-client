@@ -66,7 +66,7 @@ local function drawWindow(x, y, w, h, s)
   local dragged = hud.DragItem() -- a drag moves the frame
   local mx, my = ui.GetMousePos()
   local hovered = ui.IsItemHovered() and (mx - cx) ^ 2 + (my - cy) ^ 2 <= r * r
-  local nx, ny = eq.DrawMinimap(cx, cy, r, RANGES[zoom()], rotating())
+  local nx, ny, spawnId, spawnName = eq.DrawMinimap(cx, cy, r, RANGES[zoom()], rotating())
   ui.DrawCircle(cx, cy, r, C.accent[1], C.accent[2], C.accent[3], 0.35, 1.5 * s)
   -- north on the ring
   if nx then
@@ -76,12 +76,19 @@ local function drawWindow(x, y, w, h, s)
     local _, th = T.TextSize("N", T.font.small)
     T.Text(px, py - th / 2, "N", C.danger, T.font.small, "center")
   end
+  local onSpawn = spawnId and spawnId ~= 0
   if hovered then
-    ui.SetTooltip(string.format("%s\nClick: the map   Wheel: zoom (range %d)\nRight-click: %s", zone, RANGES[zoom()],
-      rotating() and "north up" or "turn with the player"))
+    if onSpawn then
+      ui.SetTooltip(string.format("%s\n%s\nClick: target", zone, spawnName ~= "" and spawnName or "spawn"))
+    else
+      ui.SetTooltip(string.format("%s\nClick: the map   Wheel: zoom (range %d)\nRight-click: %s", zone, RANGES[zoom()],
+        rotating() and "north up" or "turn with the player"))
+    end
     local wheel = ui.GetIO().wheel or 0
     if wheel ~= 0 then setZoom(wheel > 0 and -1 or 1) end
-    if ui.IsMouseReleased(ui.Mouse.Left) and not dragged then eq.ShowWindow("MapViewWnd", true) end
+    if ui.IsMouseReleased(ui.Mouse.Left) and not dragged then
+      if onSpawn then eq.TargetSpawn(spawnId) else eq.ShowWindow("MapViewWnd", true) end
+    end
     if ui.IsMouseClicked(ui.Mouse.Right) and not ui.GetIO().alt then
       ui.SetSetting("minimap.rotate", rotating() and "0" or "1")
       T.TakeRightClick()

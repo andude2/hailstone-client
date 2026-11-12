@@ -1297,6 +1297,15 @@ LuaUi::~LuaUi() {
 
 bool LuaUi::layout_setting(std::string_view key) { return key.starts_with("hud.") || key == "tasks.listw"; }
 
+std::string LuaUi::setting(std::string_view key) const {
+    if (auto v = impl_->get_setting(std::string(key))) return *v;
+    return {};
+}
+
+bool LuaUi::set_setting(std::string_view key, std::string_view value) {
+    return impl_->set_setting(std::string(key), std::string(value));
+}
+
 bool LuaUi::character_setting(std::string_view key) { return layout_setting(key) || key.starts_with("items."); }
 
 void LuaUi::set_character_settings(const fs::path& file) {

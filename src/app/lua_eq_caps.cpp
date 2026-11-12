@@ -30,6 +30,7 @@ namespace {
 
 using plugin::kCapActions;
 using plugin::kCapCommands;
+using plugin::kCapTarget;
 
 struct Entry {
     std::string_view name;
@@ -60,6 +61,7 @@ constexpr Entry kCalls[] = {
     {"DisplaySpellId", 0}, {"DisplayItemData", 0},
     {"SpellSets", 0}, {"DrawMap", 0}, {"MapZoom", 0}, {"MapMouseDown", 0}, {"MapMouseUp", 0}, {"MapPanReset", 0},
     {"DrawMinimap", 0}, {"DrawZoneMap", 0}, {"DrawAtlas", 0}, {"FindPathShown", 0}, {"ZoneName", 0}, {"GameTime", 0},
+    {"TargetSpawn", kCapTarget},
     {"LuaSocialRules", 0}, {"LuaSocial", 0}, {"LuaSocialFace", 0}, {"LuaSocialExport", 0},
     {"LuaSocialImport", 0}, {"LuaComplete", 0}, {"LuaSocialEditRequest", 0}, {"FreeSocial", 0}, {"SocialColors", 0},
     {"SocialEditorSocial", 0}, {"SocialLine", 0}, {"SlashCommands", 0}, {"CurrentSocial", 0},

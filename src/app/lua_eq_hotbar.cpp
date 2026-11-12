@@ -416,6 +416,19 @@ void open_hot_bar_menu(EqHost& host, int bar, float x, float y) {
     });
     spinner.check = s.spinner;
     rows.push_back(std::move(spinner));
+    // The frame's layout lock (hud.lock.<screen>, the same lock the modern UI's menu has): a drag no longer moves or
+    // resizes the bar. Hailstone's row, not the original's.
+    if (host.set_layout_setting) {
+        rows.push_back(separator());
+        const std::string lock_key = "hud.lock." + screen;
+        EqHost::MenuRow lock = row("Lock layout", [&host, lock_key] {
+            if (!host.set_layout_setting) return;
+            const bool locked = host.layout_setting && host.layout_setting(lock_key) == "1";
+            host.set_layout_setting(lock_key, locked ? "0" : "1");
+        });
+        lock.check = host.layout_setting && host.layout_setting(lock_key) == "1";
+        rows.push_back(std::move(lock));
+    }
     // 0x1a90 Open New Bar (0x68b6f0): enabled while a bar is hidden; shows the first (its Show stored)
     int hidden = -1;
     for (int b = 0; b < game::kHotBars && hidden < 0; ++b)

@@ -9,6 +9,7 @@
 // start-up loads.
 
 #include "assets/character.h"
+#include "platform/process.h"
 
 #include <algorithm>
 #include <atomic>
@@ -292,6 +293,16 @@ void append_wld_mesh(const wld::WldFile& w, const wld::Fragment& mf, std::size_t
 // ---------------------------------------------------------------------------
 // Archives
 
+std::size_t CharacterArchive::archive_bytes() const { return archive ? archive->storage_bytes() : 0; }
+
+std::size_t CharacterArchive::owned_bytes() const { return archive ? archive->owned_bytes() : 0; }
+
+std::size_t CharacterArchive::parsed_bytes() const {
+    std::size_t total = 0;
+    for (const auto& w : wlds) total += w.retained_bytes();
+    return total;
+}
+
 std::shared_ptr<const CharacterArchive> load_character_archive(const GameDir& game, std::string_view file) {
     auto path = game.find(file);
     if (!path) return nullptr;
@@ -299,9 +310,12 @@ std::shared_ptr<const CharacterArchive> load_character_archive(const GameDir& ga
     out->archive = std::make_shared<const PfsArchive>(PfsArchive::open(*path));
     for (const auto& member : out->archive->names()) {
         if (!member.ends_with(".wld")) continue;
-        auto data = out->archive->read(member);
-        if (!data) continue;
-        out->wlds.push_back(wld::WldFile::parse(*data, out->archive->label() + ":" + member));
+        auto source = out->archive;
+        out->wlds.push_back(wld::WldFile::deferred([source, member] {
+            auto bytes = source->read(member);
+            if (!bytes) throw std::runtime_error("missing character WLD " + member);
+            return std::move(*bytes);
+        }, source->label() + ":" + member));
     }
     return out;
 }
@@ -556,55 +570,55 @@ void CharacterTables::add(const CharacterArchive& ca, std::size_t ai, int level,
     const bool equip = label.starts_with("lgequip") || label.starts_with("frogequip");
     bool luclin_wld = is_luclin_archive(label) || label.find("_amr") != std::string::npos || equip;
     for (const auto& w : ca.wlds) {
-        for (const auto& f : w.fragments()) {
-            if (f.name.empty()) continue;
-            if (luclin_wld && std::holds_alternative<wld::MaterialDef>(f.data)) {
-                luclin_materials.try_emplace(upper(f.name), &w, &f);
-                zone_name('l', upper(f.name));
+        w.visit_character_index([&](wld::Ref ref, std::uint32_t type, const std::string& name, const wld::TrackRef* t) {
+            if (name.empty()) return;
+            if (luclin_wld && type == 0x30) {
+                luclin_materials.try_emplace(upper(name), FragmentLoc{&w, ref});
+                zone_name('l', upper(name));
             }
-            if (std::holds_alternative<wld::ActorDef>(f.data)) {
+            if (type == 0x14) {
                 constexpr std::string_view kSuffix = "_ACTORDEF";
-                std::string name = upper(f.name);
-                if (!name.ends_with(kSuffix)) continue;
-                std::string code = name.substr(0, name.size() - kSuffix.size());
+                std::string actor_name = upper(name);
+                if (!actor_name.ends_with(kSuffix)) return;
+                std::string code = actor_name.substr(0, actor_name.size() - kSuffix.size());
                 zone_name(equip ? 'p' : 'a', code);
                 // Luclin modular parts (hair, beards, helms, robes, plate)
                 // are IT<n> actors of the lgequip archives; their numbers
                 // overlap ordinary items, so they are kept apart.
                 if (equip)
                     add_resource(luclin_parts, part_levels, base ? &base->part_levels : nullptr, code, level,
-                                 std::pair{&w, &f});
+                                 FragmentLoc{&w, ref});
                 else {
                     add_resource(actors, actor_levels, base ? &base->actor_levels : nullptr, code, level,
-                                 std::pair{&w, &f});
-                    actor_wlds.try_emplace({&w, code}, &f);
+                                 FragmentLoc{&w, ref});
+                    actor_wlds.try_emplace(std::pair{&w, code}, FragmentLoc{&w, ref});
                 }
-            } else if (std::holds_alternative<wld::MeshDef>(f.data)) {
-                add_resource(meshes, mesh_levels, base ? &base->mesh_levels : nullptr, upper(f.name), level,
-                             std::pair{&w, &f});
-                zone_name('m', upper(f.name));
-            } else if (const auto* t = std::get_if<wld::TrackRef>(&f.data)) {
-                zone_name('t', f.name);
-                if (is_clip_code(f.name) && f.name.size() > 3) zone_name('c', f.name.substr(3));
-                if (is_clip_code(f.name) && f.name.size() > 4) zone_name('c', f.name.substr(4));
-                if (!add_resource(tracks, track_levels, base ? &base->track_levels : nullptr, f.name, level,
-                                  TrackLoc{&w, t}))
-                    continue;
-                if (is_clip_code(f.name) && f.name.size() > 3) {
-                    auto& clips = clip_list(f.name.substr(3));
-                    std::string code = f.name.substr(0, 3);
+            } else if (type == 0x36) {
+                add_resource(meshes, mesh_levels, base ? &base->mesh_levels : nullptr, upper(name), level,
+                             FragmentLoc{&w, ref});
+                zone_name('m', upper(name));
+            } else if (t) {
+                zone_name('t', name);
+                if (is_clip_code(name) && name.size() > 3) zone_name('c', name.substr(3));
+                if (is_clip_code(name) && name.size() > 4) zone_name('c', name.substr(4));
+                if (!add_resource(tracks, track_levels, base ? &base->track_levels : nullptr, name, level,
+                                  TrackLoc{&w, *t}))
+                    return;
+                if (is_clip_code(name) && name.size() > 3) {
+                    auto& clips = clip_list(name.substr(3));
+                    std::string code = name.substr(0, 3);
                     if (std::find(clips.begin(), clips.end(), code) == clips.end()) clips.push_back(code);
                     // Luclin models name their takes with a fourth letter
                     // (C01A, L10B): index that reading too.
-                    if (f.name.size() > 4 && (f.name[3] == 'A' || f.name[3] == 'B')) {
-                        auto& luclin = clip_list(f.name.substr(4));
-                        std::string code4 = f.name.substr(0, 4);
+                    if (name.size() > 4 && (name[3] == 'A' || name[3] == 'B')) {
+                        auto& luclin = clip_list(name.substr(4));
+                        std::string code4 = name.substr(0, 4);
                         if (std::find(luclin.begin(), luclin.end(), code4) == luclin.end())
                             luclin.push_back(code4);
                     }
                 }
             }
-        }
+        });
     }
 }
 
@@ -726,9 +740,28 @@ CharacterLibrary CharacterLibrary::load(const GameDir& game, std::string_view zo
 
 std::shared_ptr<const CharacterLibrary> CharacterArchiveCache::library_for_zone(const GameDir& game,
                                                                                std::string_view zone) {
+    auto memory = [](std::string_view group, const auto& archives) {
+        if (auto rss = platform::resident_memory())
+            log::info("memory checkpoint: character archives {}: resident {:.2f} MiB", group, double(*rss) / (1024.0 * 1024.0));
+        std::size_t mapped = 0, owned = 0, parsed = 0;
+        constexpr double mib = 1024.0 * 1024.0;
+        for (const auto& a : archives) {
+            const auto heap = a->owned_bytes();
+            const auto file = a->archive_bytes() - heap;
+            const auto wld = a->parsed_bytes();
+            mapped += file;
+            owned += heap;
+            parsed += wld;
+            log::info("memory archive: {} {}: mapped {:.2f} MiB, heap {:.2f} MiB, parsed WLD estimate {:.2f} MiB",
+                      group, a->archive->label(), double(file) / mib, double(heap) / mib, double(wld) / mib);
+        }
+        log::info("memory archives: {}: {} archives, mapped {:.2f} MiB, heap {:.2f} MiB, parsed WLD estimate {:.2f} MiB",
+                  group, archives.size(), double(mapped) / mib, double(owned) / mib, double(parsed) / mib);
+    };
     if (!loaded_) {
         auto t0 = std::chrono::steady_clock::now();
         auto list = CharacterLibrary::open_archives(game, global_character_archives(game, luclin_));
+        memory("global", list);
         auto levels = levels_of(list, global_archive_levels(game));
         globals_ = std::make_shared<const CharacterArchiveIndex>(std::move(list), std::move(levels));
         eqg_ = std::make_shared<EqgCharacterStore>(game);
@@ -742,6 +775,7 @@ std::shared_ptr<const CharacterLibrary> CharacterArchiveCache::library_for_zone(
     }
     // Only the zone's own archives are read and indexed here; the global ones' index is shared.
     auto zone_list = CharacterLibrary::open_archives(game, zone_character_archives(game, zone));
+    memory(zone, zone_list);
     auto lib = std::make_shared<CharacterLibrary>(globals_, std::move(zone_list));
     {
         std::lock_guard lock(*mutex_); // the last zone's library may still be in use on another thread
@@ -796,11 +830,13 @@ bool CharacterLibrary::has_model(std::string_view code) const {
 }
 
 std::vector<std::string> CharacterLibrary::model_codes() const {
+    Lock lock(*mutex_);
+    wld::WldFile::ReadScope wld_reads;
     std::vector<std::string> out;
     auto consider = [&](const std::string& code, const FragmentLoc& loc) {
         // Skeletal actors only; IT<n> are item models.
         if (code.size() > 2 && code.starts_with("IT") && std::isdigit(static_cast<unsigned char>(code[2]))) return;
-        const auto& actor = std::get<wld::ActorDef>(loc.second->data);
+        const auto& actor = std::get<wld::ActorDef>(loc.fragment()->data);
         // NOLINTBEGIN(clang-analyzer-core.NullDereference): false positive, the actor tables hold only non-null locations.
         bool skeletal = std::any_of(actor.sprites.begin(), actor.sprites.end(),
                                     [&](wld::Ref r) { return loc.first->get<wld::SkeletonRef>(r) != nullptr; });
@@ -838,6 +874,7 @@ bool CharacterLibrary::has_file(std::string_view name) const {
 
 std::shared_ptr<const CharacterModel> CharacterLibrary::model(std::string_view code_view) const {
     Lock lock(*mutex_);
+    wld::WldFile::ReadScope wld_reads;
     std::string code = upper(code_view);
     if (auto it = cache_.find(code); it != cache_.end()) {
         CharacterLookups::note(it->second.lookups);
@@ -874,10 +911,12 @@ std::shared_ptr<const CharacterModel> CharacterLibrary::model(std::string_view c
 }
 
 CharacterModel CharacterLibrary::build(std::string_view code_view) const {
+    Lock lock(*mutex_);
+    wld::WldFile::ReadScope wld_reads;
     std::string code = upper(code_view);
     const FragmentLoc* actor = actors().find(code);
     if (!actor) throw std::runtime_error("no actor " + code + "_ACTORDEF");
-    return build_actor(code, *actor->first, *actor->second);
+    return build_actor(code, *actor->first, *actor->fragment());
 }
 
 namespace {
@@ -980,7 +1019,7 @@ CharacterModel CharacterLibrary::build_actor(const std::string& code, const wld:
         auto [it, added] = rivals.try_emplace(loc->wld, false);
         if (added)
             if (auto a = actor_wlds().find({loc->wld, code})) {
-                const auto* other = actor_skeleton(*loc->wld, std::get<wld::ActorDef>((*a)->data));
+                const auto* other = actor_skeleton(*loc->wld, std::get<wld::ActorDef>(a->fragment()->data));
                 std::vector<std::string> names;
                 if (other)
                     for (const auto& node : other->nodes) {
@@ -1008,7 +1047,7 @@ CharacterModel CharacterLibrary::build_actor(const std::string& code, const wld:
         auto [it, added] = donor_rivals.try_emplace(loc->wld, false);
         if (added)
             if (auto a = actor_wlds().find({loc->wld, m.animation_donor})) {
-                const auto* other = actor_skeleton(*loc->wld, std::get<wld::ActorDef>((*a)->data));
+                const auto* other = actor_skeleton(*loc->wld, std::get<wld::ActorDef>(a->fragment()->data));
                 std::size_t shared = 0;
                 if (other)
                     for (const auto& node : other->nodes) {
@@ -1041,7 +1080,7 @@ CharacterModel CharacterLibrary::build_actor(const std::string& code, const wld:
             const std::string& name = own ? m.bone_names[i] : donor_names[i];
             const TrackLoc* loc = name.empty() ? nullptr : track(clip_code + name);
             if (own && rival(loc)) loc = nullptr;
-            const auto* def = loc ? loc->wld->get<wld::TrackDef>(loc->ref->track) : nullptr;
+            const auto* def = loc ? loc->wld->get<wld::TrackDef>(loc->ref.track) : nullptr;
             if (!def || def->frames.empty()) {
                 a.tracks[i] = rest.tracks[i];
                 continue;
@@ -1059,8 +1098,8 @@ CharacterModel CharacterLibrary::build_actor(const std::string& code, const wld:
             }
             if (def->frames.size() > 1) {
                 a.frame_count = std::max<std::uint32_t>(a.frame_count, static_cast<std::uint32_t>(def->frames.size()));
-                if ((loc->ref->flags & 1) && loc->ref->frame_ms > 0 && !timed) {
-                    a.frame_ms = loc->ref->frame_ms;
+                if ((loc->ref.flags & 1) && loc->ref.frame_ms > 0 && !timed) {
+                    a.frame_ms = loc->ref.frame_ms;
                     timed = true;
                 }
             }

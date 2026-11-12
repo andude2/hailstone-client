@@ -327,7 +327,7 @@ private:
             std::vector<glm::mat4> body;
             model_.sample(model_.clips.at(""), 0.0f, false, body);
             try {
-                CharacterModel pm = lib_.build_actor(a.name, *loc->first, *loc->second);
+                CharacterModel pm = lib_.build_actor(a.name, *loc->first, *loc->fragment());
                 std::vector<glm::mat4> local;
                 pm.sample(pm.clips.at(""), 0.0f, false, local);
                 std::vector<glm::mat4> correction(pm.bone_names.size());
@@ -362,7 +362,7 @@ private:
                 }
             } catch (const std::exception&) {
                 const wld::WldFile& w = *loc->first;
-                const auto& actor = std::get<wld::ActorDef>(loc->second->data);
+                const auto& actor = std::get<wld::ActorDef>(loc->fragment()->data);
                 piece = {};
                 try {
                     for (wld::Ref s : actor.sprites) {
@@ -572,6 +572,7 @@ void CharacterLibrary::dress_luclin(const CharacterModel& model, const game::App
 std::uint32_t CharacterLibrary::try_fheb(const CharacterModel& model, game::Appearance& a, std::uint32_t value,
                                         std::uint32_t type, bool color) const {
     Lock lock(*mutex_);
+    wld::WldFile::ReadScope wld_reads;
     CharacterMesh scratch = model.default_mesh();
     DressEnv env(*this, model, scratch, model.eqg);
     game::ActorLook look = look_of(model, a, appearance_data());

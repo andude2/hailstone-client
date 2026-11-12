@@ -403,7 +403,8 @@ TEST_CASE("fuzz: WLD files and the meshes built from them") {
     fuzz::QuietLog quiet;
     std::vector<Bytes> seeds = {test::wld_fixtures::mesh_wld(false), test::wld_fixtures::mesh_wld(true), wld_all_types(1), wld_all_types(2)};
     sweep("WldFile", seeds, 28, 700, [](std::span<const std::byte> d) {
-        auto w = wld::WldFile::parse(d);
+        wld::WldFile::ReadScope reads;
+        auto w = wld::WldFile::deferred([d] { return std::vector<std::byte>(d.begin(), d.end()); }, "fuzz");
         for (const auto& f : w.fragments()) {
             (void)w.resolve(static_cast<wld::Ref>(f.offset));
             if (const auto* m = std::get_if<wld::MeshDef>(&f.data)) check_parts(wld::build_mesh(w, *m, f.name));

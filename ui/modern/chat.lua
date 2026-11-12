@@ -7,6 +7,8 @@
 -- name in a line is a link: a click opens a tell to them (their tell window with Use Tell Windows, else
 -- "/tell <name> " in the input). Right-click: the chat menu (windows, tabs, Always Chat Here, filters, default channel,
 -- font, tell windows, timestamps, clear).
+-- A button at the strip's right end folds the window into the strip (the output and the input go, the tabs stay), as
+-- the combat ability window folds into its title bar; the frame's menu has the same (Roll up).
 -- Unlocked (any frame's menu), a chat window is moved by dragging and resized from its corner.
 local hud = dofile("lib/hud.lua")
 local stml = dofile("lib/stml.lua")
@@ -24,6 +26,7 @@ local function expandLinks(c, text) return chatlinks.Expand(c.links, text) end
 
 local SIZE = function() return 470, 250 end
 local RESIZABLE = { 240, 120 }
+local HEADER, INPUT = 26, 26 -- (the tab strip's and the input's heights, design pixels)
 
 local function state(slot)
   local c = chats[slot]
@@ -47,7 +50,8 @@ local function state(slot)
     }
     c.panelOpts = { alpha = 0.7 }
     c.closeWindow = function() eq.ChatCloseWindow(slot) end
-    c.winOpts = { size = SIZE, resizable = RESIZABLE, fit = slot == 1, panelOpts = c.panelOpts, closable = false }
+    c.winOpts = { size = SIZE, resizable = RESIZABLE, fit = slot == 1, panelOpts = c.panelOpts, closable = false,
+      rollup = true, titleHeight = HEADER }
     chats[slot] = c
   end
   return c
@@ -156,7 +160,6 @@ local function menu(slot, c, w)
 end
 
 -- ---------------------------------------------------------------- drawing
-local HEADER, INPUT = 26, 26
 local FLASH = 1.0 -- seconds a tell window's flash takes to fade
 
 -- The tabs: text along the top, the one up underlined in the accent colour, one with unseen lines marked with a
@@ -186,11 +189,36 @@ local function tabs(slot, w, x, y, width, s, title, right)
   end
 end
 
+-- The roll-up button at the right end of the tab strip: the window folds into the strip (the tabs stay, the output and
+-- the input go), as the combat ability window folds into its title bar. `x`: the button's left edge.
+local function collapseButton(slot, x, y, s, rolled)
+  local size = 16 * s
+  local bx, by = x, y + (HEADER * s - size) / 2
+  local clicked = T.Hit("##chatcollapse" .. slot, bx, by, bx + size, by + size)
+  local hovered = ui.IsItemHovered()
+  local c = hovered and C.accent or C.muted
+  local cx, cy = bx + size / 2, by + size / 2
+  local d = 4 * s
+  if rolled then
+    ui.DrawTriangleFilled(cx - d, cy - d / 2, cx + d, cy - d / 2, cx, cy + d / 2, c[1], c[2], c[3], 1)
+  else
+    ui.DrawTriangleFilled(cx - d, cy + d / 2, cx + d, cy + d / 2, cx, cy - d / 2, c[1], c[2], c[3], 1)
+  end
+  if hovered then ui.SetTooltip(rolled and "Expand" or "Collapse") end
+  if clicked then hud.SetRolled("Chat" .. slot, not rolled) end
+end
+
 local function body(slot, c, w, title, x, y, width, height, s)
   local font, active, channel = eq.ChatInfo(slot)
   font = math.max(0, math.min(10, font or 3)) -- the chat font list (/chatfontsize 0..10)
   local pad = 8 * s
-  tabs(slot, w, x, y, width, s, title, w.tells and 26 * s or nil)
+  -- rolled up: the tab strip is the title bar the window folds into, and all that is left of it (the frame's own:
+  -- this frame's, as the frame is drawn, so a click does not fold it before the frame is smaller)
+  local rolled = c.winOpts.rolled
+  local right = (w.tells and 26 * s or 0) + 22 * s -- (the room kept free at the end: the tell window's close box, the button)
+  tabs(slot, w, x, y, width, s, title, right)
+  collapseButton(slot, x + width - right, y, s, rolled)
+  if rolled then return false end
   ui.DrawLine(x + pad, y + HEADER * s, x + width - pad, y + HEADER * s, C.ink[1], C.ink[2], C.ink[3], 0.06, 1)
 
   -- the output

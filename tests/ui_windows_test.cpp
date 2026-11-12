@@ -390,6 +390,35 @@ TEST_CASE("Hot bar: Change Size, Assign Icon, the bar's menu, its settings and k
     CHECK(t.api->shown(first_hidden));
 }
 
+TEST_CASE("Hot bar menu: Lock layout stops the bar's move and resize") {
+    hailstone::test::ScratchDir game_scratch{"ui_windows_hotbar_lock"};
+    GameDir game(game_scratch.path());
+    Harness t(game);
+    std::string lock;
+    t.host.layout_setting = [&lock](std::string_view key) { return key == "hud.lock.HotButtonWnd2" ? lock : std::string(); };
+    t.host.set_layout_setting = [&lock](std::string_view key, std::string_view value) {
+        if (key == "hud.lock.HotButtonWnd2") lock = std::string(value);
+    };
+    auto lock_row = [&]() -> int {
+        if (!t.api->context_menu("HotButtonWnd2", 10, 10) || t.host.menus.size() != 1) return -1;
+        const auto& rows = t.host.menus[0].rows;
+        for (std::size_t i = 0; i < rows.size(); ++i)
+            if (rows[i].text == "Lock layout") return static_cast<int>(i);
+        return -1;
+    };
+    int row = lock_row();
+    REQUIRE(row >= 0);
+    CHECK_FALSE(t.host.menus[0].rows[static_cast<std::size_t>(row)].check);
+    CHECK(t.api->menu_click(0, row));
+    CHECK(lock == "1");
+    row = lock_row();
+    REQUIRE(row >= 0);
+    CHECK(t.host.menus[0].rows[static_cast<std::size_t>(row)].check);
+    CHECK(t.api->menu_click(0, row));
+    CHECK(lock == "0");
+    (void)lock_row(); // (leave no menu open for the next test)
+}
+
 TEST_CASE("Colour picker: a swatch, then Accept answers the caller") {
     const GameDir* game = test::game_dir();
     if (!game) return;

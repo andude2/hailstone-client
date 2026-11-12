@@ -497,7 +497,7 @@ ui.window("HUD Minimap", function()
     ui.SetCursorPos(cx - r - wx, cy - r - wy)
     ui.InvisibleButton("##minimap", r * 2, r * 2)
     local hovered = ui.IsItemHovered()
-    local nx, ny = eq.DrawMinimap(cx, cy, r, RANGES[mini.zoom], mini.rotate)
+    local nx, ny, spawnId, spawnName = eq.DrawMinimap(cx, cy, r, RANGES[mini.zoom], mini.rotate)
     ui.DrawCircle(cx, cy, r, C.edge[1], C.edge[2], C.edge[3], 0.35, T.px(2))
     ui.DrawCircle(cx, cy, r + T.px(4), 0, 0, 0, 0.5, T.px(3))
     -- north on the ring
@@ -510,12 +510,19 @@ ui.window("HUD Minimap", function()
       T.draw(px - tw / 2, py - th / 2, "N", C.accent)
       T.unfont()
     end
+    local onSpawn = spawnId and spawnId ~= 0
     if hovered then
-      ui.SetTooltip(string.format("%s\nClick: map  Wheel: zoom (range %d)\nRight click: %s", zone,
-        RANGES[mini.zoom], mini.rotate and "north up" or "rotate with the player"))
+      if onSpawn then
+        ui.SetTooltip(string.format("%s\n%s\nClick: target", zone, spawnName ~= "" and spawnName or "spawn"))
+      else
+        ui.SetTooltip(string.format("%s\nClick: map  Wheel: zoom (range %d)\nRight click: %s", zone,
+          RANGES[mini.zoom], mini.rotate and "north up" or "rotate with the player"))
+      end
       local wheel = ui.GetIO().wheel or 0
       if wheel ~= 0 then miniZoom(wheel > 0 and -1 or 1) end
-      if ui.IsMouseClicked(ui.Mouse.Left) then A.toggle("MapViewWnd") end
+      if ui.IsMouseClicked(ui.Mouse.Left) then
+        if onSpawn then eq.TargetSpawn(spawnId) else A.toggle("MapViewWnd") end
+      end
       if ui.IsMouseClicked(ui.Mouse.Right) then
         mini.rotate = not mini.rotate
         ui.SetSetting("minimap.rotate", mini.rotate)

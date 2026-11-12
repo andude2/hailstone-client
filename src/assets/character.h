@@ -124,6 +124,7 @@ struct CharacterMesh {
     // Per material: tint 0xAARRGGBB multiplied into the texture (a zero
     // high byte = none).
     std::vector<std::uint32_t> tints;
+    std::size_t retained_bytes() const; // estimate: object and owned payload sizes, excluding allocator overhead
 };
 
 struct CharacterModel {
@@ -195,12 +196,20 @@ struct CharacterModel {
     int mount_point_bone(std::string_view rider_code) const;
     // The model's default geometry as a mesh.
     CharacterMesh default_mesh() const;
+    std::size_t retained_bytes() const; // estimate: object and owned payload sizes, excluding allocator overhead
 };
 
-// An archive with its WLD files parsed.
+// An archive with validated WLD resource indices; full WLD payloads materialize on first use.
 struct CharacterArchive {
     std::shared_ptr<const PfsArchive> archive;
     std::vector<wld::WldFile> wlds;
+
+    // Storage accounting. archive_bytes() is the archive file's size: file-backed bytes live in the page cache and
+    // are shared, owned_bytes() of it is in private heap. parsed_bytes() estimates the WLD data itself, which is
+    // private; scoped model construction releases decoded payloads, keeping the resource index.
+    std::size_t archive_bytes() const;
+    std::size_t owned_bytes() const;
+    std::size_t parsed_bytes() const;
 };
 
 // Opens and parses a character archive; nullptr when the file does not exist.
@@ -269,18 +278,22 @@ std::shared_ptr<const game::AppearanceData> load_appearance_data(const GameDir& 
 namespace detail {
 struct TrackLoc {
     const wld::WldFile* wld = nullptr;
-    const wld::TrackRef* ref = nullptr;
+    wld::TrackRef ref{};
 };
-using FragmentLoc = std::pair<const wld::WldFile*, const wld::Fragment*>;
+struct FragmentLoc {
+    const wld::WldFile* first = nullptr;
+    wld::Ref ref = 0;
+    const wld::Fragment* fragment() const { return first ? first->at(ref) : nullptr; }
+};
 
 // CharacterLibrary's name tables over a list of archives, built archive by archive in load order (see
 // kZoneResourceLevel for how a name's definitions resolve).
 struct CharacterTables {
-    // "HUM" -> the actor fragment.
+    // "HUM" -> the WLD and positive actor reference; no decoded fragment is pinned by indexing.
     std::unordered_map<std::string, FragmentLoc> actors;
     std::unordered_map<std::string, TrackLoc> tracks;
     // Every actor definition by WLD and code, not only the one found ("WOL" in wol_v2_chr.wld -> its actor).
-    std::map<std::pair<const wld::WldFile*, std::string>, const wld::Fragment*> actor_wlds;
+    std::map<std::pair<const wld::WldFile*, std::string>, FragmentLoc> actor_wlds;
     // Bone track name -> clip codes that animate it ("HUMPE_TRACK" -> L01, P01 ...).
     std::unordered_map<std::string, std::vector<std::string>> clips_by_bone;
     std::unordered_map<std::string, std::size_t> files; // lower-case name -> archive index
@@ -386,6 +399,15 @@ public:
     const std::vector<std::shared_ptr<const CharacterArchive>>& archives() const { return archives_; }
     // The shared index of the global archives this library was made on, or null.
     const CharacterArchiveIndex* global_index() const { return globals_.get(); }
+    struct CacheMemory {
+        std::size_t models = 0, model_bytes = 0;
+        std::size_t appearances = 0, appearance_bytes = 0;
+        std::size_t items = 0, item_bytes = 0;
+    };
+    // Unique model/appearance objects reachable from this library, its shared cache, EQG model cache and opened
+    // standalone libraries. Item cache entries own copies and count separately. Excludes maps, lookup records,
+    // parsed EQG source meshes/parts, renderer-owned copies and allocator overhead; safe during dressing.
+    CacheMemory cache_memory() const;
     bool has_model(std::string_view code) const;
     std::vector<std::string> model_codes() const;
 
@@ -578,6 +600,7 @@ public:
     bool has_file(std::string_view name) const;
 
 private:
+    friend class CharacterLibrary; // cache diagnostics traverse the persistent standalone libraries
     GameDir game_;
     std::unordered_map<std::string, std::shared_ptr<const CharacterLibrary>> libraries_; // "PBR" -> library or null
 };

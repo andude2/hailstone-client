@@ -22,6 +22,8 @@ local function buffMenu(window)
     if ui.MenuItem("Add to Blocked Buffs") then
       eq.SetWindowText("BlockedBuffWnd", "BW_EditSpellToBlock", tostring(b.spell))
       eq.ClickChild("BlockedBuffWnd", "BW_AddSpellToBlock", "left")
+      -- The original's menu also takes the buff off now, rather than leaving it until it fades or is removed.
+      if eq.BuffSlot(window, b.id) == b.spell then eq.WindowButton(window, b.id, 3) end
     end
     if ui.MenuItem("Remove") and eq.BuffSlot(window, b.id) == b.spell then -- (still in that slot)
       eq.WindowButton(window, b.id, 3)
