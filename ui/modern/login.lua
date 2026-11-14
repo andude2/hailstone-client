@@ -399,6 +399,9 @@ local function quickCard(view, s, bh)
   ui.EndChild()
   ui.PopStyleVar()
   ui.Dummy(0, 2 * s)
+  -- The game files these characters play with: the server's own, and changeable here as on the server card.
+  gameFiles(view, s)
+  ui.Dummy(0, 2 * s)
   local q = view.characters[view.quick]
   if P.Primary(q and ("Play " .. q.name) or "Play", -1, bh, q ~= nil and not view.busy) then eq.LoginDo("play") end
   if q and not q.passwordSaved then

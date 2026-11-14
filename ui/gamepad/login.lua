@@ -384,6 +384,27 @@ local function suggestionRows(v, x0, y, x1, w)
   return y
 end
 
+-- The game files (the asset folder) the picked server plays with: its own, as the client switched to it for this
+-- server, and changeable here. Drawn on the main page under Continue as and on the More options page.
+local function gameFilesField(v, x0, y, w)
+  P.at(x0, y)
+  local cur = v.gameFolders[1]
+  local label = cur and cur.label or "None found"
+  local note = v.gameFolderFixed and "Set by --game-dir or EQ_GAME_DIR" or (cur and cur.path) or ""
+  if P.field(F, "##game", "Playing with", label, w, px(76), { chevron = not v.gameFolderFixed, note = fitStart(note, w - px(260)),
+        disabled = v.busy or v.gameFolderFixed }) then
+    local items = {}
+    for i, f in ipairs(v.gameFolders) do
+      items[#items + 1] = { label = f.label, sub = f.usable and f.path or (f.path .. "  (not usable now)"),
+        current = i == 1, disabled = not f.usable,
+        fn = function() if i > 1 then eq.LoginDo("gameFolder", i) end end }
+    end
+    items[#items + 1] = { label = "Browse...", sub = "Pick another EverQuest folder", fn = function() eq.LoginDo("browse") end }
+    openPick("Game files", items, "##game", "In use")
+  end
+  return y + px(76)
+end
+
 local function mainPage(v, x0, y, x1, w)
   local rh, gap = px(ROW_H), px(GAP)
   local busy = v.busy
@@ -391,6 +412,8 @@ local function mainPage(v, x0, y, x1, w)
   if #v.characters > 0 then
     y = heading("Continue as", x0, y, w)
     y = y + drawTiles(v, x0, y, x1) + px(18)
+    -- the game files those characters play with (the server's: changeable here)
+    y = gameFilesField(v, x0, y, w) + px(18)
   end
 
   y = heading("Server", x0, y, w)
@@ -609,22 +632,7 @@ local function morePage(v, x0, y, x1, w)
   end
 
   y = heading("Game files", x0, y, w)
-  P.at(x0, y)
-  local cur = v.gameFolders[1]
-  local label = cur and cur.label or "None found"
-  local note = v.gameFolderFixed and "Set by --game-dir or EQ_GAME_DIR" or (cur and cur.path) or ""
-  if P.field(F, "##game", "Playing with", label, w, px(76), { chevron = not v.gameFolderFixed, note = fitStart(note, w - px(260)),
-        disabled = busy or v.gameFolderFixed }) then
-    local items = {}
-    for i, f in ipairs(v.gameFolders) do
-      items[#items + 1] = { label = f.label, sub = f.usable and f.path or (f.path .. "  (not usable now)"),
-        current = i == 1, disabled = not f.usable,
-        fn = function() if i > 1 then eq.LoginDo("gameFolder", i) end end }
-    end
-    items[#items + 1] = { label = "Browse...", sub = "Pick another EverQuest folder", fn = function() eq.LoginDo("browse") end }
-    openPick("Game files", items, "##game", "In use")
-  end
-  y = y + px(76) + px(22)
+  y = gameFilesField(v, x0, y, w) + px(22)
 
   -- the add-ons (docs/addons.md): a page of their own
   local installed = 0

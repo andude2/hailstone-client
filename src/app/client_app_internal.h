@@ -274,6 +274,9 @@ public:
         bool named_server = !opts_.server.empty() && ui::select_profile_named(login_view_, opts_.server);
         if (!opts_.server.empty() && !named_server)
             log::warn("--server {}: no saved server has this id or name", opts_.server);
+        // The picked server's own game files, in place of the last one used (before anything reads them). With
+        // --game-dir / EQ_GAME_DIR, or a test login, the folder stays the one asked for.
+        apply_startup_server_game_files();
         if (auto strings = game_.find("eqlsstr_us.txt")) net::load_login_strings(*strings);
         spawn_renderer_ = std::make_unique<render::SpawnRenderer>(vk_, shader_dir_);
         world_objects_ = std::make_unique<WorldObjects>(vk_, game_, shader_dir_);
@@ -796,6 +799,22 @@ private:
     // Makes `folder` the asset folder while the login screen is idle: remembered as assets.path once the game runs
     // with it, and the game files read before the login read again. False when it cannot be used (logged).
     bool switch_asset_folder(const std::filesystem::path& folder);
+    // switch_asset_folder's work: game_'s new base, assets.path and the classic folder; `reload_now` reads the game
+    // files that were read before the login again (not at start, where none have been read yet).
+    bool set_game_folder(const std::filesystem::path& folder, bool reload_now);
+    // The game files a server keeps (ServerProfile::game_files): at start for the picked server (`at_startup`: the
+    // game files have not been read yet, so nothing is read again and the status line stays quiet), and again when
+    // the player picks another server, whose folder then replaces the one in use (with what cannot be used logged
+    // and put in the status line).
+    void apply_server_game_files(const ServerProfile& profile, bool at_startup);
+    // The folder just chosen is the picked server's from now on: its server.ini's [Server] game_files. Nothing for a
+    // new server (none is picked yet) or a test login; the caller saves nothing. `replace_existing` false only fills
+    // a server that keeps none: Log in and Save do that, so a folder on a drive that is not plugged in now (and so
+    // could not be used) keeps its path until the player picks another here.
+    void remember_profile_game_files(const std::filesystem::path& folder, bool replace_existing = true);
+    // At start, after the saved servers are loaded: the picked server's game files come first (it is the one the
+    // folder was chosen for), and a folder picked because nothing saved worked becomes that server's.
+    void apply_startup_server_game_files();
     // The login screen's Game files row: the folder in use, then the ones used before, each checked (RoF2, live,
     // gone).
     void refresh_game_folders();

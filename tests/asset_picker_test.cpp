@@ -138,6 +138,9 @@ TEST_CASE("Asset folder: the recent folders") {
     // A typed relative folder is kept as the absolute one it meant when it was chosen.
     remember_asset_folder(config, fs::path("games") / ".." / "RoF2");
     CHECK(config.get_string("assets.path") == (fs::current_path() / "RoF2").string());
+    // A server's game_files is kept the same way (core/server_profile.h).
+    CHECK(asset_folder_text("/b/") == b);
+    CHECK(asset_folder_text(fs::path("games") / ".." / "RoF2") == (fs::current_path() / "RoF2").string());
 }
 
 TEST_CASE("Asset folder: the EverQuest folder Hailstone sits in is the default when nothing saved works") {

@@ -1,7 +1,7 @@
 #pragma once
 
 // The saved servers. Each is a folder servers/<id>/ under the data folder (platform::servers_dir()):
-//   server.ini              [Server] name, host, port, username, remember, ui; [Account:<username>] character,
+//   server.ini              [Server] name, host, port, username, remember, ui, game_files; [Account:<username>] character,
 //                           world, box, save_password, char:<name>@<world>: the saved accounts and the characters
 //                           each was seen to have. Other sections are kept (an older build's [NMS] the NMS plugin
 //                           reads)
@@ -54,6 +54,10 @@ struct ServerProfile {
     std::vector<SavedAccount> accounts; // in the order they were first used
     // The user interface used on this server (a folder of ui/, ui/ui_packs.h); empty means hailstone.ini ui.name.
     std::string ui;
+    // The EverQuest installation this server plays with, as hailstone.ini assets.path keeps a folder (absolute); empty
+    // means the one used last, assets.path. Picking the server on the login screen switches to it, and the Continue as
+    // card shows and changes it (core/asset_folder_choice.h, asset_folder_text).
+    std::string game_files;
 };
 
 // A name made safe as one folder name on every file system: characters other than letters, digits, space, '-',

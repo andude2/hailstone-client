@@ -160,8 +160,12 @@ TEST_CASE("eq.LoginSet and eq.LoginDo: the fields change, and the buttons ask th
     ui("eq.LoginDo('select', 2)");
     CHECK(v.selected == 1);
     CHECK(v.ui == "modern"); // the server without its own: the default
+    CHECK(ui.host.login_action == static_cast<int>(A::SelectProfile)); // the client uses its own game files
+    ui.host.login_action.reset();
     ui("eq.LoginDo('new')");
     CHECK(v.selected == -1);
+    CHECK(ui.host.login_action == static_cast<int>(A::SelectProfile));
+    ui.host.login_action.reset();
     CHECK(ui("return eq.LoginScreen().selected") == "0");
     CHECK(ui("return eq.LoginDo('delete')") == "false"); // nothing picked to delete
     ui("eq.LoginDo('select', 1)");

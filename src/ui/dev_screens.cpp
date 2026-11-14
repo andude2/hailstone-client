@@ -753,14 +753,20 @@ LoginAction login_screen(LoginView& view) {
             for (int i = 0; i < static_cast<int>(view.profiles.size()); ++i) {
                 const ServerProfile& p = view.profiles[static_cast<std::size_t>(i)];
                 ImGui::PushID(i);
-                if (ImGui::Selectable(p.name.c_str(), view.selected == i)) select_profile(view, i);
+                if (ImGui::Selectable(p.name.c_str(), view.selected == i)) {
+                    select_profile(view, i);
+                    action = LoginAction::SelectProfile; // its own game files, if it keeps some
+                }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s:%d", p.host.c_str(), p.port);
                 ImGui::PopID();
             }
             ImGui::EndCombo();
         }
         ImGui::SameLine();
-        if (ImGui::Button("New")) new_profile(view);
+        if (ImGui::Button("New")) {
+            new_profile(view);
+            action = LoginAction::SelectProfile; // a new server has none: the folder in use stays
+        }
         ImGui::SameLine();
         ImGui::BeginDisabled(!picked);
         if (ImGui::Button("Delete")) ImGui::OpenPopup("Delete server?##hailstone");

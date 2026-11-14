@@ -249,7 +249,8 @@ void UiDemo::draw(const DemoFrameInput& in) {
             login_.status = {"Demo: add-ons are not installed here.", false};
             break;
         case ui::LoginAction::Quit: quit_ = true; break;
-        case ui::LoginAction::None: break;
+        case ui::LoginAction::None:
+        case ui::LoginAction::SelectProfile: break; // the demo's game folders are stand-ins, nothing to switch
         }
         break;
     case DemoScreen::Servers:

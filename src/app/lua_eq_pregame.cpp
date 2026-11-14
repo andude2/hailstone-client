@@ -515,8 +515,8 @@ SavedAccount* account_named(ui::LoginView& v, std::string_view username) {
 //   "updateSkip"       do not offer this release again
 //   "updateNotes"      open the release's page in the system browser
 //   "openProject"      open Hailstone's page (about.page) in the system browser
-//   "select", i        pick saved server i (0: a new server)
-//   "new"              a new server with the default fields
+//   "select", i        pick saved server i (0: a new server), and its own game files (LoginAction::SelectProfile)
+//   "new"              a new server with the default fields (the game files in use stay)
 //   "save"             save the picked server's fields
 //   "delete"           delete the picked server (ask first: its folder goes to servers/.deleted/)
 //   "account", name    put a saved account in the fields (its saved password too)
@@ -666,11 +666,19 @@ int LoginDo(lua_State* L) {
         ok = login_ready(v);
         if (ok) action = A::Submit;
     } else if (what == "select") {
-        if (!v.transient) ui::select_profile(v, index_arg(L, 2, v.profiles.size()));
-        else ok = false;
+        if (!v.transient) {
+            ui::select_profile(v, index_arg(L, 2, v.profiles.size()));
+            action = A::SelectProfile; // its own game files, if it keeps some
+        } else {
+            ok = false;
+        }
     } else if (what == "new") {
-        if (!v.transient) ui::new_profile(v);
-        else ok = false;
+        if (!v.transient) {
+            ui::new_profile(v);
+            action = A::SelectProfile; // a new server has none: the folder in use stays
+        } else {
+            ok = false;
+        }
     } else if (what == "save") {
         ok = !v.transient && !v.host.empty();
         if (ok) action = A::Save;

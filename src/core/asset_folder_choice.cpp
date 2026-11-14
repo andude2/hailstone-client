@@ -178,15 +178,19 @@ std::string join_recent_folders(const std::vector<std::string>& recent) {
 }
 
 void remember_asset_folder(Config& config, const std::filesystem::path& folder) {
+    const std::string text = asset_folder_text(folder);
+    config.set("assets.path", text);
+    config.set("assets.recent", join_recent_folders(push_recent_folder(recent_asset_folders(config), text)));
+    request_asset_folder_pick(config, false);
+}
+
+std::string asset_folder_text(const std::filesystem::path& folder) {
     // Made absolute: a typed "../RoF2" would mean another folder when the client starts from another directory.
     std::error_code ec;
     std::filesystem::path abs = std::filesystem::absolute(folder, ec);
     std::filesystem::path p = ec ? folder : abs.lexically_normal();
     if (!p.has_filename() && p.has_relative_path()) p = p.parent_path(); // "/games/RoF2/" -> "/games/RoF2"
-    std::string text = p.string();
-    config.set("assets.path", text);
-    config.set("assets.recent", join_recent_folders(push_recent_folder(recent_asset_folders(config), text)));
-    request_asset_folder_pick(config, false);
+    return p.string();
 }
 
 void request_asset_folder_pick(Config& config, bool pick) {

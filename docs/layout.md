@@ -35,7 +35,7 @@ hailstone/
                              add-on manager's alone, as nothing else is put there
   maps/                      the player's in-game maps for every server, maps/<dir>/ a maps directory (below)
   servers/<profile>/         one folder per saved server (core/server_profile.h); servers/.deleted/ the deleted ones
-    server.ini               [Server] name, host, port, username, remember
+    server.ini               [Server] name, host, port, username, remember, game_files
     assets/                  the server's own client files, over the asset folder (downloaded, or added by hand)
     hailstone.cfg            the server's rules for plugins, scripts and assets (downloaded; docs/plugins.md)
     scripts/, plugins/       the server's own Lua scripts and compiled plugins (downloaded; docs/plugins.md)
@@ -172,6 +172,15 @@ for a server's `assets/` (`ClientApp::reload_server_files`), and nothing else ho
 start directory. A folder that holds the data folder (Hailstone placed inside the RoF2 install, below its own
 folder) is refused, since Hailstone would write into it.
 
+Each saved server keeps the EverQuest installation it plays with in its `server.ini` (`[Server] game_files`), and
+picking it at the login screen switches to that folder at once (at start for the server played last, or the one
+`--server` names): one login server's players often have an install of their own. A server without one plays with
+the folder used last (`assets.path`, which every change updates), and a new server takes the folder in use when it
+is first saved. The Continue as card shows that folder under its characters, where it can be changed as on the
+server card; a change made while a server is picked is kept for it. A folder a server kept that is gone or no
+longer passes the check is logged and named in the login screen's status line, and the folder in use stays. With
+`--game-dir` or `EQ_GAME_DIR`, or a test login, no server's folder is used or saved.
+
 The check (`core/asset_folder.h`) names what is missing. Required: `spells_us.txt`, `eqstr_us.txt`, `dbstr_us.txt`,
 `eqlsstr_us.txt`, `racedata.txt`, `soundassets.txt`, `global_chr.s3d`, `sky.s3d`, at least one `snd*.pfs`,
 `Resources/SkillCaps.txt`, `Resources/BaseData.txt`, `Resources/GlobalLoad.txt` and
@@ -293,7 +302,8 @@ The login screen lists the saved servers (`core/server_profile.h`, `ui/dev_scree
 (`login.profile`) is picked; New, Save and Delete edit the list. A server has a name, an address and port, and the username when "Remember username" is ticked.
 The password is never saved. The folder id is made once from the name, so renaming a server keeps its folder. The
 Assets row shows the server's `assets/` folder, with a button that opens it. The server's files come by themselves
-(below); the player may add others by hand.
+(below); the player may add others by hand. A server also keeps the game files (the asset folder) it plays with
+(`game_files`; "The asset folder" above), which picking it switches to.
 
 ### Server files
 

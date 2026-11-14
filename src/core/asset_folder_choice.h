@@ -87,6 +87,9 @@ std::string join_recent_folders(const std::vector<std::string>& recent);
 // The picker's choice: assets.path = `folder` (made absolute against the current directory), it first in
 // assets.recent, and assets.pick cleared. The caller saves the config.
 void remember_asset_folder(Config& config, const std::filesystem::path& folder);
+// A folder as assets.path and a server's game_files keep it (core/server_profile.h): made absolute against the current
+// directory, in a normal form, without a trailing separator.
+std::string asset_folder_text(const std::filesystem::path& folder);
 // Sets (or clears) assets.pick. The caller saves the config.
 void request_asset_folder_pick(Config& config, bool pick);
 bool asset_folder_pick_requested(const Config& config);

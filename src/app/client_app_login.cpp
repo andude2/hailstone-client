@@ -40,6 +40,7 @@ void ClientApp::start_login() {
         auto saved = ui::store_login_settings(login_view_, config_);
         if (!saved) return; // the status says why
         config_.save(config_path_);
+        remember_profile_game_files(game_.root(), false); // a new server's first save keeps the folder in use
         profile = std::move(*saved);
     }
     login_view_.busy = true;
@@ -76,6 +77,7 @@ void ClientApp::start_box_login() {
     auto saved = ui::store_login_settings(login_view_, config_);
     if (!saved) return; // the status says why
     config_.save(config_path_);
+    remember_profile_game_files(game_.root(), false); // a new server's first save keeps the folder in use
     std::vector<SavedAccount> set = ui::box_accounts(login_view_);
     if (set.empty()) return;
     // Every password first: a set that cannot all log in starts none.
@@ -191,6 +193,7 @@ void ClientApp::login_action(ui::LoginAction action) {
     case ui::LoginAction::Save:
         if (auto saved = ui::store_login_settings(login_view_, config_)) {
             config_.save(config_path_);
+            remember_profile_game_files(game_.root(), false); // a new server's first save keeps the folder in use
             login_view_.status = {"Saved " + saved->name + ".", false};
         }
         break;
@@ -200,6 +203,13 @@ void ClientApp::login_action(ui::LoginAction action) {
             login_view_.status = {"Server deleted.", false};
         }
         break;
+    case ui::LoginAction::SelectProfile: {
+        // Another saved server picked: the game files it keeps, if it has any (the login screen is idle).
+        if (login_ || conn_ || asset_source_ == AssetFolderSource::Override) break;
+        const std::string id = ui::selected_profile_id(login_view_);
+        if (const ServerProfile* p = find_profile(login_view_.profiles, id)) apply_server_game_files(*p, false);
+        break;
+    }
     case ui::LoginAction::UseGameFolder: {
         // Only while nothing holds the old folder's files (the login screen is idle, as for the picker).
         if (login_ || conn_ || asset_source_ == AssetFolderSource::Override) break;

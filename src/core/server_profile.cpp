@@ -164,6 +164,7 @@ std::optional<ServerProfile> load_profile(std::string_view id, const std::filesy
     p.username = ini.get_string("Server", "username");
     p.remember = ini.get_int("Server", "remember", 1) != 0;
     p.ui = ini.get_string("Server", "ui");
+    p.game_files = ini.get_string("Server", "game_files");
     for (const std::string& section : ini.sections()) {
         if (!section.starts_with(kAccountPrefix) || section.size() == kAccountPrefix.size()) continue;
         SavedAccount a;
@@ -203,6 +204,8 @@ bool save_profile(const ServerProfile& profile, const std::filesystem::path& ser
     ini.set_int("Server", "remember", profile.remember ? 1 : 0);
     if (!profile.ui.empty()) ini.set("Server", "ui", profile.ui);
     else ini.erase("Server", "ui");
+    if (!profile.game_files.empty()) ini.set("Server", "game_files", profile.game_files);
+    else ini.erase("Server", "game_files");
     for (const std::string& section : ini.sections())
         if (section.starts_with(kAccountPrefix)) ini.erase_section(section);
     for (const SavedAccount& a : profile.accounts) {

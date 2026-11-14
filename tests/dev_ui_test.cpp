@@ -259,6 +259,35 @@ TEST_CASE("Login profiles: each server keeps its own user interface") {
     CHECK(third.ui == "classic");
 }
 
+TEST_CASE("Login profiles: each server keeps its own game files") {
+    using namespace hailstone;
+    TempServers servers;
+    Config cfg;
+    ui::LoginView view;
+    ui::load_login_settings(view, cfg, servers.path);
+    view.host = "one.example.org";
+    REQUIRE(ui::store_login_settings(view, cfg));
+    auto one = load_profile("one-example-org", servers.path);
+    REQUIRE(one);
+    one->game_files = "/games/RoF2";
+    REQUIRE(save_profile(*one, servers.path));
+
+    // Another server has none (the folder used last), and the same server.ini key survives its own saves.
+    ui::new_profile(view);
+    view.host = "two.example.org";
+    REQUIRE(ui::store_login_settings(view, cfg));
+    ui::LoginView again;
+    ui::load_login_settings(again, cfg, servers.path);
+    REQUIRE(ui::select_profile_named(again, "one.example.org"));
+    CHECK(ui::profile_from_view(again).game_files == "/games/RoF2");
+    REQUIRE(ui::select_profile_named(again, "two.example.org"));
+    CHECK(ui::profile_from_view(again).game_files.empty());
+    again.ui = "gamepad";
+    REQUIRE(ui::store_login_settings(again, cfg));
+    CHECK(load_profile("one-example-org", servers.path)->game_files == "/games/RoF2");
+    CHECK(load_profile("two-example-org", servers.path)->game_files.empty());
+}
+
 TEST_CASE("Login profiles: the old login keys become the first profile") {
     using namespace hailstone;
     TempServers servers;

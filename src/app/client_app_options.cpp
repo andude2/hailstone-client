@@ -233,22 +233,77 @@ void ClientApp::change_asset_folder_at_login() {
 bool ClientApp::switch_asset_folder(const std::filesystem::path& folder) {
     // The folder is remembered only once the game runs with it: one that went away after it was checked (removed,
     // unmounted) leaves assets.path naming the folder in use.
-    bool ok = true;
+    if (!set_game_folder(folder, true)) return false;
+    remember_profile_game_files(folder); // the picked server's from now on (its Continue as characters')
+    return true;
+}
+
+bool ClientApp::set_game_folder(const std::filesystem::path& folder, bool reload_now) {
     try {
         game_.set_base(folder);
     } catch (const std::exception& e) {
         log::error("asset folder: {}", e.what());
-        ok = false;
+        return false;
     }
-    if (ok) remember_asset_folder(config_, folder);
+    remember_asset_folder(config_, folder);
     config_.save(config_path_);
-    if (ok) {
-        log::info("asset folder {}", game_.root().string());
-        apply_classic_folder(); // the classic folder's preferred files depend on the base being live
-        reload_server_files();
-    }
+    log::info("asset folder {}", game_.root().string());
+    apply_classic_folder(); // the classic folder's preferred files depend on the base being live
+    if (reload_now) reload_server_files();
     refresh_game_folders();
-    return ok;
+    return true;
+}
+
+void ClientApp::apply_server_game_files(const ServerProfile& profile, bool at_startup) {
+    if (asset_source_ == AssetFolderSource::Override || profile.game_files.empty()) return;
+    std::filesystem::path folder(profile.game_files);
+    if (same_folder(folder, game_.root())) return;
+    AssetFolderCheck check = validate_asset_folder(folder);
+    std::string why = check.ok ? data_folder_conflict(folder, platform::data_dir()) : describe(check);
+    if (!why.empty()) {
+        log::warn("the game files saved for {} cannot be used ({}): keeping {}", profile.name, why,
+                  game_.root().string());
+        if (!at_startup)
+            login_view_.status = {"The game files saved for " + profile.name + " cannot be used: " + why, true};
+        return;
+    }
+    if (!set_game_folder(folder, !at_startup)) {
+        if (!at_startup) login_view_.status = {"Could not use the game files saved for " + profile.name + ".", true};
+        return;
+    }
+    log::info("game files for {}: {}", profile.name, game_.root().string());
+    if (!at_startup)
+        login_view_.status = {"Playing with the game files saved for " + profile.name + ": " + game_.root().string() + ".",
+                              false};
+}
+
+void ClientApp::remember_profile_game_files(const std::filesystem::path& folder, bool replace_existing) {
+    const std::string id = ui::selected_profile_id(login_view_);
+    if (id.empty()) return;
+    const std::string text = asset_folder_text(folder);
+    auto saved = load_profile(id, login_view_.servers_dir);
+    if (!saved || saved->game_files == text || (!replace_existing && !saved->game_files.empty())) return;
+    saved->game_files = text;
+    if (!save_profile(*saved, login_view_.servers_dir)) {
+        log::warn("game files: could not save {} for server {}", text, id);
+        return;
+    }
+    for (auto& p : login_view_.profiles)
+        if (p.id == id) p.game_files = text;
+    if (server_profile_.id == id) server_profile_.game_files = text;
+}
+
+void ClientApp::apply_startup_server_game_files() {
+    if (asset_source_ == AssetFolderSource::Override || login_view_.transient) return;
+    if (asset_source_ == AssetFolderSource::Picker) {
+        // Nothing saved worked and the player has just picked this folder: it is the picked server's from now on (a
+        // test login saves nothing).
+        if (opts_.auto_user.empty()) remember_profile_game_files(game_.root());
+        return;
+    }
+    const std::string id = ui::selected_profile_id(login_view_);
+    if (id.empty()) return;
+    if (const ServerProfile* p = find_profile(login_view_.profiles, id)) apply_server_game_files(*p, true);
 }
 
 void ClientApp::refresh_game_folders() {

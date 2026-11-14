@@ -215,6 +215,7 @@ TEST_CASE("Layout: server profiles saved, listed and found") {
     p.host = "192.0.2.10";
     p.port = 5998;
     p.username = "player";
+    p.game_files = (tmp.path / "RoF2").string(); // the installation this server plays with
     REQUIRE(save_profile(p, servers));
     CHECK(fs::is_directory(profile_assets_dir(p.id, servers)));
     CHECK(profile_ini(p.id, servers) == servers / "test-server" / "server.ini");
@@ -232,6 +233,7 @@ TEST_CASE("Layout: server profiles saved, listed and found") {
     CHECK(back->port == 5998);
     CHECK(back->username == "player");
     CHECK(back->remember);
+    CHECK(back->game_files == p.game_files);
 
     // keys it does not know survive a save (an older build's [NMS], which the NMS plugin reads); not remembering
     // drops the username
@@ -245,6 +247,16 @@ TEST_CASE("Layout: server profiles saved, listed and found") {
     CHECK(ini.get_string("Extra", "kept") == "1");
     CHECK(ini.get_string("NMS", "auth_key") == "secret");
     CHECK_FALSE(ini.get("Server", "username"));
+    CHECK(ini.get_string("Server", "game_files") == p.game_files);
+    // What another running client writes (an account's character) keeps it too; cleared, the key goes.
+    p.accounts.push_back(SavedAccount{.username = "player"});
+    REQUIRE(save_profile(p, servers));
+    REQUIRE(note_account_character(p.id, "player", "World", "Bob", servers));
+    CHECK(load_profile(p.id, servers)->game_files == p.game_files);
+    p.game_files.clear();
+    REQUIRE(save_profile(p, servers));
+    REQUIRE(ini.load(profile_ini(p.id, servers)));
+    CHECK_FALSE(ini.get("Server", "game_files"));
 
     // a bare server.ini: the id is the name, the defaults fill the rest
     write(servers / "alpha" / "server.ini", "[Server]\nhost=a.example\nmodule=bogus\n");

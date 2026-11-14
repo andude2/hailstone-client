@@ -201,7 +201,8 @@ struct LoginView {
 };
 
 // Save, Delete (asked again first) and OpenAssets are for the picked server; picking another and New are done
-// in the view (select_profile, new_profile). UseGameFolder and BrowseGameFolder change the game files.
+// in the view (select_profile, new_profile), and SelectProfile tells the client to use the new server's game files.
+// UseGameFolder and BrowseGameFolder change the game files.
 // LoginBox logs in the box set (box_accounts()); AccountsChanged: a box tick or character was edited (save the
 // server quietly); ForgetAccount: account_choice is to be forgotten (forget_account()); PlayCharacter: log in to
 // quick_characters()[quick_selected]'s account, play its world and enter it. UpdateDownload downloads the release
@@ -216,8 +217,8 @@ struct LoginView {
 // AddonStoreLook opens the install card of the store item whose source is addons.choice; AddonStart starts the
 // installed tool addons.choice.
 enum class LoginAction {
-    None, Submit, Quit, Save, Delete, OpenAssets, UseGameFolder, BrowseGameFolder, LoginBox, AccountsChanged,
-    ForgetAccount, PlayCharacter, MusicChanged,
+    None, Submit, Quit, Save, Delete, OpenAssets, SelectProfile, UseGameFolder, BrowseGameFolder, LoginBox,
+    AccountsChanged, ForgetAccount, PlayCharacter, MusicChanged,
     UpdateDownload, UpdateRestart, UpdateSkip, UpdateNotes, OpenProject,
     AddonInspect, AddonInstall, AddonCancel, AddonUpdate, AddonRemove, AddonAuto, AddonFolder, AddonPage, AddonCheck,
     AddonRevoke, AddonAskAgain, AddonSuggestLook, AddonSuggestLater, AddonSuggestNever, AddonBrowse, AddonStoreLook,
