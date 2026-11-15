@@ -24,6 +24,18 @@ std::string display_name(const std::string& name) {
     return out;
 }
 
+bool display_name_iequals(std::string_view name, std::string_view other) {
+    // The same trimming as display_name: leading '#', then trailing digits, '_' compared as ' '.
+    std::size_t begin = std::min(name.find_first_not_of('#'), name.size()), end = name.size();
+    while (end > begin && std::isdigit(static_cast<unsigned char>(name[end - 1]))) --end;
+    if (end - begin != other.size()) return false;
+    for (std::size_t i = 0; i < other.size(); ++i) {
+        const char c = name[begin + i] == '_' ? ' ' : name[begin + i];
+        if (ascii_lower(c) != ascii_lower(other[i])) return false;
+    }
+    return true;
+}
+
 std::optional<ElementalSwap> luclin_elemental_swap(std::uint16_t race, std::uint8_t texture, bool luclin_elementals) {
     constexpr std::uint16_t kElemental = 75, kEarth = 209, kAir = 210, kWater = 211, kFire = 212;
     if (luclin_elementals) {

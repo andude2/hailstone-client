@@ -78,3 +78,31 @@ TEST_CASE("Conversation journal: the files open in a folder whose name is outsid
     REQUIRE(k.npcs().size() == 1);
     CHECK(k.text(k.npcs()[0]->entries[0]->text) == "Guard Gehnus says 'Hail'");
 }
+
+TEST_CASE("Conversation journal: new lines in names and dialogue round-trip as spaces; long names find their NPC") {
+    hailstone::test::ScratchDir dir_scratch("journal_newline_test");
+    const fs::path& dir = dir_scratch.path();
+    game::ConversationJournal j;
+    // a name that tries to add records to CJ.hdr, and a line that would split in CJ.txt
+    j.add("Bad\n+ENTRY\n00000001\n0\n0\n0\n-1\n00000000\n-ENTRY", 2, 100, 0, 0, 0, "Bad says 'one\r\ntwo'", -1);
+    REQUIRE(j.npcs().size() == 1);
+    CHECK(j.npcs()[0]->name.find('\n') == std::string::npos);
+    CHECK(j.text(j.npcs()[0]->entries[0]->text) == "Bad says 'one  two'");
+    const std::string long_name(0x50, 'a');
+    j.add(long_name, 2, 100, 0, 0, 0, "Hail", -1);
+    j.add(long_name, 2, 110, 0, 0, 0, "Hail again", -1);
+    REQUIRE(j.npcs().size() == 2); // the second add finds the truncated NPC
+    CHECK(j.npcs()[1]->name.size() == 0x3f);
+    CHECK(j.npcs()[1]->entries.size() == 2);
+    CHECK(j.npc(long_name, 2, false) == j.npcs()[1].get());
+    REQUIRE(j.save(dir / "CJ") == 0);
+
+    game::ConversationJournal k;
+    REQUIRE(k.load(dir / "CJ") == 0);
+    REQUIRE(k.npcs().size() == 2);
+    REQUIRE(k.npcs()[0]->entries.size() == 1);
+    CHECK(k.npcs()[0]->name == j.npcs()[0]->name);
+    CHECK(k.text(k.npcs()[0]->entries[0]->text) == "Bad says 'one  two'");
+    CHECK(k.npcs()[1]->entries.size() == 2);
+    CHECK(k.remove_npc(long_name, 2));
+}

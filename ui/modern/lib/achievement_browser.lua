@@ -7,6 +7,7 @@ function M.new(look)
   local category, search, statusFilter = nil, "", "All"
   local expanded, categorySets, categoryStats, byId, children = {}, {}, {}, {}, {}
   local actionMessage, serverMessage
+  local matchCache = {} -- matching()'s last rows and what they were worked out from
   local colors = look.colors
   local function colored(text, color)
     ui.TextColored(color[1], color[2], color[3], color[4] or 1, text)
@@ -28,7 +29,7 @@ function M.new(look)
   function B.reset()
     catalogCache, stateCache, catalogToken, stateRevision = nil, nil, nil, nil
     category, search, statusFilter, actionMessage = nil, "", "All", nil
-    serverMessage = nil
+    serverMessage, matchCache = nil, {}
     expanded, categorySets, categoryStats, byId, children = {}, {}, {}, {}, {}
     if look.cancel then look.cancel() end
   end
@@ -204,6 +205,30 @@ function M.new(look)
       else muted("Count: " .. count) end
     else muted("Count unavailable") end
   end
+  -- The objectives' positions in display order (by type, then display order, then as received): sorted again only
+  -- when a component's type or display order differs from the last sort's.
+  local objectiveCache = {n=-1,types={},orders={},positions={}}
+  local function objectiveOrder(components)
+    local c, n = objectiveCache, #components
+    local same = c.n == n
+    if same then
+      for i = 1, n do
+        local value = components[i]
+        if c.types[i] ~= value.type or c.orders[i] ~= (value.display_order or 0) then same = false; break end
+      end
+    end
+    if same then return c.positions end
+    local types, orders, positions = {}, {}, {}
+    for i = 1, n do
+      types[i], orders[i], positions[i] = components[i].type, components[i].display_order or 0, i
+    end
+    table.sort(positions, function(a, b)
+      if types[a] ~= types[b] then return types[a] < types[b] end
+      return orders[a] == orders[b] and a < b or orders[a] < orders[b]
+    end)
+    c.n, c.types, c.orders, c.positions = n, types, orders, positions
+    return positions
+  end
   function B.detail(detail, scale, embedded)
     local own = detail.own or {}
     local other = detail.source == "own" and detail.comparison or nil
@@ -226,19 +251,15 @@ function M.new(look)
     ui.Separator()
     if not compact then ui.Spacing() end
     title("Objectives")
-    local rows, fulfilled, known = {}, 0, 0
-    for position, component in ipairs(own.components or {}) do
-      rows[#rows + 1] = {value=component,position=position}
+    local components = own.components or {}
+    local fulfilled, known = 0, 0
+    for _, component in ipairs(components) do
       if component.type ~= 3 and component.satisfied_known then
         known = known + 1
         if component.satisfied then fulfilled = fulfilled + 1 end
       end
     end
-    table.sort(rows, function(a, b)
-      if a.value.type ~= b.value.type then return a.value.type < b.value.type end
-      local ao, bo = a.value.display_order or 0, b.value.display_order or 0
-      return ao == bo and a.position < b.position or ao < bo
-    end)
+    local rows = objectiveOrder(components)
     if known > 0 then muted(fulfilled .. " of " .. known .. " known objectives satisfied") end
     if #rows == 0 then muted("No objective information has been received.") end
     local comparison = {}
@@ -257,8 +278,8 @@ function M.new(look)
       ui.TableSetupColumn(other.name or "Comparison")
       ui.TableHeadersRow()
     end
-    for _, entry in ipairs(rows) do
-      local component = entry.value
+    for _, position in ipairs(rows) do
+      local component = components[position]
       if tableOpen then ui.TableNextRow(); ui.TableNextColumn() end
       ui.Spacing()
       ui.PushTextWrapPos(0)
@@ -287,7 +308,14 @@ function M.new(look)
       else muted("No reward is listed for this achievement.") end
     end
   end
+  -- The rows the category, the search and the status filter keep: worked out again only when one of them, the
+  -- catalog or the character's states change (the catalog and the states are kept tables until they do).
   local function matching(state)
+    local m = matchCache
+    if m.rows and m.catalog == state.catalog and m.states == state.states and m.ready == state.ready and
+        m.category == category and m.search == search and m.filter == statusFilter then
+      return m.rows
+    end
     local allowed, rows = setFor(category), {}
     local needle = search:lower()
     for _, definition in ipairs(state.catalog.definitions or {}) do
@@ -299,6 +327,8 @@ function M.new(look)
         rows[#rows + 1] = {definition=definition,state=own}
       end
     end
+    m.rows, m.catalog, m.states, m.ready = rows, state.catalog, state.states, state.ready
+    m.category, m.search, m.filter = category, search, statusFilter
     return rows
   end
   local function overview(state, scale)

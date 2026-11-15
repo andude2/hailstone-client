@@ -26,7 +26,7 @@ VERSION = re.compile(r"^\d+\.\d+\.\d+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$")
 WORD = re.compile(r"^[a-z0-9_-]{1,64}$")
 # What an update may never write (app/update_install.cpp is_player_path); kept out of packages here too.
 PLAYER_FOLDERS = {"update", "servers", "logs", "cache", "screenshots", "bug-reports", "maps", "scripts", "textures",
-                  "web", "addons"}
+                  "web", "addons", "tools"}
 PLAYER_FILES = {"hailstone.ini", "hailstone-windows.ini", "notes.txt"}
 
 
@@ -130,6 +130,8 @@ def main():
             if not w or w[0] in ("hailstone-update", "signature"):
                 continue
             if w[0] == "version":
+                if len(w) != 2:
+                    sys.exit(f"{manifest}: \"{line.strip()}\" is not a version line (version <version>)")
                 if w[1:] != [a.version]:
                     sys.exit(f"{manifest} is for {' '.join(w[1:])}, not {a.version}")
                 continue

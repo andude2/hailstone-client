@@ -27,6 +27,7 @@ local function body(x, y, w, h, s)
     filter = needle ~= "" and function(row, texts)
       return (texts[1] or ""):lower():find(needle, 1, true) ~= nil
     end or nil,
+    filterKey = needle,
     draw = function(row, texts, x0, y0, x1, y1, s_, st)
       local _, th = T.TextSize("Ag", T.font.small)
       -- Name, then the level and the reuse (columns 2 and 7) on the right.

@@ -16,6 +16,7 @@ local W = dofile("lib/window.lua")
 local I = dofile("lib/items.lua")
 local P = dofile("lib/textpanel.lua")
 local C = T.C
+local bagSlots = {} -- the bag slots' items, read once a frame (I.readBagSlots)
 
 -- A pad shortcut of the current window, not in its first moments: the press that opened it is not one for it.
 local function pressed(name, b)
@@ -177,22 +178,27 @@ ui.window("Tribute Master", function()
       local per = math.max(1, math.floor((listX1 - x0 + gap) / (size + gap)))
       local n = 0
       local focusedItem, focusedWhere
+      local acted = false -- (a click may have moved an item: the bag slots are read again after it)
       local function cell(slot, bag, item, where)
         if n % per ~= 0 then ui.SameLine(0, gap) end
         n = n + 1
-        local clicked, focused = T.slot("##tm" .. slot .. "_" .. (bag or -1), item, size, { label = where }, pad)
+        local clicked, focused = T.slot(I.cellId("tm", slot, bag), item, size, { label = where }, pad)
         if focused then
           focusedItem, focusedWhere = item, where
           if pressed("Tribute Master", "y") and item then eq.ClickSlot(slot, bag, "rightheld") end
         end
-        if clicked then eq.ClickSlot(slot, bag, "left") end
+        if clicked then
+          eq.ClickSlot(slot, bag, "left")
+          acted = true
+        end
       end
+      I.readBagSlots(bagSlots)
       for slot = 23, 32 do
-        local it = eq.Item(slot)
+        local it = bagSlots[slot]
         if not it or (it.bagSlots or 0) == 0 then cell(slot, nil, it, eq.SlotName(slot)) end
       end
       for slot = 23, 32 do
-        local bag = eq.Item(slot)
+        local bag = acted and eq.Item(slot) or bagSlots[slot]
         if bag and (bag.bagSlots or 0) > 0 then
           for i = 0, bag.bagSlots - 1 do cell(slot, i, eq.Item(slot, i), bag.name) end
         end

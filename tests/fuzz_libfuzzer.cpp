@@ -9,17 +9,26 @@
 #include <string_view>
 #include <vector>
 
+#include "assets/character.h"
+#include "assets/eqg.h"
+#include "assets/eqg_character.h"
+#include "assets/jpeg_read.h"
+#include "assets/model_points.h"
 #include "assets/pfs.h"
 #include "assets/texture.h"
 #include "assets/wld.h"
+#include "assets/wld_detail.h"
 #include "core/addon_index.h"
 #include "core/addon_manifest.h"
 #include "core/addon_source.h"
 #include "core/binary_header.h"
+#include "core/shared_file_cache.h"
 #include "core/update_manifest.h"
 #include "core/zip_read.h"
 #include "net/session_codec.h"
 #include "net/zone_packets.h"
+#include "platform/gpu_ipc.h"
+#include "render/gpu_cache_protocol.h"
 #if defined(HAILSTONE_FUZZ_DECODERS)
 #include <iterator>
 
@@ -77,9 +86,34 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         auto w = hailstone::assets::wld::WldFile::deferred(
             [in] { return std::vector<std::byte>(in.begin(), in.end()); }, "fuzz");
         for (const auto& f : w.fragments())
-            if (const auto* m = std::get_if<hailstone::assets::wld::MeshDef>(&f.data)) (void)hailstone::assets::wld::build_mesh(w, *m, f.name);
+            if (const auto* m = f.get<hailstone::assets::wld::MeshDef>()) (void)hailstone::assets::wld::build_mesh(w, *m, f.name);
+        // The shared cache's path: track keys stay encoded in the file's bytes and are decoded on read.
+        const auto encoded = hailstone::assets::wld::WldFile::parse(
+            hailstone::ImmutableFileBytes::owned(std::vector<std::byte>(in.begin(), in.end())), "fuzz", true);
+        for (const auto& f : encoded.fragments())
+            if (const auto* def = f.get<hailstone::assets::wld::TrackDef>()) {
+                const auto track = hailstone::assets::AnimationTrack::from_wld(def->frames);
+                for (std::size_t i = 0; i < track.size(); ++i) (void)track[i];
+            }
 #elif defined(HAILSTONE_FUZZ_TEXTURE)
         (void)hailstone::assets::decode_texture(in);
+        (void)hailstone::assets::decode_cube_as_octahedral(in, 16);
+        (void)hailstone::assets::decode_jpeg(in);
+        (void)hailstone::assets::wld::decode_palette_map(in);
+#elif defined(HAILSTONE_FUZZ_MODELS)
+        // The small model and zone side files: byte 0 picks the parser, the rest is the file.
+        if (size >= 1) {
+            namespace a = hailstone::assets;
+            const auto body = in.subspan(1);
+            switch (data[0] % 6) {
+            case 0: (void)a::eqg_character::parse_layers(body); break;
+            case 1: (void)a::parse_pts(body); break;
+            case 2: (void)a::parse_prt(body); break;
+            case 3: (void)a::eqg::parse_texture_animation(body); break;
+            case 4: (void)a::eqg::parse_eco_flora(body); break;
+            default: (void)a::eqg::parse_radial_flora(body); break;
+            }
+        }
 #elif defined(HAILSTONE_FUZZ_SOE)
         namespace soe = hailstone::net::soe;
         soe::SessionParams params;
@@ -124,6 +158,22 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
             // Alternate format: byte0 chooses an achievement parser, remainder is its body.
             hailstone::fuzz_achievements::feed(in);
         }
+#elif defined(HAILSTONE_FUZZ_GPUCACHE)
+        // What one client process reads from another over the shared GPU texture transport: byte 0 picks the
+        // frame header, the broker's request parser (and the recipe a texture request carries) or the recipe alone.
+        if (size >= 1) {
+            const auto body = in.subspan(1);
+            switch (data[0] % 3) {
+            case 0: (void)hailstone::platform::gpu_ipc_wire::decode_header(body); break;
+            case 1: {
+                const auto request = hailstone::render::gpu_cache::decode_request(body);
+                if (request.op == hailstone::render::gpu_cache::Op::Texture)
+                    (void)hailstone::render::gpu_cache::decode_texture(request.recipe);
+                break;
+            }
+            default: (void)hailstone::render::gpu_cache::decode_texture(body); break;
+            }
+        }
 #elif defined(HAILSTONE_FUZZ_ZIP)
         // The updater's inputs (docs/updater.md): a package zip read whole, and the same bytes as a manifest.
         hailstone::ZipReader zip;
@@ -138,7 +188,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         (void)hailstone::read_binary_header(in);
         (void)hailstone::parse_addon_index(text, hailstone::Ed25519PublicKey{});
 #else
-#error "define one of HAILSTONE_FUZZ_PFS, HAILSTONE_FUZZ_WLD, HAILSTONE_FUZZ_TEXTURE, HAILSTONE_FUZZ_SOE, HAILSTONE_FUZZ_PACKETS, HAILSTONE_FUZZ_DECODERS, HAILSTONE_FUZZ_ZIP"
+#error "define one of HAILSTONE_FUZZ_PFS, HAILSTONE_FUZZ_WLD, HAILSTONE_FUZZ_TEXTURE, HAILSTONE_FUZZ_SOE, HAILSTONE_FUZZ_PACKETS, HAILSTONE_FUZZ_DECODERS, HAILSTONE_FUZZ_ZIP, HAILSTONE_FUZZ_GPUCACHE, HAILSTONE_FUZZ_MODELS"
 #endif
     } catch (const std::exception&) {
         // A reported error is the expected outcome for malformed input; crashes and sanitizer reports are not.

@@ -38,6 +38,10 @@ public:
     // VkContext::begin_frame_commands and begin_scene.
     void record(const render::FrameInfo& frame, web::BrowserHost& host);
 
+    // Destroys the retired textures whose frames are done (record does this too). Called each frame record is not,
+    // so a texture retired before the tabs stopped being recorded does not stay until shutdown.
+    void collect();
+
 private:
     struct Entry {
         VkImage image = VK_NULL_HANDLE;

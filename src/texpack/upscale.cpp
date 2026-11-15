@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <stdexcept>
+#include <string>
 
 namespace hailstone::texpack {
 
@@ -290,6 +292,15 @@ Outputs upscale_texture(const TextureInfo& info, const Sources& sources, const M
                         const UpscaleSettings& settings, const std::vector<FileKind>& wanted) {
     auto want = [&](FileKind k) { return std::find(wanted.begin(), wanted.end(), k) != wanted.end(); };
     const Image& src = sources.color;
+    // Refused past kMaxUpscaleTexels, at the pack's size or the colour model's (which pads and scales first): the
+    // float planes take 16 bytes a texel, and 8192 x 8192 at 8x would ask for some 50 GB.
+    auto too_large = [](std::uint64_t w, std::uint64_t h) { return w * h > kMaxUpscaleTexels; };
+    const std::uint64_t model_scale = uses_models(info) && models.color ? models.color->scale() : 1;
+    if (too_large(std::uint64_t{src.width} * settings.scale, std::uint64_t{src.height} * settings.scale) ||
+        too_large((std::uint64_t{src.width} + 2 * kEdgePad) * model_scale,
+                  (std::uint64_t{src.height} + 2 * kEdgePad) * model_scale))
+        throw std::runtime_error("too large to upscale: " + std::to_string(src.width) + "x" +
+                                 std::to_string(src.height) + " at " + std::to_string(settings.scale) + "x");
     const std::uint32_t W = src.width * settings.scale, H = src.height * settings.scale;
     const Edge edge = reflects_edges(info) ? Edge::Reflect : Edge::Wrap;
     const bool plain_ml = uses_models(info) && models.color;

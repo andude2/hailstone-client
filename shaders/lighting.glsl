@@ -29,7 +29,7 @@ struct PointLightGpu {
     vec4 haze_color;                                                                                                   \
     vec4 camera;                                                                                                       \
     vec4 screen; /* x, y: view depth = y / (d + x); z, w: 1 / the target's size (set_screen) */                       \
-    vec4 time;   /* x: seconds, wrapped every 1024 */                                                                  \
+    vec4 time;   /* x: seconds, wrapped every 1024; y: the last frame's (the zone's motion) */                         \
     vec4 wind;   /* xy: the way it blows, z: strength, w: the gusts' strength */                                         \
     vec4 cover;  /* the cover map (render/cover_map.h): x, y its corner, z: 1 / its size, w: its top */                \
     vec4 cover_params; /* x: 1 / its depth, y: 1 the cover map on, z: 1 the water map on */                            \

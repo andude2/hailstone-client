@@ -165,3 +165,22 @@ TEST_CASE("hooks: events reach every owner; packets sent from packet hooks stop 
     h.pulse();
     CHECK(pulses == 1);
 }
+
+TEST_CASE("hooks: a command that runs itself stops nesting instead of overflowing the stack") {
+    plugin::Hooks h;
+    auto o = h.new_owner("p");
+    int runs = 0;
+    h.add_command(o, "/again", [&](std::string_view) {
+        ++runs;
+        std::string line = "/again";
+        CHECK(h.command(line)); // past the limit: taken (dropped), not run
+    });
+    std::string line = "/again";
+    CHECK(h.command(line));
+    CHECK(runs == 64);
+    // The depth comes back: the next line runs again.
+    runs = 0;
+    line = "/again";
+    CHECK(h.command(line));
+    CHECK(runs == 64);
+}

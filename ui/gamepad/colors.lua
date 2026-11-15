@@ -60,7 +60,7 @@ ui.window("Color Picker", function()
         if G.repeated("left") then pick(preset + 14) end
         if G.repeated("right") then pick(preset + 1) end
       end
-      if pad.menuPressed("a") then accept = true end
+      if T.settledPress(pad, "a") then accept = true end
     end
     -- the colour now (the window's CPW_TC15Button shows it)
     local r, g, b = G.tint(CP, "CPW_TC15Button")

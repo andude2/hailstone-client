@@ -489,6 +489,11 @@ TEST_CASE("TLO: int, float and string members as MQ's") {
     CHECK(f.p("${String[a,,b].Token[2,,]}|${String[a,,b].Token[3,,]}") == "|b");
     CHECK(f.p("${String[aXbXc].Replace[X,--]} ${String[aaa].Replace[a,aa]} ${String[abc].Replace[x]}") ==
           "a--b--c aaaaaa NULL");
+    // Replace nested in itself, each making its text ten times longer: cut to 2047 bytes, not grown without end.
+    std::string grow = "aaaaaaaaaa";
+    for (int i = 0; i < 30; ++i) grow = "${String[" + grow + "].Replace[a,aaaaaaaaaa]}";
+    CHECK(f.p(grow) == std::string(2047, 'a'));
+    CHECK(f.p("${String[" + std::string(300, 'a') + "].Replace[a,bbbbbbbbbb]}") == std::string(2047, 'b'));
     CHECK(f.p("${String[plain text].StripLinks}") == "plain text");
 }
 

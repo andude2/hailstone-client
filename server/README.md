@@ -70,7 +70,7 @@ so each read is a database query), and at once after `#reloadquest`.
 
 | Setting | Default | |
 |---|---|---|
-| `enabled` | 1 | answer at all |
+| `enabled` | 1 | answer at all (0: no request is answered, `client_files/` included, and the zone does not list or hash it at start) |
 | `guild_invites_world` | 1 | `/guildinvite` reaches Hailstone players in other zones |
 | `client_files` | 1 | send `client_files/` to Hailstone clients (0: they get an empty list) |
 | `group_declines` | 1 | tell the inviter when a RoF2 client declines a group invitation |

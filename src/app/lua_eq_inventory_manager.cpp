@@ -37,13 +37,17 @@
 #include <format>
 #include <iterator>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include <lua.hpp>
 
 #include "app/lua_eq.h"
 #include "app/lua_eq_windows.h"
 #include "net/game_connection.h"
+#include "plugin/lua_keep.h"
 #include "ui/lua/lua_host.h"
 
 namespace hailstone::app {
@@ -287,28 +291,37 @@ int BulkItems(lua_State* L) {
                                                     : std::nullopt;
     if (!mode) return luaL_argerror(L, 1, "\"sell\", \"destroy\", \"tribute\" or \"withdraw\"");
     ui::lua::unview(L, 2);
-    std::vector<net::ItemSlot> slots;
+    const bool dry = lua_toboolean(L, 3) != 0;
+    // The places and the answer in a box the state owns across the pushes (plugin/lua_keep.h).
+    struct Job {
+        std::vector<net::ItemSlot> slots;
+        std::string err;
+    };
+    Job& job = plugin::lua_keep<Job>(L);
+    auto& slots = job.slots;
     if (lua_istable(L, 2))
         for (lua_Integer i = 1;; ++i) {
             lua_rawgeti(L, 2, i);
             bool more = lua_type(L, -1) == LUA_TSTRING;
             if (more)
-                if (auto at = carried_place(lua_tostring(L, -1))) slots.push_back(*at);
+                if (auto at = carried_place(lua_tostring(L, -1))) plugin::cxx_guard(L, [&] { slots.push_back(*at); });
             lua_pop(L, 1);
             if (!more) break;
         }
-    const bool dry = lua_toboolean(L, 3) != 0;
     if (!h.conn || !h.in_game) {
         lua_pushinteger(L, 0);
         lua_pushstring(L, "Not in game.");
         return 2;
     }
     net::GameConnection& c = *h.conn;
-    const std::size_t count = c.bulk_items_plan(*mode, slots).size();
-    std::string err = dry ? c.bulk_items_blocked(*mode) : c.start_bulk_job(*mode, slots);
+    std::size_t count = 0;
+    plugin::cxx_guard(L, [&] {
+        count = c.bulk_items_plan(*mode, slots).size();
+        job.err = dry ? c.bulk_items_blocked(*mode) : c.start_bulk_job(*mode, slots);
+    });
     lua_pushinteger(L, static_cast<lua_Integer>(count));
-    if (err.empty()) return 1;
-    lua_pushstring(L, err.c_str());
+    if (job.err.empty()) return 1;
+    lua_pushstring(L, job.err.c_str());
     return 2;
 }
 
@@ -357,8 +370,10 @@ int SetItemsKept(lua_State* L) {
         luaL_optstring(L, -1, "");
         lua_pop(L, 2);
     }
-    std::vector<std::pair<std::uint32_t, std::string>> items;
-    items.reserve(count);
+    // In a box the state owns (plugin/lua_keep.h): reading a name that is a number converts it on the stack, which
+    // allocates and so may raise.
+    auto& items = plugin::lua_keep<std::vector<std::pair<std::uint32_t, std::string>>>(L);
+    plugin::cxx_guard(L, [&] { items.reserve(count); });
     for (std::size_t i = 1; i <= count; ++i) {
         lua_rawgeti(L, 1, static_cast<lua_Integer>(i));
         ui::lua::unview(L, -1);
@@ -369,10 +384,11 @@ int SetItemsKept(lua_State* L) {
         lua_pushliteral(L, "name");
         lua_rawget(L, -2);
         const char* name = lua_tostring(L, -1);
-        items.emplace_back(id, name ? name : "");
+        plugin::cxx_guard(L, [&] { items.emplace_back(id, name ? name : ""); });
         lua_pop(L, 2);
     }
-    if (h.conn) h.conn->set_items_kept(items, lua_toboolean(L, 2) != 0);
+    const bool keep = lua_toboolean(L, 2) != 0;
+    if (h.conn) plugin::cxx_guard(L, [&] { h.conn->set_items_kept(items, keep); });
     return 0;
 }
 

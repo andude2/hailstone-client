@@ -58,6 +58,7 @@ function W.begin(name, opts)
   local last = S.drawn[name]
   local appearing = not last or frame - last > 1
   S.drawn[name] = frame
+  S.currentWindow = name -- (between W.begin and W.finish: the libraries' copies of this file have no `current`)
   S.appeared = S.appeared or {}
   if appearing then S.appeared[name] = frame end
   local w, h = T.px(opts.w or 900), T.px(opts.h or 600)
@@ -181,7 +182,28 @@ function W.finish()
   ui.PopStyleColor(11)
   ui.PopStyleVar(6)
   current = nil
+  S.currentWindow = nil
   return c and c.close
+end
+
+-- A click to run once A is released (a click that opens the quantity dialog, so the A still held does not press the
+-- dialog): kept for the window being drawn, and dropped if that window is gone (not drawn last frame) before then,
+-- so it never fires into another window. W.deferred(slot, fn) keeps it in the table `slot`; W.runDeferred(slot)
+-- runs or drops it, each frame.
+function W.deferred(slot, fn)
+  slot.fn, slot.owner = fn, S.currentWindow
+end
+function W.runDeferred(slot)
+  local fn = slot.fn
+  if not fn then return end
+  local owner = slot.owner
+  if owner and (S.drawn[owner] or -1) < ui.GetFrameCount() - 1 then
+    slot.fn, slot.owner = nil, nil
+    return
+  end
+  if pad.down("a") then return end
+  slot.fn, slot.owner = nil, nil
+  fn()
 end
 
 -- Whether the window `name` (this pack's) has the focus, to give it the pad's shortcuts (Y, X, LB / RB, ...).
@@ -195,7 +217,13 @@ function W.pressed(b) return ui.IsWindowFocused(3) and pad.menuPressed(b) end
 -- 1..count, drawRow(i, x0, y0, x1, y1, focused) draws one and returns nothing; onClick(i) on A / a click.
 -- state = { offset = 0 } kept by the caller. D-pad down on the last shown row (or up on the first) scrolls it, as
 -- does the mouse wheel over it. Returns the focused row (or nil).
+local listRowIds = {} -- by list id: its rows' ImGui ids ("<id>:<v>"), made once
 function W.list(id, state, count, visible, rowH, width, drawRow, onClick)
+  local rowIds = listRowIds[id]
+  if not rowIds then
+    rowIds = {}
+    listRowIds[id] = rowIds
+  end
   state.offset = state.offset or 0
   local maxOff = math.max(0, count - visible)
   if state.offset > maxOff then state.offset = maxOff end
@@ -207,7 +235,12 @@ function W.list(id, state, count, visible, rowH, width, drawRow, onClick)
   local scrolled = false
   for v = 1, math.min(visible, count) do
     local i = state.offset + v
-    ui.PushID(id .. ":" .. v)
+    local rowId = rowIds[v]
+    if not rowId then
+      rowId = id .. ":" .. v
+      rowIds[v] = rowId
+    end
+    ui.PushID(rowId)
     if state.focusNext == v then
       ui.SetKeyboardFocusHere()
       pad.showCursor()

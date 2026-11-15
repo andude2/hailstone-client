@@ -67,7 +67,7 @@ local function fitStart(text, w)
     local mid = (lo + hi) // 2
     if ui.CalcTextSize("..." .. text:sub(mid)) > w then lo = mid + 1 else hi = mid end
   end
-  return "..." .. text:sub(lo)
+  return "..." .. text:sub(T.charStart(text, lo)) -- (on to a character's start: narrower, so it still fits)
 end
 
 -- ---------------------------------------------------------------- the keys
@@ -85,7 +85,7 @@ local function clean(e, t)
   if e.digits then t = t:gsub("%D", "") end
   if e.noBlank then t = t:gsub("%s", "") end
   local max = e.max or (e.digits and 5 or 64) -- (the client's keyboard keeps 64; a link up to 400)
-  if #t > max then t = t:sub(1, max) end
+  if #t > max then t = T.cutBytes(t, max) end
   return t
 end
 
@@ -501,6 +501,11 @@ local function mainPage(v, x0, y, x1, w)
     F:want(nil)
   end
   y = y + lh
+  if v.sessionTicketAvailable and not busy then
+    P.at(x0, y + gap)
+    if P.button(F, "##resume_token", "Sign in with session", w, rh) then eq.LoginDo("resume_token") end
+    y = y + gap + rh
+  end
   if v.update then y = updateRow(v, x0, y + px(14), x1, w) end
   y = suggestionRows(v, x0, y, x1, w)
   return y
@@ -964,6 +969,7 @@ end
 
 -- Where the focus goes as the screen appears: the character played last, else the first field to fill, else Log in.
 local function firstFocus(v)
+  if v.sessionTicketAvailable and not v.busy then F:want("##resume_token") return end
   if #v.characters > 0 then
     local at = v.quick > 0 and v.quick or 1
     for i, q in ipairs(v.characters) do if q.last and v.quick == 0 then at = i end end

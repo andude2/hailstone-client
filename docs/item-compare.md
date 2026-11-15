@@ -55,7 +55,8 @@ and names both. The slots are listed with the best swap first (the highest score
 one's comparison comes first.
 
 Results are kept for half a second per item and place, so a tooltip shown every frame does not rebuild the sheet
-every frame.
+every frame. Each place (an inventory slot, a window's slot, a bag slot) keeps its own, up to eight, so two item
+displays open at once do not throw each other's away; past eight the oldest goes.
 
 ## The verdict
 

@@ -3,7 +3,9 @@
 
 #include <doctest/doctest.h>
 
+#include <cstring>
 #include <fstream>
+#include <string>
 
 #include "assets/gltf_mesh.h"
 #include "assets/model_overrides.h"
@@ -93,6 +95,25 @@ TEST_CASE("glTF: a written mesh reads back in the zone's frame, wound counter-cl
     CHECK(again->mesh.indices == m.indices);
 }
 
+TEST_CASE("glTF: a mesh's sway heights travel in its second UV set") {
+    Mesh m = sample_mesh();
+    // Without them, no second UV set is written, and none comes back.
+    auto plain = read_glb(write_glb(m));
+    REQUIRE(plain);
+    CHECK_FALSE(plain->mesh.sway_heights);
+    for (const auto& v : plain->mesh.vertices) CHECK(v.uv2 == glm::vec2(0.0f));
+    m.sway_heights = true;
+    for (std::size_t i = 0; i < m.vertices.size(); ++i) m.vertices[i].uv2 = {float(i) * 2.5f, 0.0f};
+    for (std::uint64_t hash : {0ull, 0x42ull}) {
+        auto read = read_glb(write_glb(m, hash));
+        REQUIRE(read);
+        CHECK(read->source_hash == hash);
+        CHECK(read->mesh.sway_heights);
+        REQUIRE(read->mesh.vertices.size() == m.vertices.size());
+        for (std::size_t i = 0; i < m.vertices.size(); ++i) CHECK(read->mesh.vertices[i].uv2 == m.vertices[i].uv2);
+    }
+}
+
 TEST_CASE("glTF: what is not a usable binary glTF is refused") {
     std::string error;
     CHECK_FALSE(read_glb({}, &error));
@@ -115,6 +136,58 @@ TEST_CASE("glTF: what is not a usable binary glTF is refused") {
     for (char c : padded) glb.push_back(static_cast<std::byte>(c));
     CHECK_FALSE(read_glb(glb, &error));
     CHECK(error == "a buffer outside the file");
+}
+
+namespace {
+
+// A binary glTF from its JSON and its BIN chunk.
+std::vector<std::byte> make_glb(std::string json, const std::vector<std::byte>& bin) {
+    while (json.size() % 4) json += ' ';
+    std::vector<std::byte> glb;
+    auto u32 = [&](std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) glb.push_back(static_cast<std::byte>((v >> (8 * i)) & 0xff));
+    };
+    const auto total = static_cast<std::uint32_t>(12 + 8 + json.size() + 8 + bin.size());
+    u32(0x46546c67), u32(2), u32(total), u32(static_cast<std::uint32_t>(json.size())), u32(0x4e4f534a);
+    for (char c : json) glb.push_back(static_cast<std::byte>(c));
+    u32(static_cast<std::uint32_t>(bin.size())), u32(0x004e4942);
+    glb.insert(glb.end(), bin.begin(), bin.end());
+    return glb;
+}
+
+// One triangle's positions, (0,0,0) (1,0,0) (0,1,0), as a BIN chunk.
+std::vector<std::byte> triangle_bin() {
+    const float p[9] = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+    std::vector<std::byte> bin(sizeof p);
+    std::memcpy(bin.data(), p, sizeof p);
+    return bin;
+}
+
+} // namespace
+
+TEST_CASE("glTF: a deep node chain takes each parent's transform; shared accessors share vertices") {
+    // 2000 nodes, each a child of the last, each moved 1 along x and drawing the same triangle.
+    constexpr int kDepth = 2000;
+    std::string json =
+        R"({"asset":{"version":"2.0"},"buffers":[{"byteLength":36}],"bufferViews":[{"buffer":0,"byteLength":36}],)"
+        R"("accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}],)"
+        R"("meshes":[{"primitives":[{"attributes":{"POSITION":0}},{"attributes":{"POSITION":0}}]}],"nodes":[)";
+    for (int i = 0; i < kDepth; ++i) {
+        if (i) json += ',';
+        json += R"({"mesh":0,"translation":[1,0,0])";
+        if (i + 1 < kDepth) json += R"(,"children":[)" + std::to_string(i + 1) + "]";
+        json += '}';
+    }
+    json += R"(],"scenes":[{"nodes":[0]}]})";
+    std::string error;
+    auto mesh = read_glb(make_glb(json, triangle_bin()), &error);
+    REQUIRE_MESSAGE(mesh, error);
+    // Each node's two primitives share one set of vertices; the nodes' differ.
+    CHECK(mesh->mesh.vertices.size() == 3u * kDepth);
+    CHECK(mesh->mesh.parts.size() == 2u * kDepth);
+    CHECK(mesh->mesh.vertices[0].position.x == doctest::Approx(1.0f));
+    CHECK(mesh->mesh.vertices[3u * (kDepth - 1)].position.x == doctest::Approx(float(kDepth)));
+    CHECK(mesh->mesh.vertices[3u * (kDepth - 1) + 1].position.x == doctest::Approx(float(kDepth + 1)));
 }
 
 TEST_CASE("object_mesh_hash: positions and triangles count, colours and materials do not") {

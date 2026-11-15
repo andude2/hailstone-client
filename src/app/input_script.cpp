@@ -45,7 +45,7 @@ int pad_axis(std::string_view name) {
 }
 
 double arg_or(const std::vector<std::string>& args, std::size_t i, double fallback) {
-    return i < args.size() ? std::atof(args[i].c_str()) : fallback;
+    return i < args.size() ? script_number(args[i], fallback) : fallback;
 }
 
 } // namespace
@@ -65,7 +65,7 @@ InputScript::InputScript(std::string_view script, platform::Window& window, Hook
             continue;
         }
         s.clock = time[0] == 'c' ? Clock::Select : time[0] == 'd' ? Clock::Disconnect : Clock::Zone;
-        s.at = std::atof(time.c_str() + (s.clock != Clock::Zone ? 1 : 0));
+        s.at = script_number(time.substr(s.clock != Clock::Zone ? 1 : 0));
         std::getline(in >> std::ws, s.rest);
         std::istringstream words(s.rest);
         for (std::string w; words >> w;) s.args.push_back(w);
@@ -119,7 +119,7 @@ void InputScript::run(const Step& s, double now) {
     } else if (s.action == "axis" && a.size() >= 2) {
         int ax = pad_axis(a[0]);
         if (ax < 0) return log::warn("input script: no pad axis '{}'", a[0]);
-        window_.set_virtual_pad_axis(ax, static_cast<float>(std::atof(a[1].c_str())));
+        window_.set_virtual_pad_axis(ax, static_cast<float>(script_number(a[1])));
         releases_.push_back({now + arg_or(a, 2, 0.5), s.clock, frame_ + kMinHeldFrames, [this, ax] { window_.set_virtual_pad_axis(ax, 0.0f); }});
     } else if (s.action == "key" && !a.empty()) {
         std::string name = a[0]; // "Left_Alt": an underscore stands for the space SDL's names have
@@ -133,7 +133,7 @@ void InputScript::run(const Step& s, double now) {
     } else if (s.action == "click" && a.size() >= 2) {
         int w = 0, h = 0;
         SDL_GetWindowSize(window_.sdl_window(), &w, &h);
-        float x = static_cast<float>(std::atof(a[0].c_str()) * w), y = static_cast<float>(std::atof(a[1].c_str()) * h);
+        float x = static_cast<float>(script_number(a[0]) * w), y = static_cast<float>(script_number(a[1]) * h);
         bool right = a.size() >= 3 && a[2] == "right";
         int button = right ? SDL_BUTTON_RIGHT : SDL_BUTTON_LEFT;
         window_.push_mouse_button(x, y, button, true);
@@ -141,19 +141,19 @@ void InputScript::run(const Step& s, double now) {
     } else if (s.action == "wheel" && a.size() >= 3) {
         int w = 0, h = 0;
         SDL_GetWindowSize(window_.sdl_window(), &w, &h);
-        float x = static_cast<float>(std::atof(a[0].c_str()) * w), y = static_cast<float>(std::atof(a[1].c_str()) * h);
+        float x = static_cast<float>(script_number(a[0]) * w), y = static_cast<float>(script_number(a[1]) * h);
         window_.push_mouse_motion(x, y);
         SDL_Event ev{};
         ev.type = SDL_EVENT_MOUSE_WHEEL;
         ev.wheel.windowID = SDL_GetWindowID(window_.sdl_window());
-        ev.wheel.y = static_cast<float>(std::atof(a[2].c_str()));
+        ev.wheel.y = static_cast<float>(script_number(a[2]));
         ev.wheel.mouse_x = x;
         ev.wheel.mouse_y = y;
         SDL_PushEvent(&ev);
     } else if ((s.action == "move" || s.action == "press" || s.action == "release") && a.size() >= 2) {
         int w = 0, h = 0;
         SDL_GetWindowSize(window_.sdl_window(), &w, &h);
-        float x = static_cast<float>(std::atof(a[0].c_str()) * w), y = static_cast<float>(std::atof(a[1].c_str()) * h);
+        float x = static_cast<float>(script_number(a[0]) * w), y = static_cast<float>(script_number(a[1]) * h);
         if (s.action == "move") window_.push_mouse_motion(x, y);
         else window_.push_mouse_button(x, y, SDL_BUTTON_LEFT, s.action == "press");
     } else if (s.action == "shot" && !a.empty()) {

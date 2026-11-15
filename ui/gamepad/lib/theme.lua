@@ -167,6 +167,40 @@ function T.fit(text, w)
   return text:sub(1, charEnd(text, lo)) .. "..."
 end
 
+-- UTF-8 edits: text cut, shortened or started only between characters (a name or a link label typed or pasted in can
+-- hold them). A byte that is not part of a well-formed character (Latin-1 text) counts as one character.
+local function isCont(b) return b ~= nil and b >= 0x80 and b < 0xC0 end
+-- The longest start of text of at most n bytes that does not end inside a character.
+function T.cutBytes(text, n)
+  if #text <= n then return text end
+  if n <= 0 then return "" end
+  if isCont(text:byte(n + 1)) then
+    -- back to the lead byte of the character it splits (at most three bytes back), the cut before it
+    for i = n, math.max(1, n - 2), -1 do
+      local b = text:byte(i)
+      if b >= 0xC0 then return text:sub(1, i - 1) end
+      if b < 0x80 then break end
+    end
+  end
+  return text:sub(1, n)
+end
+-- text without its last character (Delete on the keys).
+function T.dropChar(text)
+  local n = #text
+  local i = n
+  while i > 1 and i > n - 3 and isCont(text:byte(i)) do i = i - 1 end
+  if i < n and text:byte(i) >= 0xC0 then return text:sub(1, i - 1) end
+  return text:sub(1, n - 1)
+end
+-- i (a byte of text), moved on to the first byte of a character.
+function T.charStart(text, i)
+  local stop = math.min(#text + 1, i + 3)
+  local j = i
+  while j < stop and isCont(text:byte(j)) do j = j + 1 end
+  if j == stop and isCont(text:byte(j)) then return i end -- (not UTF-8: bytes as they are)
+  return j
+end
+
 -- A bar: fraction 0..1 of colour c, with a text centred on it (and an optional right-hand text).
 function T.bar(x0, y0, x1, y1, frac, c, text, right, alpha)
   local h = y1 - y0
@@ -299,6 +333,11 @@ function T.settle(clicked, pad)
     return false
   end
   return clicked
+end
+-- A pad button a window reads itself (a dialog's A to accept, not an ImGui item's), dropped in the same settling time
+-- whether or not the navigation cursor shows (a window without ImGui navigation never shows it).
+function T.settledPress(pad, b)
+  return pad.menuPressed(b) and (GPSTATE and GPSTATE.padSettleUntil or 0) <= ui.GetTime()
 end
 
 -- A button w x h: returns clicked, focused, x0, y0, x1, y1. opts: primary (accent face), disabled, glyph (a pad

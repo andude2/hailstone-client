@@ -5,7 +5,7 @@
 --   local FL = dofile("lib/find.lua")
 --   FL.state             -- { search, sel (the selected NPC's id), hover (the hovered row's id), why, menu }
 --   FL.CATS              -- eq.FindCategories(): { { key, label }, ... }
---   FL.rows()            -- the rows shown, nearest first
+--   FL.rows()            -- the rows shown, nearest first (kept a moment, shared: do not change it)
 --   FL.hidden()          -- the kinds left out, as a set of keys (find.hidden in ui/settings/modern.txt)
 --   FL.setHidden(key, hide)
 --   FL.marks()           -- whether the maps mark every listed NPC (map.npcMarks; the selected and hovered always)
@@ -48,16 +48,28 @@ function FL.setHidden(key, hide)
   ui.SetSetting("find.hidden", table.concat(parts, ","))
 end
 
+-- The rows are kept (in FIND_STATE, so the map and the minimap, each with its own copy of this file, share them)
+-- until the zone, the search or the kinds left out change, or ROWS_REREAD seconds pass (the game makes its list again
+-- every 200 ms for the distances and positions). The table returned is shared: read it, do not change it.
+local ROWS_REREAD = 0.2
 function FL.rows()
   -- a new zone: its spawn ids are its own, so the old selection would name another NPC
   local zone = select(2, eq.ZoneName()) or ""
   if zone ~= FIND_STATE.zone then
     FIND_STATE.zone, FIND_STATE.sel, FIND_STATE.hover = zone, nil, nil
   end
-  local hidden, out = FL.hidden(), {}
+  local hidden = FL.hidden()
+  local now = ui.GetTime()
+  local c = FIND_STATE.rowsCache
+  if c and c.zone == zone and c.search == FIND_STATE.search and c.hidden == hiddenRaw
+      and now - c.at < ROWS_REREAD and now >= c.at then
+    return c.rows
+  end
+  local out = {}
   for _, r in ipairs(eq.FindNpcs and eq.FindNpcs(FIND_STATE.search) or {}) do
     if not hidden[r.category] then out[#out + 1] = r end
   end
+  FIND_STATE.rowsCache = { zone = zone, search = FIND_STATE.search, hidden = hiddenRaw, at = now, rows = out }
   return out
 end
 

@@ -48,7 +48,7 @@ local function body(x, y, w, h, s)
   -- the centre mark
   ui.DrawTriangleFilled(cx - 5 * s, y + h, cx + 5 * s, y + h, cx, y + h - 6 * s, C.accent[1], C.accent[2], C.accent[3], 1)
   -- (no hit box: the whole band is the frame's drag handle)
-  if ui.IsMouseHoveringRect(x, y, x + w, y + h) and ui.IsWindowHovered() then ui.SetTooltip(string.format("Heading %d\xC2\xB0", math.floor((360 - heading) % 360 + 0.5))) end
+  if ui.IsMouseHoveringRect(x, y, x + w, y + h) and ui.IsWindowHovered() then ui.SetTooltip(string.format("Heading %d\xC2\xB0", math.floor((360 - heading) % 360 + 0.5) % 360)) end
 end
 
 ui.window("Compass", function()

@@ -1,8 +1,13 @@
 #include "app/lua_eq_plugins.h"
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <new>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <lua.hpp>
@@ -10,6 +15,7 @@
 #include "app/lua_eq.h"
 #include "core/ascii_case.h"
 #include "core/sha256.h"
+#include "plugin/lua_keep.h"
 #include "plugin/lua_value.h"
 #include "plugin/policy.h"
 #include "plugin/ui_bridge.h"
@@ -128,11 +134,17 @@ int plugin_call(lua_State* L) {
 int plugin_index(lua_State* L) {
     // upvalue 1 the host, 2 the owner's tag; arguments: the object, the key.
     const char* key = luaL_checkstring(L, 2);
-    std::string k = key;
+    const std::string_view k = key;
     if (k == "name" || k == "owner") {
         const char* owner = lua_tostring(L, lua_upvalueindex(2));
-        auto t = plugin::UiBridge::parse_tag(owner ? owner : "");
-        lua_pushstring(L, k == "owner" || !t ? owner : t->second.c_str());
+        if (k == "owner" || !owner) {
+            lua_pushstring(L, owner);
+            return 1;
+        }
+        // The tag's name, in a box the state owns across the push (plugin/lua_keep.h).
+        auto& t = plugin::lua_keep<std::optional<std::pair<plugin::UiBridge::Kind, std::string>>>(L);
+        plugin::cxx_guard(L, [&] { t = plugin::UiBridge::parse_tag(owner); });
+        lua_pushstring(L, t ? t->second.c_str() : owner);
         return 1;
     }
     lua_pushvalue(L, lua_upvalueindex(1));
@@ -150,7 +162,8 @@ int plugin_index(lua_State* L) {
 int Plugin(lua_State* L) {
     EqHost& h = host_of(L);
     const char* name = luaL_checkstring(L, 1);
-    const std::string owner = target_owner(h, name);
+    std::string& owner = plugin::lua_keep<std::string>(L); // (plugin/lua_keep.h)
+    plugin::cxx_guard(L, [&] { owner = target_owner(h, name); });
     if (owner.empty() || !may_reach(owner)) {
         lua_pushnil(L);
         return 1;
@@ -168,18 +181,31 @@ int Plugin(lua_State* L) {
 // eq.PluginOptions(): {plugin, owner (its tag: plugin::UiBridge::owner_tag), name, label, min, max, value} each
 int PluginOptions(lua_State* L) {
     EqHost& h = host_of(L);
-    lua_newtable(L);
-    if (!h.plugin_ui) return 1;
+    if (!h.plugin_ui) {
+        lua_newtable(L);
+        return 1;
+    }
     // A copy: each get runs plugin code, which may add or replace options (hailstone.option{...}) and so move the
-    // list, or the very function running, under a loop over the bridge's own.
-    std::vector<plugin::UiBridge::Option> options = h.plugin_ui->options();
-    std::erase_if(options, [](const plugin::UiBridge::Option& o) { return !may_reach(o.owner()); }); // a plugin: its own
+    // list, or the very function running, under a loop over the bridge's own. It and each owner tag live in boxes
+    // the state owns across the pushes (plugin/lua_keep.h).
+    auto& options = plugin::lua_keep<std::vector<plugin::UiBridge::Option>>(L);
+    std::string& owner = plugin::lua_keep<std::string>(L);
+    plugin::cxx_guard(L, [&] {
+        options = h.plugin_ui->options();
+        std::erase_if(options, [](const plugin::UiBridge::Option& o) { return !may_reach(o.owner()); }); // its own
+    });
+    lua_newtable(L);
     lua_Integer i = 0;
     for (const auto& o : options) {
+        lua_Integer value = 0;
+        plugin::cxx_guard(L, [&] {
+            owner = o.owner();
+            value = o.get ? o.get() : 0;
+        });
         lua_createtable(L, 0, 7);
         lua_pushstring(L, o.plugin.c_str());
         lua_setfield(L, -2, "plugin");
-        lua_pushstring(L, o.owner().c_str());
+        lua_pushstring(L, owner.c_str());
         lua_setfield(L, -2, "owner");
         lua_pushstring(L, o.name.c_str());
         lua_setfield(L, -2, "name");
@@ -189,7 +215,7 @@ int PluginOptions(lua_State* L) {
         lua_setfield(L, -2, "min");
         lua_pushinteger(L, o.max);
         lua_setfield(L, -2, "max");
-        lua_pushinteger(L, o.get ? o.get() : 0);
+        lua_pushinteger(L, value);
         lua_setfield(L, -2, "value");
         lua_rawseti(L, -2, ++i);
     }
@@ -213,17 +239,32 @@ int SetPluginOption(lua_State* L) {
     return 0;
 }
 
-// eq.PluginMenu(): {plugin, owner, label, command} each
+// The menu entries the caller may reach (a plugin's code: its own; the pack: all), as their places in the bridge's menu.
+std::vector<std::size_t> reachable_menu(const plugin::UiBridge& ui) {
+    std::vector<std::size_t> out;
+    const auto& menu = ui.menu();
+    for (std::size_t i = 0; i < menu.size(); ++i)
+        if (may_reach(menu[i].owner())) out.push_back(i);
+    return out;
+}
+
+// eq.PluginMenu(): {plugin, owner, label, command} each; a plugin's code sees its own entries alone, numbered as
+// eq.PluginMenuClick takes them.
 int PluginMenu(lua_State* L) {
     EqHost& h = host_of(L);
+    std::string& owner = plugin::lua_keep<std::string>(L); // each entry's tag, across its push (plugin/lua_keep.h)
+    auto& shown = plugin::lua_keep<std::vector<std::size_t>>(L);
     lua_newtable(L);
     if (!h.plugin_ui) return 1;
+    plugin::cxx_guard(L, [&] { shown = reachable_menu(*h.plugin_ui); });
     lua_Integer i = 0;
-    for (const auto& e : h.plugin_ui->menu()) {
+    for (std::size_t at : shown) {
+        const plugin::UiBridge::MenuEntry& e = h.plugin_ui->menu()[at];
+        plugin::cxx_guard(L, [&] { owner = e.owner(); });
         lua_createtable(L, 0, 4);
         lua_pushstring(L, e.plugin.c_str());
         lua_setfield(L, -2, "plugin");
-        lua_pushstring(L, e.owner().c_str());
+        lua_pushstring(L, owner.c_str());
         lua_setfield(L, -2, "owner");
         lua_pushstring(L, e.label.c_str());
         lua_setfield(L, -2, "label");
@@ -234,13 +275,17 @@ int PluginMenu(lua_State* L) {
     return 1;
 }
 
-// eq.PluginMenuClick(i): runs entry i's command as its owner (run_plugin_menu).
+// eq.PluginMenuClick(i): runs entry i of eq.PluginMenu() (the caller's own list) as its owner (run_plugin_menu).
 int PluginMenuClick(lua_State* L) {
     EqHost& h = host_of(L);
     lua_Integer i = luaL_checkinteger(L, 1);
-    if (i < 1 || !h.plugin_ui || static_cast<std::size_t>(i) > h.plugin_ui->menu().size()) return 0;
-    if (!may_reach(h.plugin_ui->menu()[static_cast<std::size_t>(i - 1)].owner())) return 0; // a plugin: its own
-    run_plugin_menu(h, static_cast<std::size_t>(i - 1));
+    if (i < 1 || !h.plugin_ui) return 0;
+    std::optional<std::size_t> at;
+    plugin::cxx_guard(L, [&] {
+        const auto shown = reachable_menu(*h.plugin_ui);
+        if (static_cast<std::uint64_t>(i) <= shown.size()) at = shown[static_cast<std::size_t>(i - 1)];
+    });
+    if (at) run_plugin_menu(h, *at);
     return 0;
 }
 
@@ -251,7 +296,14 @@ bool plugin_code() { return !caller().empty(); }
 // q = eq.PluginConsent()
 int PluginConsent(lua_State* L) {
     EqHost& h = host_of(L);
-    auto q = h.plugin_consent && !plugin_code() ? h.plugin_consent() : std::nullopt;
+    // The question and each file's texts live in a box the state owns across the pushes (plugin/lua_keep.h).
+    struct Consent {
+        std::optional<plugin::ConsentPrompt> q;
+        std::string hex, file;
+    };
+    Consent& c = plugin::lua_keep<Consent>(L);
+    plugin::cxx_guard(L, [&] { c.q = h.plugin_consent && !plugin_code() ? h.plugin_consent() : std::nullopt; });
+    const auto& q = c.q;
     if (!q) {
         lua_pushnil(L);
         return 1;
@@ -267,18 +319,21 @@ int PluginConsent(lua_State* L) {
     lua_createtable(L, static_cast<int>(q->files.size()), 0);
     lua_Integer i = 0;
     for (const auto& f : q->files) {
-        const std::string hex = to_hex(f.sha256);
-        const auto u8 = f.file.filename().u8string();
+        plugin::cxx_guard(L, [&] {
+            c.hex = to_hex(f.sha256);
+            const auto u8 = f.file.filename().u8string();
+            c.file.assign(reinterpret_cast<const char*>(u8.data()), u8.size());
+        });
         lua_createtable(L, 0, 5);
         lua_pushstring(L, f.name.c_str());
         lua_setfield(L, -2, "name");
-        lua_pushlstring(L, reinterpret_cast<const char*>(u8.data()), u8.size());
+        lua_pushlstring(L, c.file.data(), c.file.size());
         lua_setfield(L, -2, "file");
         lua_pushinteger(L, static_cast<lua_Integer>(f.size));
         lua_setfield(L, -2, "size");
-        lua_pushstring(L, hex.c_str());
+        lua_pushlstring(L, c.hex.data(), c.hex.size());
         lua_setfield(L, -2, "sha256");
-        lua_pushstring(L, hex.substr(0, 16).c_str());
+        lua_pushlstring(L, c.hex.data(), std::min<std::size_t>(c.hex.size(), 16));
         lua_setfield(L, -2, "short");
         lua_rawseti(L, -2, ++i);
     }
@@ -286,7 +341,9 @@ int PluginConsent(lua_State* L) {
     return 1;
 }
 
-// ok = eq.AnswerPluginConsent(allow): true, false, or nil (put away until the next zone-in)
+// ok = eq.AnswerPluginConsent(allow, serial): allow true, false, or nil (put away until the next zone-in); serial the
+// question's (eq.PluginConsent().serial). An answer to a question that is no longer the one asked (another server's,
+// or the same server's with other bytes, come up between the draw and the click) is refused: false, nothing kept.
 int AnswerPluginConsent(lua_State* L) {
     EqHost& h = host_of(L);
     std::optional<bool> allow;
@@ -294,7 +351,14 @@ int AnswerPluginConsent(lua_State* L) {
         luaL_checktype(L, 1, LUA_TBOOLEAN);
         allow = lua_toboolean(L, 1) != 0;
     }
-    if (plugin_code() || !h.answer_plugin_consent || !h.plugin_consent || !h.plugin_consent()) {
+    const lua_Integer serial = luaL_checkinteger(L, 2);
+    bool asked = false;
+    plugin::cxx_guard(L, [&] {
+        if (plugin_code() || !h.answer_plugin_consent || !h.plugin_consent) return;
+        const auto q = h.plugin_consent();
+        asked = q && static_cast<lua_Integer>(q->serial) == serial;
+    });
+    if (!asked) {
         lua_pushboolean(L, 0);
         return 1;
     }

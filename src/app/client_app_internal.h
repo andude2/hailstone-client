@@ -4,6 +4,7 @@
 // and its collision world. Only those files include it.
 
 #include <format>
+#include <exception>
 
 #include "app/updater.h"
 #include "platform/process.h"
@@ -15,11 +16,13 @@
 #include "app/progress_ui.h"
 #include "app/market_ui.h"
 #include "app/client_app.h"
+#include "app/login_token_session.h"
 #include "app/input_script.h"
 #include "app/zone_settle.h"
 #include "app/server_links.h"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <cctype>
@@ -46,6 +49,7 @@
 #include "core/character_files.h"
 #include "core/config.h"
 #include "core/game_dir.h"
+#include "core/shared_file_cache.h"
 #include "core/ini_file.h"
 #include "core/log.h"
 #include "core/wipe.h"
@@ -97,7 +101,6 @@
 #include "platform/window.h"
 #include "render/ambient_probe.h"
 #include "render/atmosphere.h"
-#include "render/horizon.h"
 #include "render/camera.h"
 #include "render/cover_map.h"
 #include "render/fire_renderer.h"
@@ -242,12 +245,14 @@ public:
     ~ClientApp() { lua_ui_.reset(); }
     ClientApp(const ClientApp&) = delete;
     ClientApp& operator=(const ClientApp&) = delete;
-    explicit ClientApp(const ClientOptions& options)
+    explicit ClientApp(ClientOptions& options)
         : opts_(options), window_(window_desc(options)), vk_(window_, options.validation),
           ui_(window_, vk_,
               ui::ImGuiLayerDesc{.scale_override = ui_scale_setting(options),
                                  .ini_path = platform::imgui_ini()}) {
+        core::wipe(options.login_launch.ticket); // opts_ owns the only application copy now
         log_memory("startup: window, Vulkan, fonts");
+        vk_.screenshot_generated(options.screenshot_generated);
         apply_window_icon(window_);
         shader_dir_ = platform::shaders_dir();
         config_path_ = default_config_path();
@@ -260,6 +265,12 @@ public:
             return;
         }
         apply_classic_folder();
+        if (auto shared = SharedFileCache::configured(config_.get_string("assets.shared_memory", "off"),
+                                                      config_.get_int("assets.shared_memory_cache_mb", 1024),
+                                                      platform::cache_dir() / "assets" / "v1" / "pfs")) {
+            log::info("shared asset cache: on, {} MiB disk budget", shared->budget_bytes >> 20);
+            game_.set_shared_file_cache(std::make_shared<SharedFileCache>(std::move(*shared)));
+        }
         // The settings (hailstone.ini's until a character enters, then the character's: apply_settings), before the
         // renderers: their pipelines take the sample count.
         apply_settings();
@@ -267,7 +278,8 @@ public:
         // The saved servers (core/server_profile.h), the last one used picked (--server another); the old
         // login.host/port/username keys become the first.
         // The saved passwords (the system keyring); test logins never read or write them.
-        if (opts_.auto_user.empty()) login_view_.credentials = &platform::system_credentials();
+        if (opts_.auto_user.empty() && !opts_.login_launch.token_requested)
+            login_view_.credentials = &platform::system_credentials();
         // A fresh install with no saved server starts on the one the asset folder's eqhost.txt names.
         const std::filesystem::path eqhost = game_.find_base("eqhost.txt").value_or(std::filesystem::path());
         if (ui::load_login_settings(login_view_, config_, platform::servers_dir(), eqhost)) config_.save(config_path_);
@@ -278,6 +290,32 @@ public:
         // --game-dir / EQ_GAME_DIR, or a test login, the folder stays the one asked for.
         apply_startup_server_game_files();
         if (auto strings = game_.find("eqlsstr_us.txt")) net::load_login_strings(*strings);
+        // Redeem short-lived launcher tickets while the expensive assets/renderers initialize. Only this worker
+        // touches LoginClient until it is joined below; Session maintains the authenticated connection meanwhile.
+        // std::thread is used throughout the client and works with older supported Apple libc++ releases too.
+        struct TokenLoginWorker {
+            std::atomic<bool> stop{false};
+            std::thread thread;
+            std::exception_ptr error;
+            void finish() {
+                stop.store(true, std::memory_order_relaxed);
+                if (thread.joinable()) thread.join();
+            }
+            ~TokenLoginWorker() { finish(); }
+        } token_login_worker;
+        if (opts_.login_launch.token_requested) {
+            start_token_login(named_server, eqhost);
+            token_login_worker.thread = std::thread([pending = login_.get(), &token_login_worker] {
+                try {
+                    while (!token_login_worker.stop.load(std::memory_order_relaxed)) {
+                        pending->update();
+                        const auto state = pending->state();
+                        if (state == net::LoginState::LoggedIn || state == net::LoginState::Failed) break;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
+                } catch (...) { token_login_worker.error = std::current_exception(); }
+            });
+        }
         spawn_renderer_ = std::make_unique<render::SpawnRenderer>(vk_, shader_dir_);
         world_objects_ = std::make_unique<WorldObjects>(vk_, game_, shader_dir_);
         neighbours_ = std::make_unique<NeighbourZones>(vk_, game_, shader_dir_);
@@ -512,7 +550,12 @@ public:
         // The isometric camera when it was the one in use (hailstone.ini camera.iso, /camera).
         if (config_.get_bool("camera.iso", false)) set_camera_type(game::kCameraIsometric);
         game::reset_camera_defaults(cameras_);
-        if (!opts_.auto_user.empty()) {
+        if (opts_.login_launch.token_requested) {
+            token_login_worker.finish();
+            if (token_login_worker.error) std::rethrow_exception(token_login_worker.error);
+            apply_server_profile(server_profile_);
+            use_ui_pack(server_profile_.ui);
+        } else if (!opts_.auto_user.empty()) {
             // Test logins never use the player's remembered server: a test account's password must not reach a
             // server someone else runs. Only a server named with --server is used; else --host/--port (or the dev
             // server) as a transient profile, never saved.
@@ -543,6 +586,8 @@ public:
 
 private:
     void start_login();
+    void start_token_login(bool named_server, const std::filesystem::path& eqhost);
+    void start_session_login();
     // The login screen's Log in box: saves the server, starts a Hailstone for each box account after the first
     // (--server --account --character) and logs this window in to the first (client_app_login.cpp).
     void start_box_login();
@@ -763,13 +808,9 @@ private:
                                          render::DynamicShadowLights* moving = nullptr) const;
     void lighting_command(std::string_view args);
     void lua_social_command(std::string_view args); // /luasocial (app/client_app_draw.cpp)
-    float config_float(std::string_view key, float fallback) const {
-        auto v = config_.get(key);
-        if (!v || v->empty()) return fallback;
-        char* end = nullptr;
-        float f = std::strtof(v->c_str(), &end);
-        return end != v->c_str() ? f : fallback;
-    }
+    // Config::get_float: NaN and the infinities are the fallback, so a bad hailstone.ini value never reaches a
+    // matrix or a clamp that lets NaN through.
+    float config_float(std::string_view key, float fallback) const { return config_.get_float(key, fallback); }
     // The Options window's Display page (app/lua_eq_dialogs.cpp OptionsWindow): its controls as whole steps (combo box
     // choices, slider ticks 0..20); nullopt for a name that is not a display setting.
     std::optional<int> display_option(std::string_view name) const;
@@ -867,16 +908,24 @@ private:
     // 0 off; the modern lighting only), display.ao (screen-space ambient occlusion, the modern lighting only),
     // display.distance_blur, display.depth_prepass (the zone's depth pre-pass, the modern lighting only),
     // display.bloom (0 off .. 1), display.brightness / contrast / gamma (the grade after the
-    // tonemap), display.render_scale (percent, 50..100: below 100 FSR 1 upscales) and display.sharpness (0..1). The
-    // Options window's Display page sets them (display_option / set_display_option).
+    // tonemap), display.render_scale (percent, 33..100: below 100 the upscaler upscales), display.sharpness (0..1) and
+    // display.upscaler (fsr1 | taa, read at start-up: render/temporal.h). The Options window's Display page sets them
+    // (display_option / set_display_option).
     void apply_scene_options() {
         render::SceneOptions scene;
         // The sample count stays the one of the first call: the renderers' pipelines are built for it, and scene
         // targets of another count under them lose the device on some drivers (Intel on Windows). A change in the
         // Options window is saved and shows at the next start, as the window says.
         if (msaa_at_start_ == 0)
-            msaa_at_start_ = static_cast<std::uint32_t>(std::clamp(config_.get_int("display.msaa", 4), 1, 16));
+            msaa_at_start_ = static_cast<std::uint32_t>(std::clamp(config_.get_int("display.msaa", 4), 1, static_cast<int>(render::kMaxMsaa)));
         scene.msaa = msaa_at_start_;
+        // Taken at start-up too: the temporal upscaler draws with one sample, so it changes the pipelines' count.
+        if (!upscaler_at_start_)
+            upscaler_at_start_ = render::parse_upscaler(config_.get_string("display.upscaler", "fsr1"));
+        scene.upscaler = *upscaler_at_start_;
+        // Frame generation (render/frame_gen.h): applied at once (the swapchain is made again); only with a temporal
+        // upscaler, which VkContext checks.
+        scene.frame_gen = config_.get_bool("display.frame_gen", false);
         std::string tonemap = config_.get_string("display.tonemap", "auto");
         scene.tonemap = tonemap != "auto" ? render::parse_tonemap(tonemap)
                         : lighting_mode_ == render::LightingMode::Modern ? render::Tonemap::AgX
@@ -895,11 +944,12 @@ private:
         scene.brightness = config_float("display.brightness", 0.0f);
         scene.contrast = config_float("display.contrast", 1.0f);
         scene.gamma = config_float("display.gamma", 1.0f);
-        scene.render_scale = static_cast<float>(std::clamp(config_.get_int("display.render_scale", 100), 50, 100)) / 100.0f;
+        scene.render_scale = static_cast<float>(std::clamp(config_.get_int("display.render_scale", 100), render::kMinRenderScalePercent, 100)) / 100.0f;
         scene.sharpness = std::clamp(config_float("display.sharpness", 0.5f), 0.0f, 1.0f);
         vk_.set_scene_options(scene, shader_dir_);
     }
     std::uint32_t msaa_at_start_ = 0; // apply_scene_options: display.msaa as the client started, 0 before
+    std::optional<render::Upscaler> upscaler_at_start_; // and display.upscaler
     // /face: MQ's heading, degrees clockwise from north.
     void face_degrees(double degrees);
     // /keypress: a key command by name, tapped (0), held (1) or let go (2); false for an unknown name.
@@ -1015,6 +1065,12 @@ private:
     // The server select's rows in the order it lists them (ui::server_list_order): row -> index into servers_.
     std::vector<std::size_t> server_rows_;
     bool auto_play_sent_ = false;
+    bool token_login_active_ = false; // through world/character selection; no keyring/account persistence
+    // The login view is the launcher's (ui::begin_launcher_login_view) until back_to_login restores the normal one,
+    // on the saved server picked before it when the ticket's server was not a saved one.
+    bool launcher_view_ = false;
+    std::string pre_launch_profile_id_;
+    LoginTokenSession login_token_session_; // only a token explicitly returned by the login server
     // A box login (Log in box, --account): play the world played last on the server without the server select, and
     // enter box_character_ (one time: after a camp the player chooses).
     bool box_play_ = false;
@@ -1198,8 +1254,12 @@ private:
     // display.neighbour_zones.
     std::unique_ptr<NeighbourZones> neighbours_;
     bool neighbour_zones_ = true;
-    // The distant hills round an outdoor zone in the modern lighting (render/horizon.h); display.horizon_hills.
+    // The land round an outdoor zone in the modern lighting (render/horizon.h); display.horizon_hills. The drawn
+    // neighbours (NeighbourZones::drawn_key) it was last hidden for.
     bool horizon_hills_ = true;
+    std::uint64_t distant_hidden_key_ = 0;
+    // display.neighbour_tint: the neighbour zones' debugging view (render::ZoneRenderer::set_debug_tint).
+    bool neighbour_tint_ = false;
     // How far the replacement models' (a texture pack's generated trees') levels of detail reach, in percent of their
     // own distances (render::ZoneRenderer::set_lod_scale); display.tree_detail, 50 to 200.
     int tree_detail_ = 100;
@@ -1227,6 +1287,8 @@ private:
     bool grass_ = true;
     // Hailstone's Flora Distance (display.flora_distance): how far the flora is drawn, in units.
     float flora_reach_ = render::kFloraReach;
+    // Hailstone's Grass Density (display.grass_density, percent): how thick the lawn is (FloraRenderer::set_density).
+    int grass_density_ = 100;
     std::vector<render::FireSource> zone_fires_;
     std::vector<render::FireSource> zone_mesh_fires_; // the flame meshes' alone (no particle clouds)
     std::vector<render::FireSource> frame_fires_;            // the zone's with the moving ones', when there are any
@@ -1443,6 +1505,11 @@ private:
     float iso_saved_fov_ = game::kStockFovUnits;
     float iso_focus_distance_ = 0.0f;
     bool iso() const { return camera_type_ == game::kCameraIsometric; }
+    // Click to move (Hailstone's own; docs/isometric.md "Click to move in every camera"): always in the isometric
+    // camera, and in the others when mouse.click_move is set (Options, the click_move option). Off by default, so
+    // the other cameras click as the original does.
+    bool click_move_ = false;
+    bool click_moves() const { return iso() || click_move_; }
     // Places camera_ for the isometric camera this frame, looking at the player drawn at `feet`.
     void update_iso_camera(const glm::vec3& feet, float dt);
     // The isometric camera's click to move and movement relative to the camera (app/client_app_iso.cpp): WASD
@@ -1523,7 +1590,7 @@ private:
     IsoMarker iso_marker_;
     std::unique_ptr<render::TargetRingRenderer> iso_marker_renderer_;
     void set_iso_marker(const glm::vec3& point, bool click);
-    bool iso_marker_shown() const { return iso() && iso_marker_.active; }
+    bool iso_marker_shown() const { return click_moves() && iso_marker_.active; }
     void draw_iso_marker(const render::FrameInfo& frame, const glm::mat4& view_proj, float far_plane, bool modern,
                          double seconds);
     Clock::time_point last_mouse_look_{}; // the last mouse look's time (the chase camera's height rate)

@@ -287,7 +287,8 @@ local function listCopy(win, id, n, reread)
 end
 
 -- The copy's rows (0-based) in the sort's order: sorted again only when the copy or the sort changed. A number
--- (commas aside) sorts as one against another number, else the texts sort without case; ties keep the list's order.
+-- (commas aside) sorts as one against another number and before any text, the texts without case; ties keep the
+-- list's order.
 local function listSorted(c)
   local st = c.sort
   if c.sorted and c.sortedVersion == c.version and c.sortedBy == st then return c.sorted end
@@ -301,9 +302,13 @@ local function listSorted(c)
       num[r] = tonumber((t:gsub(",", "")))
       low[r] = t:lower()
     end
+    -- (a strict weak order, as table.sort needs or it may raise "invalid order function": numbers come before texts,
+    -- then numbers by value and texts by text, the direction flipping all of it)
     table.sort(sorted, function(a, b)
       local na, nb = num[a], num[b]
-      if na and nb then
+      if (na == nil) ~= (nb == nil) then
+        if asc then return na ~= nil else return nb ~= nil end
+      elseif na then
         if na ~= nb then if asc then return na < nb else return na > nb end end
       else
         local x, y = low[a], low[b]

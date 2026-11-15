@@ -11,9 +11,12 @@
 // slot), verdict ("upgrade" / "downgrade" / "mixed" / "same" / "cantuse"), score, changes = { { key, name, before,
 // after, delta, weight }, ... }, weaponBefore, weaponAfter = { damage, delay, bonus } or nil, gained = { text, ... },
 // lost = { text, ... } }, ... } }, the best swap first. weight 0: a change that does not count for the class.
+#include <algorithm>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <lua.hpp>
 
@@ -25,21 +28,28 @@
 #include "game/mechanics/character.h"
 #include "game/server_ext.h"
 #include "net/game_connection.h"
+#include "plugin/lua_keep.h"
 
 namespace hailstone::app {
 
 namespace {
 
-// The last comparison, kept for half a second while the same item stays under the mouse (a tooltip asks every frame;
-// the player's Character is rebuilt every frame, so the age is what refreshes it).
+// The last comparisons, one per place (inventory slot, window slot, bag slot), each kept for half a second while the
+// same item stays there (a tooltip or an item display asks every frame, and two displays open at once ask for two
+// places; the player's Character is rebuilt every frame, so the age is what refreshes it).
 struct CompareCache {
-    std::vector<std::unique_ptr<StockWindow>>* windows = nullptr;
+    struct Entry {
+        std::string key;
+        std::uint32_t item_id = 0;
+        std::string serial;
+        std::chrono::steady_clock::time_point made{};
+        std::optional<game::ItemComparison> result;
+    };
+    // More places than a frame asks for (a tooltip, the open item displays); past it the oldest comparison goes.
+    static constexpr std::size_t kMaxEntries = 8;
+    std::function<StockWindow*(std::string_view)> find_window;
     game::mechanics::CharacterSheet scratch;
-    std::string key;
-    std::uint32_t item_id = 0;
-    std::string serial;
-    std::chrono::steady_clock::time_point made{};
-    std::optional<game::ItemComparison> result;
+    std::vector<Entry> entries;
 };
 
 EqHost& host_up(lua_State* L) { return *static_cast<EqHost*>(lua_touserdata(L, lua_upvalueindex(1))); }
@@ -50,12 +60,7 @@ int gc_cache(lua_State* L) {
     return 0;
 }
 
-StockWindow* find_window(CompareCache& c, std::string_view name) {
-    if (!c.windows) return nullptr;
-    for (auto& w : *c.windows)
-        if (w->screen() == name) return w.get();
-    return nullptr;
-}
+StockWindow* find_window(CompareCache& c, std::string_view name) { return c.find_window ? c.find_window(name) : nullptr; }
 
 game::CompareOptions options_for(const net::GameConnection& conn) {
     game::CompareOptions o;
@@ -144,39 +149,61 @@ void push_comparison(lua_State* L, const game::ItemComparison& c) {
     lua_setfield(L, -2, "slots");
 }
 
-// The comparison of `item` (from the place `key` names), from the cache while it is fresh.
-int compare(lua_State* L, std::string key, const net::Item* item) {
+// The comparison of `item` (from the place make_key() names), from the cache while it is fresh. The key is made and
+// gone inside the guard, and the comparison is the cache's (the state's): nothing of this frame's or the caller's is
+// alive across the pushes (plugin/lua_keep.h).
+template <class MakeKey> int compare(lua_State* L, const MakeKey& make_key, const net::Item* item) {
     EqHost& h = host_up(L);
     CompareCache& c = cache_up(L);
     if (!item || !h.in_game || !h.conn || !h.character) {
         lua_pushnil(L);
         return 1;
     }
-    const auto now = std::chrono::steady_clock::now();
-    if (c.key != key || c.item_id != item->id || c.serial != item->serial ||
-        now - c.made > std::chrono::milliseconds(500)) {
-        c.result = game::compare_item(*h.character, *item, options_for(*h.conn), c.scratch);
-        c.key = std::move(key);
-        c.item_id = item->id;
-        c.serial = item->serial;
-        c.made = now;
-    }
-    if (!c.result) lua_pushnil(L);
-    else push_comparison(L, *c.result);
+    std::size_t at = 0;
+    plugin::cxx_guard(L, [&] {
+        std::string key = make_key();
+        const auto now = std::chrono::steady_clock::now();
+        auto it = std::find_if(c.entries.begin(), c.entries.end(), [&](const auto& e) { return e.key == key; });
+        if (it == c.entries.end()) {
+            if (c.entries.size() < CompareCache::kMaxEntries) {
+                it = c.entries.emplace(c.entries.end());
+            } else {
+                it = std::min_element(c.entries.begin(), c.entries.end(),
+                                      [](const auto& a, const auto& b) { return a.made < b.made; });
+                it->result.reset();
+            }
+            it->key = std::move(key);
+            it->made = {};
+        }
+        if (it->made == std::chrono::steady_clock::time_point{} || it->item_id != item->id ||
+            it->serial != item->serial || now - it->made > std::chrono::milliseconds(500)) {
+            it->result = game::compare_item(*h.character, *item, options_for(*h.conn), c.scratch);
+            it->item_id = item->id;
+            it->serial = item->serial;
+            it->made = now;
+        }
+        at = static_cast<std::size_t>(it - c.entries.begin());
+    });
+    const auto& result = c.entries[at].result;
+    if (!result) lua_pushnil(L);
+    else push_comparison(L, *result);
     return 1;
 }
 
 int CompareItem(lua_State* L) {
     EqHost& h = host_up(L);
-    const auto slot = static_cast<std::int16_t>(luaL_checkinteger(L, 1));
-    const auto bag = static_cast<std::int16_t>(lua_isnoneornil(L, 2) ? -1 : luaL_checkinteger(L, 2));
+    std::int16_t slot = 0, bag = -1;
+    if (!slot_args(L, 1, slot, bag)) {
+        lua_pushnil(L);
+        return 1;
+    }
     // What is worn is what the comparison compares against.
     if (bag < 0 && slot >= 0 && slot < 23) {
         lua_pushnil(L);
         return 1;
     }
     const net::Item* item = h.conn && h.in_game ? h.conn->inventory().at(net::ItemSlot::possessions(slot, bag)) : nullptr;
-    return compare(L, "inv:" + std::to_string(slot) + ":" + std::to_string(bag), item);
+    return compare(L, [&] { return "inv:" + std::to_string(slot) + ":" + std::to_string(bag); }, item);
 }
 
 int CompareSlotItem(lua_State* L) {
@@ -184,26 +211,26 @@ int CompareSlotItem(lua_State* L) {
     const char* child = luaL_checkstring(L, 2);
     StockWindow* w = find_window(cache_up(L), name);
     const net::Item* item = w ? w->slot_item(host_up(L), child) : nullptr;
-    return compare(L, std::string("win:") + name + ":" + child, item);
+    return compare(L, [&] { return std::string("win:") + name + ":" + child; }, item);
 }
 
 int CompareBagSlotItem(lua_State* L) {
     const char* name = luaL_checkstring(L, 1);
-    const int index = static_cast<int>(luaL_checkinteger(L, 2));
+    const int index = held_int(luaL_checkinteger(L, 2));
     StockWindow* w = find_window(cache_up(L), name);
     const net::Item* item = w ? w->bag_item(host_up(L), index) : nullptr;
-    return compare(L, std::string("bag:") + name + ":" + std::to_string(index), item);
+    return compare(L, [&] { return std::string("bag:") + name + ":" + std::to_string(index); }, item);
 }
 
 } // namespace
 
-void register_compare_api(lua_State* L, EqHost& host, std::vector<std::unique_ptr<StockWindow>>& windows) {
+void register_compare_api(lua_State* L, EqHost& host, std::function<StockWindow*(std::string_view)> find_window) {
     static const luaL_Reg fns[] = {{"CompareItem", CompareItem},
                                    {"CompareSlotItem", CompareSlotItem},
                                    {"CompareBagSlotItem", CompareBagSlotItem}};
     // The one cache, the second upvalue of each function (freed with the last of them).
     auto* cache = new (lua_newuserdatauv(L, sizeof(CompareCache), 0)) CompareCache();
-    cache->windows = &windows;
+    cache->find_window = std::move(find_window);
     lua_createtable(L, 0, 1);
     lua_pushcfunction(L, gc_cache);
     lua_setfield(L, -2, "__gc");

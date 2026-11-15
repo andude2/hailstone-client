@@ -44,6 +44,9 @@ TEST_CASE("tcp socket: connects without waiting, carries bytes both ways and see
     REQUIRE(eventually([&] { return (server = listener.accept()).has_value(); }));
     REQUIRE(eventually([&] { return client.state() == TcpSocket::State::Connected; }));
     CHECK(server->state() == TcpSocket::State::Connected);
+    // Neither end is handed to a child process (close-on-exec; on Windows not inheritable).
+    CHECK_FALSE(client.inherited_by_children());
+    CHECK_FALSE(server->inherited_by_children());
 
     CHECK(client.send(as_bytes("hello")) == 5u);
     std::vector<std::byte> buf(64);

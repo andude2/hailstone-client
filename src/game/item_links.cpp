@@ -74,6 +74,41 @@ std::optional<ItemLink> parse_item_link(std::string_view tag) {
     return std::nullopt;
 }
 
+std::string stml_link_data(std::string_view tag) {
+    constexpr char digits[] = "0123456789abcdef";
+    std::string out = "x";
+    out.reserve(1 + tag.size() * 2);
+    for (const char ch : tag) {
+        const auto byte = static_cast<unsigned char>(ch);
+        out.push_back(digits[byte >> 4]);
+        out.push_back(digits[byte & 15]);
+    }
+    return out;
+}
+
+std::string stml_link_tag(std::string_view data) {
+    if (data.empty() || data.front() != 'x' || data.size() % 2 == 0) return std::string(data);
+    std::string_view body = data.substr(1);
+    if (!all_hex(body)) return std::string(data);
+    std::string out;
+    out.reserve(body.size() / 2);
+    for (std::size_t i = 0; i < body.size(); i += 2)
+        out.push_back(static_cast<char>((hex_digit(body[i]) << 4) | hex_digit(body[i + 1])));
+    return out;
+}
+
+std::string escape_stml(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    for (const char ch : text) {
+        if (ch == '<') out += "&lt;";
+        else if (ch == '>') out += "&gt;";
+        else if (ch == '&') out += "&amp;";
+        else out += ch;
+    }
+    return out;
+}
+
 std::optional<AchievementChatLink> parse_achievement_chat_link(std::string_view tag) {
     if (tag.empty() || tag.front() != '3' || tag.size() > net::kMaxAchievementLinkBytes + 4098)
         return std::nullopt;

@@ -1,6 +1,7 @@
 #include "game/item_options.h"
 
 #include <cctype>
+#include <charconv>
 
 namespace hailstone::game {
 
@@ -53,6 +54,16 @@ DestroyResult destroy_held_decision(const DestroyInput& in) {
     return r;
 }
 
+std::optional<std::uint32_t> destroy_cursor_item_id(std::string_view argument) {
+    while (!argument.empty() && std::isspace(static_cast<unsigned char>(argument.front()))) argument.remove_prefix(1);
+    while (!argument.empty() && std::isspace(static_cast<unsigned char>(argument.back()))) argument.remove_suffix(1);
+    if (argument.empty()) return std::nullopt;
+    std::uint32_t id = 0;
+    const auto [end, error] = std::from_chars(argument.data(), argument.data() + argument.size(), id);
+    if (error != std::errc{} || end != argument.data() + argument.size() || id == 0) return std::nullopt;
+    return id;
+}
+
 std::optional<CoinDestroy> destroy_cursor_coin(const std::uint32_t (&cursor)[4]) {
     for (int type = 3; type >= 0; --type)
         if (static_cast<std::int32_t>(cursor[type]) > 0) return CoinDestroy{type, static_cast<std::int32_t>(cursor[type])};
@@ -82,9 +93,8 @@ LootAllPlan plan_loot_all(const std::vector<LootAllItem>& items, bool popup_pend
                 p.queue.push_back(it.slot);
                 continue;
             }
-            if (p.popup_pending) { // the list is freed: nothing goes out
+            if (p.popup_pending) { // the list is freed, but an earlier question stays open (@0x6bdf93)
                 p.queue.clear();
-                p.ask.reset();
                 p.aborted = true;
                 return p;
             }

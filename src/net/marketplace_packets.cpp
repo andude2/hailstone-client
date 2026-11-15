@@ -43,7 +43,7 @@ public:
             return;
         }
         out.assign(p, n < len ? n : len);
-        pos_ += total;
+        advance(total);
     }
 
     // Stream_ReadString @0x80c9b0: a signed u32 length, then that many bytes; 0 or less is empty. A missing length
@@ -57,11 +57,15 @@ public:
         }
         const std::size_t left = pos_ <= data_.size() ? data_.size() - pos_ : 0;
         const std::size_t take = static_cast<std::size_t>(n) < left ? static_cast<std::size_t>(n) : left;
-        out.assign(reinterpret_cast<const char*>(data_.data() + pos_), take);
-        pos_ += static_cast<std::size_t>(n);
+        if (take) out.assign(reinterpret_cast<const char*>(data_.data() + pos_), take);
+        else out.clear();
+        advance(static_cast<std::size_t>(n));
     }
 
 private:
+    // A cursor moved past the end stays at the end: data_.data() + pos_ must never point beyond the packet.
+    void advance(std::size_t n) { pos_ = n < data_.size() - pos_ ? pos_ + n : data_.size(); }
+
     std::span<const std::byte> data_;
     std::size_t pos_ = 0;
 };

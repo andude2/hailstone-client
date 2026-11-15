@@ -2,6 +2,8 @@
 // server's switch for it (hailstone.cfg [abilities] autoskill).
 #include <doctest/doctest.h>
 
+#include <cstdint>
+#include <limits>
 #include <set>
 
 #include "game/ability_book.h"
@@ -10,6 +12,26 @@
 
 using namespace hailstone;
 using namespace hailstone::game;
+
+TEST_CASE("The autoskill list's rules move by any step, stopping at the ends") {
+    std::vector<AutoskillRule> rules = parse_autoskill_rules("skill:1,skill:2,skill:3");
+    auto keys = [&] {
+        std::string s;
+        for (const auto& r : rules) s += (s.empty() ? "" : ",") + r.key;
+        return s;
+    };
+    CHECK(move_autoskill_rule(rules, "skill:1", 1));
+    CHECK(keys() == "skill:2,skill:1,skill:3");
+    // Steps near the int64 range end at the list's ends, not in an overflow.
+    CHECK(move_autoskill_rule(rules, "skill:1", std::numeric_limits<std::int64_t>::max()));
+    CHECK(keys() == "skill:2,skill:3,skill:1");
+    CHECK(move_autoskill_rule(rules, "skill:1", std::numeric_limits<std::int64_t>::min()));
+    CHECK(keys() == "skill:1,skill:2,skill:3");
+    CHECK_FALSE(move_autoskill_rule(rules, "skill:1", -1)); // at the top already
+    CHECK_FALSE(move_autoskill_rule(rules, "skill:9", 1));
+    std::vector<AutoskillRule> one = parse_autoskill_rules("skill:1");
+    CHECK_FALSE(move_autoskill_rule(one, "skill:1", std::numeric_limits<std::int64_t>::min()));
+}
 
 TEST_CASE("ability book: keys") {
     CHECK(ability_key(AbilityKind::AltAbility, 1234) == "aa:1234");

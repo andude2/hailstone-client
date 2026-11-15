@@ -27,9 +27,19 @@ local function lowerOf(text)
   return l
 end
 
+-- A skill's value and the trainer's cap ("12 / 50"), read from the cell's text once a text rather than in each of
+-- the sort's comparisons (kept as lowerOf keeps its names).
+local valueOf, capOf, nValues = {}, {}, 0
 local function value(texts)
-  local v, cap = (texts[3] or ""):match("(%d+)%s*/%s*(%d+)")
-  return tonumber(v) or 0, tonumber(cap) or 0
+  local text = texts[3] or ""
+  local v = valueOf[text]
+  if v then return v, capOf[text] end
+  if nValues >= 2048 then valueOf, capOf, nValues = {}, {}, 0 end
+  local tv, tc = text:match("(%d+)%s*/%s*(%d+)")
+  v = tonumber(tv) or 0
+  local cap = tonumber(tc) or 0
+  valueOf[text], capOf[text], nValues = v, cap, nValues + 1
+  return v, cap
 end
 
 -- The price of a point in copper (the platinum, gold, silver and copper columns).

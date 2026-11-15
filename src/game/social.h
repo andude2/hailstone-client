@@ -35,7 +35,7 @@ struct WhoContext {
 
 struct WhoParse {
     std::optional<std::uint32_t> error; // eqstr id to show instead of sending
-    bool friends = false;               // /who friends (OP_FriendsWho; not sent yet)
+    bool friends = false;               // /who friends (OP_FriendsWho)
     std::uint32_t name_set = 0;
     std::string name;
     std::uint32_t race = 0xffffffff, class_ = 0xffffffff;
@@ -245,6 +245,8 @@ struct RaidState {
     // CRaid +0x2c00 raidId: set from OP_RaidUpdate 8 (+0x44, CRaid::RaidCreated) and the invitation's +0x44 when it is
     // accepted (CRaid::SendInviteResponse); the client's raid commands carry it at +0x44.
     std::uint32_t id = 0;
+    // Local lifetime token for UI actions; never serialized. Stock servers may leave the wire raid ID at zero.
+    std::uint64_t generation = 0;
 
     RaidMember* find(const std::string& name);
     bool is_member(const std::string& name) const;

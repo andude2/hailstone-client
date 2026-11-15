@@ -69,9 +69,8 @@ std::string item_tags_stml(const std::string& text) {
         out += text.substr(at, a - at);
         std::string tag = text.substr(a + 1, b - a - 1);
         auto link = parse_item_link(tag);
-        std::string data;
-        for (char ch : tag) data += ch == '"' ? '\'' : ch;
-        out += std::format("<a WndNotify=\"27,{}\">{}</a>", data, link ? link->text : tag);
+        // (the link's data and text are the server's: encoded and escaped so they cannot end the tag)
+        out += std::format("<a WndNotify=\"27,{}\">{}</a>", stml_link_data(tag), escape_stml(link ? link->text : tag));
         at = b + 1;
     }
     return out;
@@ -297,6 +296,23 @@ std::string task_details_stml(const Task& t, const EqStrings& strings,
 std::uint32_t task_abandon_eqstr(std::uint32_t type) {
     if (type == kTaskTypeTask) return 8995;
     return type == kTaskTypeShared ? 8996 : 8997;
+}
+
+std::string task_offer_details_stml(const TaskOffer& offer, const EqStrings& strings,
+                                    const std::function<std::string(const TaskElement&)>& element_text,
+                                    const std::function<std::string(std::uint32_t)>& zone_name) {
+    Task task;
+    task.description = offer.description;
+    for (const auto& e : offer.elements) task.elements[e.activity_id] = e;
+    std::string out = task_description_text(task, element_text);
+    if (const auto it = task.elements.find(0); it != task.elements.end()) {
+        const auto& e = it->second;
+        if (e.type != 0 && e.type != -1 && !e.zones.empty()) {
+            const std::string args[]{task_zone_names(e.zones, zone_name)};
+            out += strings.format(6029, args);
+        }
+    }
+    return out;
 }
 
 std::optional<TaskCompassMark> task_compass_mark(const TaskState& s, std::uint32_t zone_id,

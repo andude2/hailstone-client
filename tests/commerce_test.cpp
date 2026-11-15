@@ -10,6 +10,7 @@
 #include <cstring>
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -206,6 +207,14 @@ TEST_CASE("merchant sell price: ItemBase::ValueSellMerchant") {
     CHECK(game::sell_value(sellable(4999999), 1.0f, 2) == 9999998);
     // The rounding's + 50 wraps past INT_MAX, then divides as a signed number (core/wrap_math.h).
     CHECK(game::sell_value(sellable(1073741820), 1.0f, 2) == -2147483600);
+    // A rate that puts the unit price past int32 (tiny, NaN, an infinity's 0 aside) is x86's integer indefinite,
+    // 0x80000000, as the original's conversion gives, not an undefined cast; then times the count, wrapping.
+    CHECK(game::sell_value(it, 1e-30f, 1) == INT32_MIN);
+    CHECK(game::sell_value(it, -1e-30f, 1) == INT32_MIN);
+    CHECK(game::sell_value(it, std::numeric_limits<float>::quiet_NaN(), 1) == INT32_MIN);
+    CHECK(game::sell_value(it, 1e-30f, 2) == 0); // 0x80000000 * 2 wraps to 0
+    CHECK(game::sell_value(it, std::numeric_limits<float>::infinity(), 1) == 0); // 151 / inf + 0.5 truncates to 0
+    CHECK(game::sell_value(it, -2.0f, 1) == -75); // in range: -75.5 + 0.5 truncates, as the original
     // Nothing for: rate 0, no value, Temporary, No Trade, attuned, ornamented, real estate.
     CHECK(game::sell_value(it, 0.0f, 1) == 0);
     CHECK(game::sell_value(sellable(0), 1.0f, 1) == 0);

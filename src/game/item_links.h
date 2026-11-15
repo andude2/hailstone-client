@@ -45,6 +45,19 @@ struct ItemLink {
 // Parses what lies between the two \x12 of an item tag (code included).
 std::optional<ItemLink> parse_item_link(std::string_view tag);
 
+// An item tag as the data of an STML link (<a WndNotify="27,data">): 'x' and
+// the tag's bytes as hex. The tag's visible text is whatever the sender
+// typed, and the STML parsers end a tag at its first '>' and decode no
+// entities in attributes, so the raw text could close the <a> tag and inject
+// markup into everyone's chat. The original puts the tag in as it is
+// (CStmlWnd::MakeWndNotificationTag); the encoding is Hailstone's.
+std::string stml_link_data(std::string_view tag);
+// Back from stml_link_data; data not in that form is returned as it is (a
+// tag written raw by a script, or another window's link data).
+std::string stml_link_tag(std::string_view data);
+// Text for STML: '<', '>' and '&' as entities.
+std::string escape_stml(std::string_view text);
+
 struct AchievementChatLink {
     std::string metadata, text;
 };

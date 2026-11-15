@@ -19,8 +19,10 @@ std::uint32_t flora_tile_seed(std::int32_t lng, std::int32_t lat, std::size_t ec
 }
 
 void place_flora(const FloraTile& tile, std::span<const eqg::EcoFloraLayer> layers,
-                 std::span<const eqg::FloraDefinition> definitions, MsvcRand& rand, std::vector<FloraInstance>& out) {
+                 std::span<const eqg::FloraDefinition> definitions, MsvcRand& rand, std::vector<FloraInstance>& out,
+                 std::size_t zone_cap) {
     const std::uint32_t S = tile.texels;
+    if (out.size() >= zone_cap) return;
     if (S == 0 || tile.heights.size() < std::size_t{S} * S || tile.slopes.size() < std::size_t{S} * S) return;
     // The mask a layer grows on at texel i: its texture layer's, within the ecosystem's share of the tile.
     auto mask_at = [&](std::size_t k, std::size_t i) -> std::uint32_t {
@@ -57,7 +59,7 @@ void place_flora(const FloraTile& tile, std::span<const eqg::EcoFloraLayer> laye
         const std::uint32_t index = static_cast<std::uint32_t>(def - definitions.begin());
         std::int32_t placed = 0;
         for (std::int32_t attempt = 0; attempt < iterations && placed < wanted; ++attempt) {
-            if (out.size() - first >= kMaxFloraPerTile) return;
+            if (out.size() - first >= kMaxFloraPerTile || out.size() >= zone_cap) return;
             const float u = unit(rand), v = unit(rand);
             const float width = def->min_width + unit(rand) * (def->max_width - def->min_width);
             const float height = def->min_height + unit(rand) * (def->max_height - def->min_height);

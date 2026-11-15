@@ -57,6 +57,16 @@ void guard_current_window();
 void guard_drawing_window();
 // At the end of the frame's windows: the guarded ones to the front.
 void raise_guarded_windows();
+// The client's own consent prompt's ImGui window (app/automation.cpp): while the question is up, only the pack's
+// code may begin a window of this name, before the prompt's first frame too.
+inline constexpr const char* kConsentWindowName = "Allow this server's plugin?##hailstone_plugin_consent";
+// Around each script's draw function (the Lua UI's windows, an MQ script's), always as a pair: how many windows
+// ui.Begin and ui.BeginChild have open before it runs (and the style and font stacks' sizes then: its pops stop
+// there, so it cannot pop what the code around it pushed); after it returns (normally or not, once ImGui's stacks are
+// restored) that count is put back and anything the script set for the next window or item is dropped, so nothing it
+// left reaches the windows drawn after it.
+std::size_t windows_begun();
+void end_script_windows(std::size_t depth);
 // Whether `L` runs the pack's own code now: the UI pack's state (LuaUi; its registry holds kPackStateKey), with no
 // plugin folder's code running.
 bool pack_code(lua_State* L);
@@ -68,6 +78,11 @@ int code_editors_oldest();
 // for the tests (an ImGui frame must be current).
 std::vector<std::pair<float, float>> code_editor_places(const std::string& text, const std::vector<std::size_t>& at);
 inline constexpr const char* kPackStateKey = "hailstone.ui.pack";
+// The registry key of a state's long-match check: the vendored Lua's pattern matching (third_party/lua/lstrlib.c,
+// "Hailstone") calls the C function held there every 65536 steps, and it raises an error once the code running the
+// match is past its time limit (a match runs no Lua instructions, so a count hook never sees it). The UI's state
+// sets one (lua_host.cpp), and so does each script's (mq/lua_mq.cpp).
+inline constexpr const char* kMatchCheckKey = "hailstone.match_check";
 // A plugin sees the pack's shared tables through views (lua_host.cpp); a C function that reads a table raw
 // (lua_rawgeti, lua_next, lua_rawlen) calls this first on its argument: a view at idx is replaced by its table (only
 // in the pack's state; anything else stays as it is).
@@ -92,6 +107,9 @@ public:
     void frame();
 
     lua_State* state() const;
+    // Every byte the state has allocated since it was made, freed since or not (it wraps: take differences). Each
+    // window's share of a frame goes to core::frame_sections::add_bytes under its section ("Lua window <name>").
+    std::size_t allocated_bytes() const;
     // Tests: each frame's collector slice is `steps` LUA_GCSTEPs instead of its time (0: the time), so a cycle spreads
     // over frames the same way on every machine.
     void set_gc_steps_for_test(int steps);

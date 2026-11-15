@@ -123,6 +123,12 @@ bool door_can_be_used(const Door& door);
 struct SwitchClock {
     std::uint32_t last_ms = 0;
     bool started = false;
+    // The frame's working lists, kept between frames so a frame allocates nothing while the doors stay the same.
+    struct Scratch {
+        std::vector<Door*> doors;
+        std::vector<mechanics::Switch> switches;
+        std::vector<mechanics::Switch*> list;
+    } scratch;
 };
 // The spawns ProcessSwitches looks at for a moving floor switch's riders: a
 // rider's floor cache is reset (CollisionCounter = 0) so its next floor test

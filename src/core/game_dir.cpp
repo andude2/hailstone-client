@@ -7,6 +7,7 @@
 #include <stdexcept>
 
 #include "core/ascii_case.h"
+#include "core/path_utf8.h"
 
 namespace hailstone {
 
@@ -40,6 +41,7 @@ GameDir::GameDir(std::filesystem::path root, std::optional<std::filesystem::path
 
 GameDir::GameDir(const GameDir& other) {
     std::lock_guard lock(other.mutex_);
+    shared_file_cache_ = other.shared_file_cache_;
     base_ = other.base_;
     overlay_ = other.overlay_;
     base_index_ = other.base_index_;
@@ -54,6 +56,7 @@ GameDir::GameDir(const GameDir& other) {
 GameDir& GameDir::operator=(const GameDir& other) {
     if (this == &other) return *this;
     std::scoped_lock lock(mutex_, other.mutex_);
+    shared_file_cache_ = other.shared_file_cache_;
     base_ = other.base_;
     overlay_ = other.overlay_;
     base_index_ = other.base_index_;
@@ -68,6 +71,7 @@ GameDir& GameDir::operator=(const GameDir& other) {
 
 GameDir::GameDir(GameDir&& other) noexcept {
     std::lock_guard lock(other.mutex_);
+    shared_file_cache_ = std::move(other.shared_file_cache_);
     base_ = std::move(other.base_);
     overlay_ = std::move(other.overlay_);
     base_index_ = std::move(other.base_index_);
@@ -83,6 +87,7 @@ GameDir::GameDir(GameDir&& other) noexcept {
 GameDir& GameDir::operator=(GameDir&& other) noexcept {
     if (this == &other) return *this;
     std::scoped_lock lock(mutex_, other.mutex_);
+    shared_file_cache_ = std::move(other.shared_file_cache_);
     base_ = std::move(other.base_);
     overlay_ = std::move(other.overlay_);
     base_index_ = std::move(other.base_index_);
@@ -94,6 +99,16 @@ GameDir& GameDir::operator=(GameDir&& other) noexcept {
     index_ = std::move(other.index_);
     other.index_ = std::make_shared<const Index>();
     return *this;
+}
+
+void GameDir::set_shared_file_cache(std::shared_ptr<SharedFileCache> cache) {
+    std::lock_guard lock(mutex_);
+    shared_file_cache_ = std::move(cache);
+}
+
+std::shared_ptr<SharedFileCache> GameDir::shared_file_cache() const {
+    std::lock_guard lock(mutex_);
+    return shared_file_cache_;
 }
 
 std::shared_ptr<const GameDir::Index> GameDir::scan(const std::filesystem::path& root, bool overlay, bool classic) {
@@ -114,8 +129,10 @@ std::shared_ptr<const GameDir::Index> GameDir::scan(const std::filesystem::path&
             }
         }
         if (!it->is_regular_file(type_ec)) continue;
-        auto rel = std::filesystem::relative(it->path(), root, type_ec).generic_string();
+        // (as UTF-8: generic_string() could throw for a file name, and then no folder with it would open)
+        const auto rel_path = std::filesystem::relative(it->path(), root, type_ec);
         if (type_ec) continue;
+        std::string rel = generic_path_utf8(rel_path);
         index->emplace(normalize(rel), Indexed{rel, it->path(), overlay, classic});
     }
     return index;

@@ -38,6 +38,9 @@ public:
     std::string get_string(std::string_view key, std::string_view fallback = {}) const;
     int get_int(std::string_view key, int fallback) const;
     bool get_bool(std::string_view key, bool fallback) const;
+    // The number the value starts with (strtof, so "1.5x" is 1.5); `fallback` for none, an empty value, NaN or an
+    // infinity, which a clamp would not hold.
+    float get_float(std::string_view key, float fallback) const;
 
     void set(std::string_view key, std::string_view value);
     void set_int(std::string_view key, int value) { set(key, std::to_string(value)); }

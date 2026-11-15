@@ -34,8 +34,16 @@ bool identifier(std::string_view s) {
 std::optional<Version> parse_version(std::string_view text) {
     if (!text.empty() && (text[0] == 'v' || text[0] == 'V')) text.remove_prefix(1);
     if (auto plus = text.find('+'); plus != std::string_view::npos) {
+        // Ignored for precedence, but checked as SemVer writes it (dot-separated [0-9A-Za-z-] identifiers, leading
+        // zeros allowed): an add-on's unsigned manifest must not carry control characters or other bytes into
+        // installed.txt, the log and the UI through it.
         std::string_view build = text.substr(plus + 1);
-        if (build.empty()) return std::nullopt;
+        while (true) {
+            const auto dot = build.find('.');
+            if (!identifier(build.substr(0, dot))) return std::nullopt;
+            if (dot == std::string_view::npos) break;
+            build = build.substr(dot + 1);
+        }
         text = text.substr(0, plus);
     }
     std::string_view core = text, pre;

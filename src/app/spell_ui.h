@@ -45,6 +45,19 @@ struct DescriptionPlayer {
 };
 DescriptionPlayer description_player(const net::GameConnection& conn, const game::mechanics::Character* character);
 
+// Which of SpellUi's C++ windows draw this frame: each is off while its Lua window stands in for it
+// (ui::lua::replaces), and the book also needs to be open. SpellUi::draw builds a window's view (names, tooltips,
+// buff texts) only when it draws; a UI pack that replaces them all builds none.
+struct SpellWindowsDrawn {
+    bool bar = true;    // CastSpellWnd
+    bool cast = true;   // CastingWindow
+    bool book = true;   // SpellBookWnd, open
+    bool buffs = true;  // BuffWindow
+    bool songs = true;  // ShortDurationBuffWindow
+    bool target = true; // TargetWindow (the target's effects)
+};
+SpellWindowsDrawn spell_windows_drawn(bool book_open);
+
 // The tooltip of a spell: name, level, mana, times, target and the dbstr
 // description with its codes filled in as GetSpellDescriptionText does
 // (game::spell_description_text).

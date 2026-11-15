@@ -642,7 +642,7 @@ ui.window("Spell Book", function()
     elseif kb.open then
       local w = math.min(x1 - x0, T.px(900))
       local r = K.draw(kb, pad, x0 + (x1 - x0 - w) / 2, y0 + T.px(40), w)
-      if r == "ok" and ed then ed.name = kb.text:sub(1, 24) end
+      if r == "ok" and ed then ed.name = T.cutBytes(kb.text, 24) end
       if r then jump = { slot = 1 } end
       if r == "cancel" and ed and ed.n == nil and trim(ed.name) == "" and not dirty() then ed, view = nil, "sets" end
     elseif view == "book" then

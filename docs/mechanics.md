@@ -18,7 +18,7 @@ durations and cast time. They run on plain data (`CharacterSheet`) and are cover
 | `ticks.*` | DoPassageOfTime's timed updates: the 6 s buff tick (process-affects) and mana regen tick, the 1 s endurance upkeep |
 | `skills.cpp` | racial skill bonus, skill cap (with effects), adjusted skill, skill with item mods |
 | `spell_math.cpp` | spell duration, casting time modifier, the SPA 127 focus (limit checks, focus percent, the collectors), the cast time |
-| `abilities.*`, `skill_timers.inc` | skills and combat abilities on a `SkillContext` (the app's view of the player): the skill table's reuse / base damage / combat type (`tools/gen_skill_timers.py`), the skill timers and their refresh, skill reuse time (SPA 227), can-use-combat-skill; the adapters that run `use_skill.*` (`ContextQueries`) and `melee.*` (`ContextAttack`: can-I-hit, attack for slots 11 / 13 / 14 / 100, the swing timers; an item reference is its sheet slot, the fist `melee::kFistItem`) on it |
+| `abilities.*`, `skill_timers.inc` | skills and combat abilities on a `SkillContext` (the app's view of the player): the skill table's reuse / base damage / combat type (`tools/gen_skill_timers.py`), the skill timers and their refresh, skill reuse time (SPA 227; a deliberate change from RoF2: a combat skill's reuse below 0 is 0 rather than wrapping its unsigned timer, as the non-combat skills' already is), can-use-combat-skill; the adapters that run `use_skill.*` (`ContextQueries`) and `melee.*` (`ContextAttack`: can-I-hit, attack for slots 11 / 13 / 14 / 100, the swing timers; an item reference is its sheet slot, the fist `melee::kFistItem`) on it |
 | `use_skill.*` | the /doability path over plain structs and a `useskill::Queries` interface (one method per callee), packets built as bytes |
 | `melee.*` | melee range (with the scaled melee radius), attack speed modification (haste and the quiver), hand-to-hand delay, double attack and dual wield checks; the attack for slots 11, 13, 14, 100 and 101; ammo handling and the ranged attack (the range slot's OP_CombatAbility {target, 11, the item's skill}); can-I-hit (3D distance squared, bearing), can-melee-attack-now and the swing timers; through `BagQueries`, `RollQueries`, `HitQueries` and `AttackQueries` |
 | `item_stats.*` | the item getters (recursive sums over augments, charm scaling, masks) |
@@ -44,11 +44,28 @@ durations and cast time. They run on plain data (`CharacterSheet`) and are cover
 | `attack_rules.*` | who may attack whom and the same-deity rule (the PvP rules) through `AttackQueries`; the live spawns in `game/attack_check.*`, used by can-I-hit |
 | `spell_gems.*` | memorising, the memorise packet, the linked timers, the usable-slot rule and the gem readiness tests; see "Spell gems and buff stacking" |
 | `find_affect_slot.*` | buff slot choice and its stacking rules over the hit-by-spell structs and an `AffectQueries` interface; the live callees are `game/hit_landing.*` |
-| `sheet_builder.*` | the sheet from the live connection; its callers add the owned AA ranks' effects (`AltAdvState::sheet_abilities`: OP_SendAATable's ranks, OP_RespondAA's owned list) |
+| `sheet_builder.*` | the sheet from the live connection; its callers add the owned AA ranks' effects (`AltAdvState::sheet_abilities`: OP_SendAATable's ranks, OP_RespondAA's owned list). A buff's ticks left are the server's count less the 6 s ticks since it arrived, except for a permanent buff (kept at -1 / -2) and while the buff timers are on hold (the count as received) |
 
 Outside this directory, with vectors: `net/reliable_channel.*` (the session layer's reliable channel give-time, ack-one and
 ack-all: the resend timeout min(1.25 rtt + 300, 8000) ms), and the UI rules the windows call (`game/spell_book.h`,
 `group_rules.h`, `quantity_dialog.h`, `trade_rules.h`, `cursor_drop.h`; `tests/ui_rules_vectors_test.cpp`).
+
+## Tribute bonus items
+
+The server supplies personal tribute bonus items in inventory type 6, slots 0..4, and guild tribute bonus items
+in type 8, slots 0..1. `sheet_builder.cpp` puts them in the character's existing extra item lookups (0..4 and
+15..16), so their normal item stats, worn effects and focus effects take the same paths as the other item
+bonuses. Their stack count does not multiply those bonuses. Trophy containers still have no source on stock EQEmu.
+The bulk possessions/bank inventory can follow personal tribute item packets at login; it preserves those
+separately received bonus containers instead of erasing them.
+
+Stock EQEmu removes these items without item-deletion packets when tribute is disabled or a member opts out.
+The connection therefore retires the cached items on received deactivation, changed selections, self opt-out,
+guild changes and session transitions. A toggle request alone grants or removes no bonus. Repeated unchanged
+active-state messages preserve the current items; new item packets replace them normally.
+
+Packet, mechanics and mock-connection regressions cover item replacement and retirement, along with the benefit
+windows' guild permissions and platinum-donation replies. Full tribute workflows still need live acceptance.
 
 ## Exactness
 
@@ -186,8 +203,30 @@ AGI 0, plain item weights). Each value, with what produces it:
 | weight factor | `calculate_weight`: current weight = carried weight (`item_weight`: each item's own weight, charm-scaled, without its augments or its stack count; the bag reduction, SPA 221), capacity = STR with items and buffs, current / max HP with the spawn type, and `slowdown_any_level` (the level threshold 0 instead of 3); bazaar and barter zones from the zone table |
 | fall damage | current weight, adjusted skill 39, the profile's Safe Fall skill, `TotalEffect(228)`, the heroic AGI bonus; the no-fall-damage flag is the zone's (OP_NewZone +894) |
 | air supply and region damage | max air supply with STA with buffs and `TotalEffect(246)`; water breathing `TotalEffect(14)`; the fire / cold (disease in zone 200) resists from process_all_stats |
-| levitation | the levitation state update on `cached_buff(57, 0 / 1)` |
+| fly mode | `local_fly_mode` (below): the spawn record and OP_SpawnAppearance 19 set it, a levitate buff landing or fading sets it, and `cached_buff(57, 0 / 1)` recomputes it at each effect cache rebuild |
 | sneaking | the Sneak flag, set by the server's OP_SpawnAppearance type 15 and cleared by OP_CancelSneakHide or a cast's make-me-visible; the control processing then uses `sneak_speed(class, level)` x 0.46 forward and halves the walk back speed (`controls.cpp`) |
+
+The local player's fly mode (the physics object's +0xc) is state, as in the original, with several writers
+(`mech::local_fly_mode`, applied in this order within a frame):
+
+- a levitate buff fading with no levitation left (`CharacterZoneClient_RemoveAffect` @0x439700, SPA 57 case,
+  `PlayerZoneClient::Levitating` @0x5a1140) sets 0, a flying mode 1 included;
+- a levitate buff landing (`EQ_Character::HitBySpell`'s SPA 57, FUN_00432b20 @0x432b20) sets 2, or 5 for a
+  non-zero Base2, over mode 1 too; 0 in a no-levitation zone;
+- the server sets any mode 0 to 5 outright, with no rule applied: the spawn record at zone-in (UnSerializeSpawn) and
+  OP_SpawnAppearance 19 (`Handle_OP_SpawnAppearance` @0x4b4b60, `PlayerPhysics_SetFlyMode` @0x8d0910; a value above 5
+  is ignored, the original throws);
+- the effect cache rebuild (`ReCacheSpellEffects` @0x438910, ending in `UpdateLevitationState` @0x433480) gives 2 or
+  5 from the levitate buffs, else 0; it keeps mode 1, a rider takes its mount's mode, and a no-levitation zone forces 0.
+
+The rebuild runs only when the cache is cleared, so a server-set mode lasts until the buffs next change: after GM
+`#set flymode 3` the next buff landing or fading puts the player back on the ground (or levitating), and
+`#set flymode 0` while levitating lasts until then too. `#set flymode 1` survives buff changes, except a levitate buff
+landing or fading, and in a no-levitation zone the next rebuild grounds it. Hailstone sees the buff slots rather than
+the packets that clear the cache: any slot whose spell changes is a rebuild, a slot that loses a levitate spell is a
+fade and one that gains one is a landing (docs/unknowns.md). Zoning in applies the spawn record and then rebuilds.
+Tests: `tests/movement_test.cpp` ("Local fly mode", "Buff levitation change") and `tests/fly_mode_test.cpp` (through
+the connection's packets).
 
 Tests: `tests/movement_inputs_test.cpp` builds synthetic characters (buffs, worn items, augments, bags, heroic gear)
 and checks each value against the hand-worked result; the ports themselves keep their vectors
@@ -515,7 +554,8 @@ helm) and `net/game_connection_vehicle.cpp` (the helm's packets); tests in `test
   is refused and stops the boat; the turn alone is still tried, so the bow can swing away, and it can back off. The
   hull is 16 probes (spheres of radius 1 just inside the model's outline, at the outermost point each way) swept from
   the old pose to the new; a probe touching something where it starts is not held by it. Its position goes out as OP_ClientUpdate under the boat's id ten times a second while it moves;
-  EQEmu moves the boat there and passes it on. Leaving the deck lets go.
+  EQEmu moves the boat there and passes it on. Leaving the deck lets go, and so do a zone change and a same-zone
+  respawn (the new zone may give the boat's id to another vehicle, which then smooths as any other).
 - EQEmu's warp detector measures the rider's world position, so a boat faster than the rider's run speed is logged
   as a warp for a player below the exempt status; it only logs.
 
@@ -542,6 +582,21 @@ lookup 1500, follow AI 3000):
   its address, so a server patch's detour runs for each (NMS: the timer ids from 20 up in the patch's own map,
   stamped now + RecastTime / 1000 on use and set by OP_DisciplineTimer; the map lives for the session and nothing
   fills it at zone-in, as the profile has 20 timers).
+- Ability reuse is shared by timer id, including id 0. A profile timer or OP_DisciplineTimer marks every ability
+  using that id, independently of which ability started it or whether a discipline is currently active. The combat
+  ability tiles and discipline hot buttons derive their cooldown state from that shared deadline. A shorter
+  ability's reuse can be less than the shared wait; as a presentation fix, its overlay stays full until the wait
+  fits its own reuse, instead of a future inferred start making it look ready. Both UIs show a faded red reuse
+  fill and seconds countdown on combat ability entries. The regular use, assignment and drag handlers still run.
+- The active discipline's duration is separate from its reuse timer: gauge 26's helper @0x761600 gives, while a
+  discipline is active (PcZoneClient_IsDisciplineActive @0x5802c0, its effect from @0x5802a0), the effect's
+  remaining ticks * 1000 / `CharacterZoneClient::SpellDuration` @0x434420 (spell, the local player's level, false),
+  0 when that duration is not positive; the gauge function then caps the value at 1000. RoF2 gives this gauge no
+  text: the seconds shown above the bar, the interpolation between ticks, "Permanent" with a full bar for a
+  permanent effect, and a still bar while buff timers are suspended are Hailstone additions. Clicking the active
+  icon (LB in the gamepad UI, whose navigation leaves the icon out so that A on opening the window cannot end the
+  discipline) follows `/stopdisc`, requesting removal of the discipline slot and waiting for the server's fade;
+  ordinary buff slots and ability reuse timers are unchanged.
 - The rank swap (CastSpell and doCombatAbility): a player who is not a GM (PcClient's CharacterBase vtable +0x90,
   @0x580300: the spawn's vtable +0xdc) casting a spell of a SpellGroup from a gem takes, when the membership's
   spell tier limit (vtable +0 = PcClient::GetGameFeature_ @0x5784e0, feature 3) is not -1 and below the spell's
@@ -615,6 +670,20 @@ guild permission 1500, AA window filter 3000, PC skill limit 3000):
   OP_TaskActivityComplete shows 6005 (colour 15, priority 0) or 6003 / 6004 with the task title (colours 14 / 13,
   priority 1), alpha 255, 500 / 500 / 3000 ms, and nothing in chat; an invalid type / index or another task id is
   dropped.
+
+Task offers use `CTaskSelectWnd::WndNotification` (@0x76b660): a left click on `TSEL_PreviewRewardButton`
+requires a selected offer with its received preview byte enabled, then calls the preview manager (@0x463a90)
+with the task id. Both UI packs use the existing `0x6471` action-4 request and leave the offers open. Drawing,
+selecting and disabled controls send no preview. Actions remain tied to the displayed offer's task and giver
+identities when an incoming packet replaces the list.
+
+`CTaskSelectWnd_ShowTaskDescription` (@0x76b310) appends eqstr 6029 (`0x178d`, "This task begins in %1")
+after the processed offer description when element slot 0 has a type other than 0/-1 and a nonempty zone list.
+The slot is the received activity id, not packet order. `TaskElement_FormatTargetNames` (@0x480780) supplies
+full zone names joined with " or "; the string template supplies its own line breaks. This hint is independent
+of the preview flag, including with an empty description. The old bridge comment incorrectly called it a reward
+line: the native offer description does not build reward amounts or item summaries from the multiplier.
+These rules were checked by static tracing; native UI clicks and live Hailstone offer previews remain untested.
 
 ## Item moves and coin
 
@@ -747,6 +816,79 @@ find affect slot 1600). Each record is replayed call for call against the record
   strafes and jumps only standing (100) or ducking (111), and the forward key's auto-stand (AllowAutoStand) stands only a
   sitting player (110), so a feigned one stays down until /sit or /stand (CEverQuest::Sit: anything but standing or
   ducking stands up). The client hands ProcessControls the feigned state as 115 (`CharacterInput::lying`).
+
+## Loot All
+
+CLootWnd::LootAll @0x6bdba0 visits bags first and then other items, keeping corpse-slot order within each pass,
+including on the player's own corpse. Its guard @0x6bdbf5 ignores activation while its list (+0x3a0) exists; neither
+it nor the button (WndNotification @0x6be180) looks at an individual loot request awaiting its reply. The list lives
+until the reply that exhausts it (Handle_OP_LootItem @0x6bd414). Every OP_LootItem reply advances the list by one,
+an individual loot's reply too, and the list is not checked against what is still on the corpse, so an item asked for
+on its own just before Loot All is asked for again. Hailstone does the same. Its own additions: while a Loot All is
+active the button does not open the "are you sure" question, whose yes would be ignored; and a request that cannot be
+sent (any loot request) cancels the automatic queue so the player can retry.
+
+A NO DROP item requiring confirmation is left out of the queue and opens the first question during the scan
+(@0x6bdf93). Another item requiring confirmation aborts the queue but leaves that first question alive; answering it
+still applies to its original slot. If a loot question was already pending before the scan, it stays unchanged and no
+new question is created.
+
+Closing after Loot All waits for every outstanding loot reply, such as a confirmed NO DROP request or an individual
+request sent alongside the queue, and the Loot All counts as active until then. The original's close timing for that
+overlap is untraced (docs/unknowns.md).
+
+## Leaving an NPC interaction
+
+Each service window of the original checks its NPC in its OnProcessFrame with PlayerClient_IsWithinInteractRange
+(npc, 0, 20.0) @0x5a06f0: CDisplay::PlayerDistance with z scale 1, so a 3D distance, of at most 20 units (exactly
+20 stays open); a missing NPC or local player fails it. Hailstone runs these checks on connection updates, so they
+work the same in both UI packs:
+
+| Window | Original | Timer | Exception |
+|---|---|---|---|
+| Merchant | CMerchantWnd::OnProcessFrame @0x6f2400 | 500 ms | stays while a buy or sell awaits its answer |
+| Bank | CBankWnd::OnProcessFrame @0x627850 | 500 ms | |
+| Barter buyer | CBarterMerchantWnd::OnProcessFrame @0x62a500 | every frame | |
+| Alternate currency merchant | CNewPointMerchantWnd::OnProcessFrame @0x6fba10 | 500 ms | |
+| Adventure merchant | CPointMerchantWnd::OnProcessFrame @0x719e90 | 500 ms | |
+| Tribute master, personal and guild | CTributeMasterWnd::OnProcessFrame @0x787ae0 | 500 ms | out of reach it stays while an item request is pending (EverQuestinfo::IsItemPending > 0); a missing master closes it regardless |
+| Trainer | CTrainWnd::OnProcessFrame @0x7812a0 | 500 ms | |
+| Adventure recruiter | AdventureMgr_Process @0x41fa80 | more than 500 ms since the state was set or last checked | only in states 1 and 2: the recruiter's words (OP_AdventureInfo) or an offer (OP_AdventureDetails) up; on an adventure the window stays |
+| Mercenary liaison | the window's observer 0x6eb560 | every update (see docs/unknowns.md) | only with a liaison id set |
+| NPC hand-in or player trade | CTradeWnd::OnProcessFrame @0x780b50 | 500 ms | the reach is the partner's avatar height plus 20; exactly that distance stays open |
+| World tradeskill station | CContainerMgr::Process @0x65d740 (0x4dc160) | more than 500 ms since the last check | the ground item's 3D distance, at most 20; a missing item closes it too |
+
+Closing goes through each window's normal close: the merchant's OP_ShopEnd, the buyer's end of inspection, the
+trainer's OP_GMEndTraining, the trade's OP_CancelTrade (the server returns what was offered), the station's empty
+OP_ClickObjectAction (the server returns what is left in it). Hiding the adventure recruiter's window declines an
+offer that is up (CAdventureRequestWnd::AboutToHide @0x618420, 0x41fe10: OP_LDoNButton 0). Closing a tribute master
+leaves active benefits, favour and outstanding donation replies alone. The trainer and trades also close when
+their partner dies (Handle_OP_Death @0x532b50 closes the training window and cancels a trade with the dying spawn).
+Player trades use the same 3D distance check as hand-ins, whether the local player or partner moves. Only an open
+trade is checked; a request still waiting for its answer is not. Cancellation clears the offer without crediting
+items or coin locally; the server's item packets and OP_MoneyUpdate return them.
+
+A late open reply cannot show a window out of reach: the tribute master's (CTributeMasterWnd::AboutToShow @0x7878b0)
+and the trainer's (Handle_OP_GMTraining @0x4b49c0) apply the same 20-unit check to the answer. A training request or
+a station request still waiting for its answer is not checked; its answer is. Hailstone releases a station whose
+open reply comes out of reach at once, where the original opens it and releases it at its next 500 ms check. A busy
+reply (someone else is using the station) ends the request, so nothing is released for it later.
+
+When the bank window hides, for any reason, CBankWnd::OnShow @0x627760 runs CContainerMgr::CloseAllContainers
+@0x65d4e0: every container window closes, carried bags included, the world container is released, the tradeskill
+window hides and both "all bags" keys go back to opening (0x697e40). The quantity window closes with it too.
+
+Quantity questions, point-purchase confirmations and guild-bank text entry end with their owning session.
+Reopening the same NPC creates a new session, so an old answer cannot act on it. World-slot quantity questions and
+world-mold confirmations close with the station, and a world recipe batch stops. Carried tradeskill bags and their
+questions stay when only the station closes.
+
+Hailstone's model of IsItemPending (GameConnection::transact_state) counts the requests it tracks (item clicks,
+casts, memorizing, augments, the guild bank's). A tribute donation is not one of them in the original either: its
+senders (Send_OP_TributeItem @0x484190, Send_OP_GuildTributeDonateItem @0x484870) do not raise it.
+
+Not done yet: CTradeWnd skips the trade-distance check while the merchant window shows its page handler 2;
+Hailstone does not apply that exception.
 
 ## The merchant's "Show only items I can use"
 
@@ -945,7 +1087,10 @@ Vectors in `tests/zoning_vectors_test.cpp` (OP_Death handler 2500, teleport inde
 teleport index request and wait 300, do-teleport-B 2000, zone player to bind 1200). `game/death_report.*`,
 `game/zoning.*`, `net/game_connection_death.cpp`:
 
-- OP_Death: the killing blow is reported unless neither side is us and it died more than 50 away.
+- OP_Death: the killing blow is reported unless neither side is us and it died more than 50 away. If the dead
+  spawn is being tracked, tracking ends with one OP_TrackTarget {u32 0} and message 12102 in tracking colour
+  0x111. Every known death removes that spawn from the cached tracking list, including the local player's own
+  entry; an unrelated tracked spawn stays tracked. Loopback coverage is in `tests/tracking_death_test.cpp`.
 - Zone lines: the region change hands the teleport the region's text; an ATP region's is "DRNTP00255%05d0..." of
   atoi(name + 4), which reads back as zone point 10 x N. The teleport index resolve reads the zone (5 digits), then
   each 6-character field only when the text is long enough (x and the zone point number from the same field), and
@@ -991,7 +1136,12 @@ teleport index request and wait 300, do-teleport-B 2000, zone player to bind 120
   PrepareForRepop (buffs, vitals to max, drunkenness 0), vitals from the packet, air to max, gems refreshed; the
   same zone (the whole dword with the instance): death music off, rewind reset, the position list sent, no move;
   another zone: MoveToZone(zone, save 1, reason 10, x, y, z, (int)heading, -1, -1, 0).
-- The respawn window's Select waits for the packet's +8 delay and is disabled once chosen; it sends {u32 option}.
+  A deliberate difference after a same-zone hover respawn: PrepareForRepop's mana and endurance to max are skipped,
+  and the packet's mana or endurance is taken only when it is not 0, so the current values stay. EQEmu's RoF2
+  encoder writes 0 placeholders there, and the server's resource updates can arrive before the packet (or, for
+  mana still at 0 after a resurrection, not at all); the original takes the packet's values as they are.
+- The respawn window's Select waits for the packet's +8 delay and an available selected destination, then sends {u32 option} once. The option's final byte is availability, not a resurrection kind; both UI packs identify unavailable choices. The server controls timeout resolution.
+- Same-zone hover completion waits for the living own spawn with its new ID before releasing movement. The old corpse stays in the world; the new spawn's position, heading and fresh physics body replace the old movement state. Pending isometric click-to-move interactions and their marker are cancelled at placement. Current mana/endurance survive the RoF2 bind packet's zero placeholders, and the server's following buff/HP updates apply to the new player. Resurrection confirmations take input priority while the original respawn window stays drawn in both UI packs. Yes to an offer for the current zone (the zone dword with the instance, ConfirmationDialog_HandleResponse @0x52d540 case 0x67) sends no OP_RezzAnswer and locally enables the reserved final resurrection row alongside bind (0x74e9e0 enables the disabled lines and recolours them green); the countdown continues and no resurrection is committed until Select sends the chosen destination. Yes to an offer naming another zone or instance sends OP_RezzAnswer at once, as outside hover. Yes does not move the selection, and the row keeps its "r" marker; a committed highlight stays fixed until completion. The original also requires the offer's corpse name to match the local player's; that is not compared (docs/unknowns.md). Resurrection text is red while unavailable and green while available in both UI packs. Highlighting does not change the server's timeout default. No sends the decline immediately and leaves bind usable. The server's final-row ordering identifies resurrection, independently of names and availability flags. A replaced offer or changed destination invalidates local consent. Pending resurrection dialogs are dropped when respawn completes, zoning starts or the connection ends. Packet-sequence and movement coverage: `tests/hover_respawn_test.cpp`, `tests/player_placement_test.cpp`; protocol details in `docs/protocol/rof2-packets.md`.
 - Camp: sits, OP_Camp, 12293; 12684 every 5 s; a second /camp or a position change (the Stand button, the sit key,
   moving forward while sitting) cancels it (12290), any other
   stand 12683; it never looks at an open trade. At the end the position history goes (when not riding), then
@@ -1184,6 +1334,94 @@ Vectors in `tests/chat_trade_vectors_test.cpp` (set chat input mode 1500, toggle
   and 1447; CastSpell asks the same check.
 - Group invites: 148 bytes out; in, declines 1 / 4 / 5 or the pending invitation with the u32 at +0x94.
 
+## Group roles
+
+The group leader assigns Main Tank (1), Main Assist (2) and Puller (3) by right-clicking a member's name in the
+Group window, or their own name in the Player window, in either UI pack. Small role icons beside the names show
+the assignments, with the full role names on hover. A member may hold several roles, while each role belongs to
+at most one member; mercenaries may only hold Main Tank.
+On stock EQEmu, assigning a role requires the member to be in the leader's zone. An existing role can also be
+cleared while its holder is in another zone; the menus explain this restriction.
+
+Deliberate differences from RoF2 (Hailstone's, marked in `app/lua_eq_hud.cpp` and `GameConnection::send_group_role`):
+
+- The original's roles are a "Roles" submenu of the Group and Player windows' own context menu (added by
+  CGroupWnd::sub_0067ac60 @0x67ac60 and CPlayerWnd::sub_00717f60 @0x717f60). Hailstone opens the role menu on its
+  own from a right click on the name (Y on a row in the gamepad pack), and leaves the window menu to the rest of the
+  frame; the menu has no "Window" row.
+- The original offers Roles only to the group leader (the Group window's test: FUN_00443670 in 0x67ac60): other
+  members get no Roles row at all. Hailstone shows everyone in a group the menu, with the role rows greyed for all
+  but the leader.
+- The original's submenu starts with "Leader" (item 100, /makeleader; built in CGroupWnd's constructor @0x67bc00).
+  Hailstone's menu is roles only; /makeleader stays.
+- For a mercenary the original offers every row and refuses Leader, Main Assist and Puller on the click with eqstr
+  7607 "A NPC cannot be that role." (CGroupWnd::WndNotification @0x67c620). Hailstone greys those rows instead;
+  `send_group_role` still refuses with 7607 for any other caller.
+- The original's menu sends Send_OP_GroupRoles without checking leadership or CanUseCommandNow, relying on Roles
+  being offered to the leader only. Hailstone's `send_group_role` checks both (0x1db1 for a non-leader, then
+  CanUseCommandNow's refusals), as Cmd_grouproles @0x4f8360 does for `/grouproles set|unset`, so a menu left open
+  after leadership changed cannot send.
+
+The UI and `/grouproles set|unset <member> <role number>` share `GameConnection::send_group_role`, which checks
+the current group, leader, member and role before sending the existing `OP_GroupRoles` packet. Sending a request
+does not change local roles: `OP_GroupRoles` replies and the `OP_GroupUpdateB` roster set the flags. The UI's
+icons and menu checks, and scripts' `Group.MainTank`, `Group.MainAssist`, `Group.Puller` and member role flags, read
+that same state. Assigning a role clears its previous holder when the server confirms it. A group disband or
+zone transition clears the old state, and the server's roster and role updates restore it.
+
+## Group and raid leadership
+
+Both UI packs expose raid Main Assist and Mark NPC delegation, Find PC, and the Leadership window's three
+Create Hotkey buttons. A hotkey is placed on the cursor for a hot bar; the gamepad pack opens its slot picker to
+assign it with the controller. Passive abilities have none. The purchased
+rank list is separate from the active group and raid leaders' ranks. Nontrainable waypoint records are not shown
+as purchasable assist or marker abilities. The records the RoF2 table marks untrainable (2, 3, 5, 18, 21) are not
+listed at all, although stock EQEmu still sells 2, 3 and 18: ranks bought through another client do not show, and
+an old hot button for one of them does nothing.
+
+The raid member menu is a Hailstone UI extension in both packs: right-click a member, or select one and use
+Member actions. The gamepad pack also opens it with Y on the focused row. Main Assist and Mark NPC delegate
+those roles to that member; they do not mark the member as an NPC target. The menu also offers Find PC,
+leadership and looter changes, and group removal. It captures the member's name and checks current membership
+and permissions again when an action is chosen, so a changed selection or roster cannot redirect the action.
+The original button APIs remain available to scripts. Raid-wide invitations, options, lock and leave controls
+stay outside the member menu; dragging and the gamepad's group picker still move members between groups.
+When Context Menus is switched off, both packs show the direct member buttons instead.
+
+Raid marks use `/rmarknpc 1`, `/rmarknpc 2` and `/rmarknpc 3`, or leadership hotkeys. Marking the same target again
+sends the same numbered request; the server owns the result. Two deliberate changes from the original
+(Leadership_ActivateAbility @0x55f0f0): it sent mark 0 to unmark a target that already held that mark, which EQEmu
+refuses (MarkNPC and RaidMarkNPC reject 0), so the client no longer sends it; and it marked any target, where the
+client now marks only a living NPC (a player or a corpse gets the no-target line), although EQEmu's raid marks
+would take a player. `/clearmarks` clears all raid marks for the leader or
+a delegated marker. Delegation and marks change locally only when the server confirms them. Delegate identities
+are reconciled by member name, including servers that send zero-numbered roster snapshots. Departures, disbanding
+and zoning clear transient marks and delegate spawn IDs so another spawn cannot inherit them. Zoning keeps the
+delegates' names and the members' Main Assist and Mark NPC flags: EQEmu announces a delegate again only when they
+are already in the new zone, and its delegate request toggles, so a forgotten Main Assist chosen again from the
+menu would be cleared instead of set.
+
+Purchase in the Leadership window is offered whenever the next rank exists and the player has a point of that
+kind. A deliberate change: the original disables it below its own cost table (Mark NPC 3 / 4 / 5, Delegate Mark NPC
+6 / 7 / 8), but the costs are the server's (stock EQEmu charges 1 / 2 / 3 and 6 / 6 / 6) and the server checks every
+purchase. The cost column still shows the RoF2 table.
+
+The original expansion and population checks remain: Gates of Discord, at least three group members or eighteen
+raid members, and the active leader's appropriate rank. HP, mana, HP regeneration and offense enhancements use
+those active ranks, stack group and raid effects when both apply, and feed the live character sheet and ATK label.
+The server remains authoritative for combat and received vitals.
+
+Spell Awareness adds the spell name to another caster's normal casting message when the active group or raid
+leader grants it and the caster is no more than five levels above the player. GM spell identification is
+independent of leadership. The spell still has to be present in the player's spell data.
+
+Invite Expedition and Invite Task in the raid window invite missing members of the player's expedition or shared
+task **into the raid**. They send ordinary named raid invitations, skip the player and existing raid members, and
+recheck raid leadership, lock and capacity when clicked. They do not require expedition/task leadership and do not
+predict acceptance. These are distinct from the expedition and task windows' invitations into those activities.
+
+Covered by packet, mock-server and both-pack UI tests; live multiplayer acceptance remains to be checked.
+
 ## Hot buttons, socials and tracking
 
 Vectors in `tests/hotbutton_tracking_vectors_test.cpp` (do-hot-button 4000, hot-button right click 1500, social stop
@@ -1196,6 +1434,8 @@ Vectors in `tests/hotbutton_tracking_vectors_test.cpp` (do-hot-button 4000, hot-
   a line one step waits; /pause N waits N, /timer N starts the display cooldown), 120 + n runs /alternateadv act n.
   Only the comma after a prefix is skipped, so a second prefix follows it with no space (`/timer 600,/pause 10, /cast
   1`); after `, ` the rest is the command (`game::split_social_line`, which the social editor reads lines with too).
+  The queued social stops when another character enters the world (its index would run that character's lines);
+  the developer Actions window's Socials tab queues a social the same way.
 - The hotbutton's mouse and menu (`game/hot_button_menu.*`): a left or quick right click on an empty button opens
   the menu unless the cursor holds something; a quick right click (on release) of a filled one activates it except on
   items; the right button held 500 ms opens it on any button. Its rows are shown or hidden by the button (not
@@ -1251,12 +1491,45 @@ Vectors in `tests/hotbutton_tracking_vectors_test.cpp` (do-hot-button 4000, hot-
   such slot (a primary or secondary held, the other hand keeping its item unless a two-hander is involved, the range
   item in the left hand, armour by its material and tint), else alone when its IDFile is not IT63 / IT64, else "No
   item preview available.". Hailstone draws the view with its own orbit camera.
+- An incomplete evolving item's Final Result link asks the server for inspection with OP_EvolveItem action 4
+  (`CItemDisplayWnd::WndNotification @0x6ae870` → `0x69ef60`). The request preserves the source/final template ids,
+  current level, unaugmented link hash and native !Shift flag. The modern pack follows the description link;
+  the gamepad pack also provides a focusable Final Result button. A missing final-id hint is sent as received:
+  a server that resolves the family from the source can answer it, while stock servers may need a nonzero hint.
+  The reply uses the ordinary item display and changes no inventory. Received action-0 updates match both halves
+  of the persistent instance id, refresh progress and received activation state, and refresh an open display at
+  once. Progress above 100% is retained (a large XP reward can overshoot before replacement). Neither reaching
+  nor exceeding 100% advances a level locally: the server must send the evolved replacement item.
+  Packet, mock-server, bridge and gamepad UI tests cover this path; live evolution and controller acceptance remain open.
+- Evolving-item experience transfer (`net/game_connection_evolving.cpp`): both packs offer Transfer evolving
+  experience on an owned evolving item's display and open `ItemExpTransferWnd`; the server's action 1 opens it too,
+  clearing any selection. RoF2's two selection buttons take the item on the cursor (CItemExpTransferWnd::WndNotification
+  @0x6b0230); Hailstone instead lists worn, carried, bagged and cursor items in two selectors, the places EQEmu
+  searches (`HasEvolvingItem` over personal, worn and cursor). Each complete selection sends action 2 with both
+  64-bit evolving IDs (the header's `parcel_item_id` high word, `instance_id` low word). The server answers with
+  the compatibility percent, the max-transfer level (zero is valid) and the projected source and destination
+  forms; Transfer stays disabled until both projections exist and compatibility is nonzero. Transfer asks the
+  native confirmation question (eqstr 6148); Cancel sends nothing. Confirmation is bound to the original IDs, the
+  preview's revision and the live originals as serialized less their progress and activation (an action-0 tick
+  neither cancels it nor asks for a new preview; the preview's projected progress may then lag), and sends action
+  3 once. The previews are never put
+  into the inventory and no success is reported locally: the server recalculates, replaces both items on the
+  cursor and sends its own messages. A refusal changes no items (EQEmu prints "Transfer Failed" in chat), so the
+  window says the transfer was sent and that choosing an item starts over; RoF2 clears both selections once it
+  has sent the transfer (`0x6b00b0`). Zoning or disconnecting closes the window.
 - The stats-disabled flags on items (`game::update_stats_disabled`): set from the UseItem (0x13) and Ornament (0x15)
   game features and the OP_SendMembership entries, on the worn items before the stat sums and on a shown item; a
   disabled child adds nothing to SumStat unless its owner is disabled too. EQEmu sends UseItem -1 and Ornament 1, so
   nothing is disabled there.
 - The Actions window's pages: the same skill and social rules on the window's buttons; Melee and Range Attack both
   checked while the primary swing is not ready or auto fire is on.
+- Slam (skill 111, `slam_innate`): a deliberate change from the original, which fills its innate slots from the
+  profile race (EQ_Character::InitInnates) and so keeps a Barbarian's Slam under an illusion and never gives one to
+  a Dark Elf in Barbarian form. Hailstone takes the innate Slam from the player spawn's current race
+  (`app::skill_race`), as EQEmu does (Client::OPCombatAbility bypasses the Bash skill check by `GetRace()`): the
+  combat lists gain or lose Slam as an illusion starts or ends, and Bash without a shield goes through the Slam path
+  while the current form has it. Both send the same Bash attack (`DoAttack(100, 10)`), so a large race with a shield
+  loses nothing.
 - Focus reuse mod (`Character::focus_reuse_mod`): SPA 310 from the best item focus (its spell's first base), buff and
   AA, each times its percent / 100, at most the recast time; the gems, hot buttons and combat ability window take it
   off the recast they show.
@@ -1441,6 +1714,34 @@ boat/rider steps publish StepClock time + 1. The app explicitly bridges that rel
 32-bit steady clock. Empty step batches and stale spawns do not advance it. Fixtures cover the clock and actual
 packet-to-emitter flow; recorded native vectors and live acceptance remain pending.
 
+### Spell hit modes
+
+Hailstone extends the melee Hit Modes menu with **Direct Spell Damage**, **Damage Over Time**, **Healing** and
+**Healing Over Time**. Each defaults to **Normal** (the original sentence), with **Abbreviated** (a concise amount,
+effect kind and available actor/spell names) and **Number Only** (the amount). The modern chat's right-click menu
+offers **Hit Modes** alongside **Filters**, and the gamepad offers them in Options > Interface. **ALL** changes
+the melee and spell categories together. Settings
+are per character in UI.ini's `[ChatManager] SpellHitMode0..3`; the original `HitMode0..7` settings keep their meaning.
+
+This is a deliberate display addition; it changes no spell rules, filters or chat colours. REA checks of the
+original's six melee report helpers (`0x4f7d70..0x4f8270`) confirm modes 0/1/2 select the display while a separate
+`OutputTextToLog` call receives the original full input. The spell branch of `ReportSuccessfulHit` (`0x52ee40`)
+bypasses those mode helpers. Recognition of the new spell display forms uses
+OP_FormattedMessage's string id and validated numeric substitutions (`game::spell_message_hit_report`), never a
+scan of the rendered sentence. Direct damage uses ids 9073, 434 and 12481, critical blasts 428/1040; DoTs
+9072/12954/13327; heals 9068/419, critical heals 427/1039; HoTs 12976/12997/12998. The legacy non-melee messages
+434/12481 also include damage shields when the server sends them that way. Critical healing has no direct/tick
+discriminator in these messages, so both use **Healing**. A critical sends its own notice (428/1040, 427/1039) beside the hit line, so **Number Only** shows two bare numbers for one crit: the crit's amount and the hit's. Chat hooks (`OnIncomingChat`, `OnFilterChat`, `mq.event`) get the full sentence whatever the mode, unlike MQ's hook on `dsp_chat`, which sees the line as displayed (docs/plugins.md). Incoming/observer DoTs omit ambiguous caster/spell
+substitutions from the abbreviation rather than assigning the names incorrectly.
+
+An OP_Damage spell landing on the player with nonzero signed damage also follows Direct Spell Damage or Healing.
+Another target's landing text contains no amount, and zero-damage landings, casts, buffs, resists, unknown ids,
+malformed numeric arguments and raw text messages retain their full sentence. No extra damage or heal is inferred.
+Both `/log` and the diagnostic log receive the full line, once, before its display form is queued, including for
+the existing melee hit and miss modes. Incoming-chat hooks also receive full text so parsers keep working; a hook
+that rewrites a line supplies its replacement for the display and log as before. Unit tests cover decoded packets,
+all modes and categories, full logging, hooks, settings and menu actions. Live server acceptance remains open.
+
 Environmental hits (types 0xf3..0xfd: mind burns, rotting, chilled, freezing, tormented, burned, thorns, burning,
 drowning, falling, a trap; `game::environment_hit`): the player's own fall, drowning or lava damage goes through
 ApplyDamage's hit report: OP_EnvDamage, then OP_Damage {the player, no attacker, the type, spell -1, the damage}
@@ -1600,7 +1901,7 @@ Vectors in `tests/merc_vectors_test.cpp` (25 files, every handler and sender of 
   (100%). A deliberate difference there: the original's `current * 100 / max` is an int32 product that wraps past
   21.4 million; with the maximum standing in for the current power the wrap would only make the 100% meaningless, so
   the client multiplies in 64 bits.
-- Leadership bonuses, the server's PvP ruleset, the server's regen rule for `IsRestingForFastRegen`, the 21 extra
+- The server's PvP ruleset, the server's regen rule for `IsRestingForFastRegen`, the 21 extra
   item lookups (tribute-like containers), the caster level of buffs that arrived without one (OP_BuffCreate; the
   player's level is used).
 
@@ -1655,3 +1956,41 @@ names are loaded from the player's layered `Resources/campsitecategories.txt`; s
 bit to the server. Kit descriptions use DBString type 0, as the original selection handler does. Missing resources
 keep an all-category filter and the server-supplied kit name. The camp countdown is presentation only: expiration
 does not mutate membership or grant permission to place a camp before the server updates it.
+
+
+## Adventures (LDoN)
+
+Alt+V (`TOGGLE_ADVREQUESTWIN`, index 351) toggles the adventure window independently of a recruiter. A right click
+on a class-60 recruiter within 20 units in XYZ (inclusive) requests its introduction. Risk 1/2 and objective 0..4
+are sent unchanged apart from the risk selector's one-based conversion. Introductions and offers use the shared
+native 500 ms recruiter range check; assigned adventure status stays open beyond recruiter range. Closing the
+window runs RoF2's `Send_OP_LDoNButton_0041fe10`: an unaccepted offer is declined and the recruiter's words
+dismissed, both forgetting the recruiter; closed while a request awaits its answer it keeps the recruiter, and the
+answer (refusal or offer) shows the window again (`0x420130`, `0x4201b0`), where an offer can be accepted or
+declined. An offer with no recruiter (after zoning) is declined at once.
+Closing the status window preserves the assigned mission. Leaving uses a separate confirmed control in both UI
+packs. The server selects the mission and decides group eligibility, acceptance and departure.
+
+AdventureData selects the entry timer when nonzero, otherwise the completion timer. Displays round remaining
+seconds up to whole minutes and clamp at zero (`0x618a00`, `0x618ae0`); progress counts are kept whenever they come
+and shown only during completion (`0x4204e0`). The risk selector shows the adventure's risk from AdventureData,
+where stock EQEmu sends 0 normal / 1 high (not the request's 1 / 2, which RoF2's `0x618790` assumes): nonzero is
+high.
+The compass uses the server's zone-local XYZ/flag. AdventureFinish clears assignment, timers, compass and progress
+and closes the window (`0x4206eb`); points remain server-authoritative. Zone changes clear the old recruiter and
+zone-local mission data until the new server supplies them. Selecting another character clears cached adventure state.
+
+Stats show themes 1..5 then Totals: win rank, successes, failures, win percentage, percentage rank and current theme
+point balances. Profile data supplies initial points; point updates replace balances and request fresh stats, open
+window or not, as RoF2 does (`0x4208f5`), once the ten-second guard permits. After a granted leave stock EQEmu
+sends nothing, so the window shows the adventure until the next AdventureData (docs/unknowns.md). Rank zero displays a placeholder. Percentage totals and point sums use wide
+arithmetic so large server values do not wrap. Row percentages round to binary32 before one-decimal formatting.
+
+Leaderboard categories interleave wins and percentage within each theme; risk is All/Normal/High. Stock EQEmu
+combines risks. Row ranks are competition ranks (1, 1, 3), counting empty wire slots: wins ties require equal wins
+and failures; percentage ties require equal binary32 percentage and wins (`0x6175c0`). The personal rank uses the
+header value unless the player appears in the rows, in which case the computed row rank replaces it. This also
+matches RoF2 when EQEmu's header carries a zero-based found-player rank. Both selectors and refresh preserve their
+current selection across window closes. Hailstone queues the latest changed category during a request rather than
+disabling selectors as RoF2 does; ten-second refresh guards and bounded missing-reply recovery are described in
+`docs/protocol/rof2-packets.md`.

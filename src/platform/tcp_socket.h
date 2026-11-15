@@ -48,6 +48,9 @@ public:
     std::optional<std::size_t> recv(std::span<std::byte> buffer);
 
     const std::string& last_error() const { return error_; }
+    // Whether a child process started now would get this socket (its handle inheritable, or no close-on-exec): false
+    // for every socket made here, so the browser helper and other children never hold the client's connections.
+    bool inherited_by_children() const;
 
 private:
     friend class TcpListener;

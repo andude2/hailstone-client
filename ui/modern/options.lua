@@ -30,12 +30,39 @@ local function heading(text)
 end
 local LABEL_W = 170 -- the label column, in unscaled pixels
 local U = 1         -- the UI scale, this frame
+local fuzzy = dofile("lib/fuzzy.lua")
+local search = "" -- the search field's text; a row that does not match it is left out
+local lastRowShown = true -- the last row() drew its row, so a note() under it goes too
+-- The section being drawn: its title counts in every row's search ("target ring" finds the Target Ring section's
+-- rows; a plugin's section is its name). While a search is typed its heading and table wait for the first row that
+-- matches (open: nil outside a section, "pending", "open", or "failed" when BeginTable said no).
+local cur = { title = nil, open = nil }
+
+local function matches(label, tooltip)
+  if cur.title then tooltip = (tooltip or "") .. " " .. cur.title end
+  return fuzzy.match(search, label, tooltip)
+end
 
 local function tip(text)
   if text and ui.IsItemHovered(ui.HoveredFlags.DelayShort) then ui.SetTooltip(text) end
 end
 
+local function beginSection(title)
+  heading(title)
+  if not ui.BeginTable("##" .. title, 2, ui.TableFlags.SizingFixedFit) then return false end
+  ui.TableSetupColumn("label", ui.TableColumnFlags.WidthFixed, LABEL_W * U)
+  ui.TableSetupColumn("value", ui.TableColumnFlags.WidthStretch, 0)
+  return true
+end
+
 local function row(label, tooltip, draw)
+  lastRowShown = matches(label, tooltip)
+  if not lastRowShown then return end
+  if cur.open == "pending" then cur.open = beginSection(cur.title) and "open" or "failed" end
+  if cur.open == "failed" then
+    lastRowShown = false
+    return
+  end
   ui.TableNextRow()
   ui.TableNextColumn()
   ui.Text(label)
@@ -46,29 +73,43 @@ local function row(label, tooltip, draw)
   tip(tooltip)
 end
 
--- A note under the row above, in the value column.
+-- A note under the row above, in the value column; it goes with its row.
 local function note(text)
+  if not lastRowShown then return end
   ui.TableNextRow()
   ui.TableNextColumn()
   ui.TableNextColumn()
   ui.TextDisabled(text)
 end
 
+-- A heading and a table of rows. While a search is typed, a section none of whose rows match is left out whole; the
+-- section bodies draw outside row() and note() only when the search is empty.
 local function section(title, body)
-  heading(title)
-  if ui.BeginTable("##" .. title, 2, ui.TableFlags.SizingFixedFit) then
-    ui.TableSetupColumn("label", ui.TableColumnFlags.WidthFixed, LABEL_W * U)
-    ui.TableSetupColumn("value", ui.TableColumnFlags.WidthStretch, 0)
+  cur.title = title
+  if search == "" then
+    cur.open = nil
+    if beginSection(title) then
+      body()
+      ui.EndTable()
+    end
+    ui.Spacing()
+  else
+    cur.open = "pending"
     body()
-    ui.EndTable()
+    if cur.open == "open" then ui.EndTable() end
+    if cur.open ~= "pending" then ui.Spacing() end
   end
-  ui.Spacing()
+  cur.title, cur.open = nil, nil
+  lastRowShown = true
 end
 
 -- A combo box over choices (1-based here, the option's values 0-based); `values` maps a choice to the option's value.
 local function combo(name, label, choices, tooltip, values)
   local v = eq.Option(name)
-  if v == nil then return end
+  if v == nil then
+    lastRowShown = false -- no row: a note() meant for it is left out too
+    return
+  end
   row(label, tooltip, function()
     local current = v
     if values then
@@ -89,7 +130,10 @@ end
 
 local function check(name, label, tooltip)
   local v = eq.Option(name)
-  if v == nil then return end
+  if v == nil then
+    lastRowShown = false -- no row: a note() meant for it is left out too
+    return
+  end
   row(label, tooltip, function()
     local on, changed = ui.Checkbox("##" .. name, v ~= 0)
     if changed then eq.SetOption(name, on and 1 or 0) end
@@ -99,7 +143,10 @@ end
 -- A check box shown inverted: checked while the option is 0 (SyncGeneralPage's TradeskillWnd CtrlBypass box).
 local function invcheck(name, label, tooltip)
   local v = eq.Option(name)
-  if v == nil then return end
+  if v == nil then
+    lastRowShown = false -- no row: a note() meant for it is left out too
+    return
+  end
   row(label, tooltip, function()
     local on, changed = ui.Checkbox("##" .. name, v == 0)
     if changed then eq.SetOption(name, on and 0 or 1) end
@@ -109,7 +156,10 @@ end
 -- A slider over the option's own values (min..max); text(v) is what it shows.
 local function slider(name, label, min, max, text, tooltip)
   local v = eq.Option(name)
-  if v == nil then return end
+  if v == nil then
+    lastRowShown = false -- no row: a note() meant for it is left out too
+    return
+  end
   row(label, tooltip, function()
     local nv, changed = ui.SliderInt("##" .. name, v, min, max, text and text(v) or nil)
     if changed then eq.SetOption(name, nv) end
@@ -127,7 +177,10 @@ local function pct(v) return string.format("%d %%", v) end
 -- One bit of an option (the click-through mask).
 local function bit(name, mask, label, tooltip)
   local v = eq.Option(name)
-  if v == nil then return end
+  if v == nil then
+    lastRowShown = false -- no row: a note() meant for it is left out too
+    return
+  end
   row(label, tooltip, function()
     local on, changed = ui.Checkbox("##" .. name .. mask, v & mask ~= 0)
     if changed then eq.SetOption(name, on and (v | mask) or (v & ~mask)) end
@@ -292,6 +345,9 @@ local function displayTab()
   end)
   -- Hailstone's isometric camera (docs/isometric.md): the iso_* options, also /camera.
   section("Isometric Camera", function()
+    check("click_move", "Click to Move in Every Camera",
+      "Click the ground to walk there, and click a door, an item or an NPC out of reach to walk to it and use it, "
+      .. "in the other cameras too. The isometric camera always moves this way.")
     local deg = function(v) return v .. "°" end
     check("iso_camera", "Isometric Camera",
       "Look down on your character from above and to one side, and click to move. /camera iso and /camera behind "
@@ -535,11 +591,13 @@ local function displayTab()
       "Spreads or narrows the picture's light and dark.")
     ticks("gamma", "Gamma", function(t) return string.format("%.2f", 0.5 + t * 0.05) end,
       "Brightens (higher) or darkens (lower) the shadows and mid tones.")
-    ui.TableNextRow()
-    ui.TableNextColumn()
-    ui.TableNextColumn()
-    if ui.Button("Reset Picture", 0, 0) then
-      for _, o in ipairs({ "brightness", "contrast", "gamma" }) do eq.SetOption(o, 10) end
+    if search == "" then
+      ui.TableNextRow()
+      ui.TableNextColumn()
+      ui.TableNextColumn()
+      if ui.Button("Reset Picture", 0, 0) then
+        for _, o in ipairs({ "brightness", "contrast", "gamma" }) do eq.SetOption(o, 10) end
+      end
     end
   end)
   -- The RoF2 asset folder the game reads (hailstone.ini assets.path); the picker changes it on the login screen.
@@ -550,19 +608,21 @@ local function displayTab()
         .. "Hailstone never changes it.", function()
         ui.TextWrapped(eq.OptionChoices("asset_folder")[1] or "?")
       end)
-      ui.TableNextRow()
-      ui.TableNextColumn()
-      ui.TableNextColumn()
-      if pick == 0 then
-        if ui.Button("Change Asset Folder", 0, 0) then eq.SetOption("asset_folder_pick", 1) end
-        tip("Shows the folder picker on the login screen (after camping out), or the next time the game starts.")
-      else
-        if ui.Button("Keep This Folder", 0, 0) then eq.SetOption("asset_folder_pick", 0) end
-      end
-      if pick ~= 0 then
-        note(eq.Option("asset_folder_override") == 1
-          and "Started with --game-dir or EQ_GAME_DIR: that folder is used while it is given."
-          or "The folder picker shows on the login screen: camp out to choose another asset folder.")
+      if search == "" then
+        ui.TableNextRow()
+        ui.TableNextColumn()
+        ui.TableNextColumn()
+        if pick == 0 then
+          if ui.Button("Change Asset Folder", 0, 0) then eq.SetOption("asset_folder_pick", 1) end
+          tip("Shows the folder picker on the login screen (after camping out), or the next time the game starts.")
+        else
+          if ui.Button("Keep This Folder", 0, 0) then eq.SetOption("asset_folder_pick", 0) end
+        end
+        if pick ~= 0 then
+          note(eq.Option("asset_folder_override") == 1
+            and "Started with --game-dir or EQ_GAME_DIR: that folder is used while it is given."
+            or "The folder picker shows on the login screen: camp out to choose another asset folder.")
+        end
       end
     end)
   end
@@ -574,7 +634,7 @@ local PRESETS = {
   { name = "Low", shadows = 0, msaa = 0, ao = 0, distance_blur = 0, view_distance = 2 },
   { name = "Medium", shadows = 1, msaa = 1, ao = 0, distance_blur = 1, view_distance = 4 },
   { name = "High", shadows = 2, msaa = 2, ao = 1, distance_blur = 1, view_distance = 6 },
-  { name = "Ultra", shadows = 3, msaa = 3, ao = 1, distance_blur = 1, view_distance = 12 },
+  { name = "Ultra", shadows = 3, msaa = 2, ao = 1, distance_blur = 1, view_distance = 12 },
 }
 local PRESET_KEYS = { "shadows", "msaa", "ao", "distance_blur", "view_distance" }
 
@@ -589,10 +649,12 @@ local function currentPreset()
 end
 
 local msaaAtStart -- anti-aliasing changes at the next start: the setting the client started with
+local upscalerAtStart -- so does the upscaler
 local packAtStart -- so does the texture pack
 
 local function graphicsTab()
   msaaAtStart = msaaAtStart or eq.Option("msaa")
+  upscalerAtStart = upscalerAtStart or eq.Option("upscaler")
   section("Quality", function()
     row("Preset", "Sets shadows, anti-aliasing, ambient occlusion, distance blur and view distance together.", function()
       local p = currentPreset()
@@ -610,28 +672,51 @@ local function graphicsTab()
     slider("shadow_clip_plane", "Shadow Clip Plane", 0, 100,
       function(v) return string.format("%d (%d units)", v, v * 5 + 10) end,
       "How far from the camera characters cast shadows (the original's advanced display setting; /shadows on <n>).")
-    combo("msaa", "Anti-aliasing", { "Off", "2x MSAA", "4x MSAA", "8x MSAA" },
+    combo("msaa", "Anti-aliasing", { "Off", "2x MSAA", "4x MSAA" },
       "Smooths edges. Takes effect the next time the game starts.")
     local msaa = eq.Option("msaa")
     if msaa ~= nil and msaaAtStart ~= nil and msaa ~= msaaAtStart then
       note("Restart the game to change anti-aliasing.")
     end
-    slider("render_scale", "Render Scale", 50, 100, pct,
-      "Draws the 3D world at this share of its size and upscales it with AMD FSR 1. Lower is faster and softer; the interface stays sharp.")
-    if (eq.Option("render_scale") or 100) < 100 then
+    if (upscalerAtStart or 0) >= 1 then note("The temporal upscalers smooth edges themselves: MSAA is off while one is on.") end
+    combo("upscaler", "Upscaler", { "AMD FSR 1", "Temporal (TAA)", "AMD FSR 3.1" },
+      "FSR 1 sharpens each frame on its own, below a render scale of 100. Temporal and FSR 3.1 build a smooth picture over several frames at every render scale and replace MSAA; FSR 3.1 is AMD's, Temporal is Hailstone's own. Takes effect the next time the game starts.")
+    local upscaler = eq.Option("upscaler")
+    if upscaler ~= nil and upscalerAtStart ~= nil and upscaler ~= upscalerAtStart then
+      note("Restart the game to change the upscaler.")
+    end
+    -- The usual presets (render/temporal.h UpscaleQuality), each a render scale; Custom is the slider's own.
+    local temporal = (upscalerAtStart or 0) >= 1
+    combo("upscale_quality", "Upscale Quality",
+      { temporal and "Native AA" or "Native (no anti-aliasing)", "Quality", "Balanced", "Performance",
+        "Ultra Performance", "Custom" },
+      "Native draws the 3D world at full size (with Temporal or FSR 3.1 that is anti-aliasing alone). Quality, Balanced, Performance and Ultra Performance draw it at 67, 59, 50 and 33 % and upscale it: lower is faster and softer. Custom is the Render Scale below.")
+    -- Frame generation needs a temporal upscaler running: one chosen but not yet started shows it with a note.
+    if temporal or (upscaler or 0) >= 1 then
+      check("frame_gen", "Frame Generation",
+        "Shows a frame made between each two the game draws, from their motion: smoother movement on a high refresh rate screen. The game then draws at most half the refresh rate, keeps vertical sync on and reacts a little later. Needs Temporal or AMD FSR 3.1.")
+      if not temporal and eq.Option("frame_gen") == 1 then
+        note("Frame Generation starts after a restart, when the new upscaler does.")
+      end
+    end
+    slider("render_scale", "Render Scale", 33, 100, pct,
+      "Draws the 3D world at this share of its size and upscales it. Lower is faster and softer; the interface stays sharp.")
+    if (eq.Option("render_scale") or 100) < 100 or (upscalerAtStart or 0) >= 1 then
       ticks("sharpness", "Upscale Sharpening", function(t) return pct(t * 5) end,
-        "How much FSR 1 sharpens the upscaled picture.")
+        "How much the upscaled picture is sharpened.")
     end
     check("grass", "Radial Flora",
       "Grass, flowers and ferns on the newer zones' open ground, and Hailstone's grass on classic zones such as East Commonlands (/showgrass).")
     slider("flora_distance", "Flora Distance", 400, 1200, function(v) return string.format("%d units", v) end,
       "How far round the camera the grass is drawn. Past 400 units it thins out with distance. Further is slower.")
+    slider("grass_density", "Grass Density", 25, 200, pct,
+      "How thick Hailstone's grass on the classic zones grows. Lower is sparser and faster; higher is thicker and slower.")
     check("ao", "Ambient Occlusion", "Soft contact shadows where surfaces meet (modern lighting).")
     check("distance_blur", "Distance Blur", "Softens the far distance a little (modern lighting).")
     check("neighbour_zones", "Neighbour Zones",
       "Draws the next zone past an outdoor zone line in the distance (modern lighting; scenery only).")
     check("horizon_hills", "Horizon Hills",
-      "Distant hills and mountains round outdoor zones, so the land does not end in haze (modern lighting; scenery only).")
+      "Land, hills and mountains past the edges of outdoor zones, in the zone's own ground, so the world does not end in haze (modern lighting; scenery only).")
     slider("tree_detail", "Tree Detail Distance", 50, 200, pct,
       "How far a texture pack's generated trees keep their full and middle detail. Lower is faster; further trees turn to simpler ones sooner.")
     check("ground_npcs", "Ground Floating NPCs",
@@ -673,18 +758,20 @@ local function graphicsTab()
           end
         end)
       if pack ~= packAtStart then note("Restart the game to change the texture pack.") end
-      ui.TableNextRow()
-      ui.TableNextColumn()
-      ui.TableNextColumn()
-      if eq.Option("texture_studio") == 1 then
-        if ui.Button("Texture Studio...", 0, 0) then eq.SetOption("texture_studio", 1) end
-        tip("Builds an HD texture pack from your own game files on your graphics card (a program of its own).")
-      else
-        ui.TextDisabled("Texture Studio builds HD packs: install it from Add-ons on the login screen.")
+      if search == "" then
+        ui.TableNextRow()
+        ui.TableNextColumn()
+        ui.TableNextColumn()
+        if eq.Option("texture_studio") == 1 then
+          if ui.Button("Texture Studio...", 0, 0) then eq.SetOption("texture_studio", 1) end
+          tip("Builds an HD texture pack from your own game files on your graphics card (a program of its own).")
+        else
+          ui.TextDisabled("Texture Studio builds HD packs: install it from Add-ons on the login screen.")
+        end
       end
     end)
   end
-  if ui.Button("Restore Default Graphics", 0, 0) then
+  if search == "" and ui.Button("Restore Default Graphics", 0, 0) then
     -- (anti-aliasing and the lighting mode stay as they are)
     eq.SetOption("view_distance", 6)
     eq.SetOption("exposure", 10)
@@ -699,6 +786,7 @@ local function graphicsTab()
     if eq.Option("sharpness") ~= nil then eq.SetOption("sharpness", 10) end
     eq.SetOption("max_camera_distance", 60)
     if eq.Option("flora_distance") ~= nil then eq.SetOption("flora_distance", 400) end
+    if eq.Option("grass_density") ~= nil then eq.SetOption("grass_density", 100) end
   end
 end
 
@@ -722,6 +810,22 @@ end
 
 -- ---------------------------------------------------------------- Controls
 local KEYS_LIST, KEYS_FILTER = "OKP_KeyboardAssignmentList", "OKP_KeyboardFilterCombobox"
+
+-- The key list's command names by row, for the search: read for every row once, and again only when the Show filter
+-- or the number of rows changes. A rebind changes a row's keys, never its command.
+local keyNames = { key = nil, names = {} }
+local function keyCommandNames(rows, filter)
+  local key = rows .. ":" .. tostring(filter)
+  if keyNames.key ~= key then
+    local names = {}
+    for r = 0, rows - 1 do
+      local texts = eq.ListRow(WINDOW, KEYS_LIST, r)
+      names[r] = texts and texts[1] or ""
+    end
+    keyNames.key, keyNames.names = key, names
+  end
+  return keyNames.names
+end
 
 local function keyBindings()
   local choices, selected = eq.ComboInfo(WINDOW, KEYS_FILTER)
@@ -748,23 +852,50 @@ local function keyBindings()
     ui.TableSetupColumn("Key", ui.TableColumnFlags.WidthFixed, 120 * U)
     ui.TableSetupColumn("Alternate", ui.TableColumnFlags.WidthFixed, 120 * U)
     ui.TableHeadersRow()
-    for r = 0, rows - 1 do
-      local texts = eq.ListRow(WINDOW, KEYS_LIST, r)
-      if texts then
+    -- A row's key cells (columns 2 and 3), after its command's name.
+    local function keyCells(r, texts)
+      ui.Text(texts[1] or "")
+      for c = 2, 3 do
+        ui.TableNextColumn()
+        local t = texts[c] or ""
+        -- red: the key is bound to another command too
+        local kc = texts.colors and texts.colors[c]
+        if kc then ui.PushStyleColor(ui.Col.Text, kc[1], kc[2], kc[3], 1) end
+        if ui.Selectable((t ~= "" and t or "-") .. "##" .. r .. "_" .. c, false) then
+          eq.ListClick(WINDOW, KEYS_LIST, r, "left", c - 1)
+        end
+        if kc then ui.PopStyleColor() end
+        if kc and ui.IsItemHovered() then ui.SetTooltip("This key is bound to another command too.") end
+      end
+    end
+    if search == "" then
+      -- Only the rows in view are read and drawn: a row out of view is its height alone (a line of text, as each of
+      -- its cells is), so the scrolled height stays the same without a list read and three widgets for each command.
+      local _, viewY = ui.GetWindowPos()
+      local _, viewH = ui.GetWindowSize()
+      local _, lineH = ui.CalcTextSize("Ag")
+      for r = 0, rows - 1 do
         ui.TableNextRow()
         ui.TableNextColumn()
-        ui.Text(texts[1] or "")
-        for c = 2, 3 do
-          ui.TableNextColumn()
-          local t = texts[c] or ""
-          -- red: the key is bound to another command too
-          local kc = texts.colors and texts.colors[c]
-          if kc then ui.PushStyleColor(ui.Col.Text, kc[1], kc[2], kc[3], 1) end
-          if ui.Selectable((t ~= "" and t or "-") .. "##" .. r .. "_" .. c, false) then
-            eq.ListClick(WINDOW, KEYS_LIST, r, "left", c - 1)
+        local _, rowY = ui.GetCursorScreenPos()
+        local texts = rowY + lineH >= viewY and rowY <= viewY + viewH and eq.ListRow(WINDOW, KEYS_LIST, r)
+        if not texts then
+          ui.Dummy(0, lineH)
+        else
+          keyCells(r, texts)
+        end
+      end
+    else
+      -- Searching: the matching rows alone, found by the commands' names (read once, keyCommandNames).
+      local names = keyCommandNames(rows, selected)
+      for r = 0, rows - 1 do
+        if matches(names[r]) then
+          local texts = eq.ListRow(WINDOW, KEYS_LIST, r)
+          if texts then
+            ui.TableNextRow()
+            ui.TableNextColumn()
+            keyCells(r, texts)
           end
-          if kc then ui.PopStyleColor() end
-          if kc and ui.IsItemHovered() then ui.SetTooltip("This key is bound to another command too.") end
         end
       end
     end
@@ -801,7 +932,7 @@ local function chatTab()
     ui.TableHeadersRow()
     for r = 0, rows - 1 do
       local texts = eq.ListRow(WINDOW, FILTERS, r)
-      if texts then
+      if texts and matches(texts[1]) then
         ui.TableNextRow()
         ui.TableNextColumn()
         ui.Text(texts[1] or "")
@@ -839,7 +970,7 @@ local function colorsTab()
     ui.TableHeadersRow()
     for r = 0, rows - 1 do
       local texts = eq.ListRow(WINDOW, COLORS, r)
-      if texts then
+      if texts and matches(texts[1]) then
         ui.TableNextRow()
         ui.TableNextColumn()
         if ui.Selectable((texts[1] or "") .. "##c" .. r, r == selected, ui.SelectableFlags.SpanAllColumns) then
@@ -858,11 +989,12 @@ local function colorsTab()
 end
 
 -- The plugins' options (eq.PluginOptions; docs/plugins.md "Plugin windows"), one section per plugin: a switch, or
--- a slider over the option's range.
-local function pluginsTab()
+-- a slider over the option's range. `options`: this frame's eq.PluginOptions(), which pages() reads once (each call
+-- runs every option's get).
+local function pluginsTab(options)
   local by = {}
   local order = {}
-  for _, o in ipairs(eq.PluginOptions()) do -- by owner (a compiled plugin and a script may share a name)
+  for _, o in ipairs(options) do -- by owner (a compiled plugin and a script may share a name)
     if not by[o.owner] then
       by[o.owner] = {}
       order[#order + 1] = o.owner
@@ -899,9 +1031,15 @@ local function pages(visible)
   local want = eq.TabPage(WINDOW, "OPTW_OptionsSubwindows")
   if want and want >= 0 then eq.SetTabPage(WINDOW, "OPTW_OptionsSubwindows", -1) end
   local tabs = TABS
-  if #eq.PluginOptions() > 0 then -- the Plugins tab, while a loaded plugin has options
+  local options = eq.PluginOptions()
+  if #options > 0 then -- the Plugins tab, while a loaded plugin has options
     tabs = { table.unpack(TABS) }
-    tabs[#tabs + 1] = { "Plugins", pluginsTab }
+    tabs[#tabs + 1] = { "Plugins", function() pluginsTab(options) end }
+  end
+  if visible then
+    ui.SetNextItemWidth(-1)
+    search = ui.InputTextWithHint("##optionssearch", "Search this tab", search, 128)
+    if search:match("^%s*$") then search = "" end
   end
   if visible and ui.BeginTabBar("##optionstabs") then
     for _, t in ipairs(tabs) do

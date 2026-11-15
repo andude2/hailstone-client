@@ -18,6 +18,10 @@
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
+// mstcpip.h's; some SDKs lack it.
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
 #else
 #include <arpa/inet.h>
 #include <cerrno>
@@ -67,6 +71,24 @@ bool would_block(int e) { return e == WSAEWOULDBLOCK; }
 bool transient(int e) { return e == WSAECONNRESET || e == WSAEMSGSIZE; }
 std::string error_text(int e) { return std::format("winsock error {}", e); }
 void close_native(NativeSocket s) { closesocket(s); }
+// winsock2.h's since Windows 7 SP1; older SDKs lack the name.
+#ifndef WSA_FLAG_NO_HANDLE_INHERIT
+#define WSA_FLAG_NO_HANDLE_INHERIT 0x80
+#endif
+bool inheritable(NativeSocket s) {
+    DWORD flags = 0;
+    return GetHandleInformation(reinterpret_cast<HANDLE>(s), &flags) && (flags & HANDLE_FLAG_INHERIT) != 0;
+}
+// A socket no child process inherits (SDL starts the helpers with inheritable pipes, so handles are passed on).
+// WSA_FLAG_OVERLAPPED is what socket() gives; a system without the no-inherit flag takes the plain call instead.
+NativeSocket open_socket(int af, int type, int protocol) {
+    NativeSocket s = WSASocketW(af, type, protocol, nullptr, 0, WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
+    if (s == kInvalid) {
+        s = ::socket(af, type, protocol);
+        if (s != kInvalid) SetHandleInformation(reinterpret_cast<HANDLE>(s), HANDLE_FLAG_INHERIT, 0);
+    }
+    return s;
+}
 #else
 using NativeSocket = int;
 const NativeSocket kInvalid = -1;
@@ -79,6 +101,24 @@ bool would_block(int e) { return e == EAGAIN || e == EWOULDBLOCK; }
 bool transient(int e) { return e == ECONNREFUSED || e == EINTR; }
 std::string error_text(int e) { return std::strerror(e); }
 void close_native(NativeSocket s) { ::close(s); }
+bool inheritable(NativeSocket s) {
+    const int flags = fcntl(s, F_GETFD);
+    return flags >= 0 && (flags & FD_CLOEXEC) == 0;
+}
+// A socket closed across exec, so no child process (the browser helper) holds it: SOCK_CLOEXEC where the system has it
+// (Linux, the BSDs), else (macOS) fcntl after it.
+NativeSocket open_socket(int af, int type, int protocol) {
+#ifdef SOCK_CLOEXEC
+    NativeSocket s = ::socket(af, type | SOCK_CLOEXEC, protocol);
+    if (s != kInvalid) return s;
+#endif
+    NativeSocket plain = ::socket(af, type, protocol);
+    if (plain != kInvalid) {
+        const int flags = fcntl(plain, F_GETFD);
+        if (flags >= 0) fcntl(plain, F_SETFD, flags | FD_CLOEXEC);
+    }
+    return plain;
+}
 #endif
 
 NativeSocket native(std::intptr_t h) { return static_cast<NativeSocket>(h); }
@@ -314,6 +354,8 @@ UdpSocket& UdpSocket::operator=(UdpSocket&& other) noexcept {
 
 bool UdpSocket::is_open() const { return valid(handle_); }
 
+bool UdpSocket::inherited_by_children() const { return valid(handle_) && inheritable(native(handle_)); }
+
 void UdpSocket::close() {
     if (valid(handle_)) close_native(native(handle_));
     handle_ = widen(kInvalid);
@@ -327,7 +369,7 @@ bool UdpSocket::open(Endpoint::Family family, std::string& error, const Endpoint
         return false;
     }
     int af = family == Endpoint::Family::V4 ? AF_INET : AF_INET6;
-    NativeSocket s = ::socket(af, SOCK_DGRAM, IPPROTO_UDP);
+    NativeSocket s = open_socket(af, SOCK_DGRAM, IPPROTO_UDP);
     if (s == kInvalid) {
         error = "socket(): " + error_text(last_socket_error());
         return false;
@@ -344,6 +386,13 @@ bool UdpSocket::open(Endpoint::Family family, std::string& error, const Endpoint
         close_native(s);
         return false;
     }
+#ifdef _WIN32
+    // No WSAECONNRESET for an ICMP port-unreachable on the next recvfrom: there is nothing to reset on UDP, and a
+    // flood of them would only cost recv_from passes (it still skips one if this fails).
+    BOOL report_resets = FALSE;
+    DWORD returned = 0;
+    WSAIoctl(s, SIO_UDP_CONNRESET, &report_resets, sizeof report_resets, nullptr, 0, &returned, nullptr, nullptr);
+#endif
     // The original client asks for 128 KiB socket buffers. The receive buffer is 2 MiB: the
     // server's files come in bursts of up to net::ServerFileSync::kWindow pieces (net/server_files.h), which overflow
     // 128 KiB between two service passes, and EQEmu's resends of what was dropped back off for seconds.
@@ -396,7 +445,10 @@ bool UdpSocket::send_to(const Endpoint& to, std::span<const std::byte> data) {
 std::optional<std::size_t> UdpSocket::recv_from(std::span<std::byte> buffer, Endpoint& from) {
     if (!is_open()) return std::nullopt;
     error_.clear();
-    for (;;) {
+    // What is skipped (a transient error, a truncated datagram, an unknown address family) is bounded per call, so a
+    // flood of them cannot keep the caller (which holds the session's lock) here: past the bound the call returns
+    // nothing, as if nothing were waiting, and the next pass reads on.
+    for (int skipped = 0; skipped < kMaxSkippedPerRecv; ++skipped) {
         sockaddr_storage ss{};
         SockLen len = sizeof ss;
 #ifdef _WIN32
@@ -429,6 +481,7 @@ std::optional<std::size_t> UdpSocket::recv_from(std::span<std::byte> buffer, End
         from = *ep;
         return static_cast<std::size_t>(n);
     }
+    return std::nullopt;
 }
 
 bool UdpSocket::wait_readable(std::chrono::milliseconds timeout) const {

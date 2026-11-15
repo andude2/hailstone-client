@@ -33,7 +33,8 @@ std::vector<ModelPoint> parse_pts(std::span<const std::byte> data) {
     std::uint32_t version = r.le<std::uint32_t>();
     std::vector<ModelPoint> out;
     if (version != 1) return out;
-    if (data.size() < 12 + static_cast<std::size_t>(count) * kPointRecordSize) throw std::runtime_error("PTS file truncated");
+    // Divided, not multiplied: count * size can wrap a 32-bit size_t.
+    if ((data.size() - 12) / kPointRecordSize < count) throw std::runtime_error("PTS file truncated");
     out.reserve(count);
     for (std::uint32_t i = 0; i < count; ++i) {
         ModelPoint p;
@@ -57,9 +58,10 @@ std::vector<ModelEmitter> parse_prt(std::span<const std::byte> data) {
     std::vector<ModelEmitter> out;
     if (version < 1 || version > 5) return out;
     const std::size_t size = kSizes[version];
-    if (data.size() < 12 + static_cast<std::size_t>(count) * size) throw std::runtime_error("PRT file truncated");
+    if ((data.size() - 12) / size < count) throw std::runtime_error("PRT file truncated");
+    out.reserve(count);
     for (std::uint32_t i = 0; i < count; ++i) {
-        ByteReader rec(data.subspan(12 + i * size, size));
+        ByteReader rec(data.subspan(12 + std::size_t{i} * size, size));
         ModelEmitter e;
         e.emitter = rec.le<std::uint32_t>();
         e.point = cstring(rec, 64);

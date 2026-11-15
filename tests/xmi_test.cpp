@@ -89,6 +89,17 @@ TEST_CASE("XMI: a long variable-length duration") {
     CHECK_THROWS(parse_xmi(bytes({'F', 'O', 'R', 'M', 0, 0, 0, 50})));
 }
 
+TEST_CASE("XMI: data bytes are 7 bits, whatever a forged file holds") {
+    auto seqs = parse_xmi(xmi_file({bytes({0x90, 0xbc, 0xff, 1, 0xe0, 0xff, 0xff, 0xc0, 0x85, 0xff, 0x2f, 0})}));
+    const auto& e = seqs[0].events;
+    REQUIRE(e.size() == 4);
+    CHECK(e[0].data1 == 0x3c);
+    CHECK(e[0].data2 == 0x7f);
+    CHECK(e[1].data1 == 0x7f);
+    CHECK(e[1].data2 == 0x7f);
+    CHECK(e[2].data1 == 0x05);
+}
+
 TEST_CASE("XMI sequencer: releases before events, one-tick minimum, end stops notes") {
     // tick 1: note A (dur 2) and note B (dur 0); 2 ticks later C; end 3 ticks after that.
     auto evnt = bytes({0x90, 60, 100, 2, 0x90, 62, 100, 0, 2, 0x90, 64, 100, 10, 3, 0xff, 0x2f, 0});

@@ -40,6 +40,10 @@ using EntryPtr = std::shared_ptr<Entry>;
 
 // Packets a plugin sends from its own packet hook go through the hooks again; this deep, they stop.
 constexpr int kMaxPacketDepth = 8;
+// Lines a command (or a line filter) runs from inside its own run nest on the native stack; this deep, they stop. A
+// script's line passes the hooks twice (mq::Commands::filter sends it on again), and /docommand and the like stop
+// themselves sooner (mq::kMaxNestedCommands), so only a plugin's own command that runs itself gets here.
+constexpr int kMaxCommandDepth = 64;
 
 } // namespace
 
@@ -50,6 +54,7 @@ struct Hooks::Impl {
     Owner next_owner = 1;
     int depth = 0; // raising, nested; dead entries are swept when it returns to 0
     int packet_depth = 0;
+    int command_depth = 0;
     bool dirty = false;
 
     void add(Kind k, EntryPtr e) { lists[k].push_back(std::move(e)); }
@@ -212,6 +217,17 @@ Flow Hooks::chat(ChatLine& line) {
 }
 
 bool Hooks::command(std::string& line) {
+    if (impl_->command_depth >= kMaxCommandDepth) {
+        log::warn("plugin commands: commands run from commands nest too deep, '{}' dropped", line.substr(0, 64));
+        return true;
+    }
+    struct Depth {
+        int& d;
+        explicit Depth(int& v) : d(v) { ++d; }
+        ~Depth() { --d; }
+        Depth(const Depth&) = delete;
+        Depth& operator=(const Depth&) = delete;
+    } depth(impl_->command_depth);
     if (impl_->each(kLine, [&](Entry& e) { return std::get<std::function<Flow(std::string&)>>(e.fn)(line) == Flow::Drop; }))
         return true;
     std::string_view rest = line;

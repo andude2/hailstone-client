@@ -22,7 +22,9 @@
 //   droplink                   the world and zone links go silent (net::Session::simulate_link_loss): a link death
 // The virtual pad is attached at the start, so it is the pad in use.
 
+#include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -31,6 +33,13 @@
 namespace hailstone::platform { class Window; }
 
 namespace hailstone::app {
+
+// A number in a script: `fallback` for a missing one, and for "nan", "inf" or one too large to be finite, which would
+// otherwise reach a float-to-integer cast (Window::set_virtual_pad_axis) as undefined behaviour.
+inline double script_number(const std::string& text, double fallback = 0.0) {
+    const double v = std::strtod(text.c_str(), nullptr);
+    return std::isfinite(v) ? v : fallback;
+}
 
 class InputScript {
 public:

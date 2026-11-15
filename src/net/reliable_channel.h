@@ -67,6 +67,9 @@ struct ReliableChannel {
     std::int64_t manager_fast_resends = 0, manager_timeout_resends = 0;       // manager +0x320 / +0x328
 
     std::vector<ReliableSlot> slots; // the physical ring (config +4 entries)
+    // GiveTime's resend list (the original's is on its stack): kept here so a pass every frame allocates nothing.
+    // Scratch only; the channel's owner already serialises GiveTime (the session mutex), and no hook re-enters it.
+    std::vector<std::int64_t> resend_list;
 
     ReliableSlot& slot(std::int64_t sequence) {
         return slots[static_cast<std::size_t>(sequence % static_cast<std::int64_t>(slots.size()))];

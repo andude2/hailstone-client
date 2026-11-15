@@ -45,7 +45,7 @@ ui.window("Set Appearance", function()
       if G.repeated("left") then step(feature, -1) end
       if G.repeated("right") then step(feature, 1) end
       if pad.menuPressed("x") then eq.ClickChild(PC, "Random_Button", "left") end
-      if pad.menuPressed("a") then accept = true end
+      if T.settledPress(pad, "a") then accept = true end
     end
     local rh, gap = T.px(72), T.px(10)
     for i, r in ipairs(ROWS) do

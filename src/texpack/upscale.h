@@ -83,6 +83,9 @@ struct Outputs {
     std::optional<assets::Image> color, masked, keyed, normal, rough;
     std::optional<assets::Image>& of(FileKind kind);
 };
+// The most texels upscale_texture makes (the pack's image, and the colour model's output before it is scaled to
+// that): 8192 x 8192, far past any game texture at the largest scale (pack_job clamps it to 8). Past it, it throws.
+inline constexpr std::uint64_t kMaxUpscaleTexels = std::uint64_t{8192} * 8192;
 Outputs upscale_texture(const TextureInfo& info, const Sources& sources, const Models& models,
                         const UpscaleSettings& settings, const std::vector<FileKind>& wanted);
 

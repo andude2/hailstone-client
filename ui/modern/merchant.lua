@@ -26,6 +26,7 @@ local consideredH = nil             -- the height the strip under the table took
 -- everything it was made from reads the same (the cells and the icon), so a frame makes no tables and no lower-case
 -- names for rows that did not change.
 local rowCache, rowList = {}, {}
+local rowsChanged = true -- set when a record was made or the row count changed: the filtered, sorted view is redone
 local function same(e, t, tex, u0, v0, u1, v1)
   return e.src2 == t[2] and e.src3 == t[3] and e.src4 == t[4] and e.src5 == t[5] and e.src6 == t[6]
     and e.src7 == t[7] and e.src8 == t[8] and e.tex == tex and e.uv[1] == u0 and e.uv[2] == v0 and e.uv[3] == u1
@@ -44,12 +45,15 @@ local function readRows()
         e = { row = r, name = name, lname = name:lower(), qty = t[3] or "",
           copper = TC.Copper(t[4], t[5], t[6], t[7]), level = t[8] or "", tex = tex, uv = { u0, v0, u1, v1 },
           src2 = t[2], src3 = t[3], src4 = t[4], src5 = t[5], src6 = t[6], src7 = t[7], src8 = t[8] }
+        e.split = TC.Split(e.copper)
         rowCache[r] = e
+        rowsChanged = true
       end
       n = n + 1
-      out[n] = e
+      if out[n] ~= e then out[n], rowsChanged = e, true end
     end
   end
+  if #out ~= n then rowsChanged = true end
   for k = n + 1, #out do out[k] = nil end
   for r in pairs(rowCache) do if r >= rows then rowCache[r] = nil end end
   return out
@@ -71,23 +75,30 @@ local function byKey(a, b)
   return a.row < b.row
 end
 local view = {}
+-- what the view was made from last: it is filtered and sorted again only when one of these or the rows change
+local viewNeedle, viewAffordable, viewPurse, viewSortCol, viewSortAsc = nil, nil, nil, nil, nil
 
 local function goods(s, h)
   local _, _, selected = eq.ListInfo(WINDOW, LIST)
   local all = readRows()
   local purse = TC.Purse()
   local needle = search:lower()
-  local n = 0
-  for _, e in ipairs(all) do
-    if (needle == "" or e.lname:find(needle, 1, true)) and (not affordable or e.copper <= purse) then
-      n = n + 1
-      view[n] = e
+  if rowsChanged or needle ~= viewNeedle or affordable ~= viewAffordable or (affordable and purse ~= viewPurse)
+      or sortCol ~= viewSortCol or sortAsc ~= viewSortAsc then
+    rowsChanged = false
+    viewNeedle, viewAffordable, viewPurse, viewSortCol, viewSortAsc = needle, affordable, purse, sortCol, sortAsc
+    local n = 0
+    for _, e in ipairs(all) do
+      if (needle == "" or e.lname:find(needle, 1, true)) and (not affordable or e.copper <= purse) then
+        n = n + 1
+        view[n] = e
+      end
     end
-  end
-  for k = n + 1, #view do view[k] = nil end
-  if sortCol and KEYS[sortCol] then
-    sortKey = KEYS[sortCol]
-    table.sort(view, byKey)
+    for k = n + 1, #view do view[k] = nil end
+    if sortCol and KEYS[sortCol] then
+      sortKey = KEYS[sortCol]
+      table.sort(view, byKey)
+    end
   end
   if #all == 0 then
     local _, usableOnly = W.State(WINDOW, "MW_UsableButton")
@@ -132,7 +143,7 @@ local function goods(s, h)
     ui.TextColored(C.muted[1], C.muted[2], C.muted[3], 1, e.qty)
     ui.TableNextColumn()
     down((icon - lh) / 2)
-    TC.Amount(TC.Split(e.copper), tooMuch and C.danger or nil)
+    TC.Amount(e.split, tooMuch and C.danger or nil)
     ui.TableNextColumn()
     down((icon - lh) / 2)
     ui.TextColored(C.muted[1], C.muted[2], C.muted[3], 1, e.level)
@@ -147,6 +158,7 @@ local function goods(s, h)
 end
 
 -- The item being considered, its price and the buttons that act on it.
+local COIN_WORDS = { platinum = 1, gold = 2, silver = 3, copper = 4 }
 local function considered(s, btnH)
   local name = W.Text(WINDOW, "MW_SelectedItemLabel")
   local x, y = ui.GetCursorScreenPos()
@@ -170,7 +182,7 @@ local function considered(s, btnH)
     local price = W.Text(WINDOW, "MW_SelectedPriceLabel")
     local coins, read = { 0, 0, 0, 0 }, price == ""
     for n, word in price:gmatch("(%d+)%s+(%a+)") do
-      local k = ({ platinum = 1, gold = 2, silver = 3, copper = 4 })[word:lower()]
+      local k = COIN_WORDS[word:lower()]
       if k then coins[k], read = tonumber(n), true end
     end
     local caption = selling and "Sells for" or "Costs"
@@ -223,6 +235,19 @@ end
 -- The parcels waiting here (EQEmu's: eq.Parcels): a row picks one for Retrieve, which takes the first when none is
 -- picked; Claim all takes every one, one after another (Hailstone). Above the game's own Send fields.
 local pickedParcel = nil
+-- a parcel's "From ..." line by sender and date, made once rather than a frame
+local fromLines = {}
+local function fromLine(from, sent)
+  local bySent = fromLines[from]
+  if not bySent then bySent = {}; fromLines[from] = bySent end
+  local line = bySent[sent]
+  if not line then
+    line = (from ~= "" and ("From " .. from) or "From the server") ..
+      (sent > 0 and ("  \xC2\xB7  " .. os.date("%b %d", sent)) or "")
+    bySent[sent] = line
+  end
+  return line
+end
 local function parcels(s, btnH)
   local list, claiming, busy = eq.Parcels()
   list = list or {}
@@ -254,8 +279,7 @@ local function parcels(s, btnH)
       local nx = cx + isz + 14 * s
       local name = it.name .. ((it.stackable and it.count > 1) and ("  x" .. it.count) or "")
       T.Text(nx, y + 4 * s, T.Fit(name, cw - isz - 24 * s, T.font.small), it.magic and C.magic or C.text, T.font.small)
-      local from = (p.from ~= "" and ("From " .. p.from) or "From the server") ..
-        (p.sent > 0 and ("  \xC2\xB7  " .. os.date("%b %d", p.sent)) or "")
+      local from = fromLine(p.from, p.sent)
       T.Text(nx, y + 4 * s + th, T.Fit(from, cw - isz - 24 * s, T.font.tiny), C.faint, T.font.tiny)
       if hov and p.note ~= "" then ui.SetTooltip(p.note) end
       if hit then pickedParcel, found = p.slot, true end
@@ -289,6 +313,15 @@ end
 -- (a stack asks how many); money goes by eq.SendParcelMoney. The server's answer comes in the chat.
 local sendMoney, coins, sendNote, moneySerial = false, { "", "", "", "" }, nil, nil
 local COIN_NAMES = { "pp", "gp", "sp", "cp" }
+local COIN_LONG = { "platinum", "gold", "silver", "copper" }
+-- Send money asks first (Hailstone): the amount and the recipient as they were when Send money was clicked, sent
+-- only by the popup's Send. { to, note, coins = { pp, gp, sp, cp } }
+local moneyAsk = nil
+local function amountText(n)
+  local parts = {}
+  for i = 1, 4 do if n[i] > 0 then parts[#parts + 1] = T.Thousands(n[i]) .. " " .. COIN_LONG[i] end end
+  return table.concat(parts, ", ")
+end
 local function sendParcel(s, btnH)
   local _, _, _, sending, picked, money = eq.Parcels()
   -- a pick with the inventory's coin buttons: that coin for sending, the Money side shown
@@ -341,8 +374,29 @@ local function sendParcel(s, btnH)
     local any = n[1] + n[2] + n[3] + n[4] > 0
     if T.Button("##sendmoneybtn", bx, by, bx + bw, by + btnH, s, sending and "Sending..." or "Send money",
         { primary = true, enabled = any and to ~= "" and not sending, tooltip = "Send this money to " .. (to ~= "" and to or "...") }) then
-      sendNote = eq.SendParcelMoney(to, note, n[1], n[2], n[3], n[4])
-      if not sendNote then coins = { "", "", "", "" } end
+      moneyAsk = { to = to, note = note, coins = n }
+      ui.OpenPopup("##confirmparcelmoney")
+    end
+    if ui.BeginPopup("##confirmparcelmoney") then
+      local ask = moneyAsk
+      if ask then
+        ui.Text("Send " .. amountText(ask.coins) .. " to " .. ask.to .. "?")
+        if ask.note ~= "" then ui.TextColored(C.muted[1], C.muted[2], C.muted[3], 1, "Note: " .. ask.note) end
+        ui.Dummy(0, 4 * s)
+        if ui.Button("Send") then
+          local m = ask.coins
+          sendNote = eq.SendParcelMoney(ask.to, ask.note, m[1], m[2], m[3], m[4])
+          if not sendNote then coins = { "", "", "", "" } end
+          moneyAsk = nil
+          ui.CloseCurrentPopup()
+        end
+        ui.SameLine()
+      end
+      if ui.Button("Cancel") or ui.IsKeyPressed(ui.Key.Escape) or not ask then
+        moneyAsk = nil
+        ui.CloseCurrentPopup()
+      end
+      ui.EndPopup()
     end
   else
     ui.SetCursorScreenPos(bx, by)

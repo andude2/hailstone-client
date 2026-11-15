@@ -153,7 +153,7 @@ TEST_CASE("eq.PluginConsent and eq.AnswerPluginConsent: the question for the pac
     lua_setglobal(L, "eq");
 
     CHECK(run(L, "return eq.PluginConsent()") == "nil"); // no host function: nothing asked
-    CHECK(run(L, "return eq.AnswerPluginConsent(true)") == "false");
+    CHECK(run(L, "return eq.AnswerPluginConsent(true, 7)") == "false");
     Asking a;
     a.wire(host);
     const std::string hex = to_hex(sha256(std::string_view("bytes")));
@@ -166,16 +166,20 @@ TEST_CASE("eq.PluginConsent and eq.AnswerPluginConsent: the question for the pac
     CHECK(run(L, "return eq.PluginConsent().plugins[1].size") == "123456");
     CHECK(run(L, "return eq.PluginConsent().plugins[1].sha256") == hex);
     CHECK(run(L, "return eq.PluginConsent().plugins[1].short") == hex.substr(0, 16));
-    CHECK(run(L, "return (pcall(eq.AnswerPluginConsent, 'yes'))") == "false"); // a boolean or nil only
+    CHECK(run(L, "return (pcall(eq.AnswerPluginConsent, 'yes', 7))") == "false"); // a boolean or nil only
+    CHECK(run(L, "return (pcall(eq.AnswerPluginConsent, true))") == "false");     // the question's serial is required
+    CHECK(run(L, "return eq.AnswerPluginConsent(true, 8)") == "false");           // another question's: refused
     CHECK(a.answers.empty());
-    CHECK(run(L, "return eq.AnswerPluginConsent(nil)") == "true");
+    CHECK(run(L, "return eq.AnswerPluginConsent(nil, 7)") == "true");
     REQUIRE(a.answers.size() == 1);
     CHECK_FALSE(a.answers[0].has_value());
-    CHECK(run(L, "return eq.AnswerPluginConsent(true)") == "false"); // no question now
+    CHECK(run(L, "return eq.AnswerPluginConsent(true, 7)") == "false"); // no question now
     a.wire(host);
-    CHECK(run(L, "return eq.AnswerPluginConsent(false)") == "true");
+    CHECK(run(L, "return eq.AnswerPluginConsent(false, eq.PluginConsent().serial)") == "true");
     a.wire(host);
-    CHECK(run(L, "return eq.AnswerPluginConsent(true)") == "true");
+    a.prompt->serial = 9; // a new question came up after the pack read serial 7
+    CHECK(run(L, "return eq.AnswerPluginConsent(true, 7)") == "false");
+    CHECK(run(L, "return eq.AnswerPluginConsent(true, 9)") == "true");
     REQUIRE(a.answers.size() == 3);
     CHECK(a.answers[1] == std::optional<bool>(false));
     CHECK(a.answers[2] == std::optional<bool>(true));
@@ -189,10 +193,10 @@ TEST_CASE("eq.PluginConsent in a plugin's code: nil, and its answer is refused")
     fs::create_directories(pack);
     fs::create_directories(plug);
     std::ofstream(pack / "consent.lua") << "ui.window('Consent', function() pack_saw = eq.PluginConsent() ~= nil end)\n";
-    std::ofstream(plug / "sneak.lua") << "at_load = eq.AnswerPluginConsent(true)\n"
+    std::ofstream(plug / "sneak.lua") << "at_load = eq.AnswerPluginConsent(true, 7)\n"
                                          "ui.window('Sneak', function()\n"
                                          "  saw = eq.PluginConsent() ~= nil\n"
-                                         "  in_draw = eq.AnswerPluginConsent(true)\n"
+                                         "  in_draw = eq.AnswerPluginConsent(true, 7)\n"
                                          "end)\n";
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;

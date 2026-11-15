@@ -212,10 +212,12 @@ local stmlCache = {}
 local function description(win, raw, width)
   local c = stmlCache[win]
   if not c or c.raw ~= raw then
-    c = { raw = raw, lines = stml.Lines(raw, C.text) }
+    -- (the link handler is made with the lines, not once a line a frame)
+    c = { raw = raw, lines = stml.Lines(raw, C.text),
+      onLink = function(link) eq.StmlLink(win, "ItemDescription", link[1], link[2]) end }
     stmlCache[win] = c
   end
-  for _, line in ipairs(c.lines) do stml.DrawLine(line, width, function(link) eq.StmlLink(win, "ItemDescription", link[1], link[2]) end) end
+  for _, line in ipairs(c.lines) do stml.DrawLine(line, width, c.onLink) end
   return #c.lines
 end
 
@@ -230,10 +232,10 @@ local function socketText(win, id, width)
   local key = win .. "\0" .. id
   local c = socketCache[key]
   if not c or c.raw ~= raw then
-    c = { raw = raw, lines = stml.Lines(raw, C.text) }
+    c = { raw = raw, lines = stml.Lines(raw, C.text), onLink = function(link) eq.StmlLink(win, id, link[1], link[2]) end }
     socketCache[key] = c
   end
-  for _, line in ipairs(c.lines) do stml.DrawLine(line, width, function(link) eq.StmlLink(win, id, link[1], link[2]) end) end
+  for _, line in ipairs(c.lines) do stml.DrawLine(line, width, c.onLink) end
 end
 
 local function socketButton(win, id, size, s)
@@ -313,25 +315,41 @@ end
 -- ---------------------------------------------------------------- comparison
 -- Hailstone: the item against what you wear (eq.CompareSlotItem over the window's Hailstone_Item;
 -- docs/item-compare.md), every change, with a button per slot when it fits two (ears, wrists, rings).
+-- The comparison is asked for again only when the item's name line or icon changes, or every COMPARE_REREAD
+-- seconds (what you wear changes); its lines are made again only with it, the slot shown or the verdict option.
 local compareIndex = {} -- [win] = the slot shown
+local compareCache = {} -- [win] = { at, name, tex, u0, v0, c, lines, index, verdict }
+local COMPARE_REREAD = 0.5
 local CMP_KIND = { good = "good", bad = "bad", mixed = "gold" }
-local function comparison(win)
+local function comparison(win, item)
   if eq.Option("item_compare") == 0 then return end
-  local c = eq.CompareSlotItem(win, "Hailstone_Item")
+  local now = ui.GetTime()
+  local k = compareCache[win]
+  if not k then k = { at = -math.huge }; compareCache[win] = k end
+  if k.name ~= item.name or k.tex ~= item.tex or k.u0 ~= item.u0 or k.v0 ~= item.v0
+      or now - k.at >= COMPARE_REREAD or now < k.at then
+    k.c, k.lines = eq.CompareSlotItem(win, "Hailstone_Item"), nil
+    k.at, k.name, k.tex, k.u0, k.v0 = now, item.name, item.tex, item.u0, item.v0
+  end
+  local c = k.c
   if not c then return end
   W.Heading("Compared with what you wear")
   local index = compareIndex[win] or 1
   if index > #c.slots then index = 1 end
   if #c.slots > 1 then
-    for k, slot in ipairs(c.slots) do
-      if k > 1 then ui.SameLine() end
-      local label = slot.slotName .. "##cmp" .. k
-      if ui.Selectable(label, k == index, 0, (ui.CalcTextSize(slot.slotName)), 0) then compareIndex[win] = k end
+    for n, slot in ipairs(c.slots) do
+      if n > 1 then ui.SameLine() end
+      local label = slot.slotName .. "##cmp" .. n
+      if ui.Selectable(label, n == index, 0, (ui.CalcTextSize(slot.slotName)), 0) then compareIndex[win] = n end
     end
+  end
+  local verdict = eq.Option("item_compare_verdict") ~= 0
+  if not k.lines or k.index ~= index or k.verdict ~= verdict then
+    k.lines, k.index, k.verdict = CL.lines(c, index, { verdict = verdict, full = true }), index, verdict
   end
   ui.PushFont(T.font.small)
   ui.PushTextWrapPos(0)
-  for _, line in ipairs(CL.lines(c, index, { verdict = eq.Option("item_compare_verdict") ~= 0, full = true })) do
+  for _, line in ipairs(k.lines) do
     local text, kind = line[1], line[2]
     local col = CMP_KIND[kind] and C[CMP_KIND[kind]] or (kind == "muted" and C.muted or C.text)
     ui.TextColored(col[1], col[2], col[3], 1, text)
@@ -375,6 +393,9 @@ local function body(win, w, h, s)
   end
   local _, cy = ui.GetCursorScreenPos()
   ui.SetCursorScreenPos(x, math.max(cy, y + icon) + 6 * s)
+  if eq.ItemDisplayCanTransfer(win) then
+    if ui.Button("Transfer evolving experience##evolve", -1, 0) then eq.ItemDisplayTransfer(win) end
+  end
 
   -- the rest scrolls
   ui.BeginChild("##idbody", 0, 0, false)
@@ -416,7 +437,7 @@ local function body(win, w, h, s)
     end
   end
   sockets(win, s, cw)
-  comparison(win)
+  comparison(win, item)
   if trim(descRaw) ~= "" then
     W.Heading("Description")
     ui.PushFont(T.font.small)

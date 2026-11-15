@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <new>
 #include <optional>
 #include <span>
 #include <string>
@@ -40,6 +41,8 @@
 #include "game/lua_social.h"
 #include "mq/lua_mq.h"
 #include "mq/tlo.h"
+#include "plugin/lua_keep.h"
+#include "ui/lua/lua_host.h"
 
 namespace hailstone::app {
 
@@ -49,6 +52,35 @@ constexpr int kSocials = game::kSocialPages * game::kSocialButtons;
 constexpr int kEditorState = 1000; // the Lua state an editor's dry run uses (mq::ButtonPress::state)
 
 EqHost& host_of(lua_State* L) { return *static_cast<EqHost*>(lua_touserdata(L, lua_upvalueindex(1))); }
+
+// eq.LuaSocial's hash of each social's code (an editor reads it every frame), made again when the code differs from
+// what it was made from: whatever changed it (SetLuaSocial, an import, the file) is seen. eq.LuaSocial's second
+// upvalue, owned by the state.
+struct HashCache {
+    struct Entry {
+        bool made = false;
+        std::string press, face, hex;
+    };
+    std::array<Entry, kSocials> entries;
+};
+
+int gc_hash_cache(lua_State* L) {
+    static_cast<HashCache*>(lua_touserdata(L, 1))->~HashCache();
+    return 0;
+}
+
+// The hex hash of social n's code, from the cache while its code is the same.
+const std::string& social_hash(HashCache& cache, int n, const game::LuaSocial& lua) {
+    HashCache::Entry& e = cache.entries[static_cast<std::size_t>(n)];
+    if (!e.made || e.press != lua.press || e.face != lua.face) {
+        e.made = false; // until all three are set again (an exception may come between)
+        e.hex = to_hex(game::lua_social_hash(lua));
+        e.press = lua.press;
+        e.face = lua.face;
+        e.made = true;
+    }
+    return e.hex;
+}
 
 // The social number argument, or -1 when it is out of range or there are no socials.
 int social_arg(lua_State* L, int i) {
@@ -126,6 +158,9 @@ int LuaSocial(lua_State* L) {
         return 1;
     }
     const game::Social& s = h.hot_buttons->social(n);
+    auto& cache = *static_cast<HashCache*>(lua_touserdata(L, lua_upvalueindex(2)));
+    const std::string* hash = nullptr;
+    plugin::cxx_guard(L, [&] { hash = &social_hash(cache, n, s.lua); });
     lua_createtable(L, 0, 10);
     set_str(L, "name", s.name);
     set_int(L, "color", s.color);
@@ -140,7 +175,7 @@ int LuaSocial(lua_State* L) {
     set_str(L, "press", s.lua.press);
     set_str(L, "face", s.lua.face);
     set_bool(L, "running", h.scripts && h.scripts->button_running(n));
-    set_str(L, "hash", to_hex(game::lua_social_hash(s.lua)));
+    set_str(L, "hash", *hash);
     push_rules(L, h.scripts ? h.scripts->button_rules(s.lua) : plugin::ButtonRules{});
     lua_setfield(L, -2, "rules");
     return 1;
@@ -284,29 +319,39 @@ int LuaSocialExport(lua_State* L) {
     const game::Social& s = h.hot_buttons->social(n);
     if (lua_istable(L, 2)) {
         // The editor's unsaved social: every field onto the stack before any std::string exists.
+        // The lines too (raw reads), then the text made into a box the state owns across its push
+        // (plugin/lua_keep.h).
         const int base = lua_gettop(L);
         for (const char* k : {"name", "color", "press", "face", "lines"}) lua_getfield(L, 2, k);
-        game::LuaSocialFile f{string_at(L, base + 1), static_cast<int>(lua_tointeger(L, base + 2)),
-                              {string_at(L, base + 3), string_at(L, base + 4)}, {}};
-        if (lua_istable(L, base + 5))
-            for (int i = 0; i < game::kSocialLines; ++i) {
-                lua_rawgeti(L, base + 5, i + 1);
-                f.lines.push_back(string_at(L, -1));
-                lua_pop(L, 1);
-            }
-        lua_settop(L, base);
-        std::string text = game::export_lua_social(f);
+        const bool has_lines = lua_istable(L, base + 5);
+        luaL_checkstack(L, game::kSocialLines + 1, nullptr);
+        for (int i = 0; i < game::kSocialLines; ++i)
+            if (has_lines) lua_rawgeti(L, base + 5, i + 1);
+            else lua_pushnil(L);
+        std::string& text = plugin::lua_keep<std::string>(L);
+        plugin::cxx_guard(L, [&] {
+            game::LuaSocialFile f{string_at(L, base + 1), static_cast<int>(lua_tointeger(L, base + 2)),
+                                  {string_at(L, base + 3), string_at(L, base + 4)}, {}};
+            if (has_lines)
+                for (int i = 0; i < game::kSocialLines; ++i) f.lines.push_back(string_at(L, base + 6 + i));
+            text = game::export_lua_social(f);
+        });
         lua_pushlstring(L, text.data(), text.size());
         return 1;
     }
-    std::string text = game::export_lua_social(
-        {s.name, s.color, s.lua, std::vector<std::string>(s.lines.begin(), s.lines.end())});
+    std::string& text = plugin::lua_keep<std::string>(L);
+    plugin::cxx_guard(L, [&] {
+        text = game::export_lua_social(
+            {s.name, s.color, s.lua, std::vector<std::string>(s.lines.begin(), s.lines.end())});
+    });
     lua_pushlstring(L, text.data(), text.size());
     return 1;
 }
 
 int LuaSocialImport(lua_State* L) {
-    auto f = game::import_lua_social(luaL_checkstring(L, 1));
+    const char* text = luaL_checkstring(L, 1);
+    auto& f = plugin::lua_keep<std::optional<game::LuaSocialFile>>(L); // across push_file (plugin/lua_keep.h)
+    plugin::cxx_guard(L, [&] { f = game::import_lua_social(text); });
     if (!f) {
         lua_pushnil(L);
         lua_pushstring(L, "not a Hailstone social (it starts with hailstone-social:1:)");
@@ -366,7 +411,7 @@ int LuaComplete(lua_State* L) {
     std::size_t word = before.size();
     while (word > 0 && is_ident(before[word - 1])) --word;
     std::string_view prefix = before.substr(word);
-    std::vector<std::string> items;
+    auto& items = plugin::lua_keep<std::vector<std::string>>(L); // across the pushes (plugin/lua_keep.h)
     auto take = [&](std::span<const char* const> names) {
         for (const char* n : names)
             if (starts_nocase(n, prefix)) items.emplace_back(n);
@@ -376,14 +421,16 @@ int LuaComplete(lua_State* L) {
         std::size_t start = word - 1 - object.size();
         return before.substr(start, object.size()) == object && (start == 0 || !is_ident(before[start - 1]));
     };
-    if (auto path = lua_tlo_path(before); path && h.registry && h.tlo_context) {
-        items = h.registry->complete(h.tlo_context(), *path);
-    } else if (ends_with_object("mq")) {
-        take(kMqNames);
-    } else if (ends_with_object("button")) {
-        take(kButtonNames);
-    }
-    if (items.size() > 50) items.resize(50);
+    plugin::cxx_guard(L, [&] {
+        if (auto path = lua_tlo_path(before); path && h.registry && h.tlo_context) {
+            items = h.registry->complete(h.tlo_context(), *path);
+        } else if (ends_with_object("mq")) {
+            take(kMqNames);
+        } else if (ends_with_object("button")) {
+            take(kButtonNames);
+        }
+        if (items.size() > 50) items.resize(50);
+    });
     lua_pushinteger(L, static_cast<lua_Integer>(word + 1));
     lua_createtable(L, static_cast<int>(items.size()), 0);
     for (std::size_t i = 0; i < items.size(); ++i) {
@@ -395,9 +442,11 @@ int LuaComplete(lua_State* L) {
 
 // ---------------------------------------------------------------- opening, new socials
 
+// The request is the player's (a right click, /luasocial) and is taken once, by the pack's editor: a plugin's code in
+// the UI gets nil and leaves it.
 int LuaSocialEditRequest(lua_State* L) {
     EqHost& h = host_of(L);
-    if (h.lua_social_edit < 0) return 0;
+    if (h.lua_social_edit < 0 || !ui::lua::LuaUi::caller_tag().empty()) return 0;
     lua_pushinteger(L, h.lua_social_edit);
     h.lua_social_edit = -1;
     return 1;
@@ -471,6 +520,15 @@ void register_luasocial_api(lua_State* L, EqHost& h) {
                                    {nullptr, nullptr}};
     lua_pushlightuserdata(L, &h);
     luaL_setfuncs(L, fns, 1);
+    // eq.LuaSocial again, with its hash cache.
+    lua_pushlightuserdata(L, &h);
+    new (lua_newuserdatauv(L, sizeof(HashCache), 0)) HashCache();
+    lua_createtable(L, 0, 1);
+    lua_pushcfunction(L, gc_hash_cache);
+    lua_setfield(L, -2, "__gc");
+    lua_setmetatable(L, -2);
+    lua_pushcclosure(L, LuaSocial, 2);
+    lua_setfield(L, -2, "LuaSocial");
 }
 
 } // namespace hailstone::app

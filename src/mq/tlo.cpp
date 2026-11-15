@@ -270,15 +270,25 @@ Registry::Registry() {
         const auto end = v.s.find(sep, pos);
         return Value::string(v.s.substr(pos, end == std::string::npos ? std::string::npos : end - pos));
     };
-    // Replace[search,replacement]: every search (case-sensitive) replaced, left to right.
+    // Replace[search,replacement]: every search (case-sensitive) replaced, left to right. The result is cut to
+    // kMaxReplaced bytes (an MQ string's room, MAX_STRING less its terminator): nested in itself, a Replace that
+    // makes its text longer would otherwise grow it exponentially (${String[${String[...].Replace[a,aaaa]}]...}).
     t_string.members["Replace"] = [](const Context&, const Value& v, std::string_view index) {
+        constexpr std::size_t kMaxReplaced = 2047;
         const auto comma = index.find(',');
         if (comma == std::string_view::npos) return Value::nil();
         const std::string_view search = index.substr(0, comma), with = index.substr(comma + 1);
         if (v.s.empty() || search.empty()) return Value::nil();
-        std::string out = v.s;
-        for (std::size_t at = out.find(search); at != std::string::npos; at = out.find(search, at + with.size()))
-            out.replace(at, search.size(), with);
+        std::string out;
+        std::size_t from = 0;
+        for (std::size_t at = v.s.find(search); at != std::string::npos && out.size() < kMaxReplaced;
+             at = v.s.find(search, from)) {
+            out.append(v.s, from, at - from);
+            out += with;
+            from = at + search.size();
+        }
+        if (out.size() < kMaxReplaced) out.append(v.s, from, kMaxReplaced - out.size());
+        if (out.size() > kMaxReplaced) out.resize(kMaxReplaced);
         return Value::string(std::move(out));
     };
     t_string.members["StripLinks"] = [](const Context&, const Value& v, std::string_view) {

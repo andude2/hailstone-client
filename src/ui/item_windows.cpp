@@ -302,7 +302,10 @@ void show_item_info(ItemWindowsState& state, Item item) {
 void refresh_item_info(ItemWindowsState& state, const Item& item) {
     if (item.instance_id == 0 && item.parcel_item_id == 0) return;
     for (auto& shown : state.info)
-        if (shown.instance_id == item.instance_id && shown.parcel_item_id == item.parcel_item_id) shown = item;
+        // Evolving database ids and ordinary item serials are separate namespaces in RoF2 serialization.
+        if ((shown.is_evolving != 0) == (item.is_evolving != 0) && shown.instance_id == item.instance_id &&
+            shown.parcel_item_id == item.parcel_item_id)
+            shown = item;
 }
 
 // ---------------------------------------------------------------- windows

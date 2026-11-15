@@ -98,7 +98,7 @@ ui.window("Icon Selection", function()
           typing = true
           G.openKeys(kb)
         end
-        if pad.menuPressed("a") then eq.ClickChild(ISW, "ISW_Accept_Button", "left") end
+        if T.settledPress(pad, "a") then eq.ClickChild(ISW, "ISW_Accept_Button", "left") end
       end
       if ui.IsMouseHoveringRect(x0, gy, x1, gy1) then
         local wheel = ui.GetIO().wheel or 0

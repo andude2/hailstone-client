@@ -48,6 +48,9 @@ public:
 // Whether a key command is movement (kCapMove) rather than an action (kCapActions) for /keypress.
 bool movement_key(std::string_view command);
 
+// How deep /docommand, /noparse and /squelch may run each other in one line.
+inline constexpr int kMaxNestedCommands = 16;
+
 class Commands {
 public:
     explicit Commands(CommandEnv env);
@@ -62,12 +65,15 @@ private:
     // The last line filter: the line as it finally goes, after the plugins' rewrites.
     void final_check(std::string& line, plugin::Flow& flow);
     void say(const std::string& text) const; // a chat line, unless /squelch is running
+    // /docommand, /noparse and /squelch: the rest of the line run as a command, at most kMaxNestedCommands deep.
+    void run_nested(std::string_view args);
     CommandEnv env_;
     plugin::Hooks::Owner owner_ = 0;
     plugin::Hooks::Owner final_owner_ = 0; // final_check's, registered again so it stays the last filter
     bool redispatched_ = false;            // the next line through filter() is the one it sent on itself
     bool noparse_ = false;
     int squelch_ = 0;
+    int nested_ = 0; // run_nested calls in progress
 };
 
 } // namespace hailstone::mq

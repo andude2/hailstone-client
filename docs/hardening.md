@@ -37,10 +37,11 @@ trusting a bogus length). A call over 2 s also fails.
 | Session codec | `decode_datagram` for all pass/CRC combinations (also mutated plain packets re-encoded with a valid CRC), `decompress_body` (including a zlib bomb), `split_combined`/`split_app_combined`, `decode_app`, `parse_session_response`, `InboundStream` (fragments, out-of-order, wraparound, 20 000 random packets) | never throw |
 | Live `Session` | a real session over loopback UDP receiving 3 000 corrupt datagrams | keep running |
 | Login replies | `parse_handshake_reply`, `parse_login_reply`, `parse_server_list`, `parse_play_reply`, `reply_body`, with compressed/bomb seeds | error by exception only (the caller catches `std::exception`) |
-| Assets | PFS (multi-block), WLD (mesh fixtures plus every fragment type 0x03-0x37, `build_mesh` with its parts checked against its indices and vertices, `build_skeleton_pose`), EQG TER/MOD, ZON, heightmap ZON/DAT, ECO, TOG, water, EQGS/EQGM meshes, animations, DDS/BMP (all depths, RLE)/TGA, XMI, `_sounds.eff`, spellsnew, EDD, sound-bank/asset/emt/race text, ini, zone-line tags | no crash/hang/huge allocation; errors by `std::exception` |
+| Shared GPU textures | the transport's frame header (`gpu_ipc_wire::decode_header`), the broker's request parser (`gpu_cache::decode_request`, with the texture recipe it carries) and the recipe decoder (`gpu_cache::decode_texture`) | errors by `std::exception` |
+| Assets | PFS (multi-block), WLD (mesh fixtures plus every fragment type 0x03-0x37, `build_mesh` with its parts checked against its indices and vertices, `build_skeleton_pose`), EQG TER/MOD, ZON, heightmap ZON/DAT, ECO, TOG, water, EQGS/EQGM meshes, animations, EQGL layers, PTS/PRT points and emitters, texture animation lists, radial flora (ECO flora layers, RFD definitions), `Resources/OnDemandResources.txt`, DDS/BMP (all depths, RLE)/TGA, DDS cube maps made octahedral, WLD detail palette maps, JPEG, XMI, `_sounds.eff`, spellsnew, EDD, sound-bank/asset/emt/race text, ini, zone-line tags | no crash/hang/huge allocation; errors by `std::exception` |
 
 Optional libFuzzer targets (`-DHAILSTONE_LIBFUZZER=ON`, Clang): `fuzz_pfs`, `fuzz_wld`, `fuzz_texture`, `fuzz_soe`, `fuzz_decoders` (every typed decoder of `tests/fuzz_decoders.inc`, byte 0 choosing it),
-`fuzz_packets`, `fuzz_zip` (the updater's package zip and manifest) from `tests/fuzz_libfuzzer.cpp`. These were only syntax-checked here (no Clang build of the
+`fuzz_packets`, `fuzz_zip` (the updater's package zip and manifest), `fuzz_gpucache` (the shared GPU texture transport's frame header, broker requests and texture recipes), `fuzz_models` (EQGL layers, PTS, PRT, texture animations, ECO flora and RFD, byte 0 choosing; `fuzz_texture` also runs the cube map, palette map and JPEG decoders) from `tests/fuzz_libfuzzer.cpp`. These were only syntax-checked here (no Clang build of the
 dependencies was run); the deterministic tests are the verified part.
 
 ## Findings and fixes
@@ -69,6 +70,7 @@ dependencies was run); the deterministic tests are the verified part.
 | `src/assets/texture.cpp` `decode_bmp` (RLE) | a 130 KB RLE8 could declare 8192 x 8192 (end of bitmap at once), decoded into a 64 MB index buffer and the 256 MB image | refused when the size is over 128 pixels per byte of data (+512 bytes), what runs can fill; decoded straight into the image |
 | `src/assets/character_dress.cpp` `layered_texture` | Luclin layers were composited at the widest layer's width by the tallest's height: a 16384 x 1 and a 1 x 16384 layer made 1 GiB | composited at the size of the layer with the most texels |
 | `src/assets/wld_zone.cpp`, `src/assets/eqg_zone.cpp` (lights) | a non-finite light position, colour or radius from `lights.wld`, an EQG zone's DAT or ZON reached the light grid | left out at load (`finite_light`) |
+| `src/game/neighbour_zones.cpp` `GroundSampler`, `split_cells` | a NaN, infinite or huge band, cell or triangle reached `static_cast<int>(ceil/floor(...))` (UB), and the cell-span product was a `long` (32 bits on Windows) | counted in double and bounded before the cast (NaN is 0 cells); the product in 64 bits |
 
 Behaviour for valid input is unchanged. The typed packet decoders, the session layer, the login parsers and the WLD, ZON,
 model, DDS, TGA, XMI and table parsers produced no findings.

@@ -4,7 +4,8 @@
 --   A   pick up / put down / swap (the left click: the item goes on the cursor, shown here as "Holding")
 --   X   use the item (the quick right click: open a bag, read a book, cast a clicky); holding one: put it away
 --   Y   the item's full details (the held right button: the item display)
---   LB  holding an item: destroy it (the stock Destroy button: its confirmation unless Fast Item Destroy is on);
+--   LB  holding an item: destroy it (the stock Destroy button: its confirmation, or with Fast Item Destroy on this
+--       window's own Yes / No, since LB pages elsewhere);
 --       else put the focused item on a hot button (the slot picker; the left button held on the slot: a link that
 --       follows the item wherever it is moved)
 --   RB  holding an item: drop it on the ground (a click on the world with it: the game's drop rules and question)
@@ -26,6 +27,7 @@ local WORN_ROWS = {
   { 7, 9, 10, 12, 15, 16, 17, 20 },
   { 18, 19, 13, 14, 11, 22, 21 },
 }
+local destroyQ = {} -- the question before LB destroys the held item with Fast Item Destroy on (W.confirm)
 local openBag = nil -- the bag slot (23..32) whose contents are shown
 local CURRENCY_LIST = "AltCurr_PointList"
 local currencies = {} -- W.list state
@@ -182,106 +184,119 @@ ui.window("Inventory", function()
   T.frame()
   local held = eq.Item(eq.CursorSlot or 33)
   local holding = held ~= nil
-  local hints = holding and { { "a", currencyFocused and "Reclaim" or "Place" }, { "x", "Put away" }, { "lb", "Destroy" }, { "rb", "Drop" }, { "y", "Details" }, { "b", "Close" } }
+  if not holding then destroyQ.confirm = nil end -- (the question is about the held item)
+  local hints = destroyQ.confirm and { { "a", "Select" }, { "b", "Cancel" } }
+      or holding and { { "a", currencyFocused and "Reclaim" or "Place" }, { "x", "Put away" }, { "lb", "Destroy" }, { "rb", "Drop" }, { "y", "Details" }, { "b", "Close" } }
       or currencyFocused and { { "a", "Claim" }, { "b", "Close" } }
       or { { "a", "Pick up" }, { "x", "Use" }, { "y", "Details" }, { "lb", "Assign to slot" }, { "b", "Close" } }
   if W.begin("Inventory", { w = 1700, h = 980, title = "Inventory", hints = hints }) then
-    local x0, y0, x1, y1 = W.area()
-    local wx, wy = ui.GetWindowPos()
-    local leftW, rightW = T.px(400), T.px(380)
-    local midX = x0 + leftW + T.px(40)
-    local sheetY = sheet(x0, y0, x0 + leftW)
-    currencyFocused = currencyList(x0, sheetY + T.px(16), x0 + leftW, y1, held ~= nil)
-    local focusedItem, focusedWhere, focusedSlot, focusedBag
-    if held and W.pressed("lb") then eq.ClickChild(INV, "IW_Destroy", "left") end
-    if held and W.pressed("rb") and eq.gamepad and eq.gamepad.drop_cursor then eq.gamepad.drop_cursor() end
-    local size, gap = T.px(84), T.px(10)
-    local bagName -- (a slot in the open bag is named "<bag>, slot <n>" only when it has the focus)
-    local function slotAt(id, slot, bag, item, where, sz)
-      local clicked, focused, sx0, sy0, sx1 = T.slot(id, item, sz or size, { label = bag == nil and where or nil }, pad)
-      if focused then
-        focusedItem, focusedWhere = item, where or (bagName .. ", slot " .. (bag + 1))
-        focusedSlot, focusedBag = slot, bag
-        if bag == nil and slot >= 23 and slot <= 32 and item and (item.bagSlots or 0) > 0 then openBag = slot end
-        if W.pressed("x") then
-          if held then eq.ChatSubmit(1, "/autoinventory") else eq.ClickSlot(slot, bag, "rightup") end
-        end
-        if W.pressed("y") and item then eq.ClickSlot(slot, bag, "rightheld") end
-        -- the item on a hot button (the game's left button held on the slot: an item link that follows the item)
-        if not held and item and W.pressed("lb") then
-          AS.start(item.name, function() return eq.ClickSlot(slot, bag, "leftheld") end, "Inventory")
-        end
-        if held then -- what A would put here: the held item's icon at the slot's corner
-          T.itemIcon(held.icon, sx1 - T.px(30), sy0 - T.px(14), sx1 + T.px(10), sy0 + T.px(26))
+    if not W.confirm(destroyQ) then
+      local x0, y0, x1, y1 = W.area()
+      local wx, wy = ui.GetWindowPos()
+      local leftW, rightW = T.px(400), T.px(380)
+      local midX = x0 + leftW + T.px(40)
+      local sheetY = sheet(x0, y0, x0 + leftW)
+      currencyFocused = currencyList(x0, sheetY + T.px(16), x0 + leftW, y1, held ~= nil)
+      local focusedItem, focusedWhere, focusedSlot, focusedBag
+      if held and W.pressed("lb") then
+        -- (LB is "previous page" in other windows: with Fast Item Destroy on, the game would not ask, so this does)
+        if (eq.Option("fast_item_destroy") or 0) ~= 0 then
+          destroyQ.confirm = { "Destroy " .. (held.name or "the held item") .. "?", function()
+            eq.ClickChild(INV, "IW_Destroy", "left")
+          end }
+        else
+          eq.ClickChild(INV, "IW_Destroy", "left")
         end
       end
-      if clicked then eq.ClickSlot(slot, bag, "left") end
-      if ui.IsItemClicked(ui.Mouse.Right) then eq.ClickSlot(slot, bag, "rightup") end
-    end
-    -- equipment
-    ui.SetCursorPos(midX - wx, y0 - wy)
-    T.heading("Equipment")
-    for _, row in ipairs(WORN_ROWS) do
-      ui.SetCursorPos(midX - wx, select(2, ui.GetCursorScreenPos()) - wy)
-      for i, slot in ipairs(row) do
-        if i > 1 then ui.SameLine(0, gap) end
-        slotAt(SLOT_IDS[slot], slot, nil, eq.Item(slot), slotName(slot))
+      if held and W.pressed("rb") and eq.gamepad and eq.gamepad.drop_cursor then eq.gamepad.drop_cursor() end
+      local size, gap = T.px(84), T.px(10)
+      local bagName -- (a slot in the open bag is named "<bag>, slot <n>" only when it has the focus)
+      local function slotAt(id, slot, bag, item, where, sz)
+        local clicked, focused, sx0, sy0, sx1 = T.slot(id, item, sz or size, { label = bag == nil and where or nil }, pad)
+        if focused then
+          focusedItem, focusedWhere = item, where or (bagName .. ", slot " .. (bag + 1))
+          focusedSlot, focusedBag = slot, bag
+          if bag == nil and slot >= 23 and slot <= 32 and item and (item.bagSlots or 0) > 0 then openBag = slot end
+          if W.pressed("x") then
+            if held then eq.ChatSubmit(1, "/autoinventory") else eq.ClickSlot(slot, bag, "rightup") end
+          end
+          if W.pressed("y") and item then eq.ClickSlot(slot, bag, "rightheld") end
+          -- the item on a hot button (the game's left button held on the slot: an item link that follows the item)
+          if not held and item and W.pressed("lb") then
+            AS.start(item.name, function() return eq.ClickSlot(slot, bag, "leftheld") end, "Inventory")
+          end
+          if held then -- what A would put here: the held item's icon at the slot's corner
+            T.itemIcon(held.icon, sx1 - T.px(30), sy0 - T.px(14), sx1 + T.px(10), sy0 + T.px(26))
+          end
+        end
+        if clicked then eq.ClickSlot(slot, bag, "left") end
+        if ui.IsItemClicked(ui.Mouse.Right) then eq.ClickSlot(slot, bag, "rightup") end
       end
-    end
-    -- the bag slots
-    ui.SetCursorPos(midX - wx, select(2, ui.GetCursorScreenPos()) + T.px(10) - wy)
-    T.heading("Bags")
-    ui.SetCursorPos(midX - wx, select(2, ui.GetCursorScreenPos()) - wy)
-    local bsize = T.px(76)
-    for slot = 23, 32 do
-      if slot > 23 then ui.SameLine(0, T.px(8)) end
-      slotAt(SLOT_IDS[slot], slot, nil, eq.Item(slot), slotName(slot), bsize)
-    end
-    -- the open bag's contents (the first bag until one is focused); read after the slots' clicks above
-    local bag = openBag and eq.Item(openBag)
-    if not (bag and (bag.bagSlots or 0) > 0) then
-      openBag = nil
-      for slot = 23, 32 do
-        local it = eq.Item(slot)
-        if it and (it.bagSlots or 0) > 0 then
-          openBag, bag = slot, it
-          break
+      -- equipment
+      ui.SetCursorPos(midX - wx, y0 - wy)
+      T.heading("Equipment")
+      for _, row in ipairs(WORN_ROWS) do
+        ui.SetCursorPos(midX - wx, select(2, ui.GetCursorScreenPos()) - wy)
+        for i, slot in ipairs(row) do
+          if i > 1 then ui.SameLine(0, gap) end
+          slotAt(SLOT_IDS[slot], slot, nil, eq.Item(slot), slotName(slot))
         end
       end
-    end
-    if bag and (bag.bagSlots or 0) > 0 then
+      -- the bag slots
       ui.SetCursorPos(midX - wx, select(2, ui.GetCursorScreenPos()) + T.px(10) - wy)
-      T.heading(bag.name)
-      bagName = bag.name
-      local per = 10
-      for i = 0, bag.bagSlots - 1 do
-        if i % per == 0 then ui.SetCursorPos(midX - wx, select(2, ui.GetCursorScreenPos()) - wy) else ui.SameLine(0, T.px(8)) end
-        slotAt(bagId(openBag, i), openBag, i, eq.Item(openBag, i), nil, bsize)
+      T.heading("Bags")
+      ui.SetCursorPos(midX - wx, select(2, ui.GetCursorScreenPos()) - wy)
+      local bsize = T.px(76)
+      for slot = 23, 32 do
+        if slot > 23 then ui.SameLine(0, T.px(8)) end
+        slotAt(SLOT_IDS[slot], slot, nil, eq.Item(slot), slotName(slot), bsize)
       end
-    else
-      openBag = nil
-    end
-    -- the right column: the focused item, what is held
-    local rx0 = x1 - rightW
-    local holdH = held and T.px(110) or 0
-    I.summary(focusedItem, focusedWhere, rx0, y0, x1, y1 - holdH - (held and T.px(12) or 0),
-      focusedItem and focusedSlot and eq.CompareItem(focusedSlot, focusedBag) or nil)
-    if held then
-      local hy0 = y1 - holdH
-      T.rect(rx0, hy0, x1, y1, C.accent, 0.16, T.px(14))
-      T.outline(rx0, hy0, x1, y1, C.accent, 0.6, T.px(14), T.px(2))
-      local s = T.px(64)
-      T.itemIcon(held.icon, rx0 + T.px(16), hy0 + (holdH - s) / 2, rx0 + T.px(16) + s, hy0 + (holdH + s) / 2)
-      T.font(17)
-      T.draw(rx0 + T.px(96), hy0 + T.px(18), "HOLDING", C.accent)
-      T.unfont()
-      T.font(21)
-      T.draw(rx0 + T.px(96), hy0 + T.px(44), T.fit(held.name or "", x1 - rx0 - T.px(110)))
-      T.unfont()
-      T.font(16)
-      T.draw(rx0 + T.px(96), hy0 + T.px(76), "A place  X put away  LB destroy  RB drop", C.dim)
-      T.unfont()
+      -- the open bag's contents (the first bag until one is focused); read after the slots' clicks above
+      local bag = openBag and eq.Item(openBag)
+      if not (bag and (bag.bagSlots or 0) > 0) then
+        openBag = nil
+        for slot = 23, 32 do
+          local it = eq.Item(slot)
+          if it and (it.bagSlots or 0) > 0 then
+            openBag, bag = slot, it
+            break
+          end
+        end
+      end
+      if bag and (bag.bagSlots or 0) > 0 then
+        ui.SetCursorPos(midX - wx, select(2, ui.GetCursorScreenPos()) + T.px(10) - wy)
+        T.heading(bag.name)
+        bagName = bag.name
+        local per = 10
+        for i = 0, bag.bagSlots - 1 do
+          if i % per == 0 then ui.SetCursorPos(midX - wx, select(2, ui.GetCursorScreenPos()) - wy) else ui.SameLine(0, T.px(8)) end
+          slotAt(bagId(openBag, i), openBag, i, eq.Item(openBag, i), nil, bsize)
+        end
+      else
+        openBag = nil
+      end
+      -- the right column: the focused item, what is held
+      local rx0 = x1 - rightW
+      local holdH = held and T.px(110) or 0
+      I.summary(focusedItem, focusedWhere, rx0, y0, x1, y1 - holdH - (held and T.px(12) or 0),
+        focusedItem and focusedSlot and eq.CompareItem(focusedSlot, focusedBag) or nil)
+      if held then
+        local hy0 = y1 - holdH
+        T.rect(rx0, hy0, x1, y1, C.accent, 0.16, T.px(14))
+        T.outline(rx0, hy0, x1, y1, C.accent, 0.6, T.px(14), T.px(2))
+        local s = T.px(64)
+        T.itemIcon(held.icon, rx0 + T.px(16), hy0 + (holdH - s) / 2, rx0 + T.px(16) + s, hy0 + (holdH + s) / 2)
+        T.font(17)
+        T.draw(rx0 + T.px(96), hy0 + T.px(18), "HOLDING", C.accent)
+        T.unfont()
+        T.font(21)
+        T.draw(rx0 + T.px(96), hy0 + T.px(44), T.fit(held.name or "", x1 - rx0 - T.px(110)))
+        T.unfont()
+        T.font(16)
+        T.draw(rx0 + T.px(96), hy0 + T.px(76), "A place  X put away  LB destroy  RB drop", C.dim)
+        T.unfont()
+      end
     end
   end
-  if W.finish() then eq.ShowWindow(INV, false) end
+  if W.back(W.finish(), destroyQ) then eq.ShowWindow(INV, false) end
 end)

@@ -12,12 +12,18 @@
 #include "core/atomic_file.h"
 #include "core/log.h"
 #include "core/zip_read.h"
+#include "platform/durable_file.h"
 
 namespace hailstone::app {
 
 namespace fs = std::filesystem;
 
 namespace {
+
+// All of an update's files, unpacked: a release is a few hundred MB (the browser's libraries most of it), so this
+// leaves it room to grow while a package that would fill the disk (a zip bomb within its declared sizes) is refused
+// before anything is written.
+constexpr std::uint64_t kMaxUnpackedBytes = 4ull * 1024 * 1024 * 1024;
 
 // A relative '/'-separated UTF-8 name as a path.
 fs::path rel(std::string_view name) {
@@ -124,11 +130,12 @@ void remove_quietly(const fs::path& path) {
 }
 
 // Moves `from` to `to` (making its folder); on Windows a running program or a loaded library may be moved, not
-// deleted.
+// deleted. The rename is on the disk when it returns (platform/durable_file.h), so a power cut after state.txt says
+// "pending" cannot leave a file the journal says moved where it was.
 bool move_file(const fs::path& from, const fs::path& to, std::string* error) {
     std::error_code ec;
     fs::create_directories(to.parent_path(), ec);
-    fs::rename(from, to, ec);
+    platform::replace_file_synced(from, to, ec);
     if (ec && error) *error = "cannot move " + from.string() + " to " + to.string() + ": " + ec.message();
     return !ec;
 }
@@ -136,6 +143,15 @@ bool move_file(const fs::path& from, const fs::path& to, std::string* error) {
 bool is_directory_entry(const fs::path& p) {
     std::error_code ec;
     return fs::symlink_status(p, ec).type() == fs::file_type::directory;
+}
+
+// Whether `name` is in a plugin's folder (plugins/<x>/...) that an add-on installed into (docs/addons.md): the
+// add-on's files, which no package of an update writes or takes out.
+bool owned_by_addon(const fs::path& install_dir, std::string_view name) {
+    constexpr std::string_view plugins = "plugins/";
+    if (lower(name.substr(0, plugins.size())) != plugins) return false;
+    const auto slash = name.find('/', plugins.size());
+    return slash != std::string_view::npos && addon_owns_folder(install_dir, name.substr(0, slash));
 }
 
 // Moves a file out of the way into update/trash/ (removed at the next start, when nothing has it open). Never a
@@ -177,6 +193,14 @@ std::vector<std::pair<std::string, std::string>> journal_lines(const std::string
     return out;
 }
 
+bool holds_a_file(const fs::path& folder) {
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(folder, ec); !ec && it != fs::recursive_directory_iterator();
+         it.increment(ec))
+        if (!it->is_directory(ec)) return true;
+    return false;
+}
+
 // Undoes the moves the journal lists, last first, and puts installed.txt back.
 void roll_back(const fs::path& install_dir) {
     const fs::path dir = update_dir(install_dir);
@@ -209,7 +233,24 @@ void roll_back(const fs::path& install_dir) {
         fs::remove(dir / "installed.txt", ec);
     }
     remove_quietly(dir / "journal.txt");
-    remove_quietly(dir / "previous");
+    // After the undo previous/ holds no file: each went back. One still there is a copy the journal does not name (a
+    // journal the disk lost, damaged, or a move back that failed), possibly the only copy of a replaced file, so it
+    // is kept aside, not deleted, for the player or a later look (docs/updater.md).
+    if (holds_a_file(dir / "previous")) {
+        const auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
+        const fs::path kept = dir / ("kept-" + std::to_string(stamp));
+        std::error_code mv;
+        fs::rename(dir / "previous", kept, mv);
+        if (mv)
+            log::warn("Update: rolling back: {} still holds files the journal does not name, and cannot be moved to "
+                      "{}: {}; they stay",
+                      (dir / "previous").string(), kept.string(), mv.message());
+        else
+            log::warn("Update: rolling back: previous/ still held files the journal does not name; they are kept in {}",
+                      kept.string());
+    } else {
+        remove_quietly(dir / "previous");
+    }
     remove_quietly(dir / "new");
     remove_quietly(dir / "state.txt");
 }
@@ -272,7 +313,7 @@ bool is_player_path(std::string_view path) {
     const std::string_view first = std::string_view(p).substr(0, p.find('/'));
     static const std::set<std::string_view> folders = {"update", "servers", "logs",  "cache", "screenshots",
                                                        "bug-reports", "maps", "scripts", "textures", "web",
-                                                       "addons"};
+                                                       "addons", "tools"};
     static const std::set<std::string_view> files = {"hailstone.ini", "hailstone-windows.ini", "notes.txt"};
     if (first.size() < p.size() && folders.count(first)) return true;
     if (files.count(p)) return true;
@@ -333,6 +374,12 @@ InstallResult install_staged_update(const fs::path& install_dir, const std::stri
     std::map<std::string, std::vector<std::string>> new_files;
     std::set<std::string> all_new; // lower-cased: one file of two components, or of two cases, is refused
     std::set<std::string> skipped;
+    std::uint64_t unpacked = 0;
+    auto refuse = [&](std::string why) {
+        r.error = std::move(why);
+        remove_quietly(dir / "new");
+        return r;
+    };
     for (const auto& p : staged->packages) {
         const std::string only = p.component.starts_with("plugin-") ? "plugins/" + p.component.substr(7) + "/" : "";
         // An add-on installed into the plugin's folder since the download (docs/addons.md) owns it now: the release's
@@ -354,15 +401,25 @@ InstallResult install_staged_update(const fs::path& install_dir, const std::stri
             remove_quietly(dir / "new");
             return r;
         }
+        // Every package's sizes before any file is written (each entry is cut off at its declared size).
+        for (const auto& e : reader.entries()) unpacked += e.size;
+        if (unpacked > kMaxUnpackedBytes)
+            return refuse(p.file + ": the update is larger unpacked than an update may be (4 GiB)");
         auto& files = new_files[p.component];
         for (const auto& e : reader.entries()) {
             if (e.is_directory()) continue;
             if (is_player_path(e.name) || (!only.empty() && !lower(e.name).starts_with(lower(only))) ||
-                !all_new.insert(lower(e.name)).second) {
-                r.error = p.file + " holds " + e.name + ", which an update may not write";
-                remove_quietly(dir / "new");
-                return r;
+                !all_new.insert(lower(e.name)).second)
+                return refuse(p.file + " holds " + e.name + ", which an update may not write");
+            // A plugin folder an add-on installed into (docs/addons.md) is the add-on's, whichever package names it:
+            // the core package's files there are left out, as a plugin package is above.
+            if (only.empty() && owned_by_addon(install_dir, e.name)) {
+                log::info("Update: {} is left out: an add-on owns its folder", e.name);
+                continue;
             }
+            // An update replaces files only: a folder where a file goes holds what the update did not put there.
+            if (is_directory_entry(install_dir / rel(e.name)))
+                return refuse(p.file + " holds " + e.name + ", but that is a folder in the Hailstone folder");
             if (!reader.extract_to_file(e, dir / "new" / rel(e.name))) {
                 r.error = p.file + ": " + reader.error();
                 remove_quietly(dir / "new");
@@ -392,14 +449,13 @@ InstallResult install_staged_update(const fs::path& install_dir, const std::stri
         remove_quietly(dir / "new");
         return r;
     }
-    std::ofstream journal(dir / "journal.txt", std::ios::binary | std::ios::trunc);
+    // Write-ahead: each line is on the disk before the move it names is made (platform/durable_file.h), so after a
+    // power cut every file in previous/ has its line, and the roll-back can put it back.
+    const fs::path journal = dir / "journal.txt";
     auto note = [&](std::string_view what, std::string_view name) {
-        journal << what << ' ' << name << '\n';
-        journal.flush();
-        return static_cast<bool>(journal);
+        return platform::append_file_synced(journal, std::string(what) + " " + std::string(name) + "\n");
     };
     auto fail = [&](std::string why) {
-        journal.close();
         roll_back(install_dir);
         r.error = std::move(why);
         log::warn("Update: {}; the folder was put back as it was", r.error);
@@ -426,15 +482,14 @@ InstallResult install_staged_update(const fs::path& install_dir, const std::stri
         auto it = old.files.find(component);
         if (it == old.files.end()) continue;
         for (const auto& name : it->second) {
-            if (all_new.count(lower(name)) || is_player_path(name)) continue;
+            if (all_new.count(lower(name)) || is_player_path(name) || owned_by_addon(install_dir, name)) continue;
             const fs::path target = install_dir / rel(name);
-            if (!fs::exists(target, ec)) continue;
+            if (!fs::exists(target, ec) || is_directory_entry(target)) continue;
             std::string why;
             if (!note("removed", name)) return fail("cannot write the update journal");
             if (!move_file(target, dir / "previous" / rel(name), &why)) return fail(why);
         }
     }
-    journal.close();
 
     InstalledUpdate now = old;
     for (const auto& p : staged->packages) {

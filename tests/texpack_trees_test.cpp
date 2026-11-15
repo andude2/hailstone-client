@@ -3,7 +3,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <map>
+#include <set>
 
 #include <doctest/doctest.h>
 
@@ -155,6 +157,58 @@ TEST_CASE("trees: a game tree's trunk, leaves and colours measured") {
     CHECK_FALSE(measure_tree(mesh, [](const assets::Material&) { return nullptr; }, &why));
 }
 
+TEST_CASE("trees: NaN and infinite leaf UVs read a texel, not past the image") {
+    assets::Mesh mesh = game_tree();
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    const auto first_leaf = mesh.vertices.size() - 8;
+    mesh.vertices[first_leaf].uv = {nan, 0.5f};
+    mesh.vertices[first_leaf + 1].uv = {inf, -inf};
+    const Textures pine(true);
+    measure_tree(mesh, pine.lookup()); // whatever it makes of them, defined
+    CHECK(true);
+}
+
+TEST_CASE("trees: a tall trunk's short bottom prism is its own ring, so the tree stands on its foot") {
+    // As Greater Faydark's NEKPINE1: rings at -8, 15 and 215 under leaves from 60 to 260. A first ring taken as a share
+    // of the trunk's length swallowed the second ring, and the bark began halfway up the first prism, in the air.
+    assets::Mesh mesh = game_tree();
+    mesh.indices.resize(mesh.parts[0].first_index);
+    mesh.parts.clear();
+    add_trunk(mesh, {0, 0, 0}, {0, 0, 0}, {{-8.0f, 17.0f}, {15.0f, 13.0f}, {215.0f, 2.0f}, {225.0f, 0.0f}});
+    assets::MeshPart cards;
+    cards.first_index = static_cast<std::uint32_t>(mesh.indices.size());
+    cards.material = 1;
+    cards.solid = false;
+    for (glm::vec3 across : {glm::vec3(1, 0, 0), glm::vec3(0, 1, 0)}) {
+        const auto base = static_cast<std::uint32_t>(mesh.vertices.size());
+        mesh.vertices.push_back(vtx(-across * 100.0f + glm::vec3(0, 0, 60), {0, 0}));
+        mesh.vertices.push_back(vtx(across * 100.0f + glm::vec3(0, 0, 60), {1, 0}));
+        mesh.vertices.push_back(vtx(across * 100.0f + glm::vec3(0, 0, 260), {1, 1}));
+        mesh.vertices.push_back(vtx(-across * 100.0f + glm::vec3(0, 0, 260), {0, 1}));
+        for (std::uint32_t k : {0u, 1u, 2u, 0u, 2u, 3u}) mesh.indices.push_back(base + k);
+    }
+    cards.index_count = static_cast<std::uint32_t>(mesh.indices.size()) - cards.first_index;
+    mesh.parts.push_back(cards);
+    const Textures pine(true);
+    std::string why;
+    auto shape = measure_tree(mesh, pine.lookup(), &why);
+    REQUIRE_MESSAGE(shape, why);
+    REQUIRE(shape->trunk.size() == 4);
+    CHECK(shape->trunk[0].centre.z == doctest::Approx(-8.0f));
+    CHECK(shape->trunk[1].centre.z == doctest::Approx(15.0f));
+    TreeOptions opt;
+    opt.style = TreeStyle::Pine;
+    const GeneratedTree tree = generate_tree(*shape, opt);
+    // Every level's bark reaches down to the prism's foot.
+    for (const auto& part : tree.mesh.parts) {
+        if (part.material != 0) continue;
+        float low = 1e9f;
+        for (std::uint32_t i = part.first_index; i < part.first_index + part.index_count; ++i)
+            low = std::min(low, tree.mesh.vertices[tree.mesh.indices[i]].position.z);
+        CHECK(low <= -7.0f);
+    }
+}
+
 TEST_CASE("trees: a limb that is a prism of its own hangs from the ring nearest its root, and is no pine") {
     assets::Mesh mesh = game_tree();
     // A leaning limb from beside the second ring, its rings at right angles to it.
@@ -189,7 +243,8 @@ TEST_CASE("trees: a grown tree stands on the game trunk, inside its leaves, the 
         const Textures tex(cone);
         auto shape = measure_tree(mesh, tex.lookup());
         REQUIRE(shape);
-        for (TreeStyle style : {TreeStyle::Auto, TreeStyle::Pine, TreeStyle::Broadleaf, TreeStyle::Willow}) {
+        for (TreeStyle style : {TreeStyle::Auto, TreeStyle::Pine, TreeStyle::Broadleaf, TreeStyle::Willow,
+                                TreeStyle::Dead, TreeStyle::Palm}) {
             CAPTURE(cone);
             CAPTURE(int(style));
             TreeOptions opt;
@@ -228,10 +283,24 @@ TEST_CASE("trees: a grown tree stands on the game trunk, inside its leaves, the 
                 CHECK(a.mesh.materials[m].two_sided);
             }
             CHECK(a.mesh.front_ccw);
-            // A budget a zone of a few hundred trees can draw; the middle level well under the near one; the far six
-            // triangles (three crossed cards and a level one).
+            // Sway heights: the trunk's own, the leaves' their branch's, so each branch's cards move as one piece.
+            CHECK(a.mesh.sway_heights);
+            std::set<float> leaf_heights;
+            std::size_t leaf_vertices = 0;
+            for (std::uint32_t i = a.mesh.parts[1].first_index; i < a.mesh.parts[1].first_index + a.mesh.parts[1].index_count; ++i) {
+                leaf_heights.insert(a.mesh.vertices[a.mesh.indices[i]].uv2.x);
+                ++leaf_vertices;
+            }
+            CHECK(leaf_heights.size() * 8 < leaf_vertices);
+            bool trunk_own = false;
+            for (std::uint32_t i = a.mesh.parts[0].first_index; i < a.mesh.parts[0].first_index + a.mesh.parts[0].index_count; ++i)
+                trunk_own |= a.mesh.vertices[a.mesh.indices[i]].uv2.x == a.mesh.vertices[a.mesh.indices[i]].position.z &&
+                             a.mesh.vertices[a.mesh.indices[i]].position.z > 5.0f;
+            CHECK(trunk_own);
+            // A budget a zone of a few hundred trees can draw; the middle level under the near one (the same cards,
+            // straight, and thinner bark); the far eight triangles (three crossed cards and a level one).
             CHECK(tris[0] < 20000);
-            CHECK(tris[1] * 10 < tris[0] * 7);
+            CHECK(tris[1] * 10 < tris[0] * 8);
             CHECK(tris[2] == 8);
             // The far picture: the tree's shape cut out, its leaves and bark in it.
             REQUIRE(a.far.width == 64);
@@ -277,7 +346,74 @@ TEST_CASE("trees: a grown tree stands on the game trunk, inside its leaves, the 
         }
     }
     CHECK(tree_style_from_name("willow") == TreeStyle::Willow);
+    CHECK(tree_style_from_name("dead") == TreeStyle::Dead);
+    CHECK(tree_style_from_name("palm") == TreeStyle::Palm);
     CHECK_FALSE(tree_style_from_name("oak"));
+}
+
+TEST_CASE("trees: a pine's needles keep close in shade when the game's leaves are stark") {
+    // The game's leaves in stripes of a dark and a near-white green: the palette the needles pick from spans both.
+    Textures tex(true);
+    for (std::size_t i = 0; i < tex.leaf.mips[0].size(); i += 4) {
+        const bool light = (i / 4) % 2 == 0;
+        const glm::vec3 c = light ? glm::vec3(0.55f, 0.85f, 0.45f) : glm::vec3(0.1f, 0.25f, 0.05f);
+        for (int k = 0; k < 3; ++k) tex.leaf.mips[0][i + std::size_t(k)] = std::byte(static_cast<std::uint8_t>(c[k] * 255.0f));
+    }
+    auto shape = measure_tree(game_tree(), tex.lookup());
+    REQUIRE(shape);
+    TreeOptions opt;
+    opt.seed = 7;
+    opt.style = TreeStyle::Pine;
+    opt.leaf_size = opt.bark_size = 128;
+    opt.bark_name = "b.dds";
+    opt.leaf_name = "l.dds";
+    opt.far_name = "f.dds";
+    opt.far_width = opt.far_height = 64;
+    const GeneratedTree tree = generate_tree(*shape, opt);
+    // The spread of the opaque texels' green about their mean: stark needles turned over every pixel they cover as
+    // the tree swayed or the camera moved (a flicker standing still, a shimmer walking through a forest).
+    double sum = 0.0, sq = 0.0, n = 0.0;
+    const auto& px = tree.leaf.mips[0];
+    for (std::size_t i = 0; i < px.size(); i += 4)
+        if (std::to_integer<int>(px[i + 3]) == 255) {
+            const double g = std::to_integer<int>(px[i + 1]) / 255.0;
+            sum += g, sq += g * g, n += 1.0;
+        }
+    REQUIRE(n > 0.0);
+    const double mean = sum / n, spread = std::sqrt(std::max(0.0, sq / n - mean * mean)) / mean;
+    CHECK(spread < 0.35); // 0.55 with each needle the palette's own shade
+}
+
+TEST_CASE("trees: a pine's needle cards lie along its branches, none standing upright below its top") {
+    const Textures tex(true);
+    auto shape = measure_tree(game_tree(), tex.lookup());
+    REQUIRE(shape);
+    TreeOptions opt;
+    opt.seed = 7;
+    opt.style = TreeStyle::Pine;
+    opt.leaf_size = opt.bark_size = 64;
+    opt.bark_name = "b.dds";
+    opt.leaf_name = "l.dds";
+    opt.far_name = "f.dds";
+    opt.far_width = opt.far_height = 64;
+    const GeneratedTree tree = generate_tree(*shape, opt);
+    const auto& m = tree.mesh;
+    const auto& leaves = m.parts[1];
+    float top = 0.0f;
+    for (const auto& v : m.vertices) top = std::max(top, v.position.z);
+    // An upright card (the clump once at each branch's end) showed as a flat slab from beside the tree; the sprays
+    // along a branch tilt at most about 50 degrees from level. The crown's sprays round the leader stand upright.
+    int cards = 0;
+    for (std::uint32_t k = leaves.first_index; k + 2 < leaves.first_index + leaves.index_count; k += 3) {
+        const glm::vec3 a = m.vertices[m.indices[k]].position, b = m.vertices[m.indices[k + 1]].position,
+                        c = m.vertices[m.indices[k + 2]].position;
+        if (std::max({a.z, b.z, c.z}) > top * 0.8f) continue;
+        const glm::vec3 n = glm::cross(b - a, c - a);
+        if (glm::length(n) < 1e-6f) continue;
+        ++cards;
+        CHECK(std::abs(glm::normalize(n).z) > 0.4f);
+    }
+    CHECK(cards > 0);
 }
 
 TEST_CASE("trees: a written tree is a pack's replacement model for that game mesh") {
@@ -331,9 +467,14 @@ TEST_CASE("trees: the rules' tree lines") {
     CHECK(rules->trees[1].bark.empty());
     CHECK(rules->tiles.empty());
     CHECK_FALSE(parse_material_rules(materials, {{"z", "tree x = oak"}}, &error));
-    CHECK(error == "z.txt:1: expected tree <actor> = auto|pine|broadleaf|willow [bark material]");
+    CHECK(error == "z.txt:1: expected tree <actor> = auto|pine|broadleaf|willow|dead|palm [bark material]");
     CHECK_FALSE(parse_material_rules(materials, {{"z", "\ntree x = pine birch"}}, &error));
     CHECK(error == "z.txt:2: no material [birch] in materials.txt");
+    // The actor names the tree's files: a path is refused.
+    for (const char* line : {"tree ../../evil = pine", "tree a/b = pine", "tree c:\\x = pine", "tree .. = pine"}) {
+        CHECK_FALSE(parse_material_rules(materials, {{"z", line}}, &error));
+        CHECK(error == "z.txt:1: a tree's actor is a name of letters, digits, '_' and '-'");
+    }
 }
 
 TEST_CASE("trees: Qeynos Hills' trees measured from the game files") {

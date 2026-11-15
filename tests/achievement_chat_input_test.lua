@@ -41,6 +41,7 @@ for _,pack in ipairs({"modern","gamepad"})do
   local windows,sent={},{}
   local pending,edit,enter,lastShown,lastCapacity,errorText,seenTyped
   local frameNumber=0
+  local gameState,charName=5,"Hero"
   GPSTATE={chatOpen=true,chatByKeyboard=true}
   local no=function()end
   local zero=function()return 0 end
@@ -77,6 +78,7 @@ for _,pack in ipairs({"modern","gamepad"})do
   },{__index=function()return no end})
   local chatWindow={slot=1,title="Main",main=true,tab=1,tabs={{title="Main"}}}
   eq=setmetatable({InGame=function()return true end,UiReady=function()return true end,
+    GameState=function()return gameState end,Name=function()return charName end,
     ChatWindows=function()return {chatWindow}end,ChatText=function()return 0,{},true,0 end,
     ChatInfo=function()return 3,true,"Say"end,ChatPage=function()return nil end,
     ChatTakeFocus=function(_,typed)
@@ -129,5 +131,14 @@ for _,pack in ipairs({"modern","gamepad"})do
   pending={text=tag,replace=true};frame()
   edit="";frame();edit="Hero's <reward> & title";enter=true;frame()
   check(sent[5] and sent[5][2]==ordinary,"Deleting the whole draft retained a hidden link for retyped plain text")
+  if pack=="modern"then
+    -- a half-typed line belongs to the character: zoning (no character for a while) keeps it, character select or
+    -- another character drops it
+    edit="half typed";frame();check(lastShown=="half typed","Typed draft was not kept")
+    charName=nil;frame();charName="Hero";frame();check(lastShown=="half typed","Zoning dropped the draft")
+    gameState=1;charName=nil;frame();gameState=5;charName="Hero";frame()
+    check(lastShown=="","Character select kept the draft")
+    edit="half typed";frame();charName="Other";frame();check(lastShown=="","Another character inherited the draft")
+  end
 end
 print("Achievement chat composition: "..checks.." checks passed")

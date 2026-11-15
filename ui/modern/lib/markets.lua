@@ -127,13 +127,37 @@ local function same(a, b)
   return true
 end
 
+-- A row read again: kept (brought up to date in place) when its texts and colour are the same, so a list read a few
+-- rows a frame does not make a row's tables each time; true when it changed (a new row was made).
+local function reread(c, win, id, r)
+  local texts, cr, cg, cb, tex, u0, v0, u1, v1 = eq.ListRow(win, id, r)
+  local old = c.rows[r + 1]
+  if old and texts and (old.color and old.color[1]) == cr and #old.texts == #texts then
+    local ot = old.texts
+    local equal = true
+    for i = 1, #texts do if ot[i] ~= texts[i] then equal = false; break end end
+    if equal then
+      -- (the parts the comparison leaves out, as a new row would have them)
+      old.texts, old.tex = texts, tex
+      local uv = old.uv
+      uv[1], uv[2], uv[3], uv[4] = u0, v0, u1, v1
+      if old.color then old.color[2], old.color[3] = cg, cb end
+      return false
+    end
+  end
+  c.rows[r + 1] = texts and
+    { texts = texts, color = cr and { cr, cg, cb, 1 } or nil, tex = tex, uv = { u0, v0, u1, v1 }, index = r } or nil
+  return not (old == nil and texts == nil)
+end
+
 -- The list's rows (the copy; see the header), its selected row (0-based, -1 none), the column labels and a
 -- version that changes with the rows.
 function M.Rows(win, id)
-  local key = win .. "." .. id
   local n, _, selected, labels = eq.ListInfo(win, id)
   if not n then return {}, -1, {}, 0 end
-  local c = cache[key]
+  local byId = cache[win]
+  if not byId then byId = {}; cache[win] = byId end
+  local c = byId[id]
   -- read whole: a new count, asked for, or the first or last row changed (a new search with as many results)
   local whole = not c or c.n ~= n or c.dirty
   if not whole and n > 0 then
@@ -142,14 +166,12 @@ function M.Rows(win, id)
   if whole then
     c = { n = n, rows = {}, next = 0, version = ((c and c.version) or 0) + 1 }
     for r = 0, n - 1 do c.rows[r + 1] = readRow(win, id, r) end
-    cache[key] = c
+    byId[id] = c
   elseif n > 0 then
-    -- a few rows a frame (about n * per <= 400 row builds): short lists whole, long ones within a few seconds
+    -- a few rows a frame (about n * per <= 400 row reads): short lists whole, long ones within a few seconds
     for _ = 1, math.max(1, math.min(n, 400 // n)) do
       local r = c.next
-      local row = readRow(win, id, r)
-      if not same(c.rows[r + 1], row) then c.version = c.version + 1 end
-      c.rows[r + 1] = row
+      if reread(c, win, id, r) then c.version = c.version + 1 end
       c.next = (r + 1) % n
     end
   end
@@ -157,7 +179,7 @@ function M.Rows(win, id)
 end
 
 -- Read the list again whole next frame (after a click that changes it).
-function M.Refresh(win, id) local c = cache[win .. "." .. id]; if c then c.dirty = true end end
+function M.Refresh(win, id) local c = cache[win] and cache[win][id]; if c then c.dirty = true end end
 
 -- ---------------------------------------------------------------- tables
 -- M.Table(win, id, w, h, cols, opts): the list child as a table.

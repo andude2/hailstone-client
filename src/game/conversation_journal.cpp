@@ -67,12 +67,30 @@ const JournalEntry* JournalNpc::entry_in_category(std::int32_t category, std::si
     return nullptr;
 }
 
-JournalNpc* ConversationJournal::npc(const std::string& name, std::int32_t zone, bool create) {
+namespace {
+
+// CJ.txt and CJ.hdr hold one value per line, as the original writes them raw (fprintf "%s\n"). A new line in a
+// name or a dialogue line would split it on reload: the text's CRC no longer matches its entry, and a name holding
+// "\n+ENTRY\n..." would read back as records. The original's journal cannot hold a new line either, so each CR or
+// LF becomes a space before the value is stored or looked up (Hailstone's; the original does not check).
+std::string journal_line(std::string s) {
+    std::replace_if(s.begin(), s.end(), [](char c) { return c == '\r' || c == '\n'; }, ' ');
+    return s;
+}
+
+// The name as it is stored: one line, at most 0x3f characters (the original's name buffer).
+std::string journal_npc_name(const std::string& name) { return journal_line(name.substr(0, 0x3f)); }
+
+} // namespace
+
+JournalNpc* ConversationJournal::npc(const std::string& raw_name, std::int32_t zone, bool create) {
+    // (truncated before the lookup too: a name past 0x3f characters finds the NPC it made)
+    const std::string name = journal_npc_name(raw_name);
     for (auto& n : npcs_)
         if (n->zone == zone && n->name == name) return n.get();
     if (!create) return nullptr;
     auto n = std::make_unique<JournalNpc>();
-    n->name = name.substr(0, 0x3f);
+    n->name = name;
     n->zone = zone;
     npcs_.push_back(std::move(n));
     return npcs_.back().get();
@@ -81,12 +99,14 @@ JournalNpc* ConversationJournal::npc(const std::string& name, std::int32_t zone,
 void ConversationJournal::add(const std::string& npc_name, std::int32_t zone, std::int32_t time, float x, float y,
                               float z, const std::string& text, std::int32_t category) {
     JournalNpc* n = npc(npc_name, zone, true);
-    std::uint32_t c = crc(text);
-    texts_.try_emplace(c, text);
+    std::string line = journal_line(text);
+    std::uint32_t c = crc(line);
+    texts_.try_emplace(c, std::move(line));
     n->add_entry(time, x, y, z, c, category);
 }
 
-bool ConversationJournal::remove_npc(const std::string& name, std::int32_t zone) {
+bool ConversationJournal::remove_npc(const std::string& raw_name, std::int32_t zone) {
+    const std::string name = journal_npc_name(raw_name);
     auto it = std::find_if(npcs_.begin(), npcs_.end(), [&](const auto& n) { return n->zone == zone && n->name == name; });
     if (it == npcs_.end()) return false;
     npcs_.erase(it);
@@ -115,8 +135,8 @@ JournalCategory* ConversationJournal::set_category(const std::string& name, cons
         categories_.push_back(std::move(n));
         c = categories_.back().get();
     }
-    c->name = name.substr(0, 0xf);
-    c->description = description.substr(0, 0xff);
+    c->name = journal_line(name.substr(0, 0xf));
+    c->description = journal_line(description.substr(0, 0xff));
     return c;
 }
 

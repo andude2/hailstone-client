@@ -157,14 +157,22 @@ void MarketplaceWindow::pre_populate() {
     new_shown.clear();
     featured_shown.clear();
     categories.clear();
+    path_index_.clear();
     tree.clear();
     current = -1;
 }
 
 int MarketplaceWindow::find_or_create(std::string_view path) {
     if (path.empty()) return -1;
+    if (auto hint = path_index_.find(path); hint != path_index_.end() && hint->second >= 0 &&
+                                            hint->second < static_cast<int>(categories.size()) &&
+                                            categories[static_cast<std::size_t>(hint->second)].path == path)
+        return hint->second;
     for (std::size_t i = 0; i < categories.size(); ++i)
-        if (categories[i].path == path) return static_cast<int>(i);
+        if (categories[i].path == path) {
+            path_index_.insert_or_assign(std::string(path), static_cast<int>(i));
+            return static_cast<int>(i);
+        }
     const std::size_t slash = path.rfind('/');
     const std::string_view leaf = slash == std::string_view::npos ? path : path.substr(slash + 1);
     int parent = slash == std::string_view::npos || slash == 0 ? category_index(1) : find_or_create(path.substr(0, slash));
@@ -175,12 +183,14 @@ int MarketplaceWindow::find_or_create(std::string_view path) {
     n.parent = parent;
     categories.push_back(std::move(n));
     const int at = static_cast<int>(categories.size()) - 1;
+    path_index_.insert_or_assign(std::string(path), at);
     if (parent >= 0) categories[static_cast<std::size_t>(parent)].children.push_back(at);
     return at;
 }
 
 void MarketplaceWindow::populate(const Catalog& c, bool in_game) {
     categories.clear();
+    path_index_.clear();
     next_id_ = 3;
     auto builtin = [&](std::uint32_t id, const char* name, bool shown, int count) {
         MarketplaceCategory n;

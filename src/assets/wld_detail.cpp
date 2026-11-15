@@ -10,22 +10,24 @@
 #include <cstring>
 #include <string_view>
 
+#include "core/byte_io.h"
 #include "core/msvc_atoi.h"
 
 namespace hailstone::assets::wld {
 
 namespace {
 
+// Little-endian fields read through ByteReader (whatever the host's byte order); `at` is within the 54 bytes checked.
 std::uint32_t le32(std::span<const std::byte> d, std::size_t at) {
-    std::uint32_t v = 0;
-    std::memcpy(&v, d.data() + at, 4);
-    return v;
+    ByteReader r(d);
+    r.seek(at);
+    return r.le<std::uint32_t>();
 }
 
 std::uint16_t le16(std::span<const std::byte> d, std::size_t at) {
-    std::uint16_t v = 0;
-    std::memcpy(&v, d.data() + at, 2);
-    return v;
+    ByteReader r(d);
+    r.seek(at);
+    return r.le<std::uint16_t>();
 }
 
 // One palette entry, "<n>, <scale>, <value>, <file>": the loader cuts the string at its first three commas (strcspn),

@@ -27,6 +27,12 @@ struct GameConnectionTestAccess {
     static game::GroupState& group(GameConnection& c) { return c.group_; }
     static std::vector<std::pair<std::uint32_t, game::BuffSlot>>& pet_buffs(GameConnection& c) { return c.pet_buffs_; }
     static game::Inventory& inventory(GameConnection& c) { return c.inventory_; }
+    // How often the evolving transfer's item list was built, and its pair compared with the snapshots.
+    static std::pair<std::uint64_t, std::uint64_t> evolving_cache_work(const GameConnection& c) {
+        return {c.evolving_cache_.builds, c.evolving_cache_.checks};
+    }
+    static game::XTargetState& xtargets(GameConnection& c) { return c.xtargets_; }
+    static GameConnection::Aggro& aggro(GameConnection& c) { return c.aggro_; }
     static Coins& coins(GameConnection& c) { return c.coins_; }
     static std::optional<PlayerProfile>& profile(GameConnection& c) { return c.profile_; }
     static std::string& character(GameConnection& c) { return c.character_; }
@@ -34,6 +40,7 @@ struct GameConnectionTestAccess {
     static ConnectionState& state(GameConnection& c) { return c.state_; }
     static std::optional<NewZone>& new_zone(GameConnection& c) { return c.new_zone_; }
     static std::vector<ZonePoint>& zone_points(GameConnection& c) { return c.zone_points_; }
+    static std::vector<game::Door>& doors(GameConnection& c) { return c.doors_; }
     static void handle_zone(GameConnection& c, const AppPacket& p) { c.handle_zone(p); }
     static game::AltAdvState& alt_adv(GameConnection& c) { return c.alt_adv_; }
     static void update_usable_gems(GameConnection& c) { c.update_usable_gems(); }
@@ -52,6 +59,7 @@ struct GameConnectionTestAccess {
     }
     static void update_server_rules(GameConnection& c) { c.update_server_rules(); }
     static void update_bulk_job(GameConnection& c, std::int64_t now) { c.update_bulk_job(now); }
+    static auto& npc_checks(GameConnection& c) { return c.npc_checks_; }
     static void with_character(const GameConnection& c, const std::function<void(game::mechanics::Character&)>& fn) {
         c.with_character(fn);
     }

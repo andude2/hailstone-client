@@ -525,8 +525,14 @@ local function body(x, y, w, h, s)
     local enabled = b.window and true or eq.ChildState(WINDOW, b[1])
     if b.danger and not cursor then enabled = false end
     local open = b.window and eq.WindowShown(b.window) == true
-    if T.Button("##" .. b[1], bx0, by0, bx0 + bw, by0 + 26 * s, s, b[2],
-        { enabled = enabled ~= false, primary = b.primary or open, tooltip = b.tooltip }) then
+    -- (each button's id and options are made once and kept with it)
+    local bo = b.buttonOpts
+    if not bo then
+      bo = { tooltip = b.tooltip }
+      b.buttonOpts, b.buttonId = bo, "##" .. b[1]
+    end
+    bo.enabled, bo.primary = enabled ~= false, b.primary or open
+    if T.Button(b.buttonId, bx0, by0, bx0 + bw, by0 + 26 * s, s, b[2], bo) then
       if b.window then eq.ShowWindow(b.window, not open)
       elseif b[1] == "IW_DoneButton" then eq.ShowWindow(WINDOW, false)
       else eq.ClickChild(WINDOW, b[1], "left") end

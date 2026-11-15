@@ -353,6 +353,27 @@ TEST_CASE("IniFile: keys and section names stay on their own line") {
     CHECK(back.sections() == std::vector<std::string>{"S"});
 }
 
+// parse() trims the names and each line's ends; set() and get() trim names the same way, so a name set with spaces
+// around it is found before and after a save and a load. A value's trailing spaces are written as given and read
+// back trimmed, as GetPrivateProfileString reads them.
+TEST_CASE("IniFile: names with spaces around them read the same after a reload") {
+    IniFile ini;
+    ini.set(" Sect\t", "  key ", "  two words  ");
+    ini.set("Sect", ";k ", "x");
+    CHECK(ini.get_string("Sect", "key") == "  two words  ");
+    CHECK(ini.get_string(" Sect ", " key\t") == "  two words  ");
+    CHECK(ini.get_string("Sect", "_k") == "x");
+    CHECK(ini.to_string() == "[Sect]\nkey=  two words  \n_k=x\n");
+    IniFile back;
+    back.parse(ini.to_string());
+    CHECK(back.sections() == std::vector<std::string>{"Sect"});
+    CHECK(back.keys("Sect") == std::vector<std::string>{"key", "_k"});
+    CHECK(back.get_string(" Sect", "key ") == "  two words");
+    CHECK(back.get_string("Sect", "_k") == "x");
+    back.erase(" Sect ", " key ");
+    CHECK_FALSE(back.get("Sect", "key"));
+}
+
 TEST_CASE("Layout: a server's overlay over the asset folder") {
     TempDir tmp("gamedir");
     fs::path base = tmp.path / "base";

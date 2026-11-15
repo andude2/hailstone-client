@@ -26,13 +26,17 @@
 #include "core/game_dir.h"
 #include "core/ini_file.h"
 #include "core/log.h"
+#include "core/path_utf8.h"
 #include "game/chat_windows.h"
 #include "game/combat.h"
 #include "game/eq_names.h"
 #include "game/item_links.h"
+#include "game/spells.h"
 #include "net/game_connection.h"
+#include "plugin/lua_keep.h"
 #include "platform/local_time.h"
 #include "ui/dev_screens.h"
+#include "ui/lua/lua_host.h"
 #include "ui/ui_ini.h"
 
 namespace hailstone::app {
@@ -268,8 +272,8 @@ std::string escape_linking(std::string_view text, std::string& name) {
     return escape(text);
 }
 
-// One line as STML: its colour, item links as <a WndNotify="27,tag"> (the tag between the two \x12); with `names`,
-// its player's name as a name link.
+// One line as STML: its colour, item links as <a WndNotify="27,data"> (the tag between the two \x12, encoded by
+// game::stml_link_data); with `names`, its player's name as a name link.
 // Hailstone: "[hh:mm:ss] " in grey before a line (local time), nothing for a line of unknown time.
 // eq.ChatText formats every line of a window again each time a line comes, and each local time read the time zone
 // again (glibc stats /etc/localtime every call): the stamps were most of a chat window's frame in a fight. Time zones
@@ -326,9 +330,7 @@ std::string line_stml(const ui::ChatLine& l, bool names, bool stamps = false) {
         }
         auto link = game::parse_item_link(tag);
         std::string shown = link ? link->text : tag;
-        std::string data;
-        for (char ch : tag) data += ch == '"' ? '\'' : ch;
-        out += std::format("<a WndNotify=\"27,{}\">{}</a>", data, escape(shown));
+        out += std::format("<a WndNotify=\"27,{}\">{}</a>", game::stml_link_data(tag), escape(shown));
         at = b + 1;
     }
     return out + "</c>";
@@ -367,7 +369,7 @@ void set_user_color(EqHost& host, int index, std::uint32_t rgb) {
     if (!save_chat_settings(chat_ini, "TextColors",
                             {{red, std::to_string((rgb >> 16) & 0xff)},
                              {green, std::to_string((rgb >> 8) & 0xff)},
-                             {blue, std::to_string(rgb & 0xff)}})) log::warn("cannot write {}", chat_ini.string());
+                             {blue, std::to_string(rgb & 0xff)}})) log::warn("cannot write {}", path_utf8(chat_ini));
 }
 
 // CChatWindowManager::GetRGBAFromIndex @0x6508a0: the basic colours below 256, the eqclient.ini user colours from 256
@@ -448,6 +450,7 @@ struct ChatManager {
     int locked = 0;             // LockedActive (Always Chat Here; -1: none); the main window by default (set_locked)
     std::array<int, game::kChatChannelCount> channel_map{}; // the window of each channel
     std::array<int, game::kChatHitModeCount> hit_modes{};
+    game::SpellHitModes spell_hit_modes{};
     int default_channel = 8;    // eqclient.ini [Defaults] DefaultChannel
     bool tell_windows = false;
     std::uint64_t synced = 0;   // ChatView::revision the tell windows were made up to
@@ -468,6 +471,7 @@ struct ChatManager {
         locked = 0;
         channel_map.fill(0);
         hit_modes.fill(0);
+        spell_hit_modes.fill(0);
         tell_windows = false;
         synced = 0;
         ++serial;
@@ -550,6 +554,8 @@ void save_manager() {
     }
     for (int i = 0; i < game::kChatHitModeCount; ++i)
         m.ini->put("ChatManager", std::format("HitMode{}", i), std::to_string(m.hit_modes[static_cast<std::size_t>(i)]));
+    for (std::size_t i = 0; i < m.spell_hit_modes.size(); ++i)
+        m.ini->put("ChatManager", std::format("SpellHitMode{}", i), std::to_string(m.spell_hit_modes[i]));
 }
 
 void changed() {
@@ -557,13 +563,45 @@ void changed() {
     save_manager();
 }
 
-// The categories ReportHit_* reads (the first six modes) go to the connection.
+// The categories ReportHit_* reads (the first six native modes) and the separate spell modes go to the connection.
 void push_hit_modes() {
     EqHost* h = chat_host();
     if (!h || !h->conn) return;
     game::HitModes modes{};
     for (std::size_t i = 0; i < modes.size(); ++i) modes[i] = manager().hit_modes[i];
     h->conn->set_hit_modes(modes);
+    h->conn->set_spell_hit_modes(manager().spell_hit_modes);
+}
+
+// Keep Lua's existing category 7 = ALL; Hailstone's spell categories start at 8.
+std::string hit_category_name(int category) {
+    if (category < 6) return eqstr(game::hit_category_eqstr(category));
+    if (category == 6) return eqstr(game::kStrAll);
+    return std::string(game::spell_hit_category_name(category - 7));
+}
+
+int hit_mode_value(int category) {
+    const auto& m = manager();
+    if (category < 6) return m.hit_modes[static_cast<std::size_t>(category)];
+    if (category > 6) return m.spell_hit_modes[static_cast<std::size_t>(category - 7)];
+    const int mode = m.hit_modes[0];
+    for (std::size_t i = 1; i < game::HitModes{}.size(); ++i)
+        if (m.hit_modes[i] != mode) return -1;
+    for (auto spell_mode : m.spell_hit_modes)
+        if (spell_mode != mode) return -1;
+    return mode;
+}
+
+void set_hit_mode(int category, int mode) {
+    auto& m = manager();
+    if (category < 6) m.hit_modes[static_cast<std::size_t>(category)] = mode;
+    else if (category > 6) m.spell_hit_modes[static_cast<std::size_t>(category - 7)] = mode;
+    else {
+        m.hit_modes.fill(mode);
+        m.spell_hit_modes.fill(mode);
+    }
+    push_hit_modes();
+    changed();
 }
 
 // The colour a line goes by: its own, else its channel's user colour.
@@ -1076,30 +1114,28 @@ std::vector<Row> language_menu(int w) {
 
 std::vector<Row> hit_modes_menu(int w) {
     std::vector<Row> rows;
-    for (int cat = 0; cat <= 6; ++cat) {
+    // ALL stays last in the menu while retaining its public API index (7).
+    for (int cat : {0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 6}) {
         Row r;
-        r.text = eqstr(cat < 6 ? game::hit_category_eqstr(cat) : game::kStrAll);
+        r.text = hit_category_name(cat);
         r.submenu = [w, cat] {
             std::vector<Row> out;
             for (int mode = 0; mode < 3; ++mode) {
                 Row m;
                 m.text = eqstr(game::hit_mode_eqstr(cat, mode));
-                if (cat < 6) {
-                    // ids 0x190 + 10 cat + mode: the mode, and "<category> <mode>" (dsp_chat_2, colour 0x111)
+                m.check = hit_mode_value(cat) == mode;
+                if (cat != 6) {
+                    // The original categories use ids 0x190 + 10 cat + mode; spell categories use Hailstone's labels.
                     m.act = [cat, mode] {
-                        manager().hit_modes[static_cast<std::size_t>(cat)] = mode;
-                        push_hit_modes();
-                        dsp_chat(std::format("{} {}", eqstr(game::hit_category_eqstr(cat)),
+                        set_hit_mode(cat, mode);
+                        dsp_chat(std::format("{} {}", hit_category_name(cat),
                                              eqstr(game::hit_mode_eqstr(cat, mode))), 0x111);
-                        changed();
                     };
                 } else {
-                    // 0x1cc..0x1ce: all eight modes, eqstr 6044..6046 in the window
+                    // 0x1cc..0x1ce: all eight native modes, plus Hailstone's spell modes.
                     m.act = on_window(w, [mode](int win) {
-                        manager().hit_modes.fill(mode);
-                        push_hit_modes();
+                        set_hit_mode(6, mode);
                         window_text(win, eqstr(game::hit_mode_all_eqstr(mode)), 10);
-                        changed();
                     });
                 }
                 out.push_back(std::move(m));
@@ -1367,8 +1403,7 @@ int ChatText(lua_State* L) {
     for (std::size_t k = from; k < h.chat->lines.size(); ++k) {
         const auto& l = h.chat->lines[k];
         if (line_seq(*h.chat, k) <= c.cleared || window_of_line(l) != w) continue;
-        std::string s = line_stml(l, names, stamps);
-        lua_pushlstring(L, s.data(), s.size());
+        plugin::push_made(L, line_stml(l, names, stamps)); // (out of this frame before the push: plugin/lua_keep.h)
         lua_rawseti(L, -2, ++i);
     }
     if (!since) return 2;
@@ -1433,6 +1468,11 @@ int ChatSubmit(lua_State* L) {
     return 0;
 }
 
+// The one-shot key and focus state below (the chat keys' text, a pending Link All, the page keys, the input's history
+// step) is the pack's chat input's alone: a plugin's code in the UI that took it would swallow the player's key, or
+// send the loot window's links from its own call. It gets nil and changes nothing.
+bool plugin_code() { return !ui::lua::LuaUi::caller_tag().empty(); }
+
 // text, replace = eq.ChatTakeFocus(slot [, typed])   -- when the keyboard goes to the chat input (the chat keys: Enter, ';',
 // '/', '['; game/chat_input.h; a tell menu's name): what goes into the active window's input (replace: instead of
 // what is typed); nil otherwise and for other windows
@@ -1443,6 +1483,7 @@ int ChatSubmit(lua_State* L) {
 int ChatTakeFocus(lua_State* L) {
     ChatState& s = state();
     int w = window_of(L, 1);
+    if (plugin_code()) return 0;
     int to = used(s.focus_window) ? s.focus_window : active_window();
     if (s.link_all && w >= 0 && host_of(active_window()) == w) {
         bool have_typed = lua_type(L, 2) == LUA_TSTRING;
@@ -1477,6 +1518,7 @@ std::optional<std::string> step_history(bool older) {
 
 // text = eq.ChatHistory(slot, older)   -- steps through the lines sent before (older: one further back)
 int ChatHistory(lua_State* L) {
+    if (plugin_code()) return 0;
     auto line = step_history(lua_toboolean(L, 2) != 0);
     if (!line) return 0;
     lua_pushlstring(L, line->data(), line->size());
@@ -1493,12 +1535,16 @@ std::string slash_word(std::uint32_t id, const char* fallback) {
 // `text` (game::cycle_reply): its new text, nil when it stays
 int ChatCycleReply(lua_State* L) {
     EqHost& h = host(L);
-    std::string text = luaL_checkstring(L, 1);
+    const char* text = luaL_checkstring(L, 1);
+    const bool back = lua_toboolean(L, 2) != 0;
     if (!h.conn) return 0;
-    game::CycleReply r = game::cycle_reply(text, h.conn->social().last_tells, h.conn->last_tell_index(),
-                                           lua_toboolean(L, 2) != 0, slash_word(13974, "/tell"),
-                                           slash_word(14202, "/rtarget"));
-    for (std::uint32_t id : r.messages) h.conn->system_message(id);
+    // The reply in a box the state owns across its push (plugin/lua_keep.h).
+    game::CycleReply& r = plugin::lua_keep<game::CycleReply>(L);
+    plugin::cxx_guard(L, [&] {
+        r = game::cycle_reply(text, h.conn->social().last_tells, h.conn->last_tell_index(), back,
+                              slash_word(13974, "/tell"), slash_word(14202, "/rtarget"));
+        for (std::uint32_t id : r.messages) h.conn->system_message(id);
+    });
     if (r.text.empty()) return 0;
     lua_pushlstring(L, r.text.data(), r.text.size());
     return 1;
@@ -1508,6 +1554,7 @@ int ChatCycleReply(lua_State* L) {
 int ChatPage(lua_State* L) {
     ChatState& s = state();
     int w = window_of(L, 1);
+    if (plugin_code()) return 0;
     if (s.page == 0 || w < 0 || host_of(s.page_window) != w) return 0;
     lua_pushinteger(L, s.page);
     s.page = 0;
@@ -1606,7 +1653,8 @@ int ChatNewTab(lua_State* L) {
 // window stays)
 int ChatCloseTab(lua_State* L) {
     int w = window_of(L, 1);
-    lua_Integer t = luaL_checkinteger(L, 2) - 1;
+    const lua_Integer tab = luaL_checkinteger(L, 2);
+    const lua_Integer t = tab < 1 ? -1 : tab - 1; // (math.mininteger - 1 would overflow)
     if (w < 0) return 0;
     auto tabs = tabs_of(host_of(w));
     if (t < 0 || t >= static_cast<lua_Integer>(tabs.size())) return 0;
@@ -1617,7 +1665,8 @@ int ChatCloseTab(lua_State* L) {
 // eq.ChatSelectTab(slot, tab)   -- the tab that is up (a click on it)
 int ChatSelectTab(lua_State* L) {
     int w = window_of(L, 1);
-    lua_Integer t = luaL_checkinteger(L, 2) - 1;
+    const lua_Integer tab = luaL_checkinteger(L, 2);
+    const lua_Integer t = tab < 1 ? -1 : tab - 1; // (math.mininteger - 1 would overflow)
     if (w < 0) return 0;
     int host = host_of(w);
     auto tabs = tabs_of(host);
@@ -1782,16 +1831,18 @@ int ChatSetTellWindows(lua_State* L) {
     return 0;
 }
 
-// modes = eq.ChatHitModes()   -- { name, mode, modes = { names } } per melee report category (CChatWindowManager
+// modes = eq.ChatHitModes()   -- { id, name, mode, modes = { names } } per melee report category (CChatWindowManager
 // +0x224..: 0 Normal, 1 Abbreviated, 2 Number Only / Miss Only)   /   eq.ChatSetHitMode(index, mode)  (1-based
-// index; 7: ALL)
+// index; 7: ALL, 8..11 Hailstone's spell categories). ALL's mode is -1 when the categories differ.
 int ChatHitModes(lua_State* L) {
     lua_newtable(L);
-    for (int cat = 0; cat < 6; ++cat) {
-        lua_createtable(L, 0, 3);
-        lua_pushstring(L, eqstr(game::hit_category_eqstr(cat)).c_str());
+    for (int cat = 0; cat < 7 + static_cast<int>(game::SpellHitModes{}.size()); ++cat) {
+        lua_createtable(L, 0, 4);
+        lua_pushinteger(L, cat + 1);
+        lua_setfield(L, -2, "id");
+        lua_pushstring(L, hit_category_name(cat).c_str());
         lua_setfield(L, -2, "name");
-        lua_pushinteger(L, manager().hit_modes[static_cast<std::size_t>(cat)]);
+        lua_pushinteger(L, hit_mode_value(cat));
         lua_setfield(L, -2, "mode");
         lua_createtable(L, 3, 0);
         for (int mode = 0; mode < 3; ++mode) {
@@ -1804,13 +1855,10 @@ int ChatHitModes(lua_State* L) {
     return 1;
 }
 int ChatSetHitMode(lua_State* L) {
-    lua_Integer i = luaL_checkinteger(L, 1) - 1;
+    lua_Integer index = luaL_checkinteger(L, 1);
     lua_Integer mode = luaL_checkinteger(L, 2);
-    if (i < 0 || i > 6 || mode < 0 || mode > 2) return 0;
-    if (i == 6) manager().hit_modes.fill(static_cast<int>(mode));
-    else manager().hit_modes[static_cast<std::size_t>(i)] = static_cast<int>(mode);
-    push_hit_modes();
-    changed();
+    if (index < 1 || index > 7 + static_cast<lua_Integer>(game::SpellHitModes{}.size()) || mode < 0 || mode > 2) return 0;
+    set_hit_mode(static_cast<int>(index - 1), static_cast<int>(mode));
     return 0;
 }
 
@@ -1830,7 +1878,8 @@ int ChatLink(lua_State* L) {
         return 0;
     }
     if (luaL_checkinteger(L, 2) != 27) return 0;
-    if (auto link = game::parse_item_link(luaL_checkstring(L, 3)); link && h.click_link) h.click_link(*link);
+    if (auto link = game::parse_item_link(game::stml_link_tag(luaL_checkstring(L, 3))); link && h.click_link)
+        h.click_link(*link);
     return 0;
 }
 
@@ -2040,6 +2089,10 @@ void chat_layout_loaded(ui::UiIni& ini, EqHost& host, const std::filesystem::pat
     for (int i = 0; i < game::kChatHitModeCount; ++i) {
         int mode = num(std::format("HitMode{}", i), 0);
         if (mode >= 0 && mode < 3) m.hit_modes[static_cast<std::size_t>(i)] = mode;
+    }
+    for (std::size_t i = 0; i < m.spell_hit_modes.size(); ++i) {
+        int mode = num(std::format("SpellHitMode{}", i), 0);
+        if (mode >= 0 && mode < 3) m.spell_hit_modes[i] = mode;
     }
     restore_chat_history(host, CharacterFiles{user_dir}.chat_history());
     if (host.chat) {

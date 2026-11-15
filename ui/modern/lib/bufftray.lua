@@ -1,34 +1,14 @@
 -- A buff tray: the buffs of a buff window (BuffWindow, ShortDurationBuffWindow) as a grid of icons, packed (empty
 -- slots left out), with a ring for beneficial / detrimental, the time left under each and the game's fade under 19
 -- seconds left (eq.BuffSlot's fade: out once a second; a bard's own short songs do not fade); hover shows the spell
--- and time. Right-click: a menu with the spell's information (eq.ShowSpell), Add to Blocked Buffs (the Blocked Buffs
--- window's own Add on the spell's id: the server stops landing it) and Remove (the game's own right click on that
--- button).
+-- and time. Right-click: the buff's menu (lib/buffmenu.lua: Spell Info, Add to Blocked Buffs and Remove).
 local hud = dofile("lib/hud.lua")
+local buffmenu = dofile("lib/buffmenu.lua")
 local T = hud.T
 local C = T.color
 
 local tray = {}
-local picked = {} -- window -> the buff its menu is for: { id, spell, name }
-
--- The buff's menu, while open (inside the tray's frame).
-local function buffMenu(window)
-  if not ui.BeginPopup("##buffmenu") then return end
-  local b = picked[window]
-  if b then
-    ui.TextDisabled(b.name)
-    ui.Separator()
-    if ui.MenuItem("Spell Info") then eq.ShowSpell(b.spell) end
-    if ui.MenuItem("Add to Blocked Buffs") then
-      eq.SetWindowText("BlockedBuffWnd", "BW_EditSpellToBlock", tostring(b.spell))
-      eq.ClickChild("BlockedBuffWnd", "BW_AddSpellToBlock", "left")
-    end
-    if ui.MenuItem("Remove") and eq.BuffSlot(window, b.id) == b.spell then -- (still in that slot)
-      eq.WindowButton(window, b.id, 3)
-    end
-  end
-  ui.EndPopup()
-end
+local MENU = { block = "buff", remove = true } -- (the player's own buffs)
 
 -- tray.Register(scriptName, window, slots, opts)  opts: icon, perRow (at most: the tray wraps to the room the default
 -- layout gives it at the top right, lib/layout.lua trayRoom, unless the player set Icons per row)
@@ -105,19 +85,18 @@ function tray.Register(name, window, slots, opts)
       if type(tex) ~= "userdata" then tex = nil end
       b.icon.alpha = 0.2 + 0.8 * b.fade -- never quite gone, so the tray keeps its shape
       T.Icon(ix, iy, size, s, tex, u0, v0, u1, v1, b.good and C.good or C.bad, b.icon)
-      T.Hit(b.hit, ix, iy, ix + size, iy + size + label * s)
+      T.Hit(b.hit, ix, iy, ix + size, iy + size + label * s, false)
       T.HoverFx(ix, iy, ix + size, iy + size, s)
       if ui.IsItemHovered() then
         ui.BeginTooltip()
         ui.TextColored(b.good and C.good[1] or C.bad[1], b.good and C.good[2] or C.bad[2],
           b.good and C.good[3] or C.bad[3], 1, b.name)
         ui.TextDisabled(T.LongDuration(b.ms))
-        ui.TextDisabled("Right-click for info, block or remove")
+        ui.TextDisabled(buffmenu.Hint(MENU))
         ui.EndTooltip()
       end
       if ui.IsItemClicked(ui.Mouse.Right) and not ui.GetIO().alt then
-        picked[window] = { id = b.id, spell = b.spell, name = b.name }
-        ui.OpenPopup("##buffmenu")
+        buffmenu.Open(window, b, MENU)
         T.TakeRightClick()
       end
       -- the counters the game puts on the button (hits left, counters), top right
@@ -126,7 +105,7 @@ function tray.Register(name, window, slots, opts)
       local tc = (b.ms and b.ms >= 0 and b.ms < 60000) and C.gold or C.muted
       T.Text(ix + size / 2, iy + size + 1 * s, b.duration, tc, T.font.tiny, "center")
     end
-    buffMenu(window)
+    buffmenu.Draw(window)
   end
   ui.window(name, function()
     if not eq.InGame() then return end

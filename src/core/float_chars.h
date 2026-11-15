@@ -8,7 +8,9 @@
 #include <cmath>
 #include <charconv>
 #include <cstdlib>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <type_traits>
 
@@ -61,6 +63,16 @@ std::from_chars_result float_from_chars(const char* first, const char* last, T& 
 #else
     return detail::strtod_from_chars(first, last, value);
 #endif
+}
+
+// The number `text` starts with (as float_from_chars reads it), or nullopt for none, NaN or an infinity: for a
+// setting a player types, which std::clamp would not hold (NaN passes it) and which would be saved.
+template <typename T> std::optional<T> finite_float_from_text(std::string_view text) {
+    T v{};
+    if (text.empty() || float_from_chars(text.data(), text.data() + text.size(), v).ec != std::errc{} ||
+        !std::isfinite(v))
+        return std::nullopt;
+    return v;
 }
 
 } // namespace hailstone

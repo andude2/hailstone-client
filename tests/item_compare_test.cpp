@@ -3,6 +3,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -338,6 +339,84 @@ TEST_CASE("Item compare: eq.CompareItem, eq.CompareSlotItem and eq.CompareBagSlo
 
     host.in_game = false;
     CHECK(run(L, "return eq.CompareSlotItem('ItemDisplayWindow', 'Hailstone_Item')") == "nil");
+    lua_close(L);
+}
+
+// Two item displays ask for their comparisons every frame, one after the other: each place keeps its own (fresh for
+// half a second), so neither call throws the other's away, and a new item in a place is compared at once.
+TEST_CASE("Item compare: each place keeps its own comparison") {
+    hailstone::test::ScratchDir dir("item_compare_places");
+    GameDir game(dir.path());
+    net::GameConnection conn(game, {});
+
+    net::Item worn = gear("Old Helm", 1u << 2);
+    worn.hp = 10;
+    net::Item better = gear("Iron Helm", 1u << 2);
+    better.id = 1001;
+    better.hp = 50;
+    net::Item worse = gear("Tin Helm", 1u << 2);
+    worse.id = 1002;
+    worse.hp = 5;
+    net::Item great = gear("Great Helm", 1u << 2);
+    great.id = 1003;
+    great.hp = 100;
+
+    Fixture f;
+    f.sheet.possessions[2] = worn;
+    mech::Character ch(f.sheet, f.tables, f.no_spells);
+    ch.process_all_stats();
+    Fixture f2;
+    f2.sheet.possessions[2] = great;
+    mech::Character ch2(f2.sheet, f2.tables, f2.no_spells);
+    ch2.process_all_stats();
+
+    app::EqHost host;
+    host.in_game = host.ui_ready = true;
+    host.conn = &conn;
+    host.character = &ch;
+    std::vector<net::Item> displays{better, worse};
+    host.item_displays = &displays;
+    app::EqApi api(host);
+    lua_State* L = luaL_newstate();
+    luaL_openlibs(L);
+    lua_newtable(L);
+    api.register_functions(L);
+    lua_setglobal(L, "eq");
+    const std::string first = "return eq.CompareSlotItem('ItemDisplayWindow', 'Hailstone_Item').slots[1].verdict";
+    const std::string second = "return eq.CompareSlotItem('ItemDisplayWindow#2', 'Hailstone_Item').slots[1].verdict";
+
+    const auto start = std::chrono::steady_clock::now();
+    CHECK(run(L, first) == "upgrade");
+    CHECK(run(L, second) == "downgrade");
+    // Wearing a better helm now: within the half second both places still give what they worked out.
+    host.character = &ch2;
+    const std::string again_first = run(L, first), again_second = run(L, second);
+    if (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(400)) {
+        CHECK(again_first == "upgrade");
+        CHECK(again_second == "downgrade");
+    }
+    // Another item in the first display: compared now, with the helm worn now.
+    displays[0] = great;
+    displays[0].hp = 40;
+    displays[0].id = 1004;
+    CHECK(run(L, first) == "downgrade");
+    // More places than the cache holds (ten general slots): each gives its own item's comparison, and the displays'
+    // comparisons, the oldest, make way and are worked out again (against the old helm again).
+    std::vector<net::Item> carried;
+    for (std::int16_t i = 0; i < 10; ++i) {
+        net::Item it = gear("Helm " + std::to_string(i), 1u << 2);
+        it.id = 2000u + static_cast<std::uint32_t>(i);
+        it.hp = i < 5 ? 1 : 200;
+        it.slot = net::ItemSlot::possessions(static_cast<std::int16_t>(23 + i));
+        carried.push_back(it);
+    }
+    conn.receive_zone_packet_for_test(net::encode_char_inventory(carried));
+    host.character = &ch;
+    for (int i = 0; i < 10; ++i)
+        CHECK(run(L, "return eq.CompareItem(" + std::to_string(23 + i) + ").slots[1].verdict") ==
+              (i < 5 ? "downgrade" : "upgrade"));
+    CHECK(run(L, first) == "upgrade");
+    CHECK(run(L, "return eq.CompareSlotItem('ItemDisplayWindow', 'Hailstone_Item').slots[1].current[1]") == "Old Helm");
     lua_close(L);
 }
 

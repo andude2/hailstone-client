@@ -131,7 +131,9 @@ std::vector<std::pair<std::uint32_t, net::BuyLine>> parse_buy_lines_text(std::st
     std::vector<std::pair<std::uint32_t, net::BuyLine>> out;
     std::int64_t count = 0;
     text.remove_prefix(int_field(text, count, '$'));
-    for (std::uint16_t left = static_cast<std::uint16_t>(count); left != 0; --left) {
+    // The count is the server's: once the text runs out no empty records are made (each would land in slot 0 and
+    // be saved over the line there).
+    for (std::uint16_t left = static_cast<std::uint16_t>(count); left != 0 && !text.empty(); --left) {
         std::string record;
         text.remove_prefix(token(text, '$', record, 0x4a6));
         std::string first, second;

@@ -74,13 +74,18 @@ void WebTextures::destroy(Entry& e) {
 // Counted in the renderer's frames, not in record() calls, so a frame that does not record the tabs still counts.
 void WebTextures::retire(Entry e) { retired_.emplace_back(vk_.frames_begun() + kRetireFrames, e); }
 
-void WebTextures::record(const render::FrameInfo& frame, web::BrowserHost& host) {
+void WebTextures::collect() {
+    if (retired_.empty()) return;
     const std::uint64_t now = vk_.frames_begun();
     std::erase_if(retired_, [&](auto& r) {
         if (r.first > now) return false;
         destroy(r.second);
         return true;
     });
+}
+
+void WebTextures::record(const render::FrameInfo& frame, web::BrowserHost& host) {
+    collect();
 
     // Tabs that are gone, or have no image any more.
     for (auto it = entries_.begin(); it != entries_.end();) {

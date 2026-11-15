@@ -319,7 +319,13 @@ bool ClientApp::client_command(std::string_view h, const std::string& args) {
                 from.label = s.label;
                 break;
             }
-        if (from.file.empty()) from.file = ini.empty() ? eq_api_->layout_file() : std::filesystem::path(ini);
+        // An ini no source names is looked for beside the current layout file, by its bare name only: a path (a
+        // folder, "..", a drive) is no layout, and copy_layout gives 6338 for the empty file as for a missing one.
+        if (from.file.empty()) {
+            if (ini.empty()) from.file = eq_api_->layout_file();
+            else if (game::bare_file_name(ini) && !eq_api_->layout_file().empty())
+                from.file = eq_api_->layout_file().parent_path() / ini;
+        }
         c.show_eqstr(6336, {from.label, resolution});
         if (eq_host_.copy_layout)
             if (auto refused = eq_host_.copy_layout(from, {})) c.show_eqstr(refused->first, refused->second);
@@ -572,12 +578,13 @@ bool ClientApp::client_command(std::string_view h, const std::string& args) {
     }
     if (h == "Cmd_mousespeed") {
         // Cmd_mousespeed @0x4f5130: a number kept as the pointer speed (MousePointerSpeedMod, the argument as typed);
-        // else 13165, 13166; then 13167 with the value.
+        // else 13165, 13166; then 13167 with the value. A deliberate change: the number is held to 0..10, the range
+        // eqclient.ini's is read in (game::held_pointer_speed), and that is what is applied, saved and shown.
         int value = window_.pointer_speed();
         if (game::is_numeric_string(args)) {
-            value = game::eq_atoi(args);
+            value = game::held_pointer_speed(game::eq_atoi(args));
             set_pointer_speed(value);
-            config_.set("mouse.pointer_speed", args);
+            config_.set_int("mouse.pointer_speed", value);
             save();
         } else {
             c.show_eqstr(game::kStrMouseSpeedUsage);

@@ -16,6 +16,7 @@ local W = dofile("lib/window.lua")
 local I = dofile("lib/items.lua")
 local K = dofile("lib/keyfield.lua")
 local C = T.C
+local bagSlots = {} -- the bag slots' items, read once a frame (I.readBagSlots)
 
 -- Keeps the D-pad's up / down in a W.list column: ImGui's navigation may jump to a nearer item of the next column
 -- (the objectives, the message), so a focused row hands the focus to its neighbour itself. (The last shown row's
@@ -241,22 +242,27 @@ ui.window("Combine", function()
     local bper = math.max(1, math.floor((listX1 - bx0 + gap) / (size + gap)))
     local n = 0
     local bagItem = eq.BagSlotItem(screen, -1)
+    local acted = false -- (a click may have moved an item: the bag slots are read again after it)
     local function cell(slot, bag, item, where)
       if n % bper ~= 0 then ui.SameLine(0, gap) end
       n = n + 1
-      local clicked, focused = T.slot("##inv" .. slot .. "_" .. (bag or -1), item, size, { label = where }, pad)
+      local clicked, focused = T.slot(I.cellId("inv", slot, bag), item, size, { label = where }, pad)
       if focused then
         focusedItem, focusedWhere = item, where
         if pressed("Combine", "y") and item then eq.ClickSlot(slot, bag, "rightheld") end
       end
-      if clicked then eq.ClickSlot(slot, bag, "left") end
+      if clicked then
+        eq.ClickSlot(slot, bag, "left")
+        acted = true
+      end
     end
+    I.readBagSlots(bagSlots)
     for slot = 23, 32 do
-      local it = eq.Item(slot)
+      local it = bagSlots[slot]
       if not it or (it.bagSlots or 0) == 0 then cell(slot, nil, it, eq.SlotName(slot)) end
     end
     for slot = 23, 32 do
-      local bag = eq.Item(slot)
+      local bag = acted and eq.Item(slot) or bagSlots[slot]
       if bag and (bag.bagSlots or 0) > 0 and not (bagItem and bag.id == bagItem.id and bag.name == bagItem.name) then
         for i = 0, bag.bagSlots - 1 do cell(slot, i, eq.Item(slot, i), bag.name) end
       end

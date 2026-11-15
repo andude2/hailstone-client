@@ -185,6 +185,22 @@ TEST_CASE("UseSkill: kick goes through DoAttack with a hasted combat timer") {
     CHECK(use_skill(c, st, skill::kKick).sends.size() == 1);
 }
 
+TEST_CASE("UseSkill: SPA 227 past a combat skill's reuse leaves no timer instead of wrapping it") {
+    // A deliberate change from RoF2: the original's DoAttack keeps the negative reuse as an unsigned timer.
+    Fixture f;
+    f.sheet.skills[skill::kKick] = 10;
+    f.effects[{0xe3, skill::kKick}] = 10; // 10 s off an 8 s reuse
+    CHECK(skill_reuse_time(f.ch, skill::kKick) == -2000);
+    SkillState st;
+    SkillContext c = f.context(1000000);
+    c.target = Fixture::rat(10.0f);
+    REQUIRE(use_skill(c, st, skill::kKick).sends.size() == 1);
+    CHECK(st.timers.combat_ticks[0] == 0);
+    c.now += 1;
+    st.timers.update(f.ch, c.now, false, false);
+    CHECK(use_skill(c, st, skill::kKick).sends.size() == 1);
+}
+
 TEST_CASE("UseSkill: a skill the server's profile gives is used without the game's skill caps") {
     // No SkillCaps.txt (or another server's caps): GetAdjustedSkill alone says 0, which refused kick, bash and
     // taunt without a word.
@@ -231,6 +247,111 @@ TEST_CASE("CanIHit: range and facing with the original's messages") {
     CHECK(bearing(0, 0, 10, 0) == doctest::Approx(511.5));
     CHECK(bearing(0, 0, 10, 0.5) == doctest::Approx(4.067).epsilon(0.001));
     CHECK(bearing(0, 0, 0, 10) == doctest::Approx(127.875).epsilon(0.001));
+}
+
+TEST_CASE("UseSkill: large player races use shieldless Bash through their innate Slam") {
+    for (std::uint32_t race : {2u, 9u, 10u, 90u, 92u, 93u}) {
+        Fixture f;
+        f.sheet.race = race;
+        f.sheet.skills[skill::kBash] = 5;
+        SkillContext c = f.context(1000000);
+        c.form_slam = slam_innate(f.sheet.race);
+        c.target = Fixture::rat(10.0f);
+        SkillState st;
+        SkillResult r = use_skill(c, st, skill::kBash);
+        REQUIRE(r.messages.empty()); // No shield error.
+        REQUIRE(r.sends.size() == 1);
+        CHECK(r.sends[0].kind == SkillSend::Kind::CombatAbility);
+        CHECK(r.sends[0].skill == skill::kBash); // Slam sends the Bash attack.
+        CHECK_FALSE(st.timers.is_available(skill::kSlam));
+        CHECK_FALSE(st.timers.is_available(skill::kBash));
+        CHECK(can_use_combat_skill(c, skill::kBash));
+        const auto native = usable_skills(f.ch, true);
+        CHECK(std::find(native.begin(), native.end(), skill::kSlam) != native.end());
+        const auto non_combat = usable_skills(f.ch, false);
+        CHECK(std::find(non_combat.begin(), non_combat.end(), skill::kSlam) == non_combat.end());
+    }
+}
+
+TEST_CASE("UseSkill: racial Slam works even without a trained Bash skill") {
+    Fixture f;
+    f.sheet.race = 2;
+    f.sheet.class_id = 8; // Barbarian Bard: Slam is racial, not class-trained.
+    SkillContext c = f.context(1000000);
+    c.form_slam = slam_innate(f.sheet.race);
+    c.target = Fixture::rat(10.0f);
+    SkillState st;
+    const SkillResult r = use_skill(c, st, skill::kSlam);
+    REQUIRE(r.messages.empty());
+    REQUIRE(r.sends.size() == 1);
+    CHECK(r.sends[0].kind == SkillSend::Kind::CombatAbility);
+    CHECK(r.sends[0].skill == skill::kBash);
+    CHECK_FALSE(st.timers.is_available(skill::kBash));
+    const auto skills = usable_skills(f.ch, true);
+    CHECK(std::find(skills.begin(), skills.end(), skill::kSlam) != skills.end());
+}
+
+TEST_CASE("UseSkill: Barbarian illusion grants shieldless Bash and Slam to a Dark Elf Bard") {
+    Fixture f;
+    f.sheet.race = 6; // Profile is Dark Elf; the local spawn is now Barbarian (2).
+    f.sheet.class_id = 8;
+    SkillContext c = f.context(1000000);
+    c.form_slam = slam_innate(2);
+    c.target = Fixture::rat(10.0f);
+    SkillState st;
+    const SkillResult bash = use_skill(c, st, skill::kBash);
+    REQUIRE(bash.messages.empty());
+    REQUIRE(bash.sends.size() == 1);
+    CHECK(bash.sends[0].kind == SkillSend::Kind::CombatAbility);
+    CHECK(bash.sends[0].skill == skill::kBash);
+    CHECK(can_use_combat_skill(c, skill::kBash));
+    const auto skills = usable_skills(f.ch, true, 2);
+    CHECK(std::find(skills.begin(), skills.end(), skill::kSlam) != skills.end());
+    const auto original = usable_skills(f.ch, true);
+    CHECK(std::find(original.begin(), original.end(), skill::kSlam) == original.end());
+
+    SkillState slam_state;
+    const SkillResult slam = use_skill(c, slam_state, skill::kSlam);
+    REQUIRE(slam.messages.empty());
+    REQUIRE(slam.sends.size() == 1);
+    CHECK(slam.sends[0].skill == skill::kBash);
+    CHECK_FALSE(slam_state.timers.is_available(skill::kBash));
+}
+
+TEST_CASE("UseSkill: each large-race illusion exposes Slam regardless of base race") {
+    Fixture f;
+    f.sheet.race = 6; // Dark Elf without innate Slam.
+    for (std::uint32_t race : {2u, 9u, 10u, 90u, 92u, 93u}) {
+        SkillContext c = f.context(1000000);
+        c.form_slam = slam_innate(race);
+        c.target = Fixture::rat(10.0f);
+        SkillState state;
+        const SkillResult r = use_skill(c, state, skill::kBash);
+        REQUIRE(r.messages.empty());
+        REQUIRE(r.sends.size() == 1);
+        CHECK(r.sends[0].skill == skill::kBash);
+        const auto skills = usable_skills(f.ch, true, race);
+        CHECK(std::find(skills.begin(), skills.end(), skill::kSlam) != skills.end());
+    }
+}
+
+TEST_CASE("UseSkill: an illusion into a small race removes innate Slam until it ends") {
+    Fixture f;
+    f.sheet.race = 2; // Native Barbarian disguised as Dark Elf (6).
+    f.sheet.skills[skill::kBash] = 5;
+    SkillContext c = f.context(1000000);
+    c.form_slam = slam_innate(6);
+    c.target = Fixture::rat(10.0f);
+    SkillState st;
+    const SkillResult bash = use_skill(c, st, skill::kBash);
+    REQUIRE(bash.messages.size() == 1);
+    CHECK(bash.messages[0].eqstr == 12394); // Requires a shield in the current form.
+    CHECK(bash.sends.empty());
+    CHECK_FALSE(can_use_combat_skill(c, skill::kBash));
+    const auto disguised = usable_skills(f.ch, true, 6);
+    CHECK(std::find(disguised.begin(), disguised.end(), skill::kSlam) == disguised.end());
+    const auto original = usable_skills(f.ch, true, 2);
+    CHECK(std::find(original.begin(), original.end(), skill::kSlam) != original.end());
 }
 
 TEST_CASE("UseSkill: bash needs a shield, taunt needs an NPC in melee range") {

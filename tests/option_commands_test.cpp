@@ -32,6 +32,22 @@ TEST_CASE("option commands: word tests") {
     CHECK(off_on_toggle("of", "off", "on") == Switch::Toggle);
 }
 
+TEST_CASE("option commands: /copylayout's ini is a bare file name, never a path") {
+    CHECK(bare_file_name("UI_Bob_Server.ini"));
+    CHECK(bare_file_name("defaults.ini"));
+    CHECK(bare_file_name("a..ini")); // dots inside a name are no folder
+    CHECK_FALSE(bare_file_name(""));
+    CHECK_FALSE(bare_file_name("."));
+    CHECK_FALSE(bare_file_name(".."));
+    CHECK_FALSE(bare_file_name("../hailstone.ini"));
+    CHECK_FALSE(bare_file_name("sub/UI.ini"));
+    CHECK_FALSE(bare_file_name("..\\eqclient.ini"));
+    CHECK_FALSE(bare_file_name("/etc/passwd"));
+    CHECK_FALSE(bare_file_name("C:UI.ini"));
+    CHECK_FALSE(bare_file_name("C:\\x\\UI.ini"));
+    CHECK_FALSE(bare_file_name(std::string_view("UI\0.ini", 6)));
+}
+
 TEST_CASE("option commands: /safelock and the locked interface") {
     std::string pw;
     CHECK(safelock_command(pw, "") == std::vector<std::uint32_t>{13287, 13288});

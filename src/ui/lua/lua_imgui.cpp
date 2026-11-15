@@ -66,17 +66,73 @@ bool guarded(const ImGuiWindow *w) {
 // A script's window flags: ImGui's public ones. From 1 << 24 they are its own (ChildWindow, Tooltip, Popup, Modal,
 // ChildMenu: "Don't use!"); Popup without an open popup indexes OpenPopupStack out of bounds.
 int WindowFlags(lua_State *L, int i) { return I(L, i) & ((1 << 24) - 1); }
+// The windows scripts began with ui.Begin and ui.BeginChild this frame, innermost last: ui.End and ui.EndChild close
+// only the window on top, and only one of the matching kind, so a script cannot end a window it did not begin (the
+// implicit Debug window, a C++ window it was called from, a popup's or a child's with the wrong call). A refused
+// Begin (a guarded window, below) is kept as an entry that is no window: its End does nothing.
+struct Begun {
+	ImGuiWindow *window; // nullptr: refused, nothing was begun
+	bool child;
+};
+std::vector<Begun> g_begun;
+ImGuiContext *g_begunContext = nullptr;
+int g_begunFrame = -1;
+std::vector<Begun> &begun() {
+	if (g_begunContext != GImGui || g_begunFrame != ImGui::GetFrameCount()) {
+		g_begun.clear();
+		g_begunContext = GImGui;
+		g_begunFrame = ImGui::GetFrameCount();
+	}
+	return g_begun;
+}
+// The ImGui stacks' sizes as each script's draw function began (windows_begun), innermost last: its PopStyleColor,
+// PopStyleVar and PopFont pop only what it pushed, never what the C++ code that drew around it pushed.
+struct Floor {
+	int colors, vars, fonts;
+};
+std::vector<Floor> g_floors;
+int PoppableColors() { return GImGui->ColorStack.Size - (g_floors.empty() ? 0 : g_floors.back().colors); }
+int PoppableVars() { return GImGui->StyleVarStack.Size - (g_floors.empty() ? 0 : g_floors.back().vars); }
+int PoppableFonts() { return GImGui->FontStack.Size - (g_floors.empty() ? 0 : g_floors.back().fonts); }
+
+// Whether code that is not the pack's may not draw into `w` (or a child of it): it shows the consent question.
+bool refused_to(lua_State *L, const ImGuiWindow *w) {
+	if (!w || !g_guard || pack_code(L)) return false;
+	return guarded(w) || (w->RootWindow && w->RootWindow != w && guarded(w->RootWindow));
+}
+// The client's own consent prompt (app/automation.cpp), refused by name too: before its first frame it is not
+// guarded yet, and a script drawing first would otherwise create it.
+bool consent_window_name(const char *name) {
+	return ImHashStr(name) == ImHashStr(kConsentWindowName);
+}
+// A refused Begin leaves nothing behind for the next window: the script's SetNextWindow* calls are dropped, so they
+// cannot move or resize the window begun next (the consent prompt, when it follows).
+void refuse_begin(bool child) {
+	GImGui->NextWindowData.ClearFlags();
+	begun().push_back({nullptr, child});
+}
+
 // visible, open = ui.Begin(title [, open [, flags [, collapseRight]]])   open: nil = no close button;
 // collapseRight: the title bar's collapse (roll-up) button at its right, beside the close button (ImGui's
-// WindowMenuButtonPosition, for this window alone), not at its left
+// WindowMenuButtonPosition, for this window alone), not at its left. While the plugin consent question is up, code
+// that is not the pack's cannot begin its windows (visible is false, and its ui.End does nothing).
 int Begin(lua_State *L) {
+	const char *name = S(L, 1);
 	bool hasOpen = !lua_isnoneornil(L, 2);
 	bool open = B(L, 2, true);
+	const int flags = WindowFlags(L, 3);
+	if (g_guard && !pack_code(L) && (consent_window_name(name) || refused_to(L, ImGui::FindWindowByName(name)))) {
+		refuse_begin(false);
+		lua_pushboolean(L, false);
+		lua_pushboolean(L, open);
+		return 2;
+	}
 	ImGuiStyle &style = ImGui::GetStyle();
 	const ImGuiDir menuButton = style.WindowMenuButtonPosition;
 	if (lua_toboolean(L, 4)) style.WindowMenuButtonPosition = ImGuiDir_Right;
-	bool visible = ImGui::Begin(S(L, 1), hasOpen ? &open : nullptr, WindowFlags(L, 3));
+	bool visible = ImGui::Begin(name, hasOpen ? &open : nullptr, flags);
 	style.WindowMenuButtonPosition = menuButton;
+	begun().push_back({ImGui::GetCurrentWindow(), false});
 	if (g_guard && g_guardLuaFrame == ImGui::GetFrameCount() && LuaUi::drawing_window() == g_guardLuaWindow &&
 		pack_code(L))
 		guard(ImGui::GetCurrentWindow());
@@ -84,9 +140,42 @@ int Begin(lua_State *L) {
 	lua_pushboolean(L, open);
 	return 2;
 }
-int End(lua_State *) { ImGui::End(); return 0; }
-int BeginChild(lua_State *L) { return Ret(L, ImGui::BeginChild(S(L, 1), ImVec2(F(L, 2), F(L, 3)), B(L, 4) ? ImGuiChildFlags_Borders : 0, WindowFlags(L, 5))); }
-int EndChild(lua_State *) { ImGui::EndChild(); return 0; }
+// Closes the window on top of g_begun when it is the current one and of the kind asked.
+void end_begun(lua_State *L, bool child) {
+	std::vector<Begun> &b = begun();
+	if (b.empty() || b.back().child != child) return;
+	if (!b.back().window) { // a refused Begin: nothing to end
+		b.pop_back();
+		return;
+	}
+	ImGuiWindow *w = GImGui->CurrentWindow;
+	if (!w || w != b.back().window || GImGui->CurrentWindowStack.Size <= 1) return;
+	if (((w->Flags & ImGuiWindowFlags_ChildWindow) != 0) != child) return;
+	if (w->Flags & (ImGuiWindowFlags_Popup | ImGuiWindowFlags_Tooltip)) return; // EndPopup's, EndTooltip's
+	if (refused_to(L, w)) return;
+	b.pop_back();
+	if (child)
+		ImGui::EndChild();
+	else
+		ImGui::End();
+}
+int End(lua_State *L) { end_begun(L, false); return 0; }
+// visible = ui.BeginChild(id [, w, h [, border [, flags]]]) ... ui.EndChild()   (EndChild whatever it returned).
+// Refused, as Begin is, in a window of the consent question for code that is not the pack's.
+int BeginChild(lua_State *L) {
+	const char *id = S(L, 1);
+	const ImVec2 size(F(L, 2), F(L, 3));
+	const ImGuiChildFlags childFlags = B(L, 4) ? ImGuiChildFlags_Borders : 0;
+	const int flags = WindowFlags(L, 5);
+	if (refused_to(L, GImGui->CurrentWindow)) {
+		refuse_begin(true);
+		return Ret(L, false);
+	}
+	const bool visible = ImGui::BeginChild(id, size, childFlags, flags);
+	begun().push_back({ImGui::GetCurrentWindow(), true});
+	return Ret(L, visible);
+}
+int EndChild(lua_State *L) { end_begun(L, true); return 0; }
 int SetNextWindowSize(lua_State *L) { ImGui::SetNextWindowSize(ImVec2(F(L, 1), F(L, 2)), I(L, 3, ImGuiCond_FirstUseEver)); return 0; }
 int SetNextWindowPos(lua_State *L) { ImGui::SetNextWindowPos(ImVec2(F(L, 1), F(L, 2)), I(L, 3, ImGuiCond_FirstUseEver)); return 0; }
 // ui.SetNextWindowCollapsed(collapsed [, cond])   rolled up to its title bar (cond: ui.Cond, default Always)
@@ -161,15 +250,18 @@ int SliderFloat(lua_State *L) {
 }
 // value, changed = ui.SliderInt(label, value, min, max [, text])   text: shown on the slider instead of the value
 int SliderInt(lua_State *L) {
+	const char *label = S(L, 1); // every argument read before the format string exists (a Lua error skips its destructor)
 	int v = I(L, 2);
+	const int lo = I(L, 3), hi = I(L, 4, 100);
+	const char *given = lua_type(L, 5) == LUA_TSTRING ? lua_tostring(L, 5) : nullptr;
 	std::string text;
-	if (lua_isstring(L, 5)) {
-		for (const char *c = lua_tostring(L, 5); *c; ++c) {
+	if (given) {
+		for (const char *c = given; *c; ++c) {
 			if (*c == '%') text += '%';
 			text += *c;
 		}
 	}
-	bool changed = ImGui::SliderInt(S(L, 1), &v, I(L, 3), I(L, 4, 100), lua_isstring(L, 5) ? text.c_str() : "%d");
+	bool changed = ImGui::SliderInt(label, &v, lo, hi, given ? text.c_str() : "%d");
 	lua_pushinteger(L, v);
 	lua_pushboolean(L, changed);
 	return 2;
@@ -185,6 +277,16 @@ struct InputTextOptions {
 	int tab;     // stack index of the tab function, 0 for none
 	bool moveToEnd;
 };
+// The tab function (1) with the text being edited (2: the callback's data) and Shift, inside the callback's
+// protected call: pushing the text can raise (the state's memory limit), and nothing may raise across ImGui's frames.
+int TabCall(lua_State *L) {
+	const auto *d = static_cast<const ImGuiInputTextCallbackData *>(lua_touserdata(L, 2));
+	lua_settop(L, 1);
+	lua_pushlstring(L, d->Buf, static_cast<size_t>(d->BufTextLen));
+	lua_pushboolean(L, ImGui::GetIO().KeyShift);
+	lua_call(L, 2, 1);
+	return 1;
+}
 int InputTextCallback(ImGuiInputTextCallbackData *d) {
 	auto *o = static_cast<InputTextOptions *>(d->UserData);
 	if (d->EventFlag == ImGuiInputTextFlags_CallbackHistory && o->history) {
@@ -197,9 +299,9 @@ int InputTextCallback(ImGuiInputTextCallbackData *d) {
 		lua_pop(o->L, 1); // the result or the error
 	}
 	else if (d->EventFlag == ImGuiInputTextFlags_CallbackCompletion && o->tab) {
+		lua_pushcfunction(o->L, &TabCall);
 		lua_pushvalue(o->L, o->tab);
-		lua_pushlstring(o->L, d->Buf, static_cast<size_t>(d->BufTextLen));
-		lua_pushboolean(o->L, ImGui::GetIO().KeyShift);
+		lua_pushlightuserdata(o->L, d);
 		if (lua_pcall(o->L, 2, 1, 0) == LUA_OK && lua_type(o->L, -1) == LUA_TSTRING) {
 			d->DeleteChars(0, d->BufTextLen);
 			d->InsertChars(0, lua_tostring(o->L, -1));
@@ -211,6 +313,22 @@ int InputTextCallback(ImGuiInputTextCallbackData *d) {
 	}
 	return 0;
 }
+// The buffer ImGui edits in place: the text, cut to `cap` bytes, and room up to cap with a NUL ending it inside the
+// buf_size ImGui is given (cap + 1), however long the text was.
+std::string TextBuffer(const char *cur, size_t len, int cap) {
+	std::string buf(cur, std::min(len, static_cast<size_t>(cap)));
+	buf.resize(static_cast<size_t>(cap) + 1);
+	buf[static_cast<size_t>(cap)] = '\0';
+	return buf;
+}
+// Pushes the edited buffer's text: moved first into a string that outlives a push that raises (the state's memory
+// limit), which would skip the caller's destructors (plugin/lua_keep.h push_made).
+void PushBuffer(lua_State *L, std::string &&buf) {
+	thread_local std::string held;
+	held = std::move(buf);
+	std::string().swap(buf);
+	lua_pushstring(L, held.c_str());
+}
 // text, changed = ui.InputTextMultiline(label, text [, capacity [, w, h [, flags]]])
 int InputTextMultiline(lua_State *L) {
 	const char *label = S(L, 1);
@@ -220,10 +338,9 @@ int InputTextMultiline(lua_State *L) {
 	cap = cap < 1 ? 1 : cap > 65535 ? 65535 : cap;
 	float w = to_float(luaL_optnumber(L, 4, 0)), h = to_float(luaL_optnumber(L, 5, 0));
 	ImGuiInputTextFlags flags = I(L, 6, 0) & (ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_AutoSelectAll);
-	std::string buf(cur, len);
-	buf.resize(static_cast<size_t>(cap) + 1);
+	std::string buf = TextBuffer(cur, len, cap);
 	bool changed = ImGui::InputTextMultiline(label, buf.data(), buf.size(), ImVec2(w, h), flags);
-	lua_pushstring(L, buf.c_str());
+	PushBuffer(L, std::move(buf));
 	lua_pushboolean(L, changed);
 	return 2;
 }
@@ -236,14 +353,16 @@ int InputText(lua_State *L) {
 	cap = cap < 1 ? 1 : cap > 65535 ? 65535 : cap;
 	ImGuiInputTextFlags flags = I(L, 4, 0) & ~(ImGuiInputTextFlags_CallbackResize | ImGuiInputTextFlags_CallbackCharFilter |
 		ImGuiInputTextFlags_CallbackEdit | ImGuiInputTextFlags_CallbackCompletion);
-	std::string buf(cur, len);
-	buf.resize(static_cast<size_t>(cap) + 1);
 	InputTextOptions o{L, 0, 0, false};
 	if (lua_istable(L, 5)) {
-		lua_getfield(L, 5, "moveToEnd");
+		// Read raw, before the buffer exists: a metamethod lua_getfield ran could raise past its destructor.
+		unview(L, 5); // (a plugin's view of the pack's options table)
+		lua_pushliteral(L, "moveToEnd");
+		lua_rawget(L, 5);
 		o.moveToEnd = lua_toboolean(L, -1) != 0;
 		lua_pop(L, 1);
-		lua_getfield(L, 5, "history");
+		lua_pushliteral(L, "history");
+		lua_rawget(L, 5);
 		if (lua_isfunction(L, -1)) {
 			o.history = lua_gettop(L); // left on the stack for the callback
 			flags |= ImGuiInputTextFlags_CallbackHistory;
@@ -251,7 +370,8 @@ int InputText(lua_State *L) {
 		else {
 			lua_pop(L, 1);
 		}
-		lua_getfield(L, 5, "tab");
+		lua_pushliteral(L, "tab");
+		lua_rawget(L, 5);
 		if (lua_isfunction(L, -1)) {
 			o.tab = lua_gettop(L); // left on the stack for the callback
 			flags |= ImGuiInputTextFlags_CallbackCompletion;
@@ -263,8 +383,9 @@ int InputText(lua_State *L) {
 			flags |= ImGuiInputTextFlags_CallbackAlways;
 		}
 	}
+	std::string buf = TextBuffer(cur, len, cap);
 	bool changed = ImGui::InputText(label, buf.data(), buf.size(), flags, &InputTextCallback, &o);
-	lua_pushstring(L, buf.c_str());
+	PushBuffer(L, std::move(buf));
 	lua_pushboolean(L, changed); // with InputTextFlags.EnterReturnsTrue: Enter was pressed
 	return 2;
 }
@@ -288,10 +409,9 @@ int InputTextWithHint(lua_State *L) {
 	cap = cap < 1 ? 1 : cap > 65535 ? 65535 : cap;
 	ImGuiInputTextFlags flags = I(L, 5, 0) & (ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll |
 		ImGuiInputTextFlags_Password | ImGuiInputTextFlags_CharsDecimal | ImGuiInputTextFlags_ReadOnly);
-	std::string buf(cur, len);
-	buf.resize(static_cast<size_t>(cap) + 1);
+	std::string buf = TextBuffer(cur, len, cap);
 	bool changed = ImGui::InputTextWithHint(label, hint, buf.data(), buf.size(), flags);
-	lua_pushstring(L, buf.c_str());
+	PushBuffer(L, std::move(buf));
 	lua_pushboolean(L, changed);
 	return 2;
 }
@@ -673,43 +793,54 @@ int IsKeyPressed(lua_State *L) {
 	bool named = key >= ImGuiKey_NamedKey_BEGIN && key < ImGuiKey_NamedKey_END;
 	return Ret(L, named && ImGui::IsKeyPressed(static_cast<ImGuiKey>(key), false));
 }
-// The same table for every call in a frame (per Lua state): its values are ImGui's for the frame, set as the frame
-// begins, and the Modern pack asks for it from every HUD window each frame (a new table each time was garbage the
-// collector had to sweep). uiScale is set on each call (an option may change it within the frame). Read-only.
+// The same table for every call (per Lua state), its values ImGui's for the frame, filled at the frame's first call:
+// the Modern pack asks for it from every HUD window each frame (a new table each time was garbage the collector had
+// to sweep). uiScale is set on each call (an option may change it within the frame). Read-only: what the caller gets
+// is a view of it whose writes raise, so no window (a plugin's) can change what the windows after it read.
+int ReadOnlyWrite(lua_State *L) { return luaL_error(L, "ui.GetIO(): the table is read-only"); }
 int GetIO(lua_State *L) {
-	static const char kTable = 0, kFrame = 0;
+	static const char kView = 0, kReal = 0, kFrame = 0;
 	const int frame = ImGui::GetFrameCount();
+	if (lua_rawgetp(L, LUA_REGISTRYINDEX, &kReal) != LUA_TTABLE) {
+		lua_pop(L, 1);
+		lua_createtable(L, 0, 13);
+		lua_pushvalue(L, -1);
+		lua_rawsetp(L, LUA_REGISTRYINDEX, &kReal);
+		lua_newtable(L); // the view
+		lua_createtable(L, 0, 3);
+		lua_pushvalue(L, -3);
+		lua_setfield(L, -2, "__index");
+		lua_pushcfunction(L, &ReadOnlyWrite);
+		lua_setfield(L, -2, "__newindex");
+		lua_pushboolean(L, 0);
+		lua_setfield(L, -2, "__metatable");
+		lua_setmetatable(L, -2);
+		lua_rawsetp(L, LUA_REGISTRYINDEX, &kView);
+	}
+	const int real = lua_gettop(L);
 	lua_rawgetp(L, LUA_REGISTRYINDEX, &kFrame);
 	const bool same_frame = lua_isinteger(L, -1) && lua_tointeger(L, -1) == frame;
 	lua_pop(L, 1);
-	if (same_frame) {
-		lua_rawgetp(L, LUA_REGISTRYINDEX, &kTable);
-		if (lua_istable(L, -1)) {
-			lua_pushnumber(L, ui_scale()); lua_setfield(L, -2, "uiScale");
-			return 1;
-		}
-		lua_pop(L, 1);
+	if (!same_frame) {
+		lua_pushinteger(L, frame);
+		lua_rawsetp(L, LUA_REGISTRYINDEX, &kFrame);
+		ImGuiIO &io = ImGui::GetIO();
+		lua_pushnumber(L, io.DisplaySize.x); lua_setfield(L, real, "width");
+		lua_pushnumber(L, io.DisplaySize.y); lua_setfield(L, real, "height");
+		lua_pushnumber(L, io.Framerate); lua_setfield(L, real, "fps");
+		lua_pushboolean(L, io.KeyCtrl); lua_setfield(L, real, "ctrl");
+		lua_pushboolean(L, io.KeyShift); lua_setfield(L, real, "shift");
+		lua_pushboolean(L, io.KeyAlt); lua_setfield(L, real, "alt");
+		lua_pushnumber(L, io.MouseWheel); lua_setfield(L, real, "wheel");
+		lua_pushnumber(L, io.MouseDelta.x); lua_setfield(L, real, "mouseDX");
+		lua_pushnumber(L, io.MouseDelta.y); lua_setfield(L, real, "mouseDY");
+		// The gamepad's navigation: a window takes it (NavActive) and its cursor shows (NavVisible).
+		lua_pushboolean(L, io.NavActive); lua_setfield(L, real, "nav_active");
+		lua_pushboolean(L, io.NavVisible); lua_setfield(L, real, "nav_visible");
+		lua_pushboolean(L, io.WantTextInput); lua_setfield(L, real, "typing"); // a text field has the keyboard
 	}
-	ImGuiIO &io = ImGui::GetIO();
-	lua_createtable(L, 0, 12);
-	lua_pushvalue(L, -1);
-	lua_rawsetp(L, LUA_REGISTRYINDEX, &kTable);
-	lua_pushinteger(L, frame);
-	lua_rawsetp(L, LUA_REGISTRYINDEX, &kFrame);
-	lua_pushnumber(L, io.DisplaySize.x); lua_setfield(L, -2, "width");
-	lua_pushnumber(L, io.DisplaySize.y); lua_setfield(L, -2, "height");
-	lua_pushnumber(L, io.Framerate); lua_setfield(L, -2, "fps");
-	lua_pushboolean(L, io.KeyCtrl); lua_setfield(L, -2, "ctrl");
-	lua_pushboolean(L, io.KeyShift); lua_setfield(L, -2, "shift");
-	lua_pushboolean(L, io.KeyAlt); lua_setfield(L, -2, "alt");
-	lua_pushnumber(L, io.MouseWheel); lua_setfield(L, -2, "wheel");
-	lua_pushnumber(L, io.MouseDelta.x); lua_setfield(L, -2, "mouseDX");
-	lua_pushnumber(L, io.MouseDelta.y); lua_setfield(L, -2, "mouseDY");
-	lua_pushnumber(L, ui_scale()); lua_setfield(L, -2, "uiScale"); // the EQ fonts' scale over their XML sizes
-	// The gamepad's navigation: a window takes it (NavActive) and its cursor shows (NavVisible).
-	lua_pushboolean(L, io.NavActive); lua_setfield(L, -2, "nav_active");
-	lua_pushboolean(L, io.NavVisible); lua_setfield(L, -2, "nav_visible");
-	lua_pushboolean(L, io.WantTextInput); lua_setfield(L, -2, "typing"); // a text field has the keyboard
+	lua_pushnumber(L, ui_scale()); lua_setfield(L, real, "uiScale"); // the EQ fonts' scale over their XML sizes
+	lua_rawgetp(L, LUA_REGISTRYINDEX, &kView);
 	return 1;
 }
 
@@ -720,7 +851,17 @@ int SetDragDropPayload(lua_State *L) {
 	const char *data = luaL_checklstring(L, 2, &len);
 	return Ret(L, ImGui::SetDragDropPayload(S(L, 1), data, len + 1));
 }
-int EndDragDropSource(lua_State *) { ImGui::EndDragDropSource(); return 0; }
+// Only after a BeginDragDropSource that returned true, in its tooltip: ImGui ends the tooltip window it began, and in
+// a release build would otherwise end whatever window is current (the caller's own).
+int EndDragDropSource(lua_State *) {
+	const ImGuiContext &g = *GImGui;
+	if (!g.DragDropActive || !g.DragDropWithinSource) return 0;
+	if (!(g.DragDropSourceFlags & ImGuiDragDropFlags_SourceNoPreviewTooltip) &&
+		(!g.CurrentWindow || !(g.CurrentWindow->Flags & ImGuiWindowFlags_Tooltip) || g.CurrentWindowStack.Size <= 1))
+		return 0;
+	ImGui::EndDragDropSource();
+	return 0;
+}
 int BeginDragDropTarget(lua_State *L) { return Ret(L, ImGui::BeginDragDropTarget()); }
 // data = ui.AcceptDragDropPayload(type) -> string or nil
 int AcceptDragDropPayload(lua_State *L) {
@@ -733,7 +874,10 @@ int AcceptDragDropPayload(lua_State *L) {
 	}
 	return 1;
 }
-int EndDragDropTarget(lua_State *) { ImGui::EndDragDropTarget(); return 0; }
+int EndDragDropTarget(lua_State *) {
+	if (GImGui->DragDropActive && GImGui->DragDropWithinTarget) ImGui::EndDragDropTarget();
+	return 0;
+}
 
 // --- style ---
 int PushStyleColor(lua_State *L) {
@@ -745,7 +889,7 @@ int PushStyleColor(lua_State *L) {
 }
 int PopStyleColor(lua_State *L) {
 	int n = I(L, 1, 1);
-	n = n > GImGui->ColorStack.Size ? GImGui->ColorStack.Size : n;
+	n = std::min(n, PoppableColors());
 	if (n > 0) {
 		ImGui::PopStyleColor(n);
 	}
@@ -825,7 +969,7 @@ int PushStyleVars(lua_State *L) {
 }
 int PopStyleVar(lua_State *L) {
 	int n = I(L, 1, 1);
-	n = n > GImGui->StyleVarStack.Size ? GImGui->StyleVarStack.Size : n;
+	n = std::min(n, PoppableVars());
 	if (n > 0) {
 		ImGui::PopStyleVar(n);
 	}
@@ -931,7 +1075,7 @@ int ChatFontSize(lua_State *L) {
 	return 1;
 }
 int PopFont(lua_State *) {
-	if (GImGui->FontStack.Size > 0) {
+	if (PoppableFonts() > 0) {
 		ImGui::PopFont();
 	}
 	return 0;
@@ -947,6 +1091,18 @@ void SetInts(lua_State *L, const char *table, std::initializer_list<std::pair<co
 }
 
 } // namespace
+
+std::size_t windows_begun() {
+	g_floors.push_back({GImGui->ColorStack.Size, GImGui->StyleVarStack.Size, GImGui->FontStack.Size});
+	return begun().size();
+}
+void end_script_windows(std::size_t depth) {
+	if (!g_floors.empty()) g_floors.pop_back();
+	std::vector<Begun> &b = begun();
+	if (b.size() > depth) b.resize(depth);
+	GImGui->NextWindowData.ClearFlags();
+	GImGui->NextItemData.ClearFlags();
+}
 
 void set_consent_guard(bool on) { g_guard = on; }
 bool consent_guard() { return g_guard; }
@@ -1051,7 +1207,7 @@ void register_ui_api(lua_State *L) {
 		{"WindowPadding", ImGuiStyleVar_WindowPadding},
 		{"FramePadding", ImGuiStyleVar_FramePadding}, {"ItemSpacing", ImGuiStyleVar_ItemSpacing},
 		{"FrameRounding", ImGuiStyleVar_FrameRounding}, {"WindowBorderSize", ImGuiStyleVar_WindowBorderSize},
-		{"WindowRounding", ImGuiStyleVar_WindowRounding},
+		{"WindowRounding", ImGuiStyleVar_WindowRounding}, {"WindowMinSize", ImGuiStyleVar_WindowMinSize},
 		{"WindowTitleAlign", ImGuiStyleVar_WindowTitleAlign}, {"ChildRounding", ImGuiStyleVar_ChildRounding},
 		{"ChildBorderSize", ImGuiStyleVar_ChildBorderSize}, {"PopupRounding", ImGuiStyleVar_PopupRounding},
 		{"PopupBorderSize", ImGuiStyleVar_PopupBorderSize}, {"FrameBorderSize", ImGuiStyleVar_FrameBorderSize},

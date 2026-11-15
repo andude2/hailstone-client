@@ -74,6 +74,7 @@ signature <128 hex digits>
 ```
 
 - **Package file names** are taken relative to the manifest's address, so they name assets of the same release.
+- **Sizes** are a limit as well as a check: a download stops as soon as it passes the manifest's size.
 - **Packages:** a release has one package for each platform, `core`: the whole folder, `browser/` included. The
   server plugins are not in it: they are add-ons (docs/addons.md). The releases that still shipped them (0.1.0-alpha's
   NMS download, 0.2.0-alpha) left their libraries and windows in `plugins/nms/` and `plugins/projecttriune/`, and the
@@ -131,22 +132,31 @@ The install is described in `app/update_install.h`. Everything lives in `<Hailst
 | `failed.txt` | a release that was rolled back, and is not offered again |
 | `note.txt` | a rollback's message for the version it starts |
 | `trash/` | files that were in use when moved, removed at the next start |
+| `kept-<time>/` | what a rollback found in `previous/` that the journal did not name (see below); never removed by the client |
 
 The client installs the update itself once it has quit, at the end of `run_client`, after its window, the browser
 helper and the plugins are gone:
 
 1. Each package is checked again and unpacked into `new/`. A package that holds one of the player's paths is refused
-   whole, and so is a plugin package with files outside `plugins/<name>/`. The player's paths (`is_player_path`)
-   are:
+   whole, and so is a plugin package with files outside `plugins/<name>/`. The player's paths (`is_player_path`,
+   and `tools/make_update.py`'s copy of it) are:
    - the files `hailstone.ini`, `hailstone-windows.ini` and `notes.txt`;
    - the folders `update/`, `servers/`, `logs/`, `cache/`, `screenshots/`, `bug-reports/`, `maps/`, `scripts/`,
-     `textures/`, `web/` and `addons/` (docs/addons.md);
+     `textures/`, `web/`, `addons/` and `tools/` (the last two the add-ons', docs/addons.md);
    - `ui/settings/` and `ui/loadingbackgrounds/`.
 
-   An update never writes or removes any of them.
+   An update never writes or removes any of them. A plugin folder an add-on installed into (`plugins/<name>/`,
+   `addon_owns_folder`) is the add-on's too: a plugin package for it is left out, and the core package's files there
+   are left out of the install (and of `installed.txt`), as are those it shipped there before and no longer does.
+   A package whose file would go where the folder has a folder is refused before anything moves: an update replaces
+   files only, and that folder holds what it did not put there. So is an update whose packages would unpack to more
+   than 4 GiB in all (their declared sizes added up before anything is written; a release is a few hundred MB).
+   Each unpacked file is flushed to the disk before it is renamed into `new/`.
 2. Each old file is moved into `previous/` and its new one into place. The move is written to the journal before
-   it is made. Both moves are renames on one volume, which Windows allows for a running program and its loaded
-   libraries.
+   it is made, and the journal's line is flushed to the disk first (write-ahead), so after a power cut every file in
+   `previous/` has its line. Both moves are renames on one volume, which Windows allows for a running program and its
+   loaded libraries; each is on the disk before the next begins (the folder synced on Linux and macOS, a write-through
+   move on Windows).
 3. The files a component shipped before and no longer does are moved into `previous/` as well.
 4. `installed.txt` is written, and `state.txt` becomes `pending`.
 
@@ -163,10 +173,18 @@ The install waits while the box set's other windows run (they use the same files
   and may be part of a name (`added ui` of `added ui/x.lua`). A line whose name is not a file's path inside the
   folder (`is_safe_zip_path`) or is one of the player's paths is skipped, and a folder is never moved: an update
   moves files only, so a folder where a line points holds what it did not put there (`ui/settings/` under `ui/`).
+  After the undo `previous/` holds no file. One still there (a journal the disk lost or damaged, a move back that
+  failed) may be the only copy of a replaced file, so `previous/` is renamed `kept-<time>/` and a warning logged,
+  instead of being removed.
 - **`pending`:** each start of the new version is counted, and reaching the login screen ends the count
   (`update_started_fine` removes `previous/`). If two starts never reached it, the third rolls the update back, writes
   `failed.txt`, starts the old version and quits; the old version shows why (`note.txt`).
 - **A different version than the pending one** (the player put one in by hand) ends the pending state.
+
+A launcher's ticket launch (`/ticket:`, `--ticket`, `--ticket-env`; docs/protocol/login.md "Launcher tickets") skips
+`update_at_start`: its restart starts the other version without the command line, and a one-use ticket would be lost
+with it. The next start without a ticket does that work. The updater and the add-on manager otherwise run as on any
+player's run.
 
 ## Making a release
 

@@ -59,7 +59,8 @@ ItemSlot read_slot(ByteReader& r);
 
 // ItemContainerInstance values (rof2_limits.h invtype).
 inline constexpr std::int16_t kInvPossessions = 0, kInvBank = 1, kInvSharedBank = 2, kInvTrade = 3, kInvWorld = 4,
-                              kInvLimbo = 5, kInvMerchant = 9, kInvCorpse = 11, kInvRealEstate = 14,
+                              kInvLimbo = 5, kInvTribute = 6, kInvGuildTribute = 8,
+                              kInvMerchant = 9, kInvCorpse = 11, kInvRealEstate = 14,
                               kInvAltStorage = 19, kInvArchived = 20, kInvMail = 21;
 
 // Possessions slot numbers (rof2_limits.h invslot): 0..22 equipment,
@@ -112,6 +113,20 @@ struct EvolvingInfo {
     std::int32_t evolve_max_level = 0;
     std::array<std::uint8_t, 4> unknown005{};
 };
+
+// OP_EvolveItem: the display's Final Result link (XWM_LINK action 1) sends wire action 4.
+// These six dwords share their 24-byte layout with action 0's instance progress update.
+struct EvolvingFinalResult {
+    std::uint32_t item_id = 0, final_item_id = 0, level = 0, hash = 0;
+    std::uint32_t display_flags = 1; // native !Shift
+};
+AppPacket encode(const EvolvingFinalResult& v);
+
+struct EvolvingItemUpdate {
+    std::uint64_t unique_id = 0;
+    std::uint32_t percentage = 0, activated = 0;
+};
+std::optional<EvolvingItemUpdate> decode_evolving_item_update(const AppPacket& p);
 
 struct BagItem;
 

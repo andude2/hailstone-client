@@ -1,8 +1,11 @@
 // Alpha-to-coverage for the opaque pass (render/vk_context.h SceneOptions msaa): the pipeline sets constant_id 0
-// when the scene is multisampled, and the alpha test then becomes the coverage of the pixel's samples.
+// when the scene is multisampled, and the alpha test then becomes the coverage of the pixel's samples. Actors and
+// objects use fixed-function coverage; the zone shaders combine it with their LOD sample mask themselves.
+
+#include "sample_coverage.glsl"
 
 layout(constant_id = 0) const bool kAlphaToCoverage = false;
-// The scene's samples a pixel (1, 2, 4 or 8; render/zone_renderer.cpp create_pipelines).
+// The scene's actual samples a pixel (render/zone_renderer.cpp create_pipelines).
 layout(constant_id = 1) const int kSceneSamples = 1;
 
 // The samples of a pixel a level of detail covers in its fades (render/lod_bands.h lod_presence), as gl_SampleMask:
@@ -42,4 +45,40 @@ bool alpha_test(float alpha, float ref, float opacity, out float out_alpha) {
     }
     out_alpha = alpha * opacity;
     return !(ref > 0.0 && alpha < ref);
+}
+
+// The zone's alpha coverage as samples, without fixed-function alpha-to-coverage: combining that state with
+// SampleMask and discard loses geometry on some drivers. zone.frag and zone_depth.frag both write
+// lod_samples & alpha_coverage_samples(...), so an edge keeps the same samples in the pre-pass and the colour pass
+// (tests/depth_prepass_test.cpp). Other passes leave the LOD alone.
+int alpha_coverage_samples(float alpha, vec2 frag) {
+    if (!kAlphaToCoverage) return -1;
+    return coverage_sample_mask(alpha, frag, kSceneSamples);
+}
+
+// A neighbour's part of the land (render/zone_renderer.cpp Draw::land_fade): each triangle is drawn twice, with the
+// neighbour's own ground (`flags` kLandOwn) and with the current zone's (kLandZone); a pixel shows the neighbour's
+// where the blend's noise at its place on the ground lies under the vertices' weight (`weight`, color2's alpha), the
+// current zone's where it does not, so each pixel shows exactly one. The noise is in world space, patches of a few
+// tens of units with ragged edges: the one ground gives way to the other in clumps, not a straight line, and holds
+// still as the camera moves. Returns true to discard.
+float land_blend_hash(vec2 i) {
+    vec3 p = fract(vec3(i.xyx) * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+float land_blend_value(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = p - i;
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(land_blend_hash(i), land_blend_hash(i + vec2(1.0, 0.0)), f.x),
+               mix(land_blend_hash(i + vec2(0.0, 1.0)), land_blend_hash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+bool land_blend_discard(uint flags, float weight, vec3 world) {
+    const uint kLandOwn = 8192u, kLandZone = 16384u;
+    if ((flags & (kLandOwn | kLandZone)) == 0u) return false;
+    vec2 p = world.xy;
+    float n = 0.6 * land_blend_value(p / 48.0) + 0.3 * land_blend_value(p / 12.0) + 0.1 * land_blend_value(p / 3.0);
+    bool own = n < weight;
+    return (flags & kLandOwn) != 0u ? !own : own;
 }

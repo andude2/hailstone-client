@@ -200,4 +200,18 @@ void Autoskill::reset() {
     tried_.clear();
 }
 
+bool move_autoskill_rule(std::vector<AutoskillRule>& rules, std::string_view key, std::int64_t delta) {
+    auto it = std::ranges::find_if(rules, [&](const AutoskillRule& r) { return r.key == key; });
+    if (it == rules.end()) return false;
+    const auto from = static_cast<std::int64_t>(it - rules.begin());
+    const auto last = static_cast<std::int64_t>(rules.size()) - 1;
+    // The step held to the list's length first: from + a delta near 2^63 would overflow.
+    const auto to = std::clamp<std::int64_t>(from + std::clamp<std::int64_t>(delta, -last, last), 0, last);
+    if (to == from) return false;
+    AutoskillRule r = std::move(*it);
+    rules.erase(it);
+    rules.insert(rules.begin() + to, std::move(r));
+    return true;
+}
+
 } // namespace hailstone::game

@@ -1072,7 +1072,8 @@ local function files_requests_max()
 end
 
 local function on_files_request(client, packet)
-	if packet:GetSize() < 12 or packet:ReadInt32(0) ~= FILES_MAGIC then
+	-- enabled 0: not answered at all, as the other requests (a client then has no list, and keeps its own files)
+	if setting("enabled") == 0 or packet:GetSize() < 12 or packet:ReadInt32(0) ~= FILES_MAGIC then
 		return
 	end
 	local action = packet:ReadInt16(6)
@@ -1490,7 +1491,7 @@ function event_encounter_load(e)
 	setting_cache = {} -- #reloadquest: the buckets as they are now
 	quest_list, quest_file_flags = nil, {} -- and the quest files as they are now
 	zone_links = nil   -- and the zone links built again when next asked
-	if setting("client_files") ~= 0 then
+	if setting("enabled") ~= 0 and setting("client_files") ~= 0 then
 		build_client_files(true) -- the hashing is done before the first client asks
 	end
 	eq.register_player_event("hailstone", Event.unhandled_opcode, on_unhandled_opcode)

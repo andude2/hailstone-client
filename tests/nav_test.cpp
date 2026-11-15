@@ -31,6 +31,7 @@
 #include "nav/zone_nav.h"
 #include <glm/gtc/matrix_transform.hpp>
 #include "plugin/hooks.h"
+#include "plugin/policy.h"
 #include "game_files.h"
 #include "scratch_dir.h"
 #include "core/env.h"
@@ -966,6 +967,31 @@ TEST_CASE("nav: /nav's destinations, options and controls") {
     CHECK(h.nav.calls.size() == calls);
     h.run("/nav bogus");
     CHECK(h.printed.back() == "[Nav] Unknown /nav command: bogus (/nav help)");
+}
+
+TEST_CASE("nav: /nav door's click on arrival needs 'actions'; the walk alone needs 'move'") {
+    MqHost h;
+    game::Door door;
+    door.id = 5;
+    door.name = "POKDOOR";
+    net::GameConnectionTestAccess::doors(*h.world.conn).push_back(door);
+    {
+        plugin::CallerScope scope(plugin::kCapMove, "walker");
+        h.run("/nav door id 5 click");
+        CHECK(h.nav.calls.empty());
+        CHECK(h.printed.back() == "[Nav] walker: /nav door ... click needs the server's 'actions' permission");
+        h.run("/nav door pokdoor");
+        REQUIRE(h.nav.calls.size() == 1);
+        CHECK(h.nav.calls[0].what == "door");
+        CHECK(h.nav.calls[0].id == 5);
+        CHECK_FALSE(h.nav.calls[0].flag);
+    }
+    {
+        plugin::CallerScope scope(plugin::kCapMove | plugin::kCapActions, "clicker");
+        h.run("/nav door pokdoor click");
+        REQUIRE(h.nav.calls.size() == 2);
+        CHECK(h.nav.calls[1].flag);
+    }
 }
 
 TEST_CASE("nav: /moveto walks straight") {

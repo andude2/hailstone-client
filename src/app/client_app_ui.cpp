@@ -57,6 +57,7 @@ void ClientApp::draw_ui(float fps) {
     update_screen_picture();
     switch (screen_) {
     case Screen::Login: {
+        login_view_.session_ticket_available = login_token_session_.available(login_view_.host, login_view_.port);
         // The interface picked for the server on this screen is the one it shows in: the picked server's (or the one
         // chosen in its Interface list), switched to at once rather than at the login (its Lua state is not running
         // here: draw_ui comes before the UI's frame).
@@ -310,11 +311,13 @@ void ClientApp::draw_ui(float fps) {
             tv.distance = glm::distance(t.position, feet_ + glm::vec3(0, 0, floor_offset_));
         }
         game_view_.respawn = {};
-        if (const auto& rw = conn_->respawn_window()) {
-            for (const auto& o : rw->options) game_view_.respawn.options.emplace_back(o.id, o.name);
-            game_view_.respawn.seconds_left = rw->time_remaining_ms / 1000;
-            game_view_.respawn.ready = conn_->respawn_ready();
-        }
+        if (!(eq_api_ && eq_api_->replaces("RespawnWnd")))
+            if (const auto& rw = conn_->respawn_window()) {
+                for (const auto& o : rw->options)
+                    if (conn_->respawn_option_available(o.id)) game_view_.respawn.options.emplace_back(o.id, o.name);
+                game_view_.respawn.seconds_left = static_cast<std::uint32_t>((conn_->respawn_ms_left() + 999) / 1000);
+                game_view_.respawn.ready = conn_->respawn_ready();
+            }
         game_view_.spawns.selected_id = world.target_id;
         auto actions = ui::in_game_overlay(game_view_);
         draw_items();

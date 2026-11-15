@@ -117,7 +117,9 @@ local function body(x, y, w, h, s)
     -- a spell dragged from the spell book (spellbook.lua) memorizes into this gem
     -- (this frame's only: a book closed mid-drag, or the character gone, leaves a stale one)
     local dragged = modern_spell_drag_frame == ui.GetFrameCount() and modern_spell_drag or nil
-    if dragged and ui.IsMouseHoveringRect(gx, gy, gx + sz, gy + sz) then
+    -- (only while this bar is the window under the mouse: the book's own gems under it take the drop instead)
+    if dragged and ui.IsMouseHoveringRect(gx, gy, gx + sz, gy + sz)
+        and ui.IsWindowHovered(ui.HoveredFlags.ChildWindows | ui.HoveredFlags.AllowWhenBlockedByActiveItem) then
       ui.DrawRect(gx - 2 * s, gy - 2 * s, gx + sz + 2 * s, gy + sz + 2 * s, C.accent[1], C.accent[2], C.accent[3], 1, 7 * s, 2 * s)
       if ui.IsMouseReleased(ui.Mouse.Left) and not dragged.gem then eq.SpellBookMemorize(dragged.slot, g.n - 1) end
     end

@@ -22,4 +22,9 @@ template <std::integral I, std::floating_point F> I saturate_cast(F v) {
     return static_cast<I>(t);
 }
 
+// a + b for unsigned I, held at I's maximum instead of wrapping (a server's count added to a total).
+template <std::unsigned_integral I> constexpr I saturating_add(I a, I b) {
+    return a > std::numeric_limits<I>::max() - b ? std::numeric_limits<I>::max() : static_cast<I>(a + b);
+}
+
 } // namespace hailstone

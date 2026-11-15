@@ -1,5 +1,7 @@
 #include "app/gamepad.h"
 
+#include <algorithm>
+#include <cmath>
 #include <utility>
 
 #include "core/config.h"
@@ -74,7 +76,8 @@ std::vector<std::string> Gamepad::take_focus_requests() { return std::exchange(f
 
 bool Gamepad::rumble(float low, float high, int ms) {
     if (!settings_.rumble || !rumble_) return false;
-    return rumble_(low, high, ms);
+    if (!std::isfinite(low) || !std::isfinite(high)) return false;
+    return rumble_(std::clamp(low, 0.0f, 1.0f), std::clamp(high, 0.0f, 1.0f), std::clamp(ms, 0, kMaxRumbleMs));
 }
 
 void Gamepad::save() {

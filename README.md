@@ -72,6 +72,7 @@ Hailstone is portable: settings, per-server files, characters and logs live in t
 - GCC 13+, Clang 17+ or MSVC 2022
 - `glslc` (shaderc) or `glslangValidator`
 - A Vulkan 1.3 driver (MoltenVK on macOS)
+- Linux, when the system has no SDL 3.2 or newer: pkg-config and the development packages SDL needs for Wayland and X11 (the list is in [tools/docker/linux.Dockerfile](tools/docker/linux.Dockerfile)); configuring stops if SDL would be built without Wayland
 
 Dependencies are fetched automatically unless the system already provides them. On Linux and Windows the in-game browser's helper is built on CEF, which is a few hundred MB to fetch; `-DHAILSTONE_BROWSER=OFF` leaves it out, and pages then open in the system's browser. Run tests with `ctest --test-dir build` and see the client's options with `build/hailstone/hailstone --help`.
 

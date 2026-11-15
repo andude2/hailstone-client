@@ -116,7 +116,8 @@ struct SceneLighting {
     glm::vec4 haze_color{0.0f}; // linear
     glm::vec4 camera{0.0f};
     glm::vec4 screen{0.0f}; // set_screen: the depth terms and the target's texel size, for the modern water
-    glm::vec4 time{0.0f};   // x: seconds, wrapped every 1024 (the water's waves), z: the lightning's flash
+    glm::vec4 time{0.0f};   // x: seconds, wrapped every 1024 (the water's waves), y: the last frame's (the zone renderer
+                            // sets it, for zone.vert's motion), z: the lightning's flash
     glm::vec4 wind{0.0f};   // xy: the way the wind blows (unit), z: its strength (0..1), w: the gusts' (render::wind_at)
     glm::vec4 cover{0.0f};  // the cover map (render/cover_map.h): its corner, 1 / its size, its top
     glm::vec4 cover_params{0.0f}; // x: 1 / its depth range, y: 1 the cover map drawn, z: 1 the water map drawn
@@ -177,9 +178,15 @@ void set_underwater(SceneLighting& lighting, const glm::vec3& camera, const glm:
 inline constexpr float kMaxViewDistance = 12000.0f;
 float extended_far_plane(float original, float multiplier);
 
+// The haze's length as thick as the zone's fog in `view` (SetFog's start, end and density): the original's fog and
+// the haze half clear at the same distance. Density 0.1 (innothule, nektulos version 0, the commons) is a light fog,
+// 0.33 (most zones) a thick one. 0 with the fog off.
+float zone_haze_length(const game::ViewDistance& view);
+
 // The modern mode's view: the original's `view` drawn out to extended_far_plane when `extend` (not under water, in
 // lava or in a thick-fog region), with the fog distances moved out with it (the renderers cull characters at the fog
-// end), and the haze's length (the far plane, or the original fog's end when not extended).
+// end), and the haze's length: the zone's fog's (zone_haze_length), at most the far plane; the far plane, or the
+// fog's end when not extended, with the fog off.
 struct ModernView {
     game::ViewDistance view;
     float haze_length = 0.0f;

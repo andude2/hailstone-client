@@ -762,8 +762,10 @@ void ClientApp::apply_settings() {
     grass_ = config_.get_bool("display.grass", true);
     flora_reach_ = std::clamp(static_cast<float>(config_.get_int("display.flora_distance", static_cast<int>(render::kFloraReach))),
                               render::kFloraReach, render::kMaxFloraReach);
+    grass_density_ = render::grass_density_percent(config_.get_int("display.grass_density", 100));
     neighbour_zones_ = config_.get_bool("display.neighbour_zones", true);
     horizon_hills_ = config_.get_bool("display.horizon_hills", true);
+    neighbour_tint_ = config_.get_bool("display.neighbour_tint", false);
     tree_detail_ = std::clamp(config_.get_int("display.tree_detail", 100), 50, 200);
     ring_cues_ = config_.get_bool("display.target_ring_cues", true);
     ring_xray_ = config_.get_bool("display.target_ring_xray", false);

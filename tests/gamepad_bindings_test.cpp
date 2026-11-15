@@ -2,6 +2,8 @@
 // the backward NPC cycle (game/targeting.h) and eq.gamepad (app/lua_eq_gamepad.cpp). A client extension: docs/gamepad.md is the specification.
 #include <doctest/doctest.h>
 
+#include <limits>
+
 #include <lua.hpp>
 
 #include "app/gamepad.h"
@@ -302,6 +304,42 @@ TEST_CASE("Gamepad settings: section 4's defaults, clamped, by name with or with
     CHECK(t.camera_speed == doctest::Approx(4.0f));
     CHECK_FALSE(t.rumble);
     CHECK(t.deadzone == doctest::Approx(0.2f));
+    // NaN would pass the clamp and be saved; it and the infinities are refused, and a saved one loads as the default.
+    CHECK_FALSE(s.set("deadzone", std::numeric_limits<float>::quiet_NaN()));
+    CHECK_FALSE(s.set("camera_speed", std::numeric_limits<float>::infinity()));
+    CHECK_FALSE(s.set("invert_y", std::numeric_limits<float>::quiet_NaN()));
+    CHECK(s.deadzone == doctest::Approx(0.9f));
+    CHECK(s.camera_speed == doctest::Approx(2.5f));
+    CHECK(s.invert_y);
+    Config bad;
+    bad.parse("gamepad.deadzone = nan\ngamepad.camera_speed = inf\n");
+    GamepadSettings u;
+    u.load(bad);
+    CHECK(u.deadzone == doctest::Approx(0.2f));
+    CHECK(u.camera_speed == doctest::Approx(2.5f));
+}
+
+TEST_CASE("Gamepad rumble: strengths clamped, NaN refused, the length capped") {
+    Config config;
+    app::Gamepad gp(config, {});
+    float got_low = -1, got_high = -1;
+    int got_ms = -1, calls = 0;
+    gp.set_rumble([&](float l, float h, int ms) {
+        got_low = l;
+        got_high = h;
+        got_ms = ms;
+        ++calls;
+        return true;
+    });
+    CHECK(gp.rumble(2.0f, -1.0f, 100000000));
+    CHECK(got_low == 1.0f);
+    CHECK(got_high == 0.0f);
+    CHECK(got_ms == app::Gamepad::kMaxRumbleMs);
+    CHECK(gp.rumble(0.5f, 0.5f, -5));
+    CHECK(got_ms == 0);
+    CHECK_FALSE(gp.rumble(std::numeric_limits<float>::quiet_NaN(), 0.5f, 100));
+    CHECK_FALSE(gp.rumble(0.5f, std::numeric_limits<float>::infinity(), 100));
+    CHECK(calls == 2);
 }
 
 TEST_CASE("Each pad's labels") {

@@ -30,19 +30,21 @@ local kb, kbFor = K.new(), nil -- the keyboard, and what it types ("to", "note",
 -- the sold item's place when it leaves the bags.
 local sellFocus, sellRefocus, lastPage
 
+local UNITS = { { 4, "pp" }, { 5, "gp" }, { 6, "sp" }, { 7, "cp" } }
 local function coins(texts)
   local out = {}
-  local units = { { 4, "pp" }, { 5, "gp" }, { 6, "sp" }, { 7, "cp" } }
-  for _, u in ipairs(units) do
+  for _, u in ipairs(UNITS) do
     local v = tonumber(texts[u[1]] or "") or 0
     if v > 0 then out[#out + 1] = v .. u[2] end
   end
   return #out > 0 and table.concat(out, " ") or "free"
 end
 
-local function tabs(x0, y0)
-  local labels = { "Buy", "Sell" }
-  if eq.Parcels() then labels[3] = "Parcels" end
+local TABS2, TABS3 = { "Buy", "Sell" }, { "Buy", "Sell", "Parcels" }
+local bagSlots = {} -- the bag slots' items, read once a frame (I.readBagSlots)
+
+local function tabs(x0, y0, parcelsHere)
+  local labels = parcelsHere and TABS3 or TABS2
   local x = x0
   T.font(22)
   for i, l in ipairs(labels) do
@@ -66,7 +68,9 @@ ui.window("Merchant", function()
   if pendingBuy then eq.ClickChild(MW, "MW_Buy_Button", "left") pendingBuy = nil end
   if pendingSell then eq.ClickChild(MW, "MW_Sell_Button", "left") pendingSell = nil end
   if pendingSend then eq.ClickChild(MW, "MW_Send_Button", "left") pendingSend = nil end
-  local parcelsHere = eq.Parcels() ~= nil
+  -- (read once a frame, after the clicks above: each read builds the parcel list)
+  local parcelRows, parcelClaiming, _, parcelSending, _, parcelMoney = eq.Parcels()
+  local parcelsHere = parcelRows ~= nil
   if page == 3 and not parcelsHere then page = 1 end
   local title = eq.WindowTitle(MW) or ""
   local pp, gp, sp, cp = eq.Money()
@@ -95,7 +99,7 @@ ui.window("Merchant", function()
     local x0, y0, x1, y1 = W.area()
     local wx, wy = ui.GetWindowPos()
     local listX1 = x1 - T.px(420)
-    local top = tabs(x0, y0)
+    local top = tabs(x0, y0, parcelsHere)
     ui.SetCursorPos(x0 - wx, top - wy)
     local focusedItem, focusedWhere, focusedRow, focusedCompare
     if page == 1 then
@@ -117,10 +121,11 @@ ui.window("Merchant", function()
         local qty = (texts[3] or "") ~= "" and (" x" .. texts[3]) or ""
         T.textIn(rx0 + s + T.px(24), ry0, rx1 - T.px(260), ry1, T.fit((texts[2] or "") .. qty, rx1 - rx0 - s - T.px(300)), C.text, 0)
         local lvl = (texts[8] or "") ~= "" and ("Lvl " .. texts[8] .. "   ") or ""
-        T.textIn(rx1 - T.px(300), ry0, rx1 - T.px(14), ry1, lvl .. coins(texts), C.endurance, 1)
+        local price = coins(texts)
+        T.textIn(rx1 - T.px(300), ry0, rx1 - T.px(14), ry1, lvl .. price, C.endurance, 1)
         if focused then
-          focusedWhere = "Price: " .. coins(texts)
-          focusedRow = { name = texts[2] or "", qty = texts[3] or "", price = coins(texts), tex = tex, uv = { u0, v0, u1, v1 } }
+          focusedWhere = "Price: " .. price
+          focusedRow = { name = texts[2] or "", qty = texts[3] or "", price = price, tex = tex, uv = { u0, v0, u1, v1 } }
           focusedCompare = eq.CompareSlotItem(MW, "ItemList:" .. (i - 1)) -- Hailstone: against what you wear
           if buyList.lastFocus ~= i then -- select it in the stock window: the price and the item to inspect
             buyList.lastFocus = i
@@ -149,8 +154,7 @@ ui.window("Merchant", function()
       end
     elseif page == 3 and not sendMode then
       -- the parcels waiting here
-      local list, claiming = eq.Parcels()
-      list = list or {}
+      local list, claiming = parcelRows or {}, parcelClaiming
       if #list == 0 then
         T.draw(x0, top, "No parcels waiting. Y sends one.", C.dim)
         ui.Dummy(1, 1)
@@ -177,7 +181,7 @@ ui.window("Merchant", function()
       if not kb.open and W.pressed("y") then sendMode, sellRefocus, parcelNote = true, 1, nil end
     elseif page == 3 then
       -- sending: To, Note and money, then your bags (A on an item sends it)
-      local _, _, _, sending, _, money = eq.Parcels()
+      local sending, money = parcelSending, parcelMoney
       if money and money.serial ~= moneySerial then
         moneySerial = money.serial
         sendCoins[money.coin + 1] = money.amount
@@ -223,7 +227,7 @@ ui.window("Merchant", function()
       local function cell(slot, bag, item, where)
         if n % per ~= 0 then ui.SameLine(0, gap) end
         n = n + 1
-        local clicked, focused = T.slot("##send" .. slot .. "_" .. (bag or -1), item, size, {}, pad)
+        local clicked, focused = T.slot(I.cellId("send", slot, bag), item, size, {}, pad)
         if focused then focusedItem, focusedWhere = item, where end
         if clicked and item then
           if to == "" then
@@ -235,12 +239,14 @@ ui.window("Merchant", function()
           end
         end
       end
+      -- (a click here only selects an item for the merchant: nothing moves, so the slots are read once)
+      I.readBagSlots(bagSlots)
       for slot = 23, 32 do
-        local it = eq.Item(slot)
+        local it = bagSlots[slot]
         if it and (it.bagSlots or 0) == 0 then cell(slot, nil, it, eq.SlotName(slot)) end
       end
       for slot = 23, 32 do
-        local bag = eq.Item(slot)
+        local bag = bagSlots[slot]
         if bag and (bag.bagSlots or 0) > 0 then
           for i = 0, bag.bagSlots - 1 do
             local it = eq.Item(slot, i)
@@ -259,7 +265,7 @@ ui.window("Merchant", function()
         if n % per ~= 0 then ui.SameLine(0, gap) end
         n = n + 1
         if sellRefocus == n then ui.SetKeyboardFocusHere() sellRefocus = nil end
-        local clicked, focused = T.slot("##sell" .. slot .. "_" .. (bag or -1), item, size, {}, pad)
+        local clicked, focused = T.slot(I.cellId("sell", slot, bag), item, size, {}, pad)
         if focused then
           focusedItem, focusedWhere, focusedAt = item, where, n
           if item then focusedCompare = eq.CompareItem(slot, bag) end -- Hailstone: against what you wear
@@ -270,12 +276,14 @@ ui.window("Merchant", function()
           pendingSell = true
         end
       end
+      -- (a click here only selects an item for the merchant: nothing moves, so the slots are read once)
+      I.readBagSlots(bagSlots)
       for slot = 23, 32 do
-        local it = eq.Item(slot)
+        local it = bagSlots[slot]
         if it and (it.bagSlots or 0) == 0 then cell(slot, nil, it, eq.SlotName(slot)) end
       end
       for slot = 23, 32 do
-        local bag = eq.Item(slot)
+        local bag = bagSlots[slot]
         if bag and (bag.bagSlots or 0) > 0 then
           for i = 0, bag.bagSlots - 1 do
             local it = eq.Item(slot, i)
@@ -326,7 +334,7 @@ ui.window("Merchant", function()
     T.rect(listX1 + T.px(24), sy, x1, y1, C.sunken, 1, T.px(14))
     T.font(18)
     if page == 3 then
-      local _, claiming, _, sending = eq.Parcels()
+      local claiming, sending = parcelClaiming, parcelSending
       T.draw(listX1 + T.px(42), sy + T.px(16), "PARCELS", C.dim)
       T.unfont()
       T.font(22)

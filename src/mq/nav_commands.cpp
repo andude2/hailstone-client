@@ -225,6 +225,13 @@ void add_nav_commands(plugin::Hooks& h, plugin::Hooks::Owner owner, const Comman
             if (iequals(sub, "door")) {
                 bool click = !w.empty() && iequals(w.back(), "click");
                 if (click) w.pop_back();
+                // A click on arrival uses the door, an action of its own: that needs 'actions'. The walk alone
+                // (and the doors a path opens on its way, PathOptions::open_doors) stays under 'move'.
+                if (click && (plugin::caller_caps() & plugin::kCapActions) == 0) {
+                    out(std::format("{}: /nav door ... click needs the server's 'actions' permission",
+                                    plugin::caller_name()));
+                    return;
+                }
                 const game::Door* door = nullptr;
                 if (w.size() >= 3 && iequals(w[1], "id")) {
                     if (auto id = id_number<std::uint8_t>(w, 2)) door = conn->door(*id);

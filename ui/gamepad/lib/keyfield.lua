@@ -10,6 +10,13 @@ local pad = dofile("lib/pad.lua")
 local KB = dofile("lib/keyboard.lua") -- (its keys and what shift makes of them)
 local K = {}
 
+-- The keys' button ids, made once (not each frame).
+local KEY_IDS = {}
+for r, row in ipairs(KB.KEYS) do
+  KEY_IDS[r] = {}
+  for k in ipairs(row) do KEY_IDS[r][k] = "##key" .. r .. "_" .. k end
+end
+
 function K.new() return { shift = false, focus = false } end
 function K.focus(kb) kb.focus = true end
 
@@ -34,7 +41,7 @@ function K.draw(kb, get, set, x0, x1, opts)
         kb.focus = false
       end
       local label = KB.label(key, kb.shift)
-      if T.button("##key" .. r .. "_" .. k, label, kw, kh, {}, pad) then
+      if T.button(KEY_IDS[r][k], label, kw, kh, {}, pad) then
         put(label)
         kb.shift = false
       end
@@ -51,12 +58,12 @@ function K.draw(kb, get, set, x0, x1, opts)
     if T.button("##knl", "New Line", ew, kh, {}, pad) then put("\n") end
     ui.SameLine(0, gap)
   end
-  if T.button("##kdel", "Delete", ew, kh, {}, pad) then set((get() or ""):sub(1, -2)) end
+  if T.button("##kdel", "Delete", ew, kh, {}, pad) then set(T.dropChar(get() or "")) end
   ui.SameLine(0, gap)
   if T.button("##kdone", "Done", ew, kh, { primary = true }, pad) then result = "done" end
   -- the pad's shortcuts while the window has the focus
   if ui.IsWindowFocused(3) then
-    if pad.menuPressed("x") then set((get() or ""):sub(1, -2)) end
+    if pad.menuPressed("x") then set(T.dropChar(get() or "")) end
     if pad.menuPressed("y") then put(" ") end
     if pad.menuPressed("lb") then kb.shift = not kb.shift end
   end

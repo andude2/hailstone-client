@@ -39,6 +39,20 @@ int entries(const fs::path& dir) {
 }
 } // namespace
 
+TEST_CASE("Settings files: a number setting that is NaN or an infinity reads as its default") {
+    Config c;
+    c.parse("a = 1.5\nb = 2x\nc = nan\nd = inf\ne = -INFINITY\nf =\ng = word\nh = 1e39\n");
+    CHECK(c.get_float("a", 9.0f) == 1.5f);
+    CHECK(c.get_float("b", 9.0f) == 2.0f); // the number the value starts with
+    CHECK(c.get_float("c", 9.0f) == 9.0f);
+    CHECK(c.get_float("d", 9.0f) == 9.0f);
+    CHECK(c.get_float("e", 9.0f) == 9.0f);
+    CHECK(c.get_float("f", 9.0f) == 9.0f);
+    CHECK(c.get_float("g", 9.0f) == 9.0f);
+    CHECK(c.get_float("h", 9.0f) == 9.0f); // past float's range: strtof's HUGE_VALF
+    CHECK(c.get_float("missing", 9.0f) == 9.0f);
+}
+
 TEST_CASE("Settings files: written whole, through a temporary file") {
     TempDir tmp("atomic");
     const fs::path file = tmp.path / "sub" / "a.ini";
@@ -187,7 +201,8 @@ TEST_CASE("Settings files: a character's settings over hailstone.ini") {
 
 TEST_CASE("Settings files: the keys a character's settings leave in hailstone.ini") {
     for (const char* key : {"assets.path", "addons.index", "update.skip", "login.profile", "login.last_world.x",
-                            "window.x", "display.window_mode", "display.resolution", "display.msaa", "ui.name",
+                            "window.x", "display.window_mode", "display.resolution", "display.msaa",
+                            "display.upscaler", "ui.name",
                             "ui.scale", "audio.pregame_music", "plugins.autoload", "scripts.autoload", "news.last_read"})
         CHECK_MESSAGE(Config::is_shared_key(key), key);
     for (const char* key : {"display.render_scale", "display.shadows", "display.max_fps", "display.clip_plane",
@@ -230,4 +245,75 @@ TEST_CASE("Settings files: the log keeps the earlier runs' files") {
     CHECK(read(tmp.path / "logs" / "test.2.log").find("run 3") != std::string::npos);
     CHECK(read(tmp.path / "logs" / "test.3.log").find("run 2") != std::string::npos);
     CHECK_FALSE(fs::exists(tmp.path / "logs" / "test.4.log"));
+}
+
+TEST_CASE("Settings files: a second client's old logs go, the newest and the recent ones stay") {
+    TempDir tmp("log_pids");
+    const fs::path logs = tmp.path / "logs";
+    fs::create_directories(logs);
+    const auto now = fs::file_time_type::clock::now();
+    // Eight old ones (days ago, the newest first) and one written an hour ago; the earlier runs' files and others
+    // of other names are not second clients' logs.
+    for (int i = 0; i < 8; ++i) {
+        const fs::path f = logs / ("test." + std::to_string(1000 + i) + ".log");
+        std::ofstream(f) << "old";
+        fs::last_write_time(f, now - std::chrono::hours(24 * (2 + i)));
+    }
+    std::ofstream(logs / "test.2000.log") << "recent";
+    fs::last_write_time(logs / "test.2000.log", now - std::chrono::hours(1));
+    for (const char* other : {"test.1.log", "test.2.log", "test.3.log", "viewer.1234.log", "test.x1.log"}) {
+        std::ofstream(logs / other) << "other";
+        fs::last_write_time(logs / other, now - std::chrono::hours(24 * 30));
+    }
+    REQUIRE(log::open_file(logs / "test.log"));
+    log::close_file();
+    // The newest five: the recent one and the four newest old ones.
+    CHECK(fs::exists(logs / "test.2000.log"));
+    for (int i = 0; i < 8; ++i)
+        CHECK_MESSAGE(fs::exists(logs / ("test." + std::to_string(1000 + i) + ".log")) == (i < 4), i);
+    for (const char* other : {"test.2.log", "test.3.log", "viewer.1234.log", "test.x1.log"})
+        CHECK_MESSAGE(fs::exists(logs / other), other);
+}
+
+TEST_CASE("Settings files: the log file stops at its limit with a line saying so") {
+    TempDir tmp("log_limit");
+    const fs::path file = tmp.path / "logs" / "test.log";
+    log::set_file_limit(300);
+    REQUIRE(log::open_file(file));
+    for (int i = 0; i < 100; ++i) log::info("line {} of a run that logs a lot", i);
+    log::close_file();
+    log::set_file_limit(0);
+    const std::string text = read(file);
+    CHECK(text.size() < 500);
+    CHECK(text.find("line 0 ") != std::string::npos);
+    CHECK(text.find("line 99 ") == std::string::npos);
+    CHECK(text.find("reached its limit of 300 bytes") != std::string::npos);
+    // The next open starts a new file with the limit back to the default.
+    REQUIRE(log::open_file(file));
+    for (int i = 0; i < 100; ++i) log::info("line {} again", i);
+    log::close_file();
+    CHECK(read(file).find("line 99 again") != std::string::npos);
+}
+
+TEST_CASE("Settings files: a shared key a character's file still holds moves to hailstone.ini when it has none") {
+    test::ScratchDir tmp("shared_key_moves");
+    const auto one = tmp.path() / "One" / "hailstone.ini";
+    {
+        Config old; // a character's file from before display.upscaler was shared
+        old.set("display.upscaler", "fsr3");
+        old.set("display.render_scale", "67");
+        std::filesystem::create_directories(one.parent_path());
+        REQUIRE(old.save(one));
+    }
+    Config config;
+    REQUIRE(config.attach_character(one));
+    CHECK(config.get_string("display.upscaler") == "fsr3");
+    config.detach_character();
+    CHECK(config.get_string("display.upscaler") == "fsr3"); // kept in the shared settings
+    CHECK_FALSE(config.get("display.render_scale"));       // a character's own stays its own
+
+    Config set_globally; // hailstone.ini's own value wins over a stale one in the character's file
+    set_globally.set("display.upscaler", "taa");
+    REQUIRE(set_globally.attach_character(one));
+    CHECK(set_globally.get_string("display.upscaler") == "taa");
 }

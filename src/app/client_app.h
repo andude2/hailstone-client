@@ -2,6 +2,8 @@
 
 #include <string>
 
+#include "app/login_launch.h"
+
 namespace hailstone::app {
 
 struct ClientOptions {
@@ -10,6 +12,7 @@ struct ClientOptions {
     bool validation = false;
     int frames = 0;          // exit after this many frames (0 = until closed)
     std::string screenshot;  // with frames: save the last frame as PNG
+    bool screenshot_generated = false; // --screenshot-generated: screenshots save frame generation's in-between frame
     float ui_scale = 0.0f;   // > 0 overrides the display scale
     int window_width = 1280, window_height = 720; // --window-size WxH
     int clip_plane = 15;     // eqclient.ini ClipPlane, 0..20
@@ -18,6 +21,7 @@ struct ClientOptions {
     // this character without any clicks. Empty = interactive.
     std::string auto_user;
     std::string auto_password;
+    LoginLaunch login_launch; // one-use launcher ticket and optional world; never persisted
     std::string auto_host;  // test logins: this server (default: the dev server, never the remembered one)
     int auto_port = 0;
     std::string server;     // --server: the saved server (id or name) picked on the login screen and by test logins

@@ -20,4 +20,14 @@ bool write_file_synced(const std::filesystem::path& path, std::string_view text)
 // with MOVEFILE_WRITE_THROUGH. *ec why it failed.
 bool replace_file_synced(const std::filesystem::path& from, const std::filesystem::path& to, std::error_code& ec);
 
+// Flushes a file already written (and closed) by other means to the disk: an unpacked file before the rename that
+// puts it in place. Opened for reading on POSIX, so a file made read-only can be synced too. False when it cannot be
+// opened or the flush fails.
+bool sync_file(const std::filesystem::path& path);
+
+// Appends `text` to `path` (creating it) and has it on the disk before it returns: a write-ahead journal's line,
+// which must be there before the move it names is made. When the call creates the file, its folder is synced too
+// (POSIX), so the file's name is on the disk as well. False when anything fails.
+bool append_file_synced(const std::filesystem::path& path, std::string_view text);
+
 } // namespace hailstone::platform

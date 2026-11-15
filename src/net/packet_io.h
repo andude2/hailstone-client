@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <new>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -40,7 +41,8 @@ inline void write_cstring(ByteWriter& w, std::string_view s) {
     w.le<std::uint8_t>(0);
 }
 
-// Runs a decoder body; a read past the end (or any range error) gives nullopt.
+// Runs a decoder body; a read past the end (or any range error) gives nullopt, and so does an allocation the
+// packet's counts made too large: a decoder never throws into the handler loop.
 template <typename F> auto decode_with(const AppPacket& p, F&& body) -> std::optional<decltype(body(std::declval<ByteReader&>()))> {
     try {
         ByteReader r(p.data);
@@ -48,6 +50,8 @@ template <typename F> auto decode_with(const AppPacket& p, F&& body) -> std::opt
     } catch (const std::out_of_range&) {
         return std::nullopt;
     } catch (const std::length_error&) {
+        return std::nullopt;
+    } catch (const std::bad_alloc&) {
         return std::nullopt;
     }
 }

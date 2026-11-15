@@ -6,12 +6,14 @@
 //   eq.PluginOptions()           {plugin, owner, name, label, min, max, value} for each plugin option (owner: its
 //                                tag, plugin::UiBridge::owner_tag)
 //   eq.SetPluginOption(plugin, name, value)   plugin: a name or an owner tag
-//   eq.PluginMenu()              {plugin, owner, label, command} for each menu entry; eq.PluginMenuClick(i) runs it
-//                                as its owner would (run_plugin_menu)
+//   eq.PluginMenu()              {plugin, owner, label, command} for each menu entry the caller may reach (a
+//                                plugin's code: its own); eq.PluginMenuClick(i) runs that list's entry i as its
+//                                owner would (run_plugin_menu)
 //   q = eq.PluginConsent()       the server's compiled plugins waiting for the player's word, else nil:
 //                                {server, serial, warning, plugins = {{name, file, size, sha256, short}}}
-//   ok = eq.AnswerPluginConsent(allow)   true allow, false refuse (both kept for those bytes), nil put away until
-//                                the next zone-in; false when there is no question. A plugin's code gets nil / false.
+//   ok = eq.AnswerPluginConsent(allow, serial)   true allow, false refuse (both kept for those bytes), nil put away
+//                                until the next zone-in; serial the question's. False when there is no question or
+//                                it is not that one any more. A plugin's code gets nil / false.
 
 // The Lua scripts' part (mq/lua_mq.h; the Scripts window, docs/plugins.md "The Scripts window"; app/lua_eq_scripts.cpp):
 //   list, info = eq.Scripts([rescan])   {name, status ("" | "running" | "paused" | "exited" | "error"), error,

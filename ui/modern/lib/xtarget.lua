@@ -9,16 +9,17 @@
 --     style = function(r): nil, or { alpha = n (the row drawn faded), ring = {r, g, b, a} (its outline),
 --       strike = true (a line through the name), tag = { text, {r, g, b, a} } (a small label after the name) },
 --   }
--- r, a filled or (in layout mode) empty slot: n (0-based slot; hailstone.xtarget(n + 1) in a script), id (the
+-- r, a filled or empty slot (draw and style are called for filled ones only): n (0-based slot; hailstone.xtarget(n + 1) in a script), id (the
 -- game's gauge child), name, filled, hp (0..1), con ({r, g, b, a} or nil), role (nil for an auto hater), aggro,
 -- mana, endurance.
 -- The window: replaces the game's ExtendedTargetWnd with a compact list at the right, shown while the game
--- shows the window: a solid panel with a title strip (drag it, or any empty spot, to move the frame) with the
+-- shows the window: a solid panel with a title strip (drag it to move the frame) with the
 -- filled and the available slots (the server's count: 5 + the Extended Target AA's, less the slots the server
--- module hides), one row per slot that holds
--- a spawn (every slot in layout mode), its name in its con colour over its health, and the slot's role when it is
--- not an auto hater (the game's role button tool tip). A click targets it; a right click opens the game's menu for
--- that slot (its type, auto-add haters, mana / endurance bars, target sets).
+-- module hides), one row per slot, an empty one too (faint, "(empty)" or the name the slot keeps), a filled one's name
+-- in its con colour over its health, and the slot's role when it is not an auto hater (the game's role button tool
+-- tip). A click targets it; a right click opens the game's menu for that slot (its type, Current Target, auto-add
+-- haters, mana / endurance bars, target sets), so an empty slot can be given a type. The frame fits its rows until
+-- the player drags its right or bottom edge; then the rows scroll inside it.
 local hud = dofile("lib/hud.lua")
 local T = hud.T
 local C = T.color
@@ -43,11 +44,13 @@ local rows, nRows, slots, filledCount, target, total = {}, 0, 0, 0, "", 0
 local rowOf, conOf = {}, {} -- slot -> its row table, its con colour table
 local NO_OPTS = {}
 local ROW, HEAD, PAD = 30, 24, 6
+-- Under the rows: room for hud.Window's corner grip (14 pixels a side, at least 12 on screen), with 2 to spare, so the
+-- scrolling area (a child window, which takes the mouse wherever it lies) leaves the bottom edge and the grip free.
+local FOOT = 16
 
 local function rowH(r) return ROW + ((r.mana or r.endurance) and 5 or 0) end
 
 local function gather()
-  local unlocked = hud.Unlocked()
   nRows, slots = 0, 0
   for n = 0, MAX_SLOTS - 1 do
     local ids = IDS[n + 1]
@@ -58,7 +61,7 @@ local function gather()
     if shown then slots = slots + 1 end
     local frac, name, raw = eq.Gauge(42 + n)
     local filled = shown and eq.ChildShown(WINDOW, ids.hpLabel) == true
-    if shown and (filled or unlocked) then
+    if shown then -- every slot the game shows, an empty one too: its row is where its right click picks it
       local r, g, b = eq.ChildColor(WINDOW, id)
       local row = rowOf[n]
       if not row then
@@ -74,8 +77,9 @@ local function gather()
         end
         con[1], con[2], con[3], con[4] = r, g, b, 1
       end
-      row.n, row.id, row.hp, row.name, row.filled, row.raw, row.con = n, id, frac, filled and name or "(empty)", filled,
-        raw, con
+      -- an empty slot: the name the slot keeps (a named player not in the zone), else "(empty)"
+      if not filled then name = (name and name ~= "") and name or "(empty)" end
+      row.n, row.id, row.hp, row.name, row.filled, row.raw, row.con = n, id, frac, name, filled, raw, con
       row.mana, row.endurance, row.aggro, row.role = nil, nil, nil, nil
       if eq.ChildShown(WINDOW, ids.mana) == true then row.mana = eq.Gauge(62 + n) end
       if eq.ChildShown(WINDOW, ids.stamina) == true then row.endurance = eq.Gauge(82 + n) end
@@ -87,7 +91,7 @@ local function gather()
     end
   end
   target = eq.Label(28) or ""
-  total = HEAD + PAD + 4
+  total = HEAD + 4 + FOOT
   filledCount = 0
   for i = 1, nRows do
     local r = rows[i]
@@ -111,11 +115,22 @@ local function body(x0, y, w0, h, s)
   T.Text(x0 + 10 * s, y + (HEAD * s - hh) / 2, "Extended Target", C.muted, T.font.small)
   if slots > 0 then T.Text(x0 + w0 - 10 * s, y + (HEAD * s - hh) / 2, filledCount .. " / " .. slots, C.faint, T.font.small, "right") end
   ui.DrawLine(x0 + 8 * s, y + HEAD * s, x0 + w0 - 8 * s, y + HEAD * s, C.ink[1], C.ink[2], C.ink[3], 0.07, 1)
-  local x, w = x0 + PAD * s, w0 - 2 * PAD * s
-  local cy = y + HEAD * s + 4 * s
+  local top = y + HEAD * s + 4 * s
   if nRows == 0 then
-    T.Text(x0 + w0 / 2, cy + 4 * s, "No extended targets", C.faint, T.font.small, "center")
+    T.Text(x0 + w0 / 2, top + 4 * s, "No extended targets", C.faint, T.font.small, "center")
+    return
   end
+  -- The rows scroll under the title strip when the player sizes the frame shorter than they are (the wheel, or the
+  -- scroll bar). The area stays off the frame's right and bottom edges and its corner grip (hud.Window's resize
+  -- handles: 6 pixels at least 5, the grip 14 at least 12), which a child window over them would hide from the
+  -- mouse. Sized by size() it is a little taller than the rows, so no scroll bar shows for rounding.
+  local side = math.max(PAD * s, 7)
+  local listH = y + h - top - math.max(14 * s, 12)
+  if listH < 1 then return end
+  ui.SetCursorScreenPos(x0 + side, top)
+  ui.BeginChild("##xtrows", w0 - 2 * side, listH, false)
+  local x, cy = ui.GetCursorScreenPos() -- (the area's top left, scrolled)
+  local w = ui.GetContentRegionAvail() -- (less the scroll bar while it shows)
   local _, th = T.TextSize("Ag", T.font.small)
   for i = 1, nRows do
     local r = rows[i]
@@ -181,9 +196,11 @@ local function body(x0, y, w0, h, s)
     end
     cy = cy + rh + 3 * s
   end
+  ui.EndChild()
 end
 
-local HUD_OPTS = { size = size, panelOpts = { opaque = true } }
+-- Sized to its rows until the player drags an edge; then that size is kept and the rows scroll in it.
+local HUD_OPTS = { size = size, panelOpts = { opaque = true }, resizable = { 160, 70 } }
 
 function M.window(o)
   opts = o or NO_OPTS

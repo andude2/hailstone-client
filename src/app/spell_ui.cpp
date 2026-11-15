@@ -62,6 +62,17 @@ ui::BuffView buff_view(const game::SpellTable& table, const game::EqStrings& str
 
 } // namespace
 
+SpellWindowsDrawn spell_windows_drawn(bool book_open) {
+    SpellWindowsDrawn d;
+    d.bar = !ui::lua::replaces("CastSpellWnd");
+    d.cast = !ui::lua::replaces("CastingWindow");
+    d.book = book_open && !ui::lua::replaces("SpellBookWnd");
+    d.buffs = !ui::lua::replaces("BuffWindow");
+    d.songs = !ui::lua::replaces("ShortDurationBuffWindow");
+    d.target = !ui::lua::replaces("TargetWindow");
+    return d;
+}
+
 DescriptionPlayer description_player(const net::GameConnection& conn, const game::mechanics::Character* character) {
     DescriptionPlayer p;
     p.character = character;
@@ -110,9 +121,20 @@ void SpellUi::draw(net::GameConnection& conn, const game::mechanics::Character* 
     const std::uint8_t class_id = conn.profile() ? conn.profile()->class_ : 0;
     const int usable = conn.usable_gems();
 
+    // CSpellBookWnd's rules are the connection's (game/spell_book.h): opening
+    // may be refused, it sits the player down, and standing up, moving or
+    // zoning close it.
+    if (toggle_) {
+        toggle_ = false;
+        if (conn.spell_book_open()) conn.close_spell_book();
+        else conn.open_spell_book();
+    }
+    book_.open = conn.spell_book_open();
+    const SpellWindowsDrawn drawn = spell_windows_drawn(book_.open);
+
     // Gems.
     ui::SpellBarView bar;
-    for (int g = 0; g < game::kSpellGems; ++g) {
+    for (int g = 0; drawn.bar && g < game::kSpellGems; ++g) {
         const auto& gem = st.gems[static_cast<std::size_t>(g)];
         ui::SpellGemView v;
         v.usable = g < usable;
@@ -161,10 +183,10 @@ void SpellUi::draw(net::GameConnection& conn, const game::mechanics::Character* 
             std::clamp(1.0f - static_cast<float>(st.memorizing->ticks_left) / static_cast<float>(game::kMemorizeTicks), 0.0f, 1.0f);
     }
 
-    // Book.
+    // Book: up to 720 entries, each with a full tooltip, so only while the C++ book shows them.
     book_.entries.clear();
     book_.usable_gems = usable;
-    for (int slot = 0; slot < game::kSpellBookSize; ++slot) {
+    for (int slot = 0; drawn.book && slot < game::kSpellBookSize; ++slot) {
         std::uint32_t id = st.book[static_cast<std::size_t>(slot)];
         if (id == game::kNoSpell || id == 0) continue;
         const auto* s = table.get(id);
@@ -180,27 +202,19 @@ void SpellUi::draw(net::GameConnection& conn, const game::mechanics::Character* 
     }
     book_.status = st.memorizing ? cast.memorizing + "..." : std::string();
     book_.cursor_scroll = conn.cursor_scroll_spell() != 0;
-    // CSpellBookWnd's rules are the connection's (game/spell_book.h): opening
-    // may be refused, it sits the player down, and standing up, moving or
-    // zoning close it.
-    if (toggle_) {
-        toggle_ = false;
-        if (conn.spell_book_open()) conn.close_spell_book();
-        else conn.open_spell_book();
-    }
-    book_.open = conn.spell_book_open();
 
     // Buffs.
     ui::BuffWindowView buffs;
-    for (int slot = 0; slot < game::kBuffSlots; ++slot) {
+    for (int slot = 0; (drawn.buffs || drawn.songs) && slot < game::kBuffSlots; ++slot) {
         const auto& b = st.buffs[static_cast<std::size_t>(slot)];
         if (b.empty()) continue;
-        auto v = buff_view(table, strings, player, slot, b, now);
-        (slot >= game::kLongBuffSlots && slot < game::kLongBuffSlots + game::kShortBuffSlots ? buffs.songs : buffs.buffs)
-            .push_back(std::move(v));
+        const bool song = slot >= game::kLongBuffSlots && slot < game::kLongBuffSlots + game::kShortBuffSlots;
+        if (!(song ? drawn.songs : drawn.buffs)) continue;
+        (song ? buffs.songs : buffs.buffs).push_back(buff_view(table, strings, player, slot, b, now));
     }
     const auto& world = conn.world();
-    if (world.target_id && st.target_buffs_entity == world.target_id && world.target_id != world.player_id) {
+    if (drawn.target && world.target_id && st.target_buffs_entity == world.target_id &&
+        world.target_id != world.player_id) {
         if (auto it = world.spawns.find(world.target_id); it != world.spawns.end()) {
             buffs.target_name = game::display_name(it->second.name);
             for (const auto& [slot, b] : st.target_buffs)
@@ -209,13 +223,11 @@ void SpellUi::draw(net::GameConnection& conn, const game::mechanics::Character* 
     }
 
     ui::SpellActions actions;
-    // Each off while its Lua window (ui/<pack>) stands in for it.
-    if (!ui::lua::replaces("CastSpellWnd")) ui::spell_bar_window(bar, actions, icons_.get());
-    if (!ui::lua::replaces("CastingWindow")) ui::cast_bar_window(cast);
-    if (ui::lua::replaces("BuffWindow")) buffs.buffs.clear();
-    if (ui::lua::replaces("ShortDurationBuffWindow")) buffs.songs.clear();
-    if (ui::lua::replaces("TargetWindow")) buffs.target.clear();
-    if (!ui::lua::replaces("SpellBookWnd")) ui::spell_book_window(book_, actions, icons_.get());
+    // Each off while its Lua window (ui/<pack>) stands in for it (spell_windows_drawn); the buff lists of a replaced
+    // window were left empty above.
+    if (drawn.bar) ui::spell_bar_window(bar, actions, icons_.get());
+    if (drawn.cast) ui::cast_bar_window(cast);
+    if (drawn.book) ui::spell_book_window(book_, actions, icons_.get());
     ui::buff_windows(buffs, actions, icons_.get());
 
     if (!book_.open && conn.spell_book_open()) conn.close_spell_book(); // the window's close button

@@ -1,6 +1,7 @@
 -- Raid: replaces the game's RaidWindow. The raid as twelve group cards side by side (they reflow to the window's
 -- width), the players in no group in a strip above them, a summary line (players, average level, the leader,
--- locked or open) with a search that picks players out, and the raid's buttons under the cards. An invitation
+-- locked or open) with a search that picks players out, member actions in a right-click menu, and raid-wide buttons
+-- under the cards. An invitation
 -- shows as a banner with Accept and Decline.
 --
 -- Everything goes through the game's window: the members are its two lists (RAID_PlayerList, the grouped players,
@@ -12,9 +13,8 @@
 -- The game enables the group buttons for the leader of a locked raid only (CRaidWnd::UpdateButtons). So that the
 -- raid leader can always drag, a move asked for while the raid is unlocked presses Lock first and makes the move
 -- once the lock has come back from the server; a strip over the cards says so and holds Lock / Unlock. A drop on a
--- full group (six) is refused here rather than sent (EQEmu ignores it). The stock buttons the window leaves
--- disabled (Main Assist, Mark NPC, Find PC, the task and expedition invites, Remove Leader) are not drawn. The Notes
--- page has the members' notes and the message of the day.
+-- full group (six) is refused here rather than sent (EQEmu ignores it). Leadership and invitation controls follow
+-- the window's permissions and ability ranks. The Notes page has the members' notes and the message of the day.
 local hud = dofile("lib/hud.lua")
 local W = dofile("lib/widgets.lua")
 local S = dofile("lib/social.lua")
@@ -31,18 +31,39 @@ local drag = nil -- the member being dragged: { name, class, group, classColor }
 local pending = {} -- moves waiting for the raid's lock: { name, group, at }
 local bodyFrame = -1 -- the frame the members page or the notes last drew
 
+-- A member's record by the list row it was read from: S.Rows hands back last call's row table while the row reads
+-- the same, so a member that did not change keeps its record (and its lower-case words and id) from frame to frame.
+-- (Weak keys: a row that changed or went drops its record.)
+local memberOfRow = setmetatable({}, { __mode = "k" })
+local function memberOf(list, r)
+  local m = memberOfRow[r]
+  if m then return m end
+  -- columns: group, name, level, class, role, raid rank
+  local t = r.texts
+  m = { list = list, row = r.row, group = tonumber(t[1] or ""), name = t[2] or "", level = t[3] or "",
+    class = t[4] or "", role = t[5] or "", rank = t[6] or "" }
+  -- the class colour picked in Raid Options (the game's class cell colour); white (the default) keeps this pack's
+  local cc = t.colors and t.colors[4]
+  if cc and not (cc[1] >= 0.999 and cc[2] >= 0.999 and cc[3] >= 0.999) then m.classColor = cc end
+  -- what the search compares and the line's id, made once a record
+  m.lname, m.lclass, m.labbr = m.name:lower(), m.class:lower(), S.ClassAbbr(m.class):lower()
+  m.id = "##m" .. list .. r.row
+  memberOfRow[r] = m
+  return m
+end
+
 -- The raid as the window's lists give it: members by group (1..12), the ungrouped, the selected name, the leader.
+-- One table, filled again each call (what a frame reads is that frame's: nothing keeps it across frames).
+local raidRead = { groups = {}, ungrouped = {}, count = 0, leader = nil, selected = nil }
+for g = 1, GROUPS do raidRead.groups[g] = {} end
+local function clear(t) for k = #t, 1, -1 do t[k] = nil end end
 local function readRaid()
-  local raid = { groups = {}, ungrouped = {}, count = 0, leader = nil, selected = nil }
-  for g = 1, GROUPS do raid.groups[g] = {} end
+  local raid = raidRead
+  raid.count, raid.leader, raid.selected = 0, nil, nil
+  for g = 1, GROUPS do clear(raid.groups[g]) end
+  clear(raid.ungrouped)
   local function add(list, r, sel)
-    -- columns: group, name, level, class, role, raid rank
-    local t = r.texts
-    local m = { list = list, row = r.row, group = tonumber(t[1] or ""), name = t[2] or "", level = t[3] or "",
-      class = t[4] or "", role = t[5] or "", rank = t[6] or "" }
-    -- the class colour picked in Raid Options (the game's class cell colour); white (the default) keeps this pack's
-    local cc = t.colors and t.colors[4]
-    if cc and not (cc[1] >= 0.999 and cc[2] >= 0.999 and cc[3] >= 0.999) then m.classColor = cc end
+    local m = memberOf(list, r)
     if m.rank == "Raid Leader" then raid.leader = m.name end
     if r.row == sel then raid.selected = m end
     raid.count = raid.count + 1
@@ -52,10 +73,14 @@ local function readRaid()
   for _, r in ipairs(rows) do
     local m = add(GROUPED, r, sel)
     local g = m.group
-    if g and raid.groups[g] then table.insert(raid.groups[g], m) else table.insert(raid.ungrouped, m) end
+    local into = g and raid.groups[g] or raid.ungrouped
+    into[#into + 1] = m
   end
   rows, sel = S.Rows(WINDOW, UNGROUPED)
-  for _, r in ipairs(rows) do table.insert(raid.ungrouped, add(UNGROUPED, r, sel)) end
+  for _, r in ipairs(rows) do
+    local u = raid.ungrouped
+    u[#u + 1] = add(UNGROUPED, r, sel)
+  end
   return raid
 end
 
@@ -131,18 +156,23 @@ end
 
 local function matches(m, needle)
   if needle == "" then return true end
-  return m.name:lower():find(needle, 1, true) or m.class:lower():find(needle, 1, true)
-    or S.ClassAbbr(m.class):lower():find(needle, 1, true)
+  return m.lname:find(needle, 1, true) or m.lclass:find(needle, 1, true) or m.labbr:find(needle, 1, true)
 end
 
--- The member's note (the note list's third column), read only for a tooltip.
+-- The member's note (the note list's third column), read only for a tooltip: the list is scanned again for the same
+-- name at most every half second while the tooltip stays up, not every frame.
+local NOTE_EVERY = 0.5
+local noteName, noteText, noteAt = nil, "", -1
 local function noteOf(name)
+  local now = ui.GetTime()
+  if name == noteName and now >= noteAt and now - noteAt < NOTE_EVERY then return noteText end
+  noteName, noteText, noteAt = name, "", now
   local rows = eq.ListInfo(WINDOW, "RAID_NoteList") or 0
   for r = 0, rows - 1 do
     local t = eq.ListRow(WINDOW, "RAID_NoteList", r)
-    if t and t[2] == name then return t[3] or "" end
+    if t and t[2] == name then noteText = t[3] or ""; break end
   end
-  return ""
+  return noteText
 end
 
 -- A small rounded tag (RL, GL, MA, MK) ending at x1; returns its width with its gap.
@@ -167,7 +197,7 @@ local function memberLine(m, x, y, w, s, raid, needle, drags)
   local lh = lineHeight(s)
   local bh = lh - 2 * s -- (the backing leaves a gap between lines)
   local selected = raid.selected and raid.selected.name == m.name
-  local hit = T.Hit("##m" .. m.list .. m.row, x, y, x + w, y + bh)
+  local hit = T.Hit(m.id, x, y, x + w, y + bh)
   local hovered = ui.IsItemHovered()
   local dragged = drag and drag.name == m.name
   local waiting = pendingFor(m.name)
@@ -202,7 +232,7 @@ local function memberLine(m, x, y, w, s, raid, needle, drags)
 
   -- a click selects the row in the game's list; right-click is the list's own; a drag carries the member
   if hit and not drag then eq.ListClick(WINDOW, m.list, m.row, "left") end
-  if ui.IsItemClicked(ui.Mouse.Right) and not ui.GetIO().alt then
+  if not drag and ui.IsItemClicked(ui.Mouse.Right) and not ui.GetIO().alt then
     eq.ListClick(WINDOW, m.list, m.row, "right")
     T.TakeRightClick()
   end
@@ -218,6 +248,7 @@ local function memberLine(m, x, y, w, s, raid, needle, drags)
     local note = noteOf(m.name)
     if note ~= "" then lines[#lines + 1] = "Note: " .. note end
     if waiting then lines[#lines + 1] = "Moving once the raid is locked..." end
+    if eq.ContextMenus() then lines[#lines + 1] = "Right-click for member actions" end
     if drags then lines[#lines + 1] = "Drag onto another group to move" end
     ui.SetTooltip(table.concat(lines, "\n"))
   end
@@ -275,6 +306,8 @@ local function dropGlow(raid, g, x, y, w, h)
 end
 
 -- One group's card at (x, y), w x h, with room for `lines` lines.
+local GROUP_TITLES, HERE_IDS = {}, {} -- "Group g" and its Move here id, made once
+for g = 1, GROUPS do GROUP_TITLES[g], HERE_IDS[g] = "Group " .. g, "##here" .. g end
 local function groupCard(g, list, x, y, w, h, lines, s, raid, needle, drags)
   local glow = dropGlow(raid, g, x, y, w, h)
   T.Panel(x, y, x + w, y + h, s, { radius = 6, glow = glow, glowWidth = glow and 2 or nil })
@@ -282,13 +315,13 @@ local function groupCard(g, list, x, y, w, h, lines, s, raid, needle, drags)
   local _, th = T.TextSize("Ag", T.font.small)
   local n = #list
   -- the header: the group's number, its average level, its head count as pips (or Move here)
-  local hw = T.Text(x + pad + 2 * s, y + pad, "Group " .. g, C.heading or C.accent, T.font.small)
+  local hw = T.Text(x + pad + 2 * s, y + pad, GROUP_TITLES[g], C.heading or C.accent, T.font.small)
   if n > 0 then
     local sum = 0
     for _, m in ipairs(list) do sum = sum + (tonumber(m.level) or 0) end
     T.Text(x + pad + 8 * s + hw, y + pad + 1 * s, "avg " .. math.floor(sum / n), C.faint, T.font.tiny)
   end
-  if not moveHere("##here" .. g, x + w - pad, y + pad - 2 * s, s, raid, g, { x, y, x + w, y + h }) then
+  if not moveHere(HERE_IDS[g], x + w - pad, y + pad - 2 * s, s, raid, g, { x, y, x + w, y + h }) then
     pips(x + w - pad - 2 * s, y + pad + th / 2, n, s)
   end
   local ly = y + pad + th + 6 * s
@@ -360,6 +393,32 @@ local function leaderStrip(s)
   ui.SetCursorScreenPos(x, y + h + 6 * s)
 end
 
+local ACTIONS = {
+  { "RAID_MemberActionsButton", "Member actions", { tooltip = "Open the selected member's actions; right-clicking a member opens the same menu" } },
+  { "RAID_InviteExpedButton", "Invite Expedition", { tooltip = "Invite expedition members who are missing from this raid" } },
+  { "RAID_InviteTaskButton", "Invite Task", { tooltip = "Invite shared task members who are missing from this raid" } },
+  { "RAID_InviteButton", "Invite", { primary = true, tooltip = "Invite your target to the raid" } },
+  { "RAID_OptionsButton", "Options", { tooltip = "The raid's loot type, looters and class colours" } },
+  { "RAID_DumpButton", "Dump", { tooltip = "Write the raid roster with its notes to a file" } },
+  { "RAID_DisbandButton", "Leave", { danger = true, tooltip = "Leave the raid" } },
+}
+-- Context menus can be switched off globally. Keep the member controls usable in that mode.
+local DIRECT_ACTIONS = {
+  { "RAID_MainAssistButton", "Main Assist", { tooltip = "Delegate raid main assist to the selected member" } },
+  { "RAID_MarkNPCButton", "Mark NPC", { tooltip = "Delegate raid target marking to the selected member" } },
+  { "RAID_FindPCButton", "Find PC", { tooltip = "Find a path to the selected raid member" } },
+  { "RAID_MakeLeaderButton", "Make Leader", { tooltip = "Hand the raid lead to your target" } },
+  { "RAID_RemoveLeaderButton", "Remove Leader", { tooltip = "Remove the selected member's group leadership" } },
+  { "RAID_AddLooterButton", "Add Looter", { tooltip = "Let the selected player loot (Raid Looters loot type)" } },
+  { "RAID_RemoveLooterButton", "Remove Looter", { tooltip = "Take the selected player off the looters" } },
+  { "RAID_NoGroupButton", "Ungroup", { tooltip = "Take the selected player out of their group" } },
+}
+for i = 2, #ACTIONS do DIRECT_ACTIONS[#DIRECT_ACTIONS + 1] = ACTIONS[i] end
+local function actionList() return eq.ContextMenus() and ACTIONS or DIRECT_ACTIONS end
+local function actionColumns(w, s)
+  return w >= 680 * s and 4 or (w >= 510 * s and 3 or 2)
+end
+
 local function actions(raid, s)
   local btnH = S.ButtonHeight(s)
   local sel = raid.selected
@@ -372,25 +431,25 @@ local function actions(raid, s)
     ui.TextColored(C.faint[1], C.faint[2], C.faint[3], 1,
       sel.level .. " " .. sel.class .. "  -  " .. (sel.group and ("Group " .. sel.group) or "not in a group"))
   end
-  W.ButtonRow(WINDOW, {
-    { "RAID_MakeLeaderButton", "Make Leader", { tooltip = "Hand the raid lead to your target" } },
-    { "RAID_AddLooterButton", "Add Looter", { tooltip = "Let the selected player loot (Raid Looters loot type)" } },
-    { "RAID_RemoveLooterButton", "Remove Looter", { tooltip = "Take the selected player off the looters" } },
-    { "RAID_NoGroupButton", "Ungroup", { tooltip = "Take the selected player out of their group" } },
-  }, btnH)
-  W.ButtonRow(WINDOW, {
-    { "RAID_InviteButton", "Invite", { primary = true, tooltip = "Invite your target to the raid" } },
-    { "RAID_OptionsButton", "Options", { tooltip = "The raid's loot type, looters and class colours" } },
-    { "RAID_DumpButton", "Dump", { tooltip = "Write the raid roster with its notes to a file" } },
-    { "RAID_DisbandButton", "Leave", { danger = true, tooltip = "Leave the raid" } },
-  }, btnH)
+  ui.TextColored(C.faint[1], C.faint[2], C.faint[3], 1,
+    eq.ContextMenus() and "Right-click a member for actions." or "Select a member, then choose an action.")
+  local choices = actionList()
+  local cols = actionColumns(ui.GetContentRegionAvail(), s)
+  for first = 1, #choices, cols do
+    local row = {}
+    for i = first, math.min(first + cols - 1, #choices) do row[#row + 1] = choices[i] end
+    W.ButtonRow(WINDOW, row, btnH)
+  end
 end
 
 local function membersPage(raid, s)
   local needle = search:lower()
   leaderStrip(s)
   local btnH = S.ButtonHeight(s)
-  local below = 2 * btnH + 18 * s + (raid.selected and select(2, ui.CalcTextSize("Ag")) + 4 * s or 0)
+  local aw, ah = ui.GetContentRegionAvail()
+  local rows = math.ceil(#actionList() / actionColumns(aw, s))
+  local below = math.min(ah * 0.60, rows * (btnH + 8 * s) + 30 * s + select(2, ui.CalcTextSize("Ag")) + 4 * s +
+    (raid.selected and select(2, ui.CalcTextSize("Ag")) + 4 * s or 0))
   ui.BeginChild("##raidcards", 0, -below, false)
   local x0, y0 = ui.GetCursorScreenPos()
   local aw = ui.GetContentRegionAvail()
@@ -484,7 +543,10 @@ local function membersPage(raid, s)
   end
   ui.EndChild()
   ui.Dummy(0, 2 * s)
+  -- A small resized window scrolls its controls rather than drawing them beyond the dialog.
+  ui.BeginChild("##raidactions", 0, 0, false)
   actions(raid, s)
+  ui.EndChild()
 end
 
 local function notesPage(s)

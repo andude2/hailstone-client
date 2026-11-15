@@ -170,6 +170,10 @@ TEST_CASE("texpack: hash names and manifest lines round-trip") {
     CHECK(old->names.contains("knlamp04.bmp"));
     CHECK_FALSE(parse_manifest_line("{\"hash\":\"x\"}"));
     CHECK_FALSE(parse_manifest_line("not json"));
+    // No name, or an empty one: refused (pack_job names a texture by its first).
+    CHECK_FALSE(parse_manifest_line(R"({"hash":"0000626c3529d7e8","w":256,"h":256,"names":[]})"));
+    CHECK_FALSE(parse_manifest_line(R"({"hash":"0000626c3529d7e8","w":256,"h":256})"));
+    CHECK_FALSE(parse_manifest_line(R"({"hash":"0000626c3529d7e8","w":256,"h":256,"names":[""]})"));
 }
 
 TEST_CASE("texpack: what the models run on, and the files a texture gets") {
@@ -334,6 +338,13 @@ TEST_CASE("texpack: a texture's pack images") {
         Outputs o = upscale_texture(t, s, models, {2, false}, {FileKind::Color, FileKind::Masked});
         REQUIRE(o.masked);
         for (std::size_t i = 0; i < o.masked->mips[0].size(); i += 4) CHECK(std::to_integer<int>(o.masked->mips[0][i + 1]) < 8);
+    }
+    SUBCASE("an output past kMaxUpscaleTexels is refused before anything is made") {
+        TextureInfo t = picture(8192, 8192);
+        assets::Image big; // only its size is read before the refusal
+        big.width = big.height = 8192;
+        CHECK_THROWS_AS(upscale_texture(t, {big}, models, {8, false}, {FileKind::Color}), std::runtime_error);
+        CHECK(set.color.calls == 0);
     }
 }
 

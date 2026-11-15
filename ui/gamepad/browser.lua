@@ -15,9 +15,16 @@ local st = CH.new()
 local current, known = nil, {}
 local problem = nil
 
+local HINTS = { { "a", "Select" }, { "lb", "Previous tab" }, { "rb", "Next tab" }, { "b", "Close" } }
+local spare = {} -- (known's partner: see below)
+local function tabIndex(tabs, id)
+  for i, t in ipairs(tabs) do if t == id then return i end end
+  return 0
+end
+
 local function title(s)
   local t = s.title ~= "" and s.title or s.url
-  if #t > 60 then t = t:sub(1, 59) .. "…" end
+  if #t > 60 then t = T.cutBytes(t, 59) .. "…" end
   return t
 end
 
@@ -29,21 +36,20 @@ ui.window("Web Browser", function()
   end
   T.frame()
   local tabs = eq.WebTabs()
-  local seen = {}
+  -- (the tabs seen last frame and this one: two tables used in turn, not a new one a frame)
+  local seen = spare
+  for id in pairs(seen) do seen[id] = nil end
   for _, id in ipairs(tabs) do
     seen[id] = true
     if not known[id] then current = id end -- a new tab (a link, /web) comes to the front
   end
-  known = seen
+  known, spare = seen, known
   if current and not seen[current] then current = tabs[#tabs] end
   local s = current and eq.WebState(current)
   local subtitle = not eq.WebAvailable() and "Not installed"
-    or s and string.format("%s (%d of %d)", title(s), (function()
-      for i, id in ipairs(tabs) do if id == current then return i end end
-      return 0
-    end)(), #tabs)
+    or s and string.format("%s (%d of %d)", title(s), tabIndex(tabs, current), #tabs)
     or "No page open"
-  local hints = CH.hints(st, { { "a", "Select" }, { "lb", "Previous tab" }, { "rb", "Next tab" }, { "b", "Close" } })
+  local hints = CH.hints(st, HINTS)
   if W.begin("Web Browser", { w = 1700, h = 1000, title = "Web Browser", subtitle = subtitle, hints = hints }) then
     local x0, y0, x1, y1 = W.area()
     local wx, wy = ui.GetWindowPos()
@@ -65,8 +71,10 @@ ui.window("Web Browser", function()
           local ok, why
           if open then ok, why = eq.WebNavigate(current, t)
           else
-            current, why = eq.WebOpen(t)
-            ok = current ~= nil
+            local id
+            id, why = eq.WebOpen(t)
+            ok = id ~= nil
+            if ok then current = id end -- (a failed open keeps the tab that was in front)
           end
           problem = not ok and (why or "That address cannot be opened.") or nil
         end, { max = 1024, from = "addr" })
@@ -88,7 +96,9 @@ ui.window("Web Browser", function()
         end
         if button(7, "close", "Close the tab", { align = 0 }) then eq.WebClose(current) end
       elseif button(2, "new", "New tab", { align = 0 }) then
-        current = eq.WebOpen("about:blank")
+        local id, why = eq.WebOpen("about:blank")
+        if id then current = id end
+        problem = not id and (why or "The browser could not open a page.") or nil
       end
       if W.pressed("rb") or W.pressed("lb") then
         local step = W.pressed("rb") and 1 or -1

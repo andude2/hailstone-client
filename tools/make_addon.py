@@ -80,11 +80,18 @@ def check(name, kind, files, platform):
         if f.lower() in lowered:
             sys.exit(f"{f}: two files differ only in case")
         lowered.add(f.lower())
+    # A versioned shared library (libfoo.so.1) is a library like any other: no script holds one, and a plugin holds
+    # only its own library (docs/addons.md "What it holds"). The client takes it for data, since it never loads it
+    # and does not make it runnable, so this is stricter than the client: it is a packaging mistake either way.
+    def is_program(f):
+        low = f.lower()
+        return low.endswith(PROGRAMS) or bool(VERSIONED_SO.match(low.rsplit("/", 1)[-1]))
+
     if kind == "script":
         if "init.lua" not in files:
             sys.exit("a script has init.lua at its top")
         for f in files:
-            if f.lower().endswith(PROGRAMS):
+            if is_program(f):
                 sys.exit(f"{f}: a script may hold Lua and data, no programs")
         return
     lib = LIBRARY.get(platform.split("-", 1)[0])
@@ -114,7 +121,7 @@ def check(name, kind, files, platform):
         low = f.lower()
         if low.endswith(".lua") and not low.startswith("ui/"):
             sys.exit(f"{f}: a plugin's Lua goes in ui/<pack>/")
-        if low.endswith(PROGRAMS) and f not in libs:
+        if is_program(f) and f not in libs:
             sys.exit(f"{f}: a plugin may hold its one library, its windows and data, no other programs")
 
 

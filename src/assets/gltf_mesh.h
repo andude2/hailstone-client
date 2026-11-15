@@ -8,7 +8,9 @@
 // name stands for a texture as a game texture's name does, looked up in the texture pack (assets/texture_overrides.h);
 // images inside the file and buffers outside it are refused. Levels of detail: a node's extras
 // {"hailstone_lod": [near, far]} draw its meshes only from `near` to `far` world units from the camera
-// (MeshPart::lod_near, lod_far); write_glb writes one node a band.
+// (MeshPart::lod_near, lod_far); write_glb writes one node a band. A second UV set (TEXCOORD_1) is read into
+// Vertex::uv2; asset.extras {"hailstone_sway": 1} says its u is each vertex's sway height (Mesh::sway_heights, in
+// EQ units on the zone's z axis, for files whose nodes carry no transform, as write_glb's).
 
 #include <cstddef>
 #include <cstdint>

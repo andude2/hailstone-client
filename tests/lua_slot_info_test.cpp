@@ -15,7 +15,9 @@
 #include "app/lua_eq.h"
 #include "app/lua_eq_windows.h"
 #include "core/game_dir.h"
+#include "core/sha256.h"
 #include "game/hotbuttons.h"
+#include "game/lua_social.h"
 #include "game/pet_buttons.h"
 #include "game/spells.h"
 #include "net/game_connection.h"
@@ -344,6 +346,47 @@ end})))
         CHECK(store.social(0).name == "Proxy");
         CHECK(store.social(0).color == 4);
         CHECK(store.social(0).lua.press == "mq.cmd('/sit')");
+        lua_close(L);
+    }
+    ImGui::DestroyContext(ctx);
+}
+
+// eq.LuaSocial's hash is kept per social while its code stays the same, and follows any change to the code, whoever
+// makes it (eq.SetLuaSocial, or the store written directly as an import or the file does).
+TEST_CASE("Lua socials: eq.LuaSocial's hash follows the code") {
+    ImGuiContext* ctx = ImGui::CreateContext();
+    {
+        hailstone::test::ScratchDir scratch("lua_social_hash_cache");
+        GameDir game(scratch.path());
+        net::GameConnection conn(game, {});
+        game::HotButtonStore store;
+        app::EqHost host;
+        host.in_game = host.ui_ready = true;
+        host.conn = &conn;
+        host.hot_buttons = &store;
+        app::EqApi api(host);
+        lua_State* L = luaL_newstate();
+        luaL_openlibs(L);
+        lua_newtable(L);
+        api.register_functions(L);
+        lua_setglobal(L, "eq");
+        auto hash_of = [](const game::LuaSocial& l) { return to_hex(game::lua_social_hash(l)); };
+        CHECK(run(L, "return eq.LuaSocial(3)") == "nil");
+        CHECK(run(L, "return tostring(eq.SetLuaSocial(3, {name = 'Sit', press = \"mq.cmd('/sit')\"}))") == "true");
+        const std::string sit = hash_of(game::LuaSocial{"mq.cmd('/sit')", ""});
+        CHECK(run(L, "return eq.LuaSocial(3).hash") == sit);
+        CHECK(run(L, "return eq.LuaSocial(3).hash") == sit);
+        CHECK(run(L, "eq.SetLuaSocial(3, {name = 'Sit', press = \"mq.cmd('/sit')\", face = 'return {}'}) "
+                     "return eq.LuaSocial(3).hash") == hash_of(game::LuaSocial{"mq.cmd('/sit')", "return {}"}));
+        store.social(3).lua = game::LuaSocial{"mq.cmd('/stand')", ""};
+        CHECK(run(L, "return eq.LuaSocial(3).hash") == hash_of(store.social(3).lua));
+        store.social(3).lua = game::LuaSocial{"mq.cmd('/sit')", ""};
+        CHECK(run(L, "return eq.LuaSocial(3).hash") == sit);
+        // Each social has its own.
+        store.social(4) = store.social(3);
+        store.social(4).lua.press = "mq.cmd('/stand')";
+        CHECK(run(L, "return eq.LuaSocial(4).hash") == hash_of(store.social(4).lua));
+        CHECK(run(L, "return eq.LuaSocial(3).hash") == sit);
         lua_close(L);
     }
     ImGui::DestroyContext(ctx);

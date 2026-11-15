@@ -284,6 +284,7 @@ std::string get_arg(std::string_view text, int n, bool csv, char separator) {
     skip_seps();
     bool quoted = false;
     for (int k = n - 1; k > 0; --k) {
+        if (i >= text.size()) return {}; // used up: every later argument is empty (n can be near 2^31)
         while (i < text.size() && (quoted || !is_sep(text[i]))) {
             if (text[i] == '"') quoted = !quoted;
             ++i;

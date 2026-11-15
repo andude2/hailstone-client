@@ -20,11 +20,14 @@
 //   eq.WebOpenExternal(url)      in the system's browser (http(s) only; the player's windows only)
 #include <lua.hpp>
 
+#include <optional>
 #include <string>
+#include <vector>
 
 #include "app/lua_eq.h"
 #include "core/web_url.h"
 #include "platform/open_folder.h"
+#include "plugin/lua_keep.h"
 #include "plugin/policy.h"
 #include "plugin/web_access.h"
 #include "ui/lua/lua_host.h"
@@ -33,24 +36,31 @@ namespace hailstone::app {
 
 namespace {
 
+// Who calls, and the texts and lists a call makes: in a box the state owns (plugin/lua_keep.h), as the pushes after
+// may raise. Each function below checks its arguments before it makes its Caller, and does its C++ work inside
+// plugin::cxx_guard.
 struct Caller {
     plugin::WebAccess* web = nullptr;
     std::string owner;
     std::uint32_t caps = 0;
+    std::string text, why;
+    std::vector<std::uint32_t> tabs;
+    std::optional<plugin::WebState> state;
 };
 
-// Each function below checks its arguments before it makes its Caller or any other C++ object: Lua is built as C,
-// so a failed check longjmps out without running destructors.
-Caller caller(lua_State* L) {
+// The caller's box, pushed on the stack (below what the function returns).
+Caller& caller(lua_State* L) {
     auto& h = *static_cast<EqHost*>(lua_touserdata(L, lua_upvalueindex(1)));
-    Caller c;
+    Caller& c = plugin::lua_keep<Caller>(L);
     c.web = h.web;
     const std::string_view tag = ui::lua::LuaUi::caller_tag();
     if (tag.empty()) {
         c.caps = plugin::kCapAll;
     } else {
-        c.owner = std::string(tag); // (plugin::UiBridge::owner_tag)
-        c.caps = h.plugin_caps ? h.plugin_caps(tag) : 0;
+        plugin::cxx_guard(L, [&] {
+            c.owner = std::string(tag); // (plugin::UiBridge::owner_tag)
+            c.caps = h.plugin_caps ? h.plugin_caps(tag) : 0;
+        });
     }
     return c;
 }
@@ -61,7 +71,7 @@ std::uint32_t tab_arg(lua_State* L, int i) {
 }
 
 int WebAvailable(lua_State* L) {
-    Caller c = caller(L);
+    Caller& c = caller(L);
     lua_pushboolean(L, c.web && c.web->available());
     return 1;
 }
@@ -69,13 +79,15 @@ int WebAvailable(lua_State* L) {
 int WebOpen(lua_State* L) {
     const char* url_arg = luaL_checkstring(L, 1);
     const int w = static_cast<int>(luaL_optinteger(L, 2, 800)), h = static_cast<int>(luaL_optinteger(L, 3, 600));
-    Caller c = caller(L);
-    const std::string url = url_arg;
-    std::string why = "the in-game browser is not installed";
-    const std::uint32_t id = c.web ? c.web->open(c.owner, c.caps, url, w, h, &why) : 0;
+    Caller& c = caller(L);
+    std::uint32_t id = 0;
+    plugin::cxx_guard(L, [&] {
+        c.why = "the in-game browser is not installed";
+        id = c.web ? c.web->open(c.owner, c.caps, url_arg, w, h, &c.why) : 0;
+    });
     if (!id) {
         lua_pushnil(L);
-        lua_pushstring(L, why.c_str());
+        lua_pushstring(L, c.why.c_str());
         return 2;
     }
     lua_pushinteger(L, id);
@@ -83,11 +95,11 @@ int WebOpen(lua_State* L) {
 }
 
 int WebTabs(lua_State* L) {
-    Caller c = caller(L);
+    Caller& c = caller(L);
+    if (c.web) plugin::cxx_guard(L, [&] { c.tabs = c.web->tabs(c.owner); });
     lua_newtable(L);
-    if (!c.web) return 1;
     lua_Integer n = 0;
-    for (std::uint32_t id : c.web->tabs(c.owner)) {
+    for (std::uint32_t id : c.tabs) {
         lua_pushinteger(L, id);
         lua_rawseti(L, -2, ++n);
     }
@@ -96,8 +108,9 @@ int WebTabs(lua_State* L) {
 
 int WebState(lua_State* L) {
     const std::uint32_t tab = tab_arg(L, 1);
-    Caller c = caller(L);
-    auto s = c.web ? c.web->state(c.owner, tab) : std::nullopt;
+    Caller& c = caller(L);
+    plugin::cxx_guard(L, [&] { c.state = c.web ? c.web->state(c.owner, tab) : std::nullopt; });
+    const auto& s = c.state;
     if (!s) {
         lua_pushnil(L);
         return 1;
@@ -123,13 +136,15 @@ int WebState(lua_State* L) {
 int WebNavigate(lua_State* L) {
     const std::uint32_t tab = tab_arg(L, 1);
     const char* url_arg = luaL_checkstring(L, 2);
-    Caller c = caller(L);
-    const std::string url = url_arg;
-    std::string why = "the in-game browser is not installed";
-    const bool ok = c.web && c.web->navigate(c.owner, c.caps, tab, url, &why);
+    Caller& c = caller(L);
+    bool ok = false;
+    plugin::cxx_guard(L, [&] {
+        c.why = "the in-game browser is not installed";
+        ok = c.web && c.web->navigate(c.owner, c.caps, tab, url_arg, &c.why);
+    });
     lua_pushboolean(L, ok);
     if (ok) return 1;
-    lua_pushstring(L, why.c_str());
+    lua_pushstring(L, c.why.c_str());
     return 2;
 }
 
@@ -138,53 +153,60 @@ int WebNav(lua_State* L) {
     const std::string_view what = luaL_checkstring(L, 2);
     if (what != "back" && what != "forward" && what != "reload" && what != "stop")
         return luaL_argerror(L, 2, "back, forward, reload or stop");
-    Caller c = caller(L);
-    if (c.web) c.web->nav(c.owner, c.caps, tab, std::string(what));
+    Caller& c = caller(L);
+    if (c.web) plugin::cxx_guard(L, [&] { c.web->nav(c.owner, c.caps, tab, std::string(what)); });
     return 0;
 }
 
 int WebClose(lua_State* L) {
     const std::uint32_t tab = tab_arg(L, 1);
-    Caller c = caller(L);
-    if (c.web) c.web->close(c.owner, tab);
+    Caller& c = caller(L);
+    if (c.web) plugin::cxx_guard(L, [&] { c.web->close(c.owner, tab); });
     return 0;
 }
 
 int WebText(lua_State* L) {
     const std::uint32_t tab = tab_arg(L, 1);
     const char* text_arg = luaL_checkstring(L, 2);
-    Caller c = caller(L);
-    const std::string text = text_arg;
-    if (c.web) c.web->text(c.owner, c.caps, tab, text);
+    Caller& c = caller(L);
+    if (c.web) plugin::cxx_guard(L, [&] { c.web->text(c.owner, c.caps, tab, text_arg); });
     return 0;
 }
 
 int WebEval(lua_State* L) {
     const std::uint32_t tab = tab_arg(L, 1);
     const char* script_arg = luaL_checkstring(L, 2);
-    Caller c = caller(L);
-    const std::string script = script_arg;
-    lua_pushboolean(L, c.web && c.web->eval(c.owner, c.caps, tab, script));
+    Caller& c = caller(L);
+    bool ok = false;
+    if (c.web) plugin::cxx_guard(L, [&] { ok = c.web->eval(c.owner, c.caps, tab, script_arg); });
+    lua_pushboolean(L, ok);
     return 1;
 }
 
 int WebPost(lua_State* L) {
     const std::uint32_t tab = tab_arg(L, 1);
     const char* message_arg = luaL_checkstring(L, 2);
-    Caller c = caller(L);
-    const std::string message = message_arg;
-    lua_pushboolean(L, c.web && c.web->post(c.owner, c.caps, tab, message));
+    Caller& c = caller(L);
+    bool ok = false;
+    if (c.web) plugin::cxx_guard(L, [&] { ok = c.web->post(c.owner, c.caps, tab, message_arg); });
+    lua_pushboolean(L, ok);
     return 1;
 }
 
 int WebMessages(lua_State* L) {
     const std::uint32_t tab = tab_arg(L, 1);
-    Caller c = caller(L);
+    Caller& c = caller(L);
     lua_newtable(L);
     if (!c.web) return 1;
     lua_Integer n = 0;
-    while (auto m = c.web->take_message(c.owner, tab)) {
-        lua_pushlstring(L, m->data(), m->size());
+    for (;;) {
+        bool more = false;
+        plugin::cxx_guard(L, [&] {
+            auto m = c.web->take_message(c.owner, tab);
+            if ((more = m.has_value())) c.text = std::move(*m);
+        });
+        if (!more) break;
+        lua_pushlstring(L, c.text.data(), c.text.size());
         lua_rawseti(L, -2, ++n);
     }
     return 1;
@@ -193,17 +215,19 @@ int WebMessages(lua_State* L) {
 int WebView(lua_State* L) {
     const std::uint32_t tab = tab_arg(L, 1);
     const auto w = static_cast<float>(luaL_checknumber(L, 2)), h = static_cast<float>(luaL_checknumber(L, 3));
-    Caller c = caller(L);
-    lua_pushboolean(L, c.web && c.web->view(c.owner, c.caps, tab, w, h));
+    Caller& c = caller(L);
+    bool hovered = false;
+    if (c.web) plugin::cxx_guard(L, [&] { hovered = c.web->view(c.owner, c.caps, tab, w, h); });
+    lua_pushboolean(L, hovered);
     return 1;
 }
 
 int WebOpenExternal(lua_State* L) {
     const char* url_arg = luaL_checkstring(L, 1);
-    Caller c = caller(L);
-    const std::string url = url_arg;
+    Caller& c = caller(L);
     // Only from the player's windows: a plugin's page in the player's own browser is out of the rules' reach.
-    const bool ok = c.owner.empty() && web::url_allowed(url, {}) && platform::open_url(url);
+    bool ok = false;
+    if (c.owner.empty()) plugin::cxx_guard(L, [&] { ok = web::url_allowed(url_arg, {}) && platform::open_url(url_arg); });
     lua_pushboolean(L, ok);
     return 1;
 }

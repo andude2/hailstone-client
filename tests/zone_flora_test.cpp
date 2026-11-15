@@ -310,6 +310,25 @@ TEST_CASE("zone flora: non-finite and absurd vertices grow nothing and cover not
     for (const auto& p : flora.instances) CHECK(p.position.x > p.position.y);
 }
 
+TEST_CASE("zone flora: a long sliver of ground is not binned into every tile its bounds touch") {
+    std::vector<eqg::FloraDefinition> defs = {definition("grass", 2.0f)};
+    auto rules = parse_zone_flora_rules("ground grass* 10 grass\n");
+    Zone zone;
+    zone.terrain.push_back(square("grass.bmp", 100.0f));
+    ZoneFloraGrower plain(zone, rules, defs, {});
+    // A triangle under kMaxGrowArea (so never split) whose bounds cover some 150,000 tiles.
+    Mesh sliver = square("grass.bmp", 100.0f);
+    sliver.vertices[0].position = {0.0f, 0.0f, 0.0f};
+    sliver.vertices[1].position = {50000.0f, 50000.0f, 0.0f};
+    sliver.vertices[2].position = {50000.0f, 50000.05f, 0.0f};
+    sliver.indices = {0, 1, 2};
+    sliver.parts = {{0, 3, 0, true}};
+    zone.terrain.push_back(sliver);
+    ZoneFloraGrower grower(zone, rules, defs, {});
+    CHECK(grower.triangles() == plain.triangles() + 1);
+    CHECK(grower.tiles().size() == plain.tiles().size());
+}
+
 TEST_CASE("zone flora: tile by tile, each plant once, in the tile its foot is in") {
     std::vector<eqg::FloraDefinition> defs = {definition("grass", 2.0f)};
     auto rules = parse_zone_flora_rules("ground grass* 10 grass\n");
@@ -430,7 +449,9 @@ TEST_CASE("zone flora: East Commonlands' ground (game files)") {
     REQUIRE(zone.flora.grower);
     std::vector<FloraInstance> plants;
     for (std::size_t t = 0; t < zone.flora.grower->tiles().size(); ++t) zone.flora.grower->grow(t, plants);
-    CHECK(plants.size() > 300000);
+    // The accent plants (ferns, flowers, bushes) are a quarter as dense since the lawn took over the ground
+    // (density 0.95, was 3.8): about 190,000 here.
+    CHECK(plants.size() > 150000);
     std::size_t wet = 0;
     for (const auto& p : plants)
         if (zone.regions.lookup(p.position + glm::vec3(0, 0, 1)).is_water()) ++wet;
@@ -583,6 +604,65 @@ TEST_CASE("zone flora: the lawn tapers where it meets bare ground") {
     CHECK(edge == 6400 - 74 * 74);
 }
 
+TEST_CASE("zone flora: the lawn's edge under a platform wobbles, and its edges fray") {
+    // Ground of 256 units, a platform 20 units over its left half (x < 0): no straight line of bare ground under the
+    // platform's straight edge, but one that wanders either side of it by up to kLawnCoverJitter.
+    Zone zone;
+    zone.terrain.push_back(square("grass.bmp", 256.0f));
+    for (auto& v : zone.terrain[0].vertices) v.position -= glm::vec3(128.0f, 128.0f, 0.0f);
+    Mesh platform = square("roof.bmp", 128.0f);
+    for (auto& v : platform.vertices) {
+        v.position.x -= 128.0f;
+        v.position.y = v.position.y * 2.0f - 128.0f;
+        v.position.z = 20.0f;
+    }
+    zone.terrain.push_back(platform);
+    auto rules = parse_zone_flora_rules("ground grass* 0 lawn\nground roof* 0\n");
+    ZoneFlora flora;
+    place_zone_flora(zone, rules, {}, flora);
+    std::map<int, float> first; // a row of squares (y): the least x grown
+    for (const auto& p : flora.instances) {
+        // Away from the ground's and the platform's own edges.
+        if (std::abs(p.position.y) > 100.0f || p.position.x < -100.0f) continue;
+        CHECK(p.position.x > -kLawnCoverJitter - kLawnCell);
+        const int row = static_cast<int>(std::floor(p.position.y / kLawnCell));
+        auto [it, fresh] = first.try_emplace(row, p.position.x);
+        if (!fresh) it->second = std::min(it->second, p.position.x);
+    }
+    REQUIRE(first.size() > 50);
+    float lo = 1e9f, hi = -1e9f;
+    for (const auto& [row, x] : first) {
+        lo = std::min(lo, x);
+        hi = std::max(hi, x);
+    }
+    CHECK(lo < -kLawnCell);         // in under the platform somewhere
+    CHECK(hi > 2.0f * kLawnCell);   // short of it elsewhere
+    CHECK(hi < kLawnCoverJitter + 2.0f * kLawnCell);
+
+    // The offset stays within its bound and wanders smoothly.
+    for (float x = -300.0f; x < 300.0f; x += 3.7f) {
+        const glm::vec2 o = lawn_cover_offset({x, 0.5f * x + 11.0f});
+        CHECK(std::abs(o.x) <= kLawnCoverJitter);
+        CHECK(std::abs(o.y) <= kLawnCoverJitter);
+        CHECK(glm::length(lawn_cover_offset({x + kLawnCell, 0.5f * x + 11.0f}) - o) < 1.25f * kLawnCoverJitter);
+    }
+    // An edge patch keeps a share of its blades of its own, all of them inside.
+    float least = 1.0f, most = 0.0f;
+    for (int k = 0; k < 200; ++k) {
+        const float c = lawn_edge_cover(1.0f, {static_cast<float>(k) * kLawnCell + 1.0f, 7.0f});
+        CHECK(c >= 0.25f);
+        CHECK(c <= 0.85f);
+        least = std::min(least, c);
+        most = std::max(most, c);
+    }
+    CHECK(most - least > 0.4f);
+    CHECK(lawn_edge_cover(static_cast<float>(kLawnEdgeCells) + 0.5f, {3.0f, 5.0f}) == doctest::Approx(1.0f));
+    std::size_t frayed = 0;
+    for (const auto& p : flora.instances)
+        if (p.cover < 1.0f) ++frayed;
+    CHECK(frayed > 0);
+}
+
 TEST_CASE("zone flora: the lawn grows no lone tufts") {
     auto rules = parse_zone_flora_rules("ground grass* 0 +green lawn\n");
     // Ground a little over one square: its patch has no neighbours and goes.
@@ -634,17 +714,76 @@ TEST_CASE("zone flora: the lawn's height wanders smoothly between 0 and 1") {
     CHECK(hi - lo > 0.5f);
 }
 
+TEST_CASE("lawn: Grass Density scales each draw's blades, which keep their width") {
+    for (std::size_t k = 0; k < render::kLawnLods.size(); ++k)
+        CHECK(render::lawn_lod_blades(k) == render::kLawnLods[k].blades);
+    CHECK(render::lawn_lod_blades(0, 2.0f) == 98);
+    CHECK(render::lawn_lod_blades(1, 0.5f) == 8);
+    CHECK(render::lawn_lod_blades(2, 0.25f) == 2);
+    CHECK(render::lawn_lod_blades(0, 10.0f) == 98);  // clamped to kMaxGrassDensity
+    CHECK(render::lawn_lod_blades(2, 0.0f) == 2);    // and kMinGrassDensity
+    CHECK(render::lawn_lod_blades(0, std::numeric_limits<float>::quiet_NaN()) == 49);
+    CHECK(render::lawn_lod_blades(3) == 0);
+    for (float density : {0.25f, 0.5f, 1.0f, 1.5f, 2.0f}) {
+        CHECK(render::lawn_blades(0.0f, density) == static_cast<float>(render::lawn_lod_blades(0, density)));
+        CHECK(render::lawn_blades(5000.0f, density) == static_cast<float>(render::lawn_lod_blades(2, density)));
+        CHECK(render::lawn_blade_width(0.0f, density) == render::kLawnBladeWidth);
+        // Each draw holds the blades that stand anywhere in its range.
+        for (float d = 0.0f; d < 400.0f; d += 5.0f)
+            CHECK(static_cast<float>(render::lawn_lod_blades(render::lawn_lod(d), density)) + 1e-3f >=
+                  render::lawn_blades(d, density));
+    }
+    CHECK(render::grass_density_percent(100) == 100);
+    CHECK(render::grass_density_percent(0) == 25);
+    CHECK(render::grass_density_percent(1000) == 200);
+}
+
 TEST_CASE("lawn: levels of detail and the far patches' stride") {
     CHECK(render::lawn_lod(0.0f) == 0);
     CHECK(render::lawn_lod(render::kLawnNear + 1.0f) == 1);
     CHECK(render::lawn_lod(render::kLawnMid + 1.0f) == 2);
-    // Each level fewer vertices, its blades wider, so a patch keeps about its cover.
-    for (std::size_t k = 1; k < render::kLawnLods.size(); ++k) {
-        CHECK(render::kLawnLods[k].vertices() < render::kLawnLods[k - 1].vertices());
-        CHECK(render::kLawnLods[k].blade_width > render::kLawnLods[k - 1].blade_width);
-    }
     CHECK(render::kLawnLods[0].vertices() == 49 * 15);
     CHECK(render::kLawnLods[2].vertices() == 9 * 3);
+    // The blades thin out smoothly, never more than the draw a patch is in holds, and the width grows as they thin.
+    CHECK(render::lawn_blades(0.0f) == 49.0f);
+    CHECK(render::lawn_blades(render::kLawnNear) == doctest::Approx(16.0f));
+    CHECK(render::lawn_blades(render::kLawnMid) == doctest::Approx(9.0f));
+    CHECK(render::lawn_blades(5000.0f) == 9.0f);
+    float last_n = 49.0f, last_w = 0.0f;
+    for (float d = 0.0f; d < 600.0f; d += 0.5f) {
+        const float n = render::lawn_blades(d), w = render::lawn_blade_width(d);
+        CHECK(n <= static_cast<float>(render::kLawnLods[render::lawn_lod(d)].blades) + 1e-4f);
+        CHECK(n <= last_n);
+        CHECK(last_n - n < 0.5f); // no step
+        CHECK(w >= last_w);
+        last_n = n;
+        last_w = w;
+    }
+    CHECK(render::lawn_blade_width(0.0f) == render::kLawnBladeWidth);
+    // Far patches: those a coarser stride drops fade out over the band before it, the kept ones grow to take their
+    // squares, smoothly.
+    CHECK(render::lawn_patch_fade(1, 0.0f) == 1.0f);
+    CHECK(render::lawn_patch_fade(1, render::kFloraReach - render::kLawnStrideBand) == 1.0f);
+    CHECK(render::lawn_patch_fade(1, render::kFloraReach) == 0.0f);
+    CHECK(render::lawn_patch_fade(2, render::kFloraReach * 2.0f) == 0.0f);
+    CHECK(render::lawn_patch_fade(4, 5000.0f) == 1.0f);
+    CHECK(render::lawn_patch_side(1, 0.0f) == kLawnCell);
+    CHECK(render::lawn_patch_side(2, render::kFloraReach) == doctest::Approx(2.0f * kLawnCell));
+    CHECK(render::lawn_patch_side(4, render::kFloraReach) == doctest::Approx(2.0f * kLawnCell));
+    CHECK(render::lawn_patch_side(4, render::kFloraReach * 2.0f) == doctest::Approx(4.0f * kLawnCell));
+    for (std::uint32_t own : {1u, 2u, 4u}) {
+        float fade = 1.0f, side = 0.0f;
+        for (float d = 0.0f; d < 1300.0f; d += 1.0f) {
+            CHECK(render::lawn_patch_fade(own, d) <= fade);
+            CHECK(fade - render::lawn_patch_fade(own, d) < 0.03f);
+            CHECK(render::lawn_patch_side(own, d) >= side);
+            CHECK(render::lawn_patch_side(own, d) - side < 0.2f + (side == 0.0f ? kLawnCell : 0.0f));
+            // A patch is gone wherever lawn_stride drops it (a far tile skips those).
+            if (own < render::lawn_stride(d)) CHECK(render::lawn_patch_fade(own, d) == 0.0f);
+            fade = render::lawn_patch_fade(own, d);
+            side = render::lawn_patch_side(own, d);
+        }
+    }
     CHECK(render::lawn_stride(0.0f) == 1);
     CHECK(render::lawn_stride(render::kFloraReach) == 1);
     CHECK(render::lawn_stride(render::kFloraReach + 1.0f) == 2);

@@ -536,8 +536,12 @@ void Window::read_gamepad() {
 
 bool Window::rumble_gamepad(float low, float high, int ms) {
     if (!pad_) return false;
-    auto strength = [](float v) { return static_cast<Uint16>(std::clamp(v, 0.0f, 1.0f) * 65535.0f); };
-    return SDL_RumbleGamepad(pad_, strength(low), strength(high), static_cast<Uint32>(std::max(ms, 0)));
+    // NaN passes std::clamp, and NaN cast to Uint16 is undefined: it is no rumble. Callers keep `ms` short
+    // (app::Gamepad::kMaxRumbleMs); SDL's own limit is 0xFFFF ms.
+    auto strength = [](float v) {
+        return v == v ? static_cast<Uint16>(std::clamp(v, 0.0f, 1.0f) * 65535.0f) : Uint16{0};
+    };
+    return SDL_RumbleGamepad(pad_, strength(low), strength(high), static_cast<Uint32>(std::clamp(ms, 0, 0xFFFF)));
 }
 
 void Window::set_pad_pointer(bool active) {

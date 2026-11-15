@@ -38,7 +38,11 @@ constexpr std::string_view kTarget[] = {"Send_OP_TargetCommand_004e9790", "Cmd_a
 constexpr std::string_view kActions[] = {"Cmd_cast",     "Cmd_discipline", "Cmd_doability", "Cmd_useitem",
                                          "Cmd_attack",   "Cmd_memspellset", "Cmd_stopcast",  "Cmd_stopdisc",
                                          "Cmd_bandolier", "Cmd_potionbelt", "Cmd_stopsong",  "Cmd_melody",
-                                         "Cmd_spellscribe", "Cmd_aggressive", "Cmd_stance"};
+                                         "Cmd_spellscribe", "Cmd_aggressive", "Cmd_stance",
+                                         // They act in the game too: order the pet, loot, move the cursor's item, use
+                                         // or buy an AA, give money away, let others drag the corpse, delete the guild.
+                                         "cmd_pet",      "__do_loot",     "cmd_autoinventory", "cmd_alternateadv",
+                                         "Cmd_split",    "Cmd_consent",   "Cmd_guilddelete"};
 constexpr std::string_view kMove[] = {"Cmd_follow", "Cmd_sit", "Cmd_stand", "Cmd_duck", "Cmd_dismount",
                                       "Cmd_corpsedrag", "Cmd_camp", "Cmd_kneel"};
 constexpr std::string_view kChat[] = {"Cmd_say",   "Cmd_gsay",     "Cmd_shout",     "Cmd_auction",  "Cmd_ooc",
@@ -48,6 +52,9 @@ constexpr std::string_view kChat[] = {"Cmd_say",   "Cmd_gsay",     "Cmd_shout", 
                                       "Cmd_2",     "Cmd_3",        "Cmd_4",         "Cmd_5",        "Cmd_6",
                                       "Cmd_7",     "Cmd_8",        "Cmd_9",         "Cmd_10"};
 constexpr std::string_view kWeb[] = {"Cmd_url", "Cmd_www"};
+// Hailstone's own commands (not in RoF2's table; GameConnection::item_command) by their whole word, lower case: they
+// destroy or move items, so they need what using an item needs, not the generic 'commands'.
+constexpr std::string_view kOwnActions[] = {"/destroy", "/destroycursor", "/stowcursor"};
 
 template <std::size_t N> bool in(const std::string_view (&list)[N], std::string_view h) {
     return std::find(std::begin(list), std::end(list), h) != std::end(list);
@@ -102,9 +109,9 @@ std::vector<std::string> caps_described(std::uint32_t caps) {
     // The same order as kNames.
     static constexpr std::array<const char*, 13> kWords{
         "read the game state",
-        "run commands (windows, options, other plugins' commands)",
+        "run other commands (windows, options, /who, other plugins' commands)",
         "change your target",
-        "cast spells, use abilities and items, attack",
+        "cast spells, use abilities, items and AAs, attack, loot, order your pet",
         "move your character (face, follow, sit, camp)",
         "speak for you (say, tells, group, guild, channels)",
         "see the chat lines, and hide them",
@@ -127,7 +134,11 @@ std::uint32_t command_caps(std::string_view line, const game::EqStrings* strings
     case game::CommandLine::Kind::Empty: return 0;
     case game::CommandLine::Kind::ChatServer:
     case game::CommandLine::Kind::Text: return kCapChat;
-    case game::CommandLine::Kind::Invalid: return kCapCommands;
+    case game::CommandLine::Kind::Invalid: {
+        std::string word = cl.word;
+        for (char& c : word) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return in(kOwnActions, word) ? kCapActions : kCapCommands;
+    }
     case game::CommandLine::Kind::Command: break;
     }
     std::string_view h = game::slash_commands()[cl.index].handler;

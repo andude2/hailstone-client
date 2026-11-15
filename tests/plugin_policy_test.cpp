@@ -193,6 +193,25 @@ TEST_CASE("command_caps: EQ commands by their handler, abbreviations too; text i
     CHECK(command_caps("/disc Fortitude") == kCapActions);
     CHECK(command_caps("/useitem 22") == kCapActions);
     CHECK(command_caps("/attack on") == kCapActions);
+    // Hailstone's own item commands (not in RoF2's table) need what using an item needs, by their whole word.
+    CHECK(command_caps("/destroycursor 123") == kCapActions);
+    CHECK(command_caps("/STOWCURSOR 123") == kCapActions);
+    CHECK(command_caps("/destroy") == kCapActions);
+    CHECK(command_caps("/Destroy") == kCapActions);
+    CHECK(command_caps("/stowcursorx 123") == kCapCommands);
+    CHECK(command_caps("/destro") == kCapCommands); // no prefix match: the client runs it as no command
+    CHECK(command_caps("/finditem sword") == kCapCommands); // a window, not an item move
+    // RoF2 commands that act in the game, not only windows or options.
+    CHECK(command_caps("/pet attack") == kCapActions);
+    CHECK(command_caps("/loot") == kCapActions);
+    CHECK(command_caps("/autoinventory") == kCapActions);
+    CHECK(command_caps("/alt act 1") == kCapActions);
+    CHECK(command_caps("/alternateadv buy 1") == kCapActions);
+    CHECK(command_caps("/split 1 0 0 0") == kCapActions);
+    CHECK(command_caps("/consent bob") == kCapActions);
+    CHECK(command_caps("/guilddelete") == kCapActions);
+    CHECK(command_caps("/petition help") == kCapCommands); // not /pet
+    CHECK(command_caps("/autosplit") == kCapCommands);      // an option
     CHECK(command_caps("/sit") == kCapMove);
     CHECK(command_caps("/follow") == kCapMove);
     CHECK(command_caps("/g hello") == kCapChat);

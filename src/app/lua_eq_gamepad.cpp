@@ -2,6 +2,8 @@
 // extension: RoF2 has no gamepad, so there is no original API to follow. Buttons and axes go by the names of
 // platform/gamepad.h; bars, buttons, sets and slots are 1-based.
 
+#include <algorithm>
+
 #include <lua.hpp>
 
 #include "app/gamepad.h"
@@ -158,7 +160,8 @@ int Setting(lua_State* L) {
     return 1;
 }
 
-// ok = eq.gamepad.set_setting(name, value) (booleans: a number or true / false); saved to hailstone.ini.
+// ok = eq.gamepad.set_setting(name, value) (booleans: a number or true / false); saved to hailstone.ini. False for
+// NaN or an infinity (GamepadSettings::set).
 int SetSetting(lua_State* L) {
     Gamepad* g = pad(L);
     float v = lua_isboolean(L, 2) ? (lua_toboolean(L, 2) ? 1.0f : 0.0f) : static_cast<float>(luaL_checknumber(L, 2));
@@ -166,12 +169,13 @@ int SetSetting(lua_State* L) {
     return 1;
 }
 
-// ok = eq.gamepad.rumble(low, high, ms): strengths 0..1; false without a pad, rumble, or with gamepad.rumble off.
+// ok = eq.gamepad.rumble(low, high, ms): strengths 0..1, ms at most Gamepad::kMaxRumbleMs; false without a pad,
+// rumble, with gamepad.rumble off, or for a NaN or infinite strength.
 int Rumble(lua_State* L) {
     Gamepad* g = pad(L);
+    const lua_Integer ms = std::clamp<lua_Integer>(luaL_optinteger(L, 3, 200), 0, Gamepad::kMaxRumbleMs);
     lua_pushboolean(L, g && g->rumble(static_cast<float>(luaL_optnumber(L, 1, 0.5)),
-                                      static_cast<float>(luaL_optnumber(L, 2, 0.5)),
-                                      static_cast<int>(luaL_optinteger(L, 3, 200))));
+                                      static_cast<float>(luaL_optnumber(L, 2, 0.5)), static_cast<int>(ms)));
     return 1;
 }
 

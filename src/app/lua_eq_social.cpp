@@ -13,11 +13,13 @@
 #include <format>
 #include <functional>
 #include <string>
+#include <vector>
 
 #include <imgui.h>
 #include <lua.hpp>
 
 #include "app/lua_eq_windows.h"
+#include "core/ascii_case.h"
 #include "core/web_url.h"
 #include "game/eq_names.h"
 #include "game/guild_notes.h"
@@ -27,6 +29,7 @@
 #include "mq/commands.h"
 #include "net/game_connection.h"
 #include "net/social_packets.h"
+#include "plugin/lua_keep.h"
 #include "ui/ui_ini.h"
 
 namespace hailstone::app {
@@ -747,11 +750,26 @@ public:
         }
         // The leadership abilities: Main Assist and Mark NPC for the leader with 0x13 / 0x14 active, Find PC in a
         // raid with 0x1c active (Gates of Discord in each).
-        else if (id == "RAID_MainAssistButton") out.enabled = leader && host.conn->leadership_ability_active(0x13, 1);
-        else if (id == "RAID_MarkNPCButton") out.enabled = leader && host.conn->leadership_ability_active(0x14, 1);
+        else if (id == "RAID_MainAssistButton")
+            out.enabled = leader && !host.conn->interface_locked() && host.conn->leadership_ability_active(0x13, 1);
+        else if (id == "RAID_MarkNPCButton")
+            out.enabled = leader && !host.conn->interface_locked() && host.conn->leadership_ability_active(0x14, 1);
         else if (id == "RAID_FindPCButton") out.enabled = r.active && host.conn->leadership_ability_active(0x1c, 1);
-        else if (id == "RAID_InviteExpedButton" || id == "RAID_InviteTaskButton")
-            out.enabled = false;
+        else if (id == "RAID_MemberActionsButton") {
+            out.text = "Member actions";
+            out.tooltip = "Actions for the selected raid member";
+            out.enabled = host.conn->in_zone() && !host.conn->interface_locked() && host.context_menus() && r.active &&
+                          member(host, r.target) != nullptr;
+        }
+        else if (id == "RAID_InviteExpedButton" || id == "RAID_InviteTaskButton") {
+            const bool can_invite = host.conn->in_zone() && !host.conn->interface_locked() && !r.locked &&
+                                    (!r.active || leader) && r.members.size() < 72;
+            out.enabled = can_invite && (id == "RAID_InviteExpedButton"
+                                            ? host.conn->expedition().info.assigned && !host.conn->expedition().members.empty()
+                                            : !host.conn->tasks().shared_members.empty());
+            out.tooltip = id == "RAID_InviteExpedButton" ? "Invite expedition members who are missing from the raid."
+                                                       : "Invite shared task members who are missing from the raid.";
+        }
         // The note page (UpdateButtons): the note input is editable for the leader with a note list row selected;
         // Update is the leader's while the input differs from that row's note.
         else if (id == "NoteEdit") {
@@ -842,6 +860,9 @@ public:
         else if (id == "RAID_MainAssistButton") c.raid_delegate_ability(3, r.target);
         else if (id == "RAID_MarkNPCButton") c.raid_delegate_ability(4, r.target);
         else if (id == "RAID_FindPCButton") c.raid_find_path_to_target();
+        else if (id == "RAID_MemberActionsButton") return open_member_menu(host, r.target);
+        else if (id == "RAID_InviteExpedButton") c.raid_invite_expedition();
+        else if (id == "RAID_InviteTaskButton") c.raid_invite_shared_task();
         else if (id == "RAID_RemoveLeaderButton") {
             if (leader && !r.target.empty()) c.raid_remove_group_leader(r.target);
         } else if (id == "RAID_NoGroupButton") {
@@ -853,7 +874,7 @@ public:
         } else return false;
         return true;
     }
-    bool list_click(EqHost& host, std::string_view id, int row, bool, int) override {
+    bool list_click(EqHost& host, std::string_view id, int row, bool right, int) override {
         if (id == "RAID_NoteList") {
             // The row's member becomes the raid target and its note goes to the note input.
             if (!host.conn || row < 0 || row >= static_cast<int>(host.conn->raid().members.size())) return true;
@@ -866,8 +887,11 @@ public:
         const auto& names = id == "RAID_PlayerList" ? grouped_names_ : ungrouped_names_;
         if (id != "RAID_PlayerList" && id != "RAID_NotInGroupPlayerList") return false;
         // CRaid::SetTargetRaidPlayer with the row's name.
-        if (host.conn && row >= 0 && row < static_cast<int>(names.size()))
-            host.conn->set_raid_target(names[static_cast<std::size_t>(row)]);
+        if (host.conn && row >= 0 && row < static_cast<int>(names.size())) {
+            const std::string name = names[static_cast<std::size_t>(row)];
+            host.conn->set_raid_target(name);
+            if (right) return open_member_menu(host, name);
+        }
         return true;
     }
     std::optional<int> tab_page(EqHost&, std::string_view id) override { return id == "Subwindows" ? std::optional<int>(page_) : std::nullopt; }
@@ -876,6 +900,159 @@ public:
     }
 
 private:
+    enum class MemberAction { Assist, Marker, Looter, Find, Leader, RemoveGroupLeader, Move, Ungroup };
+
+    static const game::RaidMember* member(const EqHost& host, const std::string& name) {
+        if (!host.conn || name.empty()) return nullptr;
+        for (const auto& entry : host.conn->raid().members)
+            if (::hailstone::iequals(entry.name, name)) return &entry;
+        return nullptr;
+    }
+
+    static bool looter(const game::RaidState& raid, const std::string& name) {
+        return ::hailstone::iequals(raid.leader, name) ||
+               std::any_of(raid.looters.begin(), raid.looters.end(), [&](const auto& n) { return ::hailstone::iequals(n, name); });
+    }
+
+    static bool allowed(const EqHost& host, const std::string& name, MemberAction action, int group = -1) {
+        const auto* m = member(host, name);
+        if (!m || !host.conn->in_zone() || host.conn->interface_locked() || !host.context_menus() ||
+            !host.conn->raid().active) return false;
+        const auto& c = *host.conn;
+        const auto& raid = c.raid();
+        const bool leader = ::hailstone::iequals(raid.leader, c.character_name());
+        switch (action) {
+        case MemberAction::Assist: return leader && c.leadership_ability_active(19, 1);
+        case MemberAction::Marker: return leader && c.leadership_ability_active(20, 1);
+        case MemberAction::Looter:
+            return leader && raid.loot_type == 3 && !::hailstone::iequals(raid.leader, m->name);
+        case MemberAction::Find: return c.leadership_ability_active(28, 1);
+        case MemberAction::Leader: return leader && !raid.locked && !::hailstone::iequals(m->name, c.character_name());
+        case MemberAction::RemoveGroupLeader: return leader && raid.locked && m->group_leader;
+        case MemberAction::Ungroup: return leader && raid.locked && m->group < 12;
+        case MemberAction::Move:
+            if (!leader || !raid.locked) return false;
+            if (group < 0) return true;
+            if (group >= 12 || m->group == static_cast<std::uint32_t>(group)) return false;
+            return std::count_if(raid.members.begin(), raid.members.end(), [group](const auto& entry) {
+                return entry.group == static_cast<std::uint32_t>(group);
+            }) < 6;
+        }
+        return false;
+    }
+
+    static std::function<void()> member_action(EqHost& host, const std::string& name, MemberAction action,
+                                                bool desired = false, int group = -1) {
+        return [&host, connection = host.conn, raid_id = host.conn ? host.conn->raid().id : 0u,
+                raid_generation = host.conn ? host.conn->raid().generation : 0u, name, action, desired, group] {
+            if (!host.conn || host.conn != connection || host.conn->raid().id != raid_id ||
+                host.conn->raid().generation != raid_generation ||
+                !allowed(host, name, action, group)) return;
+            const auto* m = member(host, name);
+            auto& c = *host.conn;
+            switch (action) {
+            case MemberAction::Assist:
+                if (m->main_assist != desired) c.raid_delegate_ability(3, m->name);
+                return;
+            case MemberAction::Marker:
+                if (m->marker != desired) c.raid_delegate_ability(4, m->name);
+                return;
+            case MemberAction::Leader: {
+                EqHost::Confirm question;
+                question.text = "Make " + m->name + " the raid leader?";
+                question.done = [&host, connection, raid_id, raid_generation, name](bool yes) {
+                    if (!yes || !host.conn || host.conn != connection || host.conn->raid().id != raid_id ||
+                        host.conn->raid().generation != raid_generation ||
+                        !allowed(host, name, MemberAction::Leader)) return;
+                    if (const auto* selected = member(host, name))
+                        host.conn->raid_send_leadership_change(selected->name);
+                };
+                host.confirm = std::move(question);
+                return;
+            }
+            case MemberAction::RemoveGroupLeader:
+                c.raid_remove_group_leader(m->name);
+                return;
+            case MemberAction::Move:
+                c.raid_move_group(m->name, group);
+                return;
+            case MemberAction::Ungroup:
+                c.raid_move_group(m->name, -1);
+                return;
+            case MemberAction::Find:
+                c.set_raid_target(m->name);
+                c.raid_find_path_to_target();
+                return;
+            case MemberAction::Looter:
+                if (looter(c.raid(), m->name) == desired) return;
+                c.set_raid_target(m->name);
+                if (desired) c.raid_add_looter();
+                else c.raid_remove_looter();
+                return;
+            }
+        };
+    }
+
+    static bool open_member_menu(EqHost& host, const std::string& name) {
+        const auto* m = member(host, name);
+        if (!m || !host.conn->in_zone() || host.conn->interface_locked() || !host.context_menus() ||
+            !host.conn->raid().active) return false;
+        // Hailstone's member menu shares the existing packet senders with the native buttons. Capture names,
+        // not row indexes or the mutable raid/world target; every action rechecks its current permissions.
+        const std::string selected = m->name;
+        std::vector<EqHost::MenuRow> rows;
+        EqHost::MenuRow heading;
+        heading.text = selected;
+        heading.enabled = false;
+        rows.push_back(std::move(heading));
+        auto add = [&](const char* text, MemberAction action, bool check = false) {
+            EqHost::MenuRow row;
+            row.text = text;
+            row.check = check;
+            row.enabled = allowed(host, selected, action);
+            row.act = member_action(host, selected, action, !check);
+            rows.push_back(std::move(row));
+        };
+        add("Main Assist", MemberAction::Assist, m->main_assist);
+        add("Mark NPC", MemberAction::Marker, m->marker);
+        add("Looter", MemberAction::Looter, looter(host.conn->raid(), selected));
+        add("Find PC", MemberAction::Find);
+        EqHost::MenuRow separator;
+        separator.separator = true;
+        rows.push_back(std::move(separator));
+        add("Make Raid Leader", MemberAction::Leader);
+        add("Remove Group Leader", MemberAction::RemoveGroupLeader);
+        EqHost::MenuRow moves;
+        moves.text = "Move to Group";
+        moves.enabled = allowed(host, selected, MemberAction::Move);
+        moves.submenu = [&host, selected, connection = host.conn, raid_id = host.conn->raid().id,
+                         raid_generation = host.conn->raid().generation] {
+            std::vector<EqHost::MenuRow> groups;
+            if (!host.conn || host.conn != connection || host.conn->raid().id != raid_id ||
+                host.conn->raid().generation != raid_generation) return groups;
+            const auto* current = member(host, selected);
+            for (int group = 0; group < 12; ++group) {
+                EqHost::MenuRow row;
+                row.text = "Group " + std::to_string(group + 1);
+                row.check = current && current->group == static_cast<std::uint32_t>(group);
+                row.enabled = allowed(host, selected, MemberAction::Move, group);
+                row.act = member_action(host, selected, MemberAction::Move, false, group);
+                groups.push_back(std::move(row));
+            }
+            return groups;
+        };
+        rows.push_back(std::move(moves));
+        add("Ungroup", MemberAction::Ungroup);
+        ImVec2 pos = ImGui::GetMousePos();
+        if (!ImGui::IsMouseClicked(ImGuiMouseButton_Right) || !ImGui::IsMousePosValid(&pos)) {
+            const auto& rect = host.click_rect;
+            if (rect[2] >= 0) pos = ImVec2(rect[2], (rect[1] + rect[3]) / 2);
+            else if (!ImGui::IsMousePosValid(&pos)) pos = ImGui::GetMainViewport()->GetCenter();
+        }
+        host.open_menu(pos.x, pos.y, std::move(rows));
+        return true;
+    }
+
     // The options window's button for a class (the inverse of CRaid::UpdateClassColor's button-to-class table), -1
     // for none. Indexed by class id: warrior 1 is button 13, bard 8 button 0, berserker 16 button 15.
     static int class_button(std::uint8_t class_id) {
@@ -1079,7 +1256,10 @@ public:
         }
         return nullptr;
     }
-    bool combo_select(EqHost&, std::string_view id, int index) override {
+    bool combo_select(EqHost& host, std::string_view id, int index) override {
+        // One of the combo's own choices only: the time zone and the class go into the packets as they are.
+        const ComboData* c = combo(host, id);
+        if (c && (index < 0 || index >= static_cast<int>(c->choices.size()))) return true;
         if (id == "PLFG_TimeZoneCombo") player_tz_.selected = index;
         else if (id == "GLFP_TimeZoneCombo") guild_tz_.selected = index;
         else if (id == "GSFP_TimeZoneCombo") search_tz_.selected = index;
@@ -1199,6 +1379,14 @@ private:
 class GuildBankWindow : public StockWindow {
 public:
     GuildBankWindow() : StockWindow("GuildBankWnd", false) {}
+
+    void frame(EqHost& host) override {
+        const auto serial = shown(host) ? host.conn->guild_bank().serial : 0;
+        if (serial != session_serial_) {
+            session_serial_ = serial;
+            asking_ = asking_quantity_ = false;
+        }
+    }
 
     bool shown(EqHost& host) override { return host.conn && host.conn->guild_bank().banker; }
     void set_shown(EqHost& host, bool show) override {
@@ -1420,7 +1608,7 @@ private:
             q.x = static_cast<std::int32_t>((host.click_rect[0] + host.click_rect[2]) / 2);
             q.y = static_cast<std::int32_t>((host.click_rect[1] + host.click_rect[3]) / 2);
         }
-        open_quantity(host, q, std::move(done));
+        open_quantity(host, q, std::move(done), question_owner(host));
         asking_quantity_ = host.quantity.has_value();
         if (host.quantity) quantity_serial_ = host.quantity->serial;
     }
@@ -1431,13 +1619,24 @@ private:
         e.prompt = eqstr(host, 6109);
         e.max_chars = 64;
         e.text = name;
-        e.done = [this, &host](const std::string& text) {
+        e.owner_valid = question_owner(host);
+        e.done = [this, &host, valid = e.owner_valid](const std::string& text) {
             asking_ = false;
-            if (!host.conn || !host.conn->has_guild_permission(game::kGuildPermBankPermissions)) return;
+            if (!valid() || !host.conn->has_guild_permission(game::kGuildPermBankPermissions)) return;
             host.conn->guild_bank_set_permission(net::GuildBankPermission::SingleMember, text);
         };
         host.text_entry = std::move(e);
         asking_ = true;
+    }
+
+    static std::function<bool()> question_owner(EqHost& host) {
+        const auto* conn = host.conn;
+        const auto serial = conn->guild_bank().serial;
+        const auto selected = conn->guild_bank().selected;
+        return [&host, conn, serial, selected] {
+            return host.conn == conn && conn && conn->guild_bank().banker && conn->guild_bank().serial == serial &&
+                   conn->guild_bank().selected == selected;
+        };
     }
 
     ListData main_list_, deposit_list_;
@@ -1446,6 +1645,7 @@ private:
     ComboData filter_, permission_;
     bool asking_ = false, asking_quantity_ = false; // a member name or quantity question of ours is open
     int quantity_serial_ = 0;
+    std::uint64_t session_serial_ = 0;
 };
 
 } // namespace
@@ -1471,6 +1671,14 @@ namespace {
 int WhoResults(lua_State* L) {
     auto& h = *static_cast<EqHost*>(lua_touserdata(L, lua_upvalueindex(1)));
     const net::WhoResponse* r = h.conn ? h.conn->last_who() : nullptr;
+    // Each entry's texts in a box the state owns across the pushes (plugin/lua_keep.h): a push that fails longjmps
+    // past this frame's own strings. (Below the two results.)
+    struct Entry {
+        net::WhoResponse one;
+        std::vector<std::string> lines;
+        std::string race, zone;
+    };
+    Entry& t = plugin::lua_keep<Entry>(L);
     lua_pushinteger(L, h.conn ? h.conn->who_count() : 0);
     lua_newtable(L);
     if (!r) return 2;
@@ -1489,21 +1697,24 @@ int WhoResults(lua_State* L) {
     int n = 0;
     for (const auto& e : r->entries) {
         if (e.format == 5026 || e.format == 5027) continue; // "ZONE: %1 is UP": not a player
-        // The player's own line: the reply cut down to this entry, without its title and footer.
-        net::WhoResponse one;
-        one.entries.push_back(e);
-        auto ext = h.conn->server_ext().who_lines(*h.conn, one);
-        auto lines = ext ? std::move(*ext) : game::format_who_response(one, h.conn->strings(), false);
+        plugin::cxx_guard(L, [&] {
+            // The player's own line: the reply cut down to this entry, without its title and footer.
+            t.one.entries.assign(1, e);
+            auto ext = h.conn->server_ext().who_lines(*h.conn, t.one);
+            t.lines = ext ? std::move(*ext) : game::format_who_response(t.one, h.conn->strings(), false);
+            t.race = e.race ? game::race_name(e.race) : std::string();
+            t.zone.clear();
+            if (e.zone_string != 0xffffffff)
+                t.zone = (e.zone_id >> 15) & 1 ? e.zone_name : game::zone_short_name(e.zone_id);
+        });
         lua_newtable(L);
         set_str("name", e.name);
         set_int("level", e.level);
         set_int("class", e.class_);
         set_int("race", e.race);
-        set_str("raceName", e.race ? game::race_name(e.race) : std::string());
+        set_str("raceName", t.race);
         set_str("guild", e.guild);
-        std::string zone;
-        if (e.zone_string != 0xffffffff) zone = (e.zone_id >> 15) & 1 ? e.zone_name : game::zone_short_name(e.zone_id);
-        set_str("zone", zone);
+        set_str("zone", t.zone);
         set_bool("anonymous", e.format == 5024);
         set_bool("roleplay", e.format == 5023);
         set_bool("afk", (e.flags & 1) != 0);
@@ -1511,7 +1722,7 @@ int WhoResults(lua_State* L) {
         set_bool("trader", (e.flags & 0x10) != 0);
         set_bool("buyer", (e.flags & 0x20) != 0);
         set_bool("offline", (e.flags & 0x400) != 0);
-        set_str("line", lines.empty() ? e.name : lines.front());
+        set_str("line", t.lines.empty() ? e.name : t.lines.front());
         lua_rawseti(L, -2, ++n);
     }
     return 2;

@@ -5,6 +5,7 @@
 #include "lighting.glsl"
 #include "coverage.glsl"
 #include "weather.glsl"
+#include "zone_surface.glsl"
 
 // Zone geometry pixels by the original's effect:
 //   0 classic region effects (RegionC1 / RegionOld*): texture x lit colour
@@ -61,7 +62,15 @@ layout(location = 8) in vec3 v_point;
 layout(location = 9) in vec3 v_rest; // the plants at rest, as the lights' shadow cubes hold them (point_shadow)
 layout(location = 10) flat in float v_lod_distance; // zone.vert: a level of detail's fades
 
+layout(location = 11) in vec4 v_now;
+layout(location = 12) in vec4 v_then;
+
 layout(location = 0) out vec4 o_color;
+layout(location = 1) out vec2 o_motion;   // the opaque pass's (render/vk_context.h SceneOutput)
+layout(location = 2) out float o_reactive; // the blended and additive passes' (water, glass, glows)
+
+#define MOTION_SET 2
+#include "motion.glsl"
 
 const uint kUnlit = 1u;
 const uint kNoFog = 2u;
@@ -75,6 +84,11 @@ const uint kMolten = 512u;     // RegionLava whose texture's name says lava or m
 const uint kEnergy = 1024u;    // RegionLavaH (harbingers' towers): drawn as lava (modern)
 const uint kEnvMap = 2048u;    // water: slot 2 is its own environment, an octahedral map (a "noswap" cube)
 const uint kFlagLodFade = 4096u; // a level of detail: extra3 its band (coverage.glsl lod_fade_samples)
+const uint kTintNeighbour = 32768u; // render/zone_renderer.h set_debug_tint: a neighbour's own geometry
+const uint kTintLand = 65536u;      // its own ground in its part of the land
+const uint kPackedNormal = 131072u; // CBGG1/CBSG1: RG normal, B glow, A gloss
+const uint kGlow = 262144u;         // blue channel of slot 1
+const uint kAdditiveGlow = 524288u; // AddAlpha surfaces emit into modern HDR
 
 vec4 tex(uint i, vec2 uv) { return texture(textures[nonuniformEXT(i)], uv); }
 
@@ -493,17 +507,29 @@ vec3 modern_lava(vec3 texel, float molten, vec2 p) {
 }
 
 // The weather on the ground (shaders/weather.glsl): snow on the level surfaces, the rain's soak, and water standing
-// in the low spots.
-vec3 weathered(vec3 color, vec3 n) {
-    float footprint = length(fwidth(v_world));
+// in the low spots. A cut-out surface (`cutout`: leaves, fronds, grates) has no surface for water to stand on, and its
+// normals are a crown's or a card's, mostly facing up: no puddles or snow and a lighter soak, or a generated tree's
+// crown takes the sky's colour or turns white.
+vec3 weathered(vec3 color, vec3 n, bool cutout) {
+    vec3 dpx = dFdx(v_world), dpy = dFdy(v_world);
+    float footprint = length(abs(dpx) + abs(dpy));
     float open = sky_open(shadow_map, scene.cover, scene.cover_params, scene.shadow_params.y, v_world + n * 0.5);
     if (open <= 0.0) return color;
     vec3 horizon = scene.haze.z > 0.5 ? scene.haze_color.rgb : to_linear(scene.fog_color.rgb);
-    return weather_surface(color, lit(vec3(0.88, 0.9, 0.94)), v_world, n, normalize(scene.camera_pos.xyz - v_world),
-                           scene.weather, open, horizon, scene.sky.rgb, scene.time.x, footprint, true, 1.0);
+    vec3 view = normalize(scene.camera_pos.xyz - v_world);
+    vec4 weather = scene.weather;
+    if (cutout) weather.y = 0.0;
+    color = weather_surface(color, lit(vec3(0.88, 0.9, 0.94)), v_world, n, view, weather, open, horizon, scene.sky.rgb,
+                            cutout ? 0.3 : 1.0);
+    if (cutout || weather.w <= 0.0) return color;
+    vec3 face = cross(dpx, dpy);
+    float face_len = length(face);
+    face = face_len > 1e-12 ? face / face_len : n;
+    return puddle_surface(color, v_world, n, face, view, weather, open, horizon, scene.sky.rgb, scene.time.x,
+                          footprint, scene.to_light.xyz, scene.light.rgb * g_shadow);
 }
 
-vec3 mapped_normal(vec3 n, uint slot) {
+vec3 mapped_normal(vec3 n, vec4 surface, bool packed_channels) {
     vec3 dp1 = dFdx(v_world), dp2 = dFdy(v_world);
     vec2 duv1 = dFdx(v_uv), duv2 = dFdy(v_uv);
     vec3 dp2perp = cross(dp2, n), dp1perp = cross(n, dp1);
@@ -512,7 +538,7 @@ vec3 mapped_normal(vec3 n, uint slot) {
     float scale = max(dot(t, t), dot(b, b));
     if (!(scale > 1e-20)) return n;
     float inv = inversesqrt(scale);
-    vec3 m = tex(slot, v_uv).rgb * 2.0 - 1.0;
+    vec3 m = zone_surface_normal(surface, packed_channels);
     vec3 mapped = t * inv * m.x + b * inv * m.y + n * m.z;
     float l = length(mapped);
     return l > 1e-6 ? mapped / l : n;
@@ -520,14 +546,14 @@ vec3 mapped_normal(vec3 n, uint slot) {
 
 // The specular classes' highlight of the sun (Blinn-Phong at the material's shininess, its gloss as the strength) and
 // the reflective classes' sky (in place of their environment map), both in the open sky's share of the vertex.
-vec3 surface_shine(vec3 n, uint flags) {
+vec3 surface_shine(vec3 n, uint flags, float gloss) {
     vec3 view = normalize(scene.camera_pos.xyz - v_world);
     vec3 shine = vec3(0.0);
     if ((flags & kSpecular) != 0u) {
         vec3 h = normalize(view + scene.to_light.xyz);
         float ndl = max(dot(n, scene.to_light.xyz), 0.0);
         float power = max(pc.extra.x, 1.0);
-        shine += scene.light.rgb * g_shadow * ndl * pow(max(dot(n, h), 0.0), power) * pc.extra.y * (power + 8.0) / 25.0;
+        shine += scene.light.rgb * g_shadow * ndl * pow(max(dot(n, h), 0.0), power) * gloss * (power + 8.0) / 25.0;
     }
     if ((flags & kReflective) != 0u) {
         vec3 r = reflect(-view, n);
@@ -544,11 +570,12 @@ void main() {
     if (reveal_discard(v_world, gl_FragCoord.xy, scene.reveal_origin, scene.reveal_axis, scene.reveal_shape,
                        scene.reveal_roof))
         discard;
-    // A level of detail in its fade into the next (render/lod_bands.h): each sample shows one of the two. The mask is
-    // written on every path (an unwritten one is undefined), and zone_depth.frag writes the same.
+    // A level of detail in its fade into the next (render/lod_bands.h): each sample shows one of the two. Its mask
+    // is combined with the alpha test below, as in zone_depth.frag.
     int lod_samples = lod_fade_samples((pc.tex2.z & kFlagLodFade) != 0u, v_lod_distance, pc.extra3, gl_FragCoord.xy);
     if (lod_samples == 0) discard;
-    gl_SampleMask[0] = lod_samples;
+    // A neighbour's part of the land: this draw's ground or the other's (coverage.glsl land_blend_discard).
+    if (land_blend_discard(pc.tex2.z, v_color2.a, v_world)) discard;
     uint mode = pc.tex2.y;
     uint flags = pc.tex2.z;
     bool unlit = (flags & kUnlit) != 0u;
@@ -557,7 +584,10 @@ void main() {
     vec3 n = len > 1e-6 ? v_normal / len : vec3(0.0, 0.0, 1.0);
     // The EQG materials' normal maps (modern): the tangent frame from the position's and the texture coordinates'
     // screen derivatives (the meshes carry no tangents), the map's green along +v as Direct3D's maps have it.
-    if (g_modern && mode == 0u && (flags & kNormalMap) != 0u && !unlit) n = mapped_normal(n, pc.tex.y);
+    bool has_surface = mode == 0u && (flags & kNormalMap) != 0u && !unlit;
+    bool packed_surface = (flags & kPackedNormal) != 0u;
+    vec4 surface = has_surface && (g_modern || (flags & kGlow) != 0u) ? tex(pc.tex.y, v_uv) : vec4(0.5, 0.5, 1.0, 1.0);
+    if (g_modern && has_surface) n = mapped_normal(n, surface, packed_surface);
     // A texture pack's maps, on the classic effect in the modern lighting.
     uint normal_slot = pc.tex2.w & 0xffffu, rough_slot = pc.tex2.w >> 16;
     bool mapped = g_modern && !unlit && mode == 0u && (flags & (kWaterSurface | kLavaSurface)) == 0u;
@@ -694,15 +724,28 @@ void main() {
             color = modern_lava(t.rgb, 0.0, v_world.xy * 0.045);
         }
     }
-    if (g_modern && !unlit && mode == 0u && (flags & (kSpecular | kReflective)) != 0u) color += surface_shine(n, flags);
+    if (g_modern && !unlit && mode == 0u && (flags & (kSpecular | kReflective)) != 0u)
+        color += surface_shine(n, flags, zone_surface_gloss(surface, packed_surface, pc.extra.y));
     if (g_modern && !unlit && (flags & (kWaterSurface | kLavaSurface)) == 0u && mode != 2u && mode != 3u &&
         (scene.weather.x > 0.0 || scene.weather.y > 0.0 || scene.weather.w > 0.0))
-        color = weathered(color, n);
+        color = weathered(color, n, pc.params.x > 0.0);
+    // The packed map's glow, after the weather: snow or rain on a glowing crystal does not put it out.
+    if (!unlit && mode == 0u && (flags & kGlow) != 0u) {
+        vec3 albedo = tex(pc.tex.x, v_uv).rgb;
+        color += zone_surface_glow(g_modern ? to_linear(albedo) : albedo, surface.b, g_modern);
+    }
+    // AddAlpha surfaces (render/zone_surface.h kAdditiveGlow; never set in a full-bright view).
+    if (g_modern && (flags & kAdditiveGlow) != 0u) color *= zone_emission_gain(true);
     // Alpha test, GREATEREQUAL against the reference (0 = off), or coverage when multisampled.
     float out_alpha;
     if (!alpha_test(alpha, pc.params.x, pc.params.y, out_alpha)) discard;
+    // Write every surviving path's coverage explicitly, including the alpha-tested edges under MSAA.
+    gl_SampleMask[0] = lod_samples & alpha_coverage_samples(out_alpha, gl_FragCoord.xy);
     // The modern water over the copies is the whole result (it blends the floor itself).
     if (g_modern && (flags & kWaterCopies) != 0u) out_alpha = 1.0;
+    // The neighbour zones' debugging view: what comes from where.
+    if ((flags & kTintNeighbour) != 0u) color = mix(color, vec3(dot(color, vec3(0.3, 0.6, 0.1))) * vec3(1.6, 0.2, 1.4), 0.75);
+    if ((flags & kTintLand) != 0u) color = mix(color, vec3(dot(color, vec3(0.3, 0.6, 0.1))) * vec3(0.2, 1.6, 0.3), 0.6);
     if (g_modern) {
         if ((flags & kNoFog) == 0u)
             color = apply_haze(color, v_world, scene.camera, scene.haze, scene.haze_color, scene.to_light, scene.light);
@@ -713,4 +756,9 @@ void main() {
         color = to_linear(color);
     }
     o_color = vec4(color, out_alpha);
+    o_motion = motion_uv(v_now, v_then);
+    // Water is drawn blended but covers what is under it: a full reactive value would leave its waves without any
+    // history (shimmering); it takes a little.
+    bool watery = mode == 5u || (flags & kWaterSurface) != 0u;
+    o_reactive = reactive_of(o_color) * (watery ? 0.35 : 1.0);
 }

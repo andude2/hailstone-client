@@ -16,6 +16,7 @@
 #include <imgui.h>
 
 #include "app/actions_ui.h"
+#include "core/path_utf8.h"
 #include "game/coords.h"
 #include "game/chat_windows.h"
 #include "game/eq_names.h"
@@ -43,6 +44,8 @@ namespace {
 class QuantityWindow : public StockWindow {
 public:
     QuantityWindow() : StockWindow("QuantityWnd", false) {}
+
+    void frame(EqHost& host) override { sync(host); }
 
     bool shown(EqHost& host) override {
         sync(host);
@@ -112,6 +115,7 @@ public:
 private:
     // The dialog's owner this frame; a new one starts the slider at its start and moves the window.
     void sync(EqHost& host) {
+        if (host.quantity && host.quantity->owner_valid && !host.quantity->owner_valid()) host.quantity.reset();
         int key = 0;
         std::int32_t min = 0, max = 0, start = 0;
         std::optional<std::pair<int, int>> pos;
@@ -578,8 +582,8 @@ private:
 // What a saved report's windows show (BugReportWindow after Send, CrashReportWindow): its file, size and what did
 // not fit, and the buttons that open its folder and copy its forum post.
 void saved_report_child(const SavedBugReport& saved, std::string_view id, Child& out) {
-    if (id == "SavedName") out.text = saved.zip.filename().string();
-    else if (id == "SavedFolder") out.text = saved.zip.parent_path().string();
+    if (id == "SavedName") out.text = path_utf8(saved.zip.filename());
+    else if (id == "SavedFolder") out.text = path_utf8(saved.zip.parent_path());
     else if (id == "SavedInfo")
         out.text = saved.size < 1024 * 1024 ? std::format("{} KB", (saved.size + 1023) / 1024)
                                             : std::format("{:.1f} MB", static_cast<double>(saved.size) / (1024.0 * 1024.0));
@@ -926,7 +930,13 @@ private:
 
 } // namespace
 
-void open_quantity(EqHost& host, const game::QuantityOpen& in, std::function<void(std::int32_t)> done) {
+void open_quantity(EqHost& host, const game::QuantityOpen& in, std::function<void(std::int32_t)> done,
+                   std::function<bool()> owner_valid) {
+    if (owner_valid) {
+        done = [valid = owner_valid, accept = std::move(done)](std::int32_t n) {
+            if (valid() && accept) accept(n);
+        };
+    }
     game::QuantityOpen q = in;
     ImVec2 ds = ImGui::GetIO().DisplaySize;
     q.screen_width = static_cast<std::int32_t>(ds.x);
@@ -953,6 +963,7 @@ void open_quantity(EqHost& host, const game::QuantityOpen& in, std::function<voi
     u.slider = r.slider;
     u.position = r.position;
     u.done = std::move(done);
+    u.owner_valid = std::move(owner_valid);
     u.serial = ++host.quantity_serial;
     host.quantity = std::move(u);
 }

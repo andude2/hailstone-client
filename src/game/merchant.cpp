@@ -1,6 +1,7 @@
 #include "game/merchant.h"
 
 #include <algorithm>
+#include <limits>
 
 #include "core/wrap_math.h"
 #include "game/item_moves.h"
@@ -162,8 +163,13 @@ std::int32_t sell_value(const Item& item, float rate, std::int32_t count) {
         if (!is_droppable(b.item)) return 0;
     std::int32_t value = item_value(item);
     if (value <= 0 || rate == 0.0f) return 0;
-    // NOLINTNEXTLINE(bugprone-incorrect-roundings): the original truncates value / rate + 0.5; kept as is.
-    auto each = static_cast<std::int32_t>(static_cast<double>(value) / static_cast<double>(rate) + 0.5);
+    // The original truncates value / rate + 0.5; kept as is. A result past int32's range or NaN (a tiny, negative
+    // tiny or NaN rate from the server) is undefined to cast in C++; the x86 conversion the original's compiler
+    // emits (cvttsd2si, as the x87 fistp) gives the "integer indefinite" 0x80000000 for it, so that is what it is.
+    const double unit = static_cast<double>(value) / static_cast<double>(rate) + 0.5;
+    const std::int32_t each = unit > -2147483649.0 && unit < 2147483648.0
+                                  ? static_cast<std::int32_t>(unit) // NOLINT(bugprone-incorrect-roundings)
+                                  : std::numeric_limits<std::int32_t>::min();
     std::int32_t price = wrap32(static_cast<std::uint32_t>(each) * static_cast<std::uint32_t>(count));
     if (price >= 10000000) price = core::wrapped_div(static_cast<std::uint32_t>(price) + 50u, 100) * 100;
     return price;

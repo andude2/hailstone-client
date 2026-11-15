@@ -1,5 +1,6 @@
 #include "mq/event_pattern.h"
 
+#include <array>
 #include <charconv>
 
 namespace hailstone::mq {
@@ -70,52 +71,70 @@ EventPattern::EventPattern(std::string_view pattern) : size_(pattern.size()) {
     flush();
 }
 
+std::string EventPattern::fold(std::string_view line) { return folded(line); }
+
 std::optional<std::vector<std::string>> EventPattern::match(std::string_view line, const Resolve& resolve) const {
-    line = line.substr(0, line.find('\0')); // a C string to Blech too
-    if (line.empty() || tokens_.empty()) return std::nullopt; // (Blech is not fed an empty line; MQ crashes on "")
     const std::string low = folded(line);
-    std::vector<std::string> args(static_cast<std::size_t>(max_number_));
+    return match(line, low, resolve);
+}
+
+std::optional<std::vector<std::string>> EventPattern::match(std::string_view line, std::string_view low,
+                                                            const Resolve& resolve) const {
+    line = line.substr(0, line.find('\0')); // a C string to Blech too
+    if (line.empty() || tokens_.empty() || low.size() < line.size()) return std::nullopt; // (Blech is not fed an empty line; MQ crashes on "")
+    low = low.substr(0, line.size());
+    // Where each #n# was found, made into the arguments only once the whole line matches.
+    struct Span {
+        std::size_t at = 0, size = 0;
+    };
+    std::array<Span, kMaxArg> spans{};
     const Token* pending = nullptr; // the #...# whose end is not known yet
     std::size_t pos = 0;            // where the line is matched from
     std::string fixed;              // the literal text since it (literals and |...| values together)
     auto take = [&](std::size_t end) {
-        if (pending->number > 0) args[static_cast<std::size_t>(pending->number - 1)] = std::string(line.substr(pos, end - pos));
+        if (pending->number > 0) spans[static_cast<std::size_t>(pending->number - 1)] = {pos, end - pos};
+    };
+    auto result = [&]() {
+        std::vector<std::string> args(static_cast<std::size_t>(max_number_));
+        for (std::size_t i = 0; i < args.size(); ++i) args[i] = std::string(line.substr(spans[i].at, spans[i].size));
+        return std::optional(std::move(args));
     };
     for (const Token& k : tokens_) {
         if (k.kind == Token::Kind::Literal) {
             fixed += k.text;
-            continue;
-        }
-        if (k.kind == Token::Kind::Print) {
+        } else if (k.kind == Token::Kind::Print) {
             fixed += folded(resolve ? resolve(k.text) : k.text);
+        } else {
+            if (pending) {
+                if (fixed.empty()) {
+                    take(pos); // two #...# with nothing between: the first gets ""
+                } else {
+                    const std::size_t at = low.find(fixed, pos); // the first place it is
+                    if (at == std::string::npos) return std::nullopt;
+                    take(at);
+                    pos = at + fixed.size();
+                }
+            } else {
+                if (low.compare(pos, fixed.size(), fixed) != 0) return std::nullopt; // the start of the line
+                pos += fixed.size();
+            }
+            fixed.clear();
+            pending = &k;
             continue;
         }
-        if (pending) {
-            if (fixed.empty()) {
-                take(pos); // two #...# with nothing between: the first gets ""
-            } else {
-                const std::size_t at = low.find(fixed, pos); // the first place it is
-                if (at == std::string::npos) return std::nullopt;
-                take(at);
-                pos = at + fixed.size();
-            }
-        } else {
-            if (low.compare(pos, fixed.size(), fixed) != 0) return std::nullopt; // the start of the line
-            pos += fixed.size();
-        }
-        fixed.clear();
-        pending = &k;
+        // Literal text longer than what is left of the line can be nowhere in it (a |...| value grown large).
+        if (fixed.size() > line.size() - pos) return std::nullopt;
     }
-    if (!pending) return low == fixed ? std::optional(std::move(args)) : std::nullopt;
+    if (!pending) return low == fixed ? result() : std::nullopt;
     if (fixed.empty()) {
         take(line.size());
-        return args;
+        return result();
     }
     // Blech's walk takes the first place the last literal is, and that must end the line.
     const std::size_t at = low.find(fixed, pos);
     if (at == std::string::npos || at + fixed.size() != line.size()) return std::nullopt;
     take(at);
-    return args;
+    return result();
 }
 
 } // namespace hailstone::mq

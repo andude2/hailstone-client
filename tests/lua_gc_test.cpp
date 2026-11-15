@@ -4,10 +4,12 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <string_view>
 
 #include <imgui.h>
 #include <lua.hpp>
 
+#include "core/frame_sections.h"
 #include "ui/lua/lua_gc_live.h"
 #include "ui/lua/lua_host.h"
 #include "scratch_dir.h"
@@ -53,6 +55,59 @@ TEST_CASE("Lua UI: the collector runs in the frame's slices and keeps the heap b
         // on this machine, the heap stays under that and a frame's garbage.
         CHECK(most < live * 4 + 1024);
         CHECK(lua_gc(L, LUA_GCISRUNNING) == 0);
+    }
+    ImGui::DestroyContext(ctx);
+}
+
+TEST_CASE("Lua UI: each window's allocations go to its frame section") {
+    hailstone::test::ScratchDir scratch("lua_gc_bytes_test");
+    const fs::path dir = scratch.path() / "pack";
+    fs::create_directories(dir);
+    // 'Garbage' makes 3000 small tables a frame (well over 100 KB); 'Quiet' only adds to a number.
+    std::ofstream(dir / "garbage.lua") << "ui.window('Garbage', function()\n"
+                                          "  local t = {}\n"
+                                          "  for i = 1, 3000 do t[i] = { i } end\n"
+                                          "end)\n"
+                                          "local n = 0\n"
+                                          "ui.window('Quiet', function() n = n + 1 end)\n";
+
+    ImGuiContext* ctx = ImGui::CreateContext();
+    ImGui::GetIO().IniFilename = nullptr;
+    unsigned char* px = nullptr;
+    int w = 0, h = 0;
+    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    {
+        hailstone::ui::lua::LuaUi lua(dir, scratch.path() / "ui.txt");
+        auto frame = [&] {
+            ImGui::GetIO().DisplaySize = ImVec2(800, 600);
+            ImGui::GetIO().DeltaTime = 1.0f / 60.0f;
+            ImGui::NewFrame();
+            lua.frame();
+            ImGui::Render();
+        };
+        frame(); // loads the script
+        namespace sections = hailstone::core::frame_sections;
+        sections::take();
+        sections::take_bytes();
+        const std::size_t before = lua.allocated_bytes();
+        frame();
+        const std::size_t total = lua.allocated_bytes() - before;
+        std::size_t garbage = 0, quiet = 0;
+        bool saw_quiet = false;
+        for (const auto& [name, bytes] : sections::take_bytes()) {
+            if (std::string_view(name) == "Lua window Garbage") garbage = bytes;
+            if (std::string_view(name) == "Lua window Quiet") {
+                quiet = bytes;
+                saw_quiet = true;
+            }
+        }
+        sections::take();
+        CHECK(garbage > 100 * 1024);
+        CHECK(saw_quiet); // listed with 0, not left out
+        // Next to nothing: 'Quiet' makes no tables, but what the host does around a window (its draw list, the
+        // collector's state when a slice falls in it) is not fixed, so 0 would hold only by luck of order and timing.
+        CHECK(quiet < 1024);
+        CHECK(total >= garbage);
     }
     ImGui::DestroyContext(ctx);
 }

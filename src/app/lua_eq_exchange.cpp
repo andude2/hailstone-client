@@ -19,6 +19,8 @@
 //
 // The clicks are the ones a bank bag's container window (CContainerWnd's slots) and the bank window's slots make:
 // GameConnection::click_slot on the bank location, so the server sees the same moves.
+#include <optional>
+
 #include <lua.hpp>
 
 #include <imgui.h>
@@ -33,9 +35,10 @@ namespace {
 
 EqHost& host(lua_State* L) { return *static_cast<EqHost*>(lua_touserdata(L, lua_upvalueindex(1))); }
 
-net::ItemSlot bank_slot(lua_State* L, int first) {
-    auto slot = static_cast<std::int16_t>(luaL_checkinteger(L, first));
-    auto bag = static_cast<std::int16_t>(lua_isnoneornil(L, first + 1) ? -1 : luaL_checkinteger(L, first + 1));
+// The bank slot from argument `first` on, nullopt when a number is past a slot's range (slot_args).
+std::optional<net::ItemSlot> bank_slot(lua_State* L, int first) {
+    std::int16_t slot = 0, bag = -1;
+    if (!slot_args(L, first, slot, bag)) return std::nullopt;
     bool shared = lua_toboolean(L, first + 3) != 0;
     return net::ItemSlot{shared ? net::kInvSharedBank : net::kInvBank, slot, bag, -1, 0, 0};
 }
@@ -43,8 +46,8 @@ net::ItemSlot bank_slot(lua_State* L, int first) {
 int BankItem(lua_State* L) {
     auto& h = host(L);
     if (!h.conn || !h.in_game) return push_item(L, nullptr);
-    auto slot = static_cast<std::int16_t>(luaL_checkinteger(L, 1));
-    auto bag = static_cast<std::int16_t>(lua_isnoneornil(L, 2) ? -1 : luaL_checkinteger(L, 2));
+    std::int16_t slot = 0, bag = -1;
+    if (!slot_args(L, 1, slot, bag)) return push_item(L, nullptr);
     bool shared = lua_toboolean(L, 3) != 0;
     return push_item(L, h.conn->inventory().at(net::ItemSlot{shared ? net::kInvSharedBank : net::kInvBank, slot, bag, -1, 0, 0}));
 }
@@ -56,7 +59,12 @@ int BankSlotClick(lua_State* L) {
         lua_pushboolean(L, false);
         return 1;
     }
-    net::ItemSlot s = bank_slot(L, 1);
+    const std::optional<net::ItemSlot> at = bank_slot(L, 1);
+    if (!at) {
+        lua_pushboolean(L, false);
+        return 1;
+    }
+    const net::ItemSlot s = *at;
     std::string_view button = lua_isstring(L, 3) ? lua_tostring(L, 3) : "left";
     if (button == "left") {
         const ImGuiIO& io = ImGui::GetIO();

@@ -74,6 +74,17 @@ TEST_CASE("spell effect timers: a stage starting at 0 never plays (the compares 
     CHECK(t.empty());
 }
 
+TEST_CASE("spell effect timers: an entry whose stage 2 starts near 2^32 is dropped once elapsed tops out") {
+    // A deliberate change: the original's 32-bit elapsed wraps back under such a start and keeps the entry for good.
+    SpellEffectTimers t;
+    t.add(1, 1, 5, 10, 0xfffffff5u, 100, false, 0); // stage 2 at 0xffffffff, which no elapsed passes
+    t.take();
+    t.update(0x80000000ull);
+    CHECK_FALSE(t.empty());
+    t.update(0x100000010ull); // the 32-bit sum would wrap to 0x10
+    CHECK(t.empty());
+}
+
 TEST_CASE("spell effect timers: remove drops every entry with the caster, target and effect") {
     SpellEffectTimers t;
     t.add(1, 2, 5, 1000, 0, 0, false, 0);

@@ -6,12 +6,15 @@
 --   width = the window's (unscaled; 240)
 --   fold = "<setting key>": the command buttons fold under a "Pet commands" header the player opens and closes
 --     (kept in the UI settings under that key; folded at first)
+-- The pet's buffs open the buff's menu on a right click (lib/buffmenu.lua: Spell Info and Add to Blocked Pet Spells).
 local hud = dofile("lib/hud.lua")
+local buffmenu = dofile("lib/buffmenu.lua")
 local T = hud.T
 local C = T.color
 local M = {}
 M.WINDOW = "PetInfoWindow"
 local WINDOW = M.WINDOW
+local MENU = { block = "pet" } -- (the pet's buffs: the Blocked Pet Buffs window)
 local BUTTONS, PER_ROW = 14, 4
 local MAX_BUFFS = 85
 local ICON = 22
@@ -59,7 +62,7 @@ local function gather()
     if spell then
       nBuffs = nBuffs + 1
       local b = entry(buffs, nBuffs)
-      b.id, b.ms, b.name, b.good = id, ms, name, good
+      b.id, b.spell, b.ms, b.name, b.good = id, spell, ms, name, good
     end
   end
   for _, id in ipairs(OTHER_IDS) do
@@ -173,13 +176,16 @@ local function body(x, y, w, h, s)
     local tex, u0, v0, u1, v1 = eq.ChildArt(WINDOW, b.id, "decal")
     if type(tex) ~= "userdata" then tex = nil end
     T.Icon(ix, yy, ICON * s, s, tex, u0, v0, u1, v1, b.good and C.good or C.bad, ICON_OPTS)
-    T.Hit(HIT[b.id], ix, yy, ix + ICON * s, yy + ICON * s)
-    if ui.IsItemHovered() then ui.SetTooltip(b.name .. "\n" .. T.LongDuration(b.ms)) end
+    T.Hit(HIT[b.id], ix, yy, ix + ICON * s, yy + ICON * s, false)
+    if ui.IsItemHovered() then
+      ui.SetTooltip(b.name .. "\n" .. T.LongDuration(b.ms) .. "\n" .. buffmenu.Hint(MENU))
+    end
     if ui.IsItemClicked(ui.Mouse.Right) and not ui.GetIO().alt then
-      eq.WindowButton(WINDOW, b.id, 3)
+      buffmenu.Open(WINDOW, b, MENU)
       T.TakeRightClick()
     end
   end
+  buffmenu.Draw(WINDOW)
 end
 
 local HUD_OPTS = { size = size }

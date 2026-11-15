@@ -17,6 +17,7 @@ local AW = "AAWindow"
 local TABS = { "General", "Archetype", "Class", "Special" }
 local lists = { {}, {}, {}, {} }
 local desc = {}
+local rowCol = { 1, 1, 1, 1 } -- a row's colour, filled in for each row (not a table a row each frame)
 local message, messageAt
 
 local function tabs(x0, y0, page)
@@ -99,7 +100,8 @@ ui.window("Alternate Advancement", function()
     W.list("aa", state, rows, visible, rowH, listX1 - x0, function(i, rx0, ry0, rx1, ry1, focused)
       local texts, r, g, b = eq.ListRow(AW, listId, i - 1)
       if not texts then return end
-      local col = { r or 1, g or 1, b or 1, 1 }
+      local col = rowCol
+      col[1], col[2], col[3] = r or 1, g or 1, b or 1
       T.textIn(rx0 + T.px(20), ry0, rx1 - T.px(480), ry1, T.fit(texts[1] or "", rx1 - rx0 - T.px(500)), col, 0)
       T.textIn(rx1 - T.px(470), ry0, rx1 - T.px(360), ry1, texts[2] or "", col, 0.5)
       T.textIn(rx1 - T.px(350), ry0, rx1 - T.px(270), ry1, texts[3] or "", C.endurance, 0.5)

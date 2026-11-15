@@ -70,3 +70,17 @@ TEST_CASE("float_from_chars fallback agrees with std::from_chars where both exis
         if (ra.ec == std::errc() && !std::isnan(a)) CHECK(a == b);
     }
 }
+
+TEST_CASE("finite_float_from_text: a typed setting is a finite number or none") {
+    using hailstone::finite_float_from_text;
+    CHECK(finite_float_from_text<float>("45") == 45.0f);
+    CHECK(finite_float_from_text<float>("-2.5") == -2.5f);
+    CHECK(finite_float_from_text<float>("30deg") == 30.0f); // the number it starts with, as before
+    CHECK_FALSE(finite_float_from_text<float>(""));
+    CHECK_FALSE(finite_float_from_text<float>("abc"));
+    CHECK_FALSE(finite_float_from_text<float>("nan"));
+    CHECK_FALSE(finite_float_from_text<float>("-NaN"));
+    CHECK_FALSE(finite_float_from_text<float>("inf"));
+    CHECK_FALSE(finite_float_from_text<float>("-infinity"));
+    CHECK_FALSE(finite_float_from_text<float>("1e39")); // past float's range
+}

@@ -39,6 +39,7 @@ struct FloraInstance {
     std::uint32_t color = 0xffffffffu;
     std::uint32_t definition = 0;
     glm::vec2 slope{0.0f};
+    float cover = 1.0f; // a lawn patch (kLawnDefinition): the share of its blades that stand (assets::lawn_edge_cover)
 };
 
 // A zone's flora, by tile (the instances of tile t are instances[first, first + count)).
@@ -97,9 +98,16 @@ std::uint32_t flora_tile_seed(std::int32_t lng, std::int32_t lat, std::size_t ec
 // (each layer at most its *ITERATIONS, 500 at most in the game's files).
 inline constexpr std::size_t kMaxFloraPerTile = 65536;
 
-// Places the flora of `layers` on the tile, appending to `out`, at most kMaxFloraPerTile of them. `definitions`
-// gives the shapes by name (a layer naming none places nothing).
+// The most plants a zone's radial flora holds (`out` across every tile's call): a bound for a forged ecosystem file
+// that fills every tile, which kMaxFloraPerTile alone leaves at 65,536 a tile (gigabytes over a large zone). Moors,
+// the largest stock count measured (docs/formats/eqg.md), places 262,194; this is about sixteen times that, some 200 MB of
+// instances.
+inline constexpr std::size_t kMaxFloraPerZone = std::size_t{1} << 22;
+
+// Places the flora of `layers` on the tile, appending to `out`, at most kMaxFloraPerTile of them and none once `out`
+// holds `zone_cap`. `definitions` gives the shapes by name (a layer naming none places nothing).
 void place_flora(const FloraTile& tile, std::span<const eqg::EcoFloraLayer> layers,
-                 std::span<const eqg::FloraDefinition> definitions, MsvcRand& rand, std::vector<FloraInstance>& out);
+                 std::span<const eqg::FloraDefinition> definitions, MsvcRand& rand, std::vector<FloraInstance>& out,
+                 std::size_t zone_cap = kMaxFloraPerZone);
 
 } // namespace hailstone::assets

@@ -47,17 +47,37 @@ std::string track_of(std::uint8_t code, int column) {
     return std::string(mech::new_style_tag(code)) + "_" + std::string(assets::eqg_character::kTrackStyles[column]);
 }
 
-// The player's animation table as 0x58afa0 reads it: a cell is variant k (0..3) of a column.
+// The player's animation table as 0x58afa0 reads it: a cell is variant k (0..3) of a column. One track choice asks
+// for the same cells and rows several times; each answer is kept for the call (0 not asked, 1 no, 2 yes), so a clip
+// name is built and looked up once. The answers are the same as asking again: the model does not change mid-call.
 struct Rows {
+    static constexpr std::uint8_t kFirst = 0x50, kLast = 0xb6; // the codes new_style_track walks
+    static constexpr std::size_t kCodes = kLast - kFirst + 1;
     const std::function<bool(std::string_view)>& has;
-    bool cell(std::uint8_t code, int column, int k) const {
+    mutable std::array<std::uint8_t, kCodes * 6 * 4> cells{};
+    mutable std::array<std::uint8_t, kCodes> rows{};
+    static bool kept(std::uint8_t code) { return code >= kFirst && code <= kLast; }
+    bool look(std::uint8_t code, int column, int k) const {
         return has(track_of(code, column) + "_" + std::to_string(k + 1));
     }
+    bool cell(std::uint8_t code, int column, int k) const {
+        if (!kept(code)) return look(code, column, k);
+        std::uint8_t& m = cells[(static_cast<std::size_t>(code - kFirst) * 6 + static_cast<std::size_t>(column)) * 4 +
+                                static_cast<std::size_t>(k)];
+        if (m == 0) m = static_cast<std::uint8_t>(look(code, column, k) ? 2 : 1);
+        return m == 2;
+    }
     bool row(std::uint8_t code) const {
-        for (int c = 0; c < 6; ++c)
-            for (int k = 0; k < 4; ++k)
-                if (cell(code, c, k)) return true;
-        return false;
+        auto scan = [&] {
+            for (int c = 0; c < 6; ++c)
+                for (int k = 0; k < 4; ++k)
+                    if (cell(code, c, k)) return true;
+            return false;
+        };
+        if (!kept(code)) return scan();
+        std::uint8_t& m = rows[static_cast<std::size_t>(code - kFirst)];
+        if (m == 0) m = static_cast<std::uint8_t>(scan() ? 2 : 1);
+        return m == 2;
     }
 };
 

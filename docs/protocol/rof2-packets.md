@@ -44,7 +44,7 @@ While zoning (`LoginInfo::zoning = true`), world skips the guild list and charac
 
 | Packet | Dir | Opcode | Layout as implemented |
 |---|---|---|---|
-| SendLoginInfo | C→W | 0x7a09 | 464 B. +0 `char[64]` "account\0key\0"; +64 `char[124]` custom-files key (NUL-terminated, empty normally); +188 u8 zoning; +192 u8 0xcc; rest 0 |
+| SendLoginInfo | C→W | 0x7a09 | 464 B. +0 `char[64]` "account\0key\0"; +64 `char[124]` custom-files key (NUL-terminated, so at most 123 characters; empty normally); +188 u8 zoning; +192 u8 0xcc; rest 0 |
 | LogServer | W→C | 0x7ceb | 560 B. +4 u8 pvp, +8 u8 enable_FV, +36 `char[32]` world short name |
 | ApproveWorld | W→C | 0x7499 | 544-byte constant; not decoded |
 | EnterWorld | W→C | 0x578f | cstr name |
@@ -134,7 +134,7 @@ What world checks:
 | Animation | Z→C | 0x7177 | 4 B: u16 spawn, u8 action, u8 speed (rof2.cpp swaps action and speed relative to the server struct). Action n is the n-th clip of C01..C11, D01..D05, L01..L09, O01, S01..S05, P01..P07, T01..T09, S06..S28, P08, O02, O03 |
 | SpawnAppearance (sit) | both | 0x0971 | 8 B: u16 own id, u16 14, u32 110 sit / 100 stand (102 freeze, 105 loot, 111 crouch, 115 lying). The server checks the id is the sender's; it is not echoed to the sender |
 | ZonePlayerToBind | Z→C | 0x08d8 | u16 zone (0 = this zone), u16 instance, f32 x, y, z, heading, cstr zone name, u8 1, 3×u32 0 |
-| RespawnWindow | Z→C | 0x0ecb | u32 selection, u32 ms left, u32 0, u32 count, count×{u32 id, u32 zone, f32 x, y, z, heading, cstr name, u8 type}, then count + 1 zero bytes |
+| RespawnWindow | Z→C | 0x0ecb | u32 selection, u32 ms left, u32 0, u32 count, count×{u32 id, u32 zone, f32 x, y, z, heading, cstr name, u8 validity (0 available, nonzero unavailable)}, optionally followed by legacy count + 1 zero padding bytes |
 | RespawnWindow | C→Z | 0x0ecb | 4 B: u32 chosen option id |
 
 Observed sequences (EQEmu server, `playprobe --fight-nearest`):
@@ -143,6 +143,12 @@ Observed sequences (EQEmu server, `playprobe --fight-nearest`):
 - Melee: C→Z `OP_AutoAttack` 1 + `OP_AutoAttack2` 1. The server swings on its own timer when the player is in range (`CombatRange`), sees the target (LOS) and **faces** it (`IsFacingMob`); out of range it sends "Your target is too far away, get closer!". Each swing: Z→C `OP_Damage` (to both sides), `OP_Animation`, `OP_MobHealth`; hits on the player also `OP_HPUpdate`. Client-built lines: "You slash a rodent for 6 points of damage.", "A rodent bites YOU for 5 points of damage.".
 - NPC death: Z→C `OP_Death` (the spawn keeps its id as the corpse), then `OP_ExpUpdate` and the experience message. The client prints "You have slain a rodent!", drops the target and stops attacking.
 - Player death (Character:RespawnFromHover off): Z→C `OP_Death` with the player as victim, then `OP_ZonePlayerToBind` with zone 0 (bind in this zone). The client answers C→Z `OP_ZoneChange` {zone 0, instance, the given position, reason 0}; the server resolves zone 0 to the bind point (`Handle_OP_ZoneChange`, zone mode ZoneToBindPoint) and answers success 1, and the client re-enters the zone through world like any zone change. With hover respawn on, the server sends `OP_RespawnWindow` instead and waits for the chosen option (or picks option 0 itself when the timer runs out).
+
+Hover completion (EQEmu source sequence, covered by the loopback tests in `tests/hover_respawn_test.cpp`):
+- Same zone and instance: `OP_ZonePlayerToBind`, then a living own `OP_ZoneEntry` with a new entity ID, authoritative buffs and HP. The previous ID remains the corpse. Movement stays blocked between the bind acknowledgement and own publication; other players, NPCs and stale records for the corpse ID cannot release that wait. The app consumes the new spawn's position and heading once and resets its movement body, held controls and fall state without loading the zone again.
+- RoF2's bind packet contains zero HP/mana/endurance placeholders. During same-zone hover recovery the client preserves current mana/endurance (including zero), applies explicit nonzero values if supplied, and accepts the server's resource updates before or after the bind packet. While the live entity is unpublished, mana/endurance updates can use entity ID zero. HP and buffs after publication belong to the new player ID.
+- Another zone or instance uses the normal zone transfer and profile reload. Countdown expiry remains the server's decision; the client does not guess a destination. The selection is sent once, only for an available ID from the current window. Malformed windows preserve the valid current window and cannot unlock a selection.
+- A resurrection uses the ordinary `OP_RezzRequest` / `OP_RezzAnswer` confirmation, even when no refreshed respawn window arrives. While hovering, Yes to an offer whose zone dword (+4, zone and instance) is the current zone records consent locally and enables the reserved final resurrection option, leaving the selection where it was; it sends no acceptance packet and does not restart the countdown (ConfirmationDialog_HandleResponse @0x52d540 case 0x67). Yes to an offer naming another zone or instance is echoed in `OP_RezzAnswer` at once. A subsequent destination selection sends `OP_RespawnWindow {option_id}` for either bind or resurrection. This preserves the native hover publication path on stock EQEmu; sending an ordinary `OP_RezzAnswer` acceptance at the prompt would commit immediately on some servers. No echoes `OP_RezzAnswer` decline immediately and leaves bind usable. Outside hover, the ordinary resurrection answer still sends `OP_RezzAnswer` at once. Both UI packs keep the original respawn window drawn alongside the question, and put the question in front once, as it appears (the `ResurrectionOffer` child of ConfirmationDialogBox tells them it is the resurrection offer). Replacement ownership remains registered so the fallback death panel cannot take over. EQEmu reserves the final row for resurrection and numbers rows from zero; local consent is associated only with that verified ordering, never with translated names or the availability byte. A changed reserved destination or newer offer invalidates that consent. New death, completion, zoning and disconnect discard stale resurrection questions without answering them.
 
 ### Items, inventory and loot (`net/item_packets.h`, `GameConnection` in `net/game_connection_items.cpp`, rules in `game/inventory.{h,cpp}`)
 
@@ -162,6 +168,8 @@ Observed sequences (EQEmu server, `playprobe --fight-nearest`):
 | ItemLinkClick | C→Z | 0x4cef | 52 B (ItemViewRequest_Struct): u32 item id, 6×u32 augments, u32 link hash, u32 flags (4 \| shift 2 \| ctrl 8 \| alt 0x10), u32 is evolving, u32 evolve group, u32 evolve level, u32 ornament icon |
 | AugmentItem | C→Z | 0x661b | 40 B: u64 host serial (instance id, parcel id; ignored by the server), InventorySlot host, u32 socket 0..5, InventorySlot distiller (-1, -1, 0xffff and 2 unwritten bytes when none), u32 action (0 insert, 1 remove, 2 swap, 3 destroy). The cursor augment is never named. No reply packet: the server answers with OP_ItemPacket 0x67 (the host rebuilt, same serial), OP_MoveItem / OP_DeleteItem, OP_ItemPacket 0x6a (an augment back on the cursor) or red chat |
 | AugmentInfo | both | 0x0afb | 76 B: u32 item id, u32 window, `char[64]` name, u32 (EQEmu unknown072). Request: the augment's SolventItemID and the display's index, the rest 0; reply: the solvent's name (shown as eqstr 5881; 13325 when the last field is 55, never from EQEmu) |
+| EvolveItem | C→Z | 0x7cfb | Final Result: 24 B, six u32 values: action **4**, source template id, final template id hint, current evolution level, unaugmented item-link hash, !Shift (1 normally, 0 with Shift). The item display's hyperlink action 1 maps to this wire action 4. The server answers with an ordinary ItemPacketViewLink / ItemLinkResponse, never a local grant |
+| EvolveItem | Z→C | 0x7cfb | Progress: 24 B, u32 action **0**, u32 unused, u64 persistent instance id, u32 percentage, u32 activated. The id is `instance_id \| (u64(parcel_item_id) << 32)` from item serialization. Updates only the matching received evolving instance; the level and template change only through subsequent inventory item packets. Transfer actions 1–3: see "Evolving items" below |
 
 **Serialized item** (`SerializeItem`, all `#pragma pack(1)`; every field read one by one in `read_item`, and `write_item` reproduces the server's bytes exactly, which the live fixture test checks):
 
@@ -200,7 +208,7 @@ None of these has a RoF2 translator except OP_ShopPlayerBuy/Sell (field copies) 
 | TradeRequest | both | 0x77b5 | 8 B: u32 the other side, u32 the sender. C→Z on a left click on a spawn while holding an item (within AvatarHeight + 20, 12294; banker-type classes 40/63/64/66/74 refuse, 8505). Z→C (a player asks): the client opens its trade window at once and answers the Ack |
 | TradeRequestAck | both | 0x14bf | 8 B: {the other side, the sender}. For an NPC the server answers it itself ({me, NPC}); then the cursor item goes into the trade (OP_MoveItem cursor → {3, slot}, count 0; a stack merges first) and the give window (4 slots) opens; players get the trade window (8 slots) |
 | TradeAcceptClick | both | 0x69e2 | 8 B: u32 partner, u8 ready (1), 3 unset bytes. The server forwards it to a player partner (byte +4 = their ready flag); for an NPC it finishes the trade |
-| TradeCoins | Z→C | 0x4206 | 12 B: u32 the receiver's own id, u8 coin type (0 cp .. 3 pp), 3 B, u32 amount added (a delta) |
+| TradeCoins | Z→C | 0x4206 | 12 B: u32 the receiver's own id, u8 coin type (0 cp .. 3 pp), 3 B, u32 amount added (a delta; Hailstone holds the total at 0xffffffff rather than wrapping) |
 | MoveCoin | C→Z | 0x0bcf | 20 B: i32 from, i32 to (0 cursor, 1 inventory, 2 bank, 3 trade, 4 shared bank), i32 type from, type to, i32 amount. Coin goes into a trade in two moves, inventory → cursor and cursor → trade |
 | CancelTrade | both | 0x354c | 8 B: C→Z {partner, me}; Z→C {the receiver's own id (player partner) or the NPC id, action}. On receipt the client prints 1448/1450 and sends its own cancel back while a partner is set. Refunds come as item packets and OP_MoneyUpdate, then OP_FinishWindow/2 (empty) |
 | FinishTrade | Z→C | 0x3993 | empty: the trade window closes; received items follow as type 0x67 (or 0x6a onto the cursor) |
@@ -219,6 +227,27 @@ Observed sequences (EQEmu server, `playprobe --shop/--hail/--handin/--trade-with
 - Hand-in: OP_TradeRequest → OP_TradeRequestAck {me, Tabure}; OP_MoveItem cursor → trade 0; OP_TradeAcceptClick → OP_FinishTrade, item packet 0x6a "Dirty Training Tunic (Legendary)" onto the cursor, his speech and five faction messages.
 - Player trade: the partner gets OP_TradeRequest, acknowledges, receives the offer as item packet 0x65 (slot 0) and the coin as OP_TradeCoins (+2 silver); both OP_TradeAcceptClick, then OP_MoneyUpdate, the item as 0x67 (stacked into an existing stack), OP_FinishTrade. A client that disconnects with an open give window gets its item back (server refund).
 - On every camp the server sends OP_CancelTrade {own id, action 7}; with no trade open it is ignored.
+
+### Evolving items (`net/evolving_packets.h`, `net/game_connection_evolving.cpp`)
+
+`OP_EvolveItem` is `0x7cfb`. Layouts were checked against EQEmu's RoF2 serializer and the native handlers
+`0x6af8e0` (details), `0x6b0230` (selection/confirmation) and `0x6b00b0` (confirmed transfer). Action 0 (progress)
+and action 4 (Final Result) are the EvolveItem rows of the item table above.
+
+| Action | Direction | Payload |
+|---|---|---|
+| 1 open | Z→C | 24 B, action 0's envelope; opens the transfer window and clears its selection; no client open request |
+| 2 details request | C→Z | 24 B: `u32 action, u32 zero, u64 source ID, u64 destination ID` |
+| 2 details reply | Z→C | 30 B header: `u32 action, u64 source ID, u64 destination ID, u32 compatibility percent, u32 max level, u8 source present, u8 destination present`, followed by each present serialized item |
+| 3 transfer | C→Z | 24 B, same layout as the details request, sent only after explicit confirmation |
+
+An evolving item's ID combines the serialized header's `parcel_item_id` high word and `instance_id` low word;
+the serial text is a different identity. The details reply uses original IDs in its header, but its serialized
+items are projected resulting forms. Hailstone matches the selected original pair and rejects invalid presence
+flags, truncated items and trailing data. Confirmation rechecks live originals and the approval revision.
+The protocol has no request nonce: two replies for the same pair cannot be distinguished (see `docs/unknowns.md`).
+The server rechecks on action 3 and supplies results through ordinary inventory updates and messages, with no
+dedicated success reply. No preview is applied optimistically to inventory.
 
 ### Bank, coin moves and stack splits (`GameConnection` in `net/game_connection_bank.cpp` and `net/game_connection_items.cpp`, rules in `game/bank.{h,cpp}`)
 
@@ -293,6 +322,7 @@ Server side: zone `Handle_OP_Group*` (client_packet.cpp), `Group::*` (groups.cpp
 | GroupLeadershipAAUpdate | Z→C | 0x02cf | leadership AAs; sent after every group update; the group leader's ability ranks and NPC marker are kept (`GameConnection::handle_leadership_ability`) |
 | GroupMakeLeader | C→Z | 0x4229 | 456 B: u32 8, `char[64]` current leader (me), `char[64]` new leader, 324 B 0. The client then sends GroupMentor {0, ""} |
 | GroupMentor | C→Z | 0x3342 | 68 B: i32 percent, `char[64]` name ("" clears) |
+| GroupRoles | both | 0x70e2 | 148 B: `char[64]` member, `char[64]` leader, 3 × u32, i32 role at +0x8c (1 Main Tank, 2 Main Assist, 3 Puller), u8 on at +0x90 (0 clear, 1 assign), 3 B padding. The group leader's menu and `/grouproles` send requests; server replies update the member's flags and clear the previous holder of an assigned role. Requests leave the local flags unchanged until a server update |
 | MobManaUpdate / MobEnduranceUpdate | Z→C | 0x2404 / 0x1c81 | 3 B: u16 spawn, u8 percent; group members' mana and endurance |
 | MobHealth | Z→C | 0x37b1 | 3 B (above); group members' HP percentages come this way too |
 
@@ -410,6 +440,10 @@ The element text is the server's description, else the type's template (with / w
 
 **Reward selection** (`net/reward_packets`, `game/reward_selection`). These are stock RoF2 managers, independent of a server's reward providers. Pending rewards use `0x6411` (`AchievementReward`); task previews use `0x6471` (`RewardSelection`) and cannot claim.
 
+Offered-task Preview Reward uses the same action-4 request as active tasks: the selected task id, gated by the
+offer's received preview byte. This was confirmed in `CTaskSelectWnd::WndNotification` (@0x76b660) and the
+preview manager sender (@0x463a90). It neither accepts nor declines the offer.
+
 | Action | Direction | Layout after u32 action |
 |---|---|---|
 | 0 | Z→C | u8 has reward, then one reward set when true; pending upserts by pending id, preview replaces |
@@ -472,6 +506,7 @@ Chat out (OP_ChannelMessage 0x2b2d) is echoed locally with the client's own temp
 | Packet | Dir | Opcode | Layout |
 |---|---|---|---|
 | WhoAllRequest | C→Z | 0x674b | 156 B: `char[64]` name, 64 B, u32 race, class, level low, level high, GM (1 / 0), guild (or -2 friends, -3 LFG, -4 traders, -5 buyers), type (0 zone, 2 corpse, 3 all, 4 ripoff); 0xffffffff = no filter |
+| FriendsWho | C→Z | 0x3956 | ASCII `0` (zone) or `1` (all), then each saved friend name prefixed by a comma, then NUL; no trailing comma or count. The server answers with WhoAllResponse |
 | WhoAllResponse | Z→C | 0x578c | 64 B header (u32 id, u32 title eqstr, `char[27]` rule, u8, u32, u32 footer eqstr @+0x28, u32 footer count @+0x2c, 3×u32, u32 entries @+0x3c), then per player u32 format, u32 flags, u32 PID eqstr, name, u32 rank eqstr, guild, u32, u32 extra eqstr, u32 zone eqstr, u32 zone, [flags 0x200: zone name], u32 class, level, race, account, u32 |
 | RandomReq | C→Z | 0x7b10 | 8 B: u32 low, u32 high (the first word and the rest of the line, `atoi`; 0..0 is 0..100 on EQEmu) |
 | RandomReply | Z→C | 0x106b | 76 B: u32 low, high, result, `char[64]` name; shown as 1086 and 1087 unless the roller is ignored |
@@ -485,6 +520,8 @@ Chat out (OP_ChannelMessage 0x2b2d) is echoed locally with the client's own temp
 | LFPGetMatchesResponse | Z→C | 0x22c6 | u32 (skipped), then {comments, i16 from, i16 to, u32 classes, i16 count, count × {name, i16 class, level, zone, guild}} |
 | Consent / ConsentDeny | C→Z | 0x1fd1 / 0x7a45 | the name, NUL-terminated |
 | SpawnAppearance 21 / 24 | C→Z | 0x0971 | anonymous flags (1 anonymous, 2 roleplaying) / AFK; other spawns' 18 linkdead, 20 GM, 22 guild id, 23 guild rank, 52 guild show, 53 offline mode update `game::Spawn` (the guild lines: Guilds below) |
+
+`/who friends` (also the localised `friend` word and `/who all friends`) sends the saved list through FriendsWho instead of WhoAllRequest. The scope, separators and final NUL follow Who_BuildAndSendRequest (`0x524a8a`, send at `0x524c1a`); after the send it shows eqstr 12307 and a line of dashes (`0x524c61`–`0x524c92`, colour 0x119), and an empty list shows eqstr 12308 instead (`0x524c94`). Without a chat server the original skips the branch and shows nothing (`0x524a75`), and so does Hailstone. The current UCS world's prefix is removed from saved names, in any case (`World.Alice` and `world.Alice` become `Alice`); other worlds stay, as CChatService::GetFriendName (`0x7efa90`, `__strnicmp`) does. Stock EQEmu selects online friends in world and supplies the normal who response, omitting offline friends and hiding anonymous/roleplaying friends' level, class, race and zone. Its world handler treats the leading scope token as an unmatched friend name and searches the whole world for either scope. Hailstone uses the response's format and fields without filling in hidden details from local spawns. Packet and loopback mock-server tests cover the request and display; a live RoF2 comparison remains open.
 
 Tried live against EQEmu with two clients: `/who` (zone) and `/who all bard` (world, truncated by the server with "Your who request was cut short... too many players."), `/random` with the 1086/1087 lines on both clients, `/loc`, `/time`, `/played`, `/emote` (shown to the sender; the other client was outside EQEmu's emote range), `/tell` with the server's echo, `/reply` and `/rtarget`, `/afk`, `/anon`, `/lfg`, the socials (`/smile`, `/smile <name>`, `/cheer` seen by the other client), `/follow`.
 
@@ -525,7 +562,7 @@ The guild bank tried live (OP_GuildBank and OP_GuildBankItemList, in the table f
 |---|---|---|---|
 | RaidInvite | C→Z | 0x55ac | 140 B RaidGeneral: u32 action, `char[64]` player, u32, `char[64]` leader, u32 parameter. Invite: action 3 when not in a raid, 0 into ours, player = invitee, leader = me (5064). Accept (`/raidaccept`): action 1 {inviter, me} (5079). Decline: action 31 {inviter, me, 5081} (5080; EQEmu has no handler). Leader change: 30 {me, new leader}. Leaving (`/raiddisband`): 5 {me, me}, the leader's removal of the raid target 5 {me, member}. The leader's commands: 6 move {leader, member, group 0..11 / 0xffffffff}, 7 remove group leader {leader, member} (EQEmu: NYI), 8 / 9 lock / unlock {leader, leader}, 0x20 loot type {me, me, 1..4}, 0x21 / 0x22 add / remove looter {leader, member}; 35 the MOTD (1164 B); 0x24 a member's note (204 B: {me, member} and `char[64]` note at +0x8c). The u32 at +0x44 is the raid id (from RaidUpdate 8) |
 | RaidUpdate | Z→C | 0x3973 | by action: 0 add (148 B: + u8 class @140, level, group leader, 5 B; parameter = group 0..11 or 0xffffffff), 1 remove, 5 disband (5062), 8 create, 10 the zone-in reset (136 B), 17/18 lock/unlock, 20 invitation (5065, 5067), 14 the raid leader's leadership ranks and 30 leader (392 B: the 64 dwords from +136 are Leadership_SetRaidAbilityRanks' block, raid ability n at dword n; 30 also 5069 / 5070), 32 loot type (+136), 33 / 34 looter added / removed (+72), 35 MOTD (1164 B; 6349), 36 a member's note (204 B: the member at +72, the note at +140; EQEmu sends the notes after the roster) |
-| RaidDelegateAbility | both | 0x2b33 | 92 B DelegateAbility_Struct. C→Z: ability 3 main assist / 4 marker / 5, the member's name at +28. Z→C: ability, member number (EQEmu: markers 0), action (1 removes), spawn id @20, name @28; the raid's three of each by number, lines 0x2242..0x224a |
+| RaidDelegateAbility | both | 0x2b33 | 92 B DelegateAbility_Struct. C→Z: ability 3 main assist / 4 marker, the member's name at +28 (EQEmu toggles the role). Z→C: ability, member number (EQEmu: assists 1..3, markers 0), action (1 removes), spawn id @20, name @28; the client keeps the raid's three of each by name (the number only places an assist), lines 0x2242..0x224a |
 
 Tried live: `/raidinvite <second player>` → the second player is told "invites you to join a raid" and accepts (`--auto-accept`), "joined the raid", `/rsay` reaches the other member ("<name> tells the raid,  'raid hello'": template 5112 with an empty language part), `/raiddisband` moves the leadership to the other player and removes the first (and the group EQEmu made).
 
@@ -599,7 +636,7 @@ Tried live against EQEmu with two clients (playprobe `--duel`, `--duel-wait`, `-
 | Stun / ItemRecastDelay / Bind_Wound | Z→C | 0x36a4 / 0x15a9 / 0x0386 | u32 duration ms (+2 B) / 12 B {delay s, recast type, bool} / 8 B {u16 target, u16, u16 type: 3 start, 1 done, 4 target dead, 5 gone, 7 no bandage} |
 | Sound (QuestReward_Struct) / CashReward | Z→C | 0x1a30 / 0x5f7a | 68 B {giver, our id, exp, faction, mod, copper +20, silver, gold, platinum} / 16 B {copper, silver, gold, platinum}: coin added without a coin update |
 | GuildMemberAdd / Delete / Level / PublicNote / SetGuildRank (= RankAltBanker) / Details | Z→C | 0x2925 / 0x3141 / 0x1bd3 / 0x01f9 / 0x0b9c / 0x69b9 | u32 guild first; see GameConnection::handle_world_social |
-| GroupRoles / Charm / DisciplineUpdate / Untargetable / YellForHelp / GetGuildMOTDReply | Z→C | 0x70e2 / 0x5d92 / 0x759e / 0x053c / 0x4e56 / 0x4f1f | 148 B GroupRole_Struct (role +0x8c, on +0x90) / 12 B {owner, pet, 1 on / 0 off} / 300 × u32 / 8 B {spawn, targetable} / u32 yeller / the GuildMOTD struct |
+| Charm / DisciplineUpdate / Untargetable / YellForHelp / GetGuildMOTDReply | Z→C | 0x5d92 / 0x759e / 0x053c / 0x4e56 / 0x4f1f | 12 B {owner, pet, 1 on / 0 off} / 300 × u32 / 8 B {spawn, targetable} / u32 yeller / the GuildMOTD struct |
 | Weblink | Z→C | 0x6f4b | the address, NUL-terminated (EQEmu `Weblink_Struct`); the case @0x4c5b5d opens it in an HTML window (docs/browser.md) |
 | Bug | C→Z | 0x73f4 | 8740 B EQEmu BugReport_Struct (not translated): category and its name, reporter, UI path, server x, y, z, heading, minutes played, target id and name, flags (1 can duplicate, 2 crash, 4 target, 8 character flags), the report at +2592, system info at +4642 |
 | VetClaimRequest / VetRewardsAvaliable / VetClaimReply | C→Z / Z→C / Z→C | 0x1126 / 0x590e / 0x16d4 | 80 B {`char[68]`, claim id (0xffffffff: the list), u32, action} / {count, × {claim id, available, item count, u8 enabled, × {u32 length, name (not NUL-terminated), item id, charges}}} / 80 B, action 0 claimed, 1 refused |
@@ -617,10 +654,10 @@ Tried live against EQEmu with two clients (playprobe `--duel`, `--duel-wait`, `-
 | SharedTaskMemberList / MemberChange | Z→C | 0x1e7d / 0x0119 | {u32, u32, count, × {name, u32 mission, u8 leader}} / {u32, u32, u8 added, name} |
 | AdventureInfoRequest / AdventureInfo / AdventureDetails | C→Z / Z→C / Z→C | 0x3cb0 / 0x4c54 / 0x5648 | u32 the recruiter (class 60) / its text or the server's refusal / the adventure offered (NUL-terminated strings) |
 | AdventureRequest / LDoNButton | C→Z | 0x2c6c / 0x5327 | 12 B {risk 1 normal / 2 high, recruiter, objective 0 any .. 4 rescue} / 1 B accept the offer |
-| AdventureData / AdventureUpdate / AdventureFinish | Z→C | 0x7171 / 0x1b01 / 0x400f | 2084 B {u32 (0 with no adventure: all zero), `char[2048]` text, seconds to enter, seconds left, risk, f32 x, y, z, show compass, u32} / 8 B {current, total} / 8 B {won, points} |
+| AdventureData / AdventureUpdate / AdventureFinish | Z→C | 0x7171 / 0x1b01 / 0x400f | 2084 B {u32 (0 with no adventure: all zero), `char[2048]` text, seconds to enter, seconds left, risk (EQEmu: 0 normal / 1 high; RoF2 reads it as the request's 1 / 2, `0x618790`), f32 x, y, z, show compass, u32} / 8 B {current, total} / 8 B {won, points} |
 | AdventurePointsUpdate | Z→C | 0x65c3 | 140 B {available; each theme's points at +56, +76, +96, +116, +136} |
-| AdventureStatsRequest / Reply | C→Z / Z→C | 0x5a62 / 0x2370 | no body / 96 B: successes, failures, rank, percentage rank × {total, five themes} |
-| AdventureLeaderboardRequest / Reply | C→Z / Z→C | 0x7093 / 0x7f79 | 12 B {order 0 wins / 1 percentage, theme 0..5, risk (unread)} / 7220 B {u32, u32, our successes, failures, rank, 100 × {`char[64]`, successes, failures}} |
+| AdventureStatsRequest / Reply | C→Z / Z→C | 0x5a62 / 0x2370 | 1 B zero (native sender reserves one byte; EQEmu ignores it) / 96 B: successes, failures, rank, percentage rank × {total, five themes} |
+| AdventureLeaderboardRequest / Reply | C→Z / Z→C | 0x7093 / 0x7f79 | 12 B {order 0 wins / 1 percentage, theme 0..5, risk 0 all / 1 normal / 2 high (EQEmu ignores risk)} / 7220 B {order, reserved, our successes, failures, rank, 100 × {`char[64]`, successes, failures}}; EQEmu zeroes both leading words |
 | DzExpeditionInfo / DzSetLeaderName / DzExpeditionEndsWarning | Z→C | 0x9119 / 0x3de9 / 0x5189 | every DZ packet starts {u32 client id, u32}: 208 B {assigned, max players, `char[128]` name, `char[64]` leader} / 72 B `char[64]` leader / 12 B minutes left (EQEmu sends its own chat line too) |
 | DzMemberList / DzMemberListStatus / DzMemberListName | Z→C | 0x5ae4 / 0x12f5 / 0x32f0 | {count, count × {name, u8 status: 1 online, 2 offline, 3 in the zone, 4 link dead}} (Status: one member whose status changed; more than 1000 members are refused, a client limit) / 76 B {u32 add, `char[64]` name} |
 | DzExpeditionLockoutTimers | Z→C | 0x205f | {count, count × {expedition, u32 seconds, i32 type (-1 replay), event}} (the answer to DzListTimers too) |
@@ -632,6 +669,17 @@ Tried live against EQEmu with two clients (playprobe `--duel`, `--duel-wait`, `-
 | NewTitlesAvailable | Z→C | 0x0d32 | empty: a line when the window's notice box is on |
 
 Duel state (`game::DuelState`) is the player we challenged or accepted, the challenger, and an on flag. The profile's bandolier sets and potion belt are decoded (`PlayerProfile::bandoliers`, `potion_belt`).
+
+Adventure request fields are verified against RoF2 senders `0x420030`, `0x4209f0`, `0x41fed0` and `0x41ff80`.
+The stats sender `0x619570` and leaderboard sender `0x6173e0` both gate requests for ten seconds (EQEmu separately
+limits them to eight and four seconds). The leaderboard category index interleaves order within theme:
+`order = category % 2`, `theme = category / 2`; risk is the second selector's raw index.
+The player profile's counted LDoN block has six u32 entries: a reserved entry then the five theme balances,
+followed by the available total (`rof2.cpp ENCODE(OP_PlayerProfile)`). Subsequent point updates replace these balances.
+
+The leaderboard reply has no reliable category identifier on stock EQEmu, so Hailstone serializes requests and
+holds the latest selection until the preceding reply and ten-second guard allow it. A missing reply is released
+after thirty seconds, a Hailstone recovery choice. See `docs/unknowns.md` for the residual late-reply ambiguity.
 
 ### Bazaar and barter (`net/market_packets.h`, `GameConnection` in `net/game_connection_market.cpp`, rules in `game/bazaar.{h,cpp}`)
 
@@ -676,7 +724,7 @@ RoF2 has no OP_TraderBuy: everything goes through OP_Trader (trader mode) and OP
 | Barter 0x10 / 0x14 / 0x16 | Z→C | 0x243a | 0x10 {name}: 6060 "browsing"; 0x14 {name at +8, text at +0x48}: 6070 / 788 (EQEmu sends a chat line instead); 0x16: "Your inventory is full!" |
 | Barter 0x11 / 0x14 / 0x17 | C→Z | 0x243a | 0x11 4 B the hall's welcome; 0x14 8 B {0x14, buyer character} the buyer's greeting; 0x17 4 B the buyers for the search window's combo, once per zone |
 | Barter 0x1a / 0x1b, BuyerItems 0x19 | Z→C | both | 0x1a {zone, character id, spawn id, name[64]} adds a buyer to the combo, 0x1b {character id} removes one, BuyerItems 0x19 {count, records} replaces them (EQEmu never sends it; the records stop where the data does) |
-| BuyerItems 5 | Z→C | 0x1a6a | {5, u32 length, "<count>$<record>$..."}: lines in the BART ini format, stored and saved (EQEmu never sends it) |
+| BuyerItems 5 | Z→C | 0x1a6a | {5, u32 length, "<count>$<record>$..."}: lines in the BART ini format, stored and saved; records stop when the text does, whatever the count (EQEmu never sends it) |
 
 The trader window opens only with the membership feature 0xe and in The Bazaar (zone flag 0x10000000, only zone 151); Begin Trader needs the player standing on a trader stall (the floor switch under the feet, types 0x99 / 0x9b, else 6743); its 200 slots are the items in Trader's Satchels (bag type 51) in the general slots, in slot order; prices come from `[ItemToSell]` of `BZR_<name>_<server>.ini` (key: the item id, or "id:charges" for an item with a click spell), written by Set Price (6751) for every slot holding the same item. Prices show as "12p 3g 4s 5c". Each price button opens the amount dialog: gold, silver and copper 0..100 as on the original; platinum 0..4,294,967, where the original stops at 1,000,000 (a deliberate difference: the price fields are 32-bit copper on the wire and in EQEmu's `trader.item_cost`, so a price is held at 4,294,967,295 copper).
 
@@ -743,6 +791,43 @@ From EQEmu (zone/tribute.cpp and the RoF2 translator). Not tried live.
 | TributeItem / TributeMoney | both | 0x4f3e / 0x58fb | 24 B {slot (12 B), quantity, master, favour} / 12 B {platinum, master, favour}: the server takes the donation and answers with the favour |
 
 The profile carries favour, career favour and the five chosen tributes (`PlayerProfile::tribute_points`, `career_tribute_points`, `tributes`).
+
+The bonus items arrive through `OP_ItemPacket`, type 108 for personal tribute (inventory type 6, slots 0..4)
+and 109 for guild tribute (inventory type 8, slots 0..1). These received items feed local stats and effects.
+At login, personal bonus item packets precede `OP_CharInventory`; that possessions/bank snapshot preserves
+already received tribute items unless it explicitly supplies their replacements.
+The server does not notify their deletion on deactivation or opt-out: received tribute settings, guild active
+benefits and our own opt state retire obsolete items. Changed selections retire the affected slot; repeated
+unchanged state preserves it. Guild membership and session changes retire the previous context's items too.
+
+Guild benefit editing and activation require received guild permission 23, checked both by the shared window
+bridge and before sending a request. Another member's opt-out requires permission 22; self opt-in/out remains
+available. Revocation discards unsaved guild-benefit edits. Both UI packs use these shared checks. Source can
+send the next guild's tagged permission rows, rank names and active tribute snapshot before the own GuildID
+appearance. Those permissions remain separate until membership confirms their guild. The active packet's
+leading DWORD can be zero (`SendGuildActiveTributes`) or the guild id (`GuildTributeToggleReply`); an untagged
+snapshot uses the received rank-table context. Matching new-guild metadata survives the appearance while old
+bonus items retire, and a future guild's state cannot authorize changing the current guild's benefits.
+Joining a different guild also clears the old rank until the new GuildRank appearance confirms it; a previous guild's
+leader rank cannot authorize actions during split delivery of the two appearances.
+The confirmed rank permissions and names survive a zone change (EQEmu's zone-in sends them all again,
+`SendGuildRanks` / `SendGuildRankNames`) and are cleared at a session start, a disconnect or a guild change. A
+staged table that no GuildID appearance confirmed is dropped at a zone change: untagged rank names go to a staged
+table while one exists, so a stale one would otherwise take the current guild's later names.
+
+A guild platinum donation has one outstanding request at a time. As in the original
+(`Send_OP_GuildTributeDonatePlat` @0x483e80), it is sent only while carried platinum covers the amount (gold,
+silver and copper do not count), and the master window's Donate button is greyed until the reply
+(`CTributeMasterWnd` +0x2d8, `UpdateDonateButton` @0x785f40). Its 12-byte reply retains both quantity and
+favour. A quantity of -1 clears the request without a debit, as @0x483cd0 does. A client safety deviation: the
+original clears the request on any reply, but here only a matching quantity debits the purse, updates the last
+donation and clears it; malformed, unmatched and repeated replies leave it alone, since the reply names no
+transaction. No coin is removed before the answer. A second deviation: the original subtracts carried platinum
+only, but EQEmu (`TakeMoneyFromPP`) takes copper first and makes change without a coin update, so the client's
+debit follows the server's. Session reset or a later guild-master open reply retires an unanswered request (the
+zone connection orders that open after any earlier donation answer); a local timeout cannot identify a new
+transaction. The existing decoder fuzz tests and mock tests cover malformed replies, overlap, duplicates, the
+greyed button, making change and reset. No server changes are needed.
 
 ### Mercenaries (`game/mercenary.{h,cpp}`, `GameConnection` in `net/game_connection_merc.cpp`, windows in `app/lua_eq_merc.cpp`)
 

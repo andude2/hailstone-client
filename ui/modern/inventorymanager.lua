@@ -134,13 +134,52 @@ local function ago(sec)
   return math.floor(sec / 86400) .. " days"
 end
 
+-- Whether two tables' plain values (not their tables) are all the same.
+local function sameValues(a, b)
+  local n = 0
+  for k, v in pairs(a) do
+    if type(v) ~= "table" then
+      if b[k] ~= v then return false end
+      n = n + 1
+    end
+  end
+  for _, v in pairs(b) do if type(v) ~= "table" then n = n - 1 end end
+  return n == 0
+end
+
+-- Whether a second's read gave the rows it had (each row's and item's plain values): the view is then kept.
+local function sameRows(old, new)
+  if #old ~= #new then return false end
+  for i, r in ipairs(new) do
+    local o = old[i]
+    for k, v in pairs(r) do
+      if k ~= "item" and type(v) ~= "table" and o[k] ~= v then return false end
+    end
+    for k, v in pairs(o) do -- (a value gone; the fields refresh() adds start with "_")
+      if r[k] == nil and type(v) ~= "table" and not (type(k) == "string" and k:sub(1, 1) == "_") then return false end
+    end
+    if o.item == nil or r.item == nil or not sameValues(o.item, r.item) then return false end
+  end
+  return true
+end
+
 local function refresh()
   local inv, keep = eq.ItemsRevision()
   local now = ui.GetTime()
   -- again when the inventory or the marks change, and each second (an item's charges, the bank's slots)
   if inv == data.inv and keep == data.keep and now - data.at < 1 and now >= data.at then return end
+  local timed = inv == data.inv and keep == data.keep
   data.inv, data.keep, data.at = inv, keep, now
-  data.rows = eq.AllItems() or {}
+  local fresh = eq.AllItems() or {}
+  if timed and sameRows(data.rows, fresh) then
+    -- nothing changed: the rows (and the view sorted from them) are kept, with this read's items
+    for i, r in ipairs(data.rows) do
+      r.item = fresh[i].item
+      r._stats = r.item.stats or {}
+    end
+    return
+  end
+  data.rows = fresh
   for i, r in ipairs(data.rows) do
     local it = r.item
     r._order = i
@@ -180,11 +219,25 @@ local FLAG_TEST = {
 -- The rows shown, sorted, with each one's group header ("" none), and how many each choice of the sidebar would show
 -- with the other choices as they are: kept until the items, the marks, the search or a choice change.
 local view = { rows = {}, groups = {}, counts = { place = {}, kind = {}, mark = {}, flag = {}, stat = {} } }
-local function cacheKey()
-  local parts = { data.stamp, tools.MarksStamp(), data.keep, search, cfg.place, cfg.kind, cfg.mark, cfg.sort,
-    tostring(cfg.desc), cfg.stat }
-  for _, f in ipairs(FLAGS) do parts[#parts + 1] = cfg.flags[f[1]] and "1" or "0" end
-  return table.concat(parts, "|")
+-- (what the view was worked out from, compared field by field: no key string made each frame)
+local viewKey = { flags = {} }
+local function viewCurrent()
+  local k = viewKey
+  if not k.set or k.stamp ~= data.stamp or k.marks ~= tools.MarksStamp() or k.keep ~= data.keep
+      or k.search ~= search or k.place ~= cfg.place or k.kind ~= cfg.kind or k.mark ~= cfg.mark
+      or k.sort ~= cfg.sort or k.desc ~= cfg.desc or k.stat ~= cfg.stat then
+    return false
+  end
+  for _, f in ipairs(FLAGS) do
+    if k.flags[f[1]] ~= (cfg.flags[f[1]] and true or false) then return false end
+  end
+  return true
+end
+local function viewNoteKey()
+  local k = viewKey
+  k.set, k.stamp, k.marks, k.keep, k.search = true, data.stamp, tools.MarksStamp(), data.keep, search
+  k.place, k.kind, k.mark, k.sort, k.desc, k.stat = cfg.place, cfg.kind, cfg.mark, cfg.sort, cfg.desc, cfg.stat
+  for _, f in ipairs(FLAGS) do k.flags[f[1]] = cfg.flags[f[1]] and true or false end
 end
 
 -- The rows selected (a click on a row; Shift, Ctrl), by place, with their item id, serial and quantity at selection:
@@ -238,9 +291,8 @@ local function bySort(a, b)
 end
 
 local function shownRows()
-  local key = cacheKey()
-  if view.key == key then return view end
-  view.key = key
+  if viewCurrent() then return view end
+  viewNoteKey()
   local q = search:lower()
   local counts = { place = { all = 0 }, kind = { all = 0 }, mark = { any = 0 }, flag = {}, stat = { [""] = 0 } }
   local rows = {}

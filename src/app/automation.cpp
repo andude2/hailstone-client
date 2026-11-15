@@ -312,7 +312,7 @@ void Automation::Impl::consent_window() {
                             ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowBgAlpha(0.95f);
     bool open = true;
-    ImGui::Begin("Allow this server's plugin?##hailstone_plugin_consent", &open,
+    ImGui::Begin(ui::lua::kConsentWindowName, &open,
                  ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
     ui::lua::guard_current_window();
     ImGui::Text("%s wants to run %s on your computer:", server.c_str(),

@@ -55,13 +55,32 @@ local typed = nil
 local input, inputLinks, inputError = "", {}, nil
 local slotIdx = 1
 
+-- The chat windows, read once a frame (the ticker, the log and a send each want them).
+local windowsFrame, windowsList = nil, nil
+local function chatWindows()
+  local f = ui.GetFrameCount()
+  if f ~= windowsFrame or not windowsList then windowsFrame, windowsList = f, eq.ChatWindows() end
+  return windowsList
+end
+-- The input with its links' tags put back, worked out again only when the input or its links change (the ticker
+-- offers it to the chat keys every frame). The links are only ever added to, or replaced by a new table.
+local expandedText, expandedFor, expandedLinks, expandedCount = "", "", nil, 0
+local function expandedInput()
+  if input ~= expandedFor or not rawequal(inputLinks, expandedLinks) or #inputLinks ~= expandedCount then
+    expandedFor, expandedLinks, expandedCount = input, inputLinks, #inputLinks
+    expandedText = chatlinks.Expand(inputLinks, input)
+  end
+  return expandedText
+end
+
 -- ---------------------------------------------------------------- ticker
 ui.window("Chat Ticker", function()
   if not eq.InGame() then input, inputLinks, inputError, typed = "", {}, nil, nil; return end
   if not W.shown("Chat1") then return end
   local start, replace
-  for index, window in ipairs(eq.ChatWindows()) do
-    start, replace = eq.ChatTakeFocus(window.slot, chatlinks.Expand(inputLinks, input))
+  local text = expandedInput()
+  for index, window in ipairs(chatWindows()) do
+    start, replace = eq.ChatTakeFocus(window.slot, text)
     if start then slotIdx = index; break end
   end
   if start then
@@ -157,7 +176,7 @@ end
 
 local function send(text, composed)
   if text == "" then return true end
-  local windows = eq.ChatWindows()
+  local windows = chatWindows()
   local slot = windows[slotIdx] and windows[slotIdx].slot or 1
   local prefix = text:sub(1, 1) == "/" and "" or CHANNELS[channel][2]
   local expanded, reason = chatlinks.ForSubmit(composed and inputLinks or {}, text, prefix)
@@ -196,7 +215,7 @@ ui.window("Chat Log", function()
     mode, typed, inputError = "keys", nil, nil
     GPSTATE.chatFocusInput = GPSTATE.chatByKeyboard -- (the pad uses the on-screen keys)
   end
-  local windows = eq.ChatWindows()
+  local windows = chatWindows()
   if slotIdx > #windows then slotIdx = 1 end
   local win = windows[slotIdx]
   local slot = win and win.slot or 1
@@ -313,7 +332,7 @@ ui.window("Chat Log", function()
       ui.SameLine(0, T.px(8))
       if T.button("##space", "Space", third, T.px(60), {}, pad) then input = input .. " " end
       ui.SameLine(0, T.px(8))
-      if T.button("##back", "Delete", third, T.px(60), {}, pad) then input = input:sub(1, -2) end
+      if T.button("##back", "Delete", third, T.px(60), {}, pad) then input = T.dropChar(input) end
       ui.SameLine(0, T.px(8))
       if T.button("##send", "Send", third, T.px(60), { primary = true }, pad) then
         if send(input, true) then input, inputLinks = "", {} end

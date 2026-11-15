@@ -299,6 +299,30 @@ TEST_CASE("addon_install: an install cut off is undone at the next start") {
     CHECK_FALSE(fs::exists(dir.path().parent_path() / "outside"));
 }
 
+// The journal is written ahead of each move (on the disk before it); should it still come back without a line, a
+// file left in previous/ after the undo may be the only copy of a replaced one: it is kept aside, not deleted.
+TEST_CASE("addon_install: files in previous/ an unfinished journal does not name are kept aside") {
+    test::ScratchDir dir("addon_kept");
+    const fs::path addons = addons_dir(dir.path());
+    install_script(dir.path(), "autoloot", "1.0.0", {{"init.lua", "-- v1\n"}});
+    CHECK_FALSE(fs::exists(addons / "journal.txt")); // a finished install removes its journal
+    put_file(addons / "previous" / "autoloot" / "init.lua", "-- the only copy\n");
+    put_file(addons / "journal.txt", "");
+    addons_at_start(dir.path());
+    CHECK_FALSE(fs::exists(addons / "previous"));
+    std::vector<fs::path> kept;
+    for (const auto& e : fs::directory_iterator(addons))
+        if (e.path().filename().string().starts_with("kept-")) kept.push_back(e.path());
+    REQUIRE(kept.size() == 1);
+    CHECK(read_file(kept[0] / "autoloot" / "init.lua") == "-- the only copy\n");
+
+    // A finished journal's previous/ is the old version's, removed as before.
+    put_file(addons / "previous" / "autoloot" / "init.lua", "-- v0\n");
+    put_file(addons / "journal.txt", "done\n");
+    addons_at_start(dir.path());
+    CHECK_FALSE(fs::exists(addons / "previous"));
+}
+
 TEST_CASE("addon_install: installed.txt reads back, a damaged record is taken from its backup or refused") {
     test::ScratchDir dir("addon_registry");
     InstalledAddon a;

@@ -228,18 +228,32 @@ ModernView modern_view(const game::ViewDistance& view, float multiplier, float e
     return out;
 }
 
+float zone_haze_length(const game::ViewDistance& view) {
+    if (!view.fog_enabled || !(view.fog_density > 0.0f)) return 0.0f;
+    // The original's exp(-(10 density (d - start) / (end - start))^2) (shaders/zone.vert fog_factor) is half clear
+    // at start + sqrt(ln 2) (end - start) / (10 density); the haze's exp(-kHazeDepth (d / length)^2) at
+    // length sqrt(ln 2 / kHazeDepth).
+    constexpr float kLn2 = 0.69314718f;
+    const float half = std::max(view.fog_start, 0.0f) +
+                       std::sqrt(kLn2) * std::max(view.fog_end - view.fog_start, 1.0f) / (10.0f * view.fog_density);
+    return std::max(half * std::sqrt(kHazeDepth / kLn2), 50.0f);
+}
+
 ModernView modern_view(const game::ViewDistance& view, float multiplier, bool extend) {
     ModernView out;
     out.view = view;
+    // The haze is as thick as the zone's fog (zone_haze_length), never longer than the view; without fog, the view.
+    const float zone = zone_haze_length(view);
     if (!extend) {
-        out.haze_length = std::max(std::min(view.fog_end, view.far_plane), 50.0f);
+        const float reach = std::max(std::min(view.fog_end, view.far_plane), 50.0f);
+        out.haze_length = zone > 0.0f ? zone : reach;
         return out;
     }
     float far = extended_far_plane(view.far_plane, multiplier);
     out.view.far_plane = far;
     out.view.fog_start = std::max(view.fog_start, 0.5f * far);
     out.view.fog_end = far;
-    out.haze_length = far;
+    out.haze_length = zone > 0.0f ? std::min(zone, far) : far;
     return out;
 }
 

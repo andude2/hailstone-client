@@ -5,6 +5,8 @@
 #include <initializer_list>
 
 #include "game/eq_strings.h"
+#include "game/item_links.h"
+#include "game/item_preview.h"
 #include "game/merchant.h"
 #include "game/mechanics/item_stats.h"
 
@@ -197,6 +199,39 @@ const net::Item* augment_in(const net::Item& item, int socket) {
     return item.content(static_cast<std::uint32_t>(socket));
 }
 
+bool has_disabled_ornament(const net::Item& item) {
+    // ItemBase_HasDisabledOrnamentAug @0x7b2ea0: the first ornament socket (types 20, 21) decides.
+    for (int socket = 0; socket < kAugSockets; ++socket) {
+        if (!is_ornament_socket_type(aug_socket_type(item, socket))) continue;
+        const net::Item* aug = augment_in(item, socket);
+        return aug && stats_disabled(*aug);
+    }
+    return false;
+}
+
+WornLook worn_look(const net::Item& item, int material_slot) {
+    WornLook w;
+    w.tint = item.color;
+    const bool ornament = !has_disabled_ornament(item);
+    if (material_slot >= 7) {
+        // ItemBase_GetIDFile @0x7b3e70: the ornament's model (the secondary's own string when set).
+        if (ornament) {
+            const std::string& name =
+                material_slot == 8 && !item.ornament_off.empty() ? item.ornament_off : item.ornament_main;
+            w.material = item_model_number(name);
+        }
+        if (w.material == 0) w.material = item_model_number(item.id_file);
+        return w;
+    }
+    // ItemBase_GetArmorProperties @0x7b3d90: the item's Material, with the ornament's hero's forge model in place of
+    // the item's. The material is the item's: EQEmu sends the item's Material to everyone (Mob::GetEquipmentMaterial)
+    // and at zone-in, so taking an ornament augment's own Material here would show a look only this player sees,
+    // and only until the next zone.
+    w.material = item.material;
+    w.hero_forge = ornament && item.ornament_hero_model != 0 ? item.ornament_hero_model : item.heros_forge_model;
+    return w;
+}
+
 void update_stats_disabled(net::Item& item, std::int32_t use_item, std::int32_t ornament, bool top_level) {
     const std::int32_t prestige = item.item_class != 0 ? 0 : static_cast<std::int32_t>(item.prestige);
     item.rank_disabled = use_item != -1 && use_item < prestige;
@@ -335,7 +370,8 @@ std::string augment_socket_row_text(const net::Item& item, int socket, const Aug
         third = str(s.strings, 6699); // empty
     } else {
         // CStmlWnd::MakeWndNotificationTag(27, name, "0^i") @0087e130.
-        third = std::format("<a WndNotify=\"27,0^{}\">{}</a>", socket, aug->name);
+        // (the name is the server's database text: escaped so it cannot end the tag)
+        third = std::format("<a WndNotify=\"27,0^{}\">{}</a>", socket, escape_stml(aug->name));
     }
     std::string row = str(s.strings, 3355, {std::to_string(socket + 1), type_name, third});
     auto wrap = [](std::uint32_t argb, const std::string& text) {

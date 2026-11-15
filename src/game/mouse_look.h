@@ -72,6 +72,13 @@ struct PointerStep {
 };
 PointerStep pointer_step(float x, float y, float dx, float dy, std::int32_t speed, float width, float height);
 
+// /mousespeed's number as this client applies it: held to eqclient.ini's 0..10. A deliberate change: Cmd_mousespeed
+// @0x4f5130 keeps the argument as typed, so /mousespeed 999999 multiplied every step by it (and -5 was no speed).
+inline constexpr std::int32_t kMaxPointerSpeed = 10;
+constexpr std::int32_t held_pointer_speed(std::int32_t speed) {
+    return speed < 0 ? 0 : speed > kMaxPointerSpeed ? kMaxPointerSpeed : speed;
+}
+
 // CEverQuest::LMouseUp's limit: a press held this long (ms) is no longer a click.
 inline constexpr std::uint32_t kLeftClickMaxHeldMs = 0x2ef;
 // CEverQuest::RMouseUp's: a right-button look held longer is not a right click.

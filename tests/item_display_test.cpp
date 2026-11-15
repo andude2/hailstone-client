@@ -305,3 +305,21 @@ TEST_CASE("build_item_display: a stat label the game folder's eqstr_us.txt lacks
     CHECK(labels[3] == "Strikethrough:");
     for (const auto& l : labels) CHECK(l.find('[') == std::string::npos);
 }
+
+TEST_CASE("build_item_display: a flag the game folder's eqstr_us.txt lacks falls back to a plain label") {
+    // A live game folder's table has 3095 (Lore) and 3099 (No Trade) but not 3094 (Magic) or 3098 (Summoned).
+    game::EqStrings s;
+    s.set(0xc17, "Lore");
+    s.set(0xc1b, "No Trade");
+    net::Item it;
+    it.name = "Chestplate";
+    it.magic = 1;
+    it.lore_group = 1;
+    it.summoned = 1;
+    it.no_drop = 0; // No Trade
+    it.no_rent = 1;
+    game::ItemDisplayContext ctx;
+    ctx.strings = &s;
+    auto d = game::build_item_display(it, ctx);
+    CHECK(d.info[1].text == "Magic, Lore, Summoned, No Trade");
+}

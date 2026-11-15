@@ -63,6 +63,9 @@ public:
     bool open(Endpoint::Family family, std::string& error, const Endpoint* bind_to = nullptr);
     void close();
     bool is_open() const;
+    // Whether a child process started now would get this socket (an inheritable handle, or no close-on-exec): false
+    // for every socket opened here, so the browser helper and other children never hold the client's sockets.
+    bool inherited_by_children() const;
 
     std::optional<Endpoint> local_endpoint() const;
 
@@ -72,7 +75,10 @@ public:
 
     // Returns the datagram size, or nullopt when nothing is waiting or on
     // an error (see last_error()). A datagram larger than buffer is dropped
-    // on every platform, not returned cut short.
+    // on every platform, not returned cut short. A call skips at most
+    // kMaxSkippedPerRecv such drops and transient errors, then returns nullopt
+    // with no error.
+    static constexpr int kMaxSkippedPerRecv = 64;
     std::optional<std::size_t> recv_from(std::span<std::byte> buffer, Endpoint& from);
 
     // Waits until a datagram is readable or the timeout passes.

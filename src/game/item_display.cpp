@@ -143,11 +143,12 @@ bool is_weapon(const net::Item& item) {
     return item.damage > 0 && item.item_type != 27 && item.item_type != 28 && item.item_type != 43 && item.item_type != 44;
 }
 
-// CItemDisplayWnd_CreateItemFlagsString @0x69e280: the flags, ", " between them.
+// CItemDisplayWnd_CreateItemFlagsString @0x69e280: the flags, ", " between them. Each has a plain label for a live
+// game folder's eqstr_us.txt, which dropped some of them (3094 Magic, 3098 Summoned).
 std::string item_flags(const net::Item& item, const ItemDisplayContext& ctx) {
     std::string s;
-    auto add = [&](bool on, std::uint32_t id) {
-        if (on) s += str(ctx, id) + ", ";
+    auto add = [&](bool on, std::uint32_t id, const char* fallback) {
+        if (on) s += str_or(ctx, id, fallback) + ", ";
     };
     auto any_child = [&](auto&& self, const net::Item& it, auto pred) -> bool {
         if (pred(it)) return true;
@@ -155,26 +156,26 @@ std::string item_flags(const net::Item& item, const ItemDisplayContext& ctx) {
             if (self(self, c.item, pred)) return true;
         return false;
     };
-    add(any_child(any_child, item, [](const net::Item& i) { return i.magic != 0; }), 0xc16);       // Magic
-    add(item.is_lore(), 0xc17);                                                                       // Lore
-    add(item.artifact != 0, 0xc19);                                                                   // Artifact
-    add(item.summoned != 0, 0xc1a);                                                                   // Summoned
-    add(any_child(any_child, item, [](const net::Item& i) { return i.no_trade(); }), 0xc1b);         // No Trade
-    add(any_child(any_child, item, [](const net::Item& i) { return i.no_transfer != 0; }), 0x180b);  // No Storage
-    add(item.attuneable != 0, 0x1717);                                                                // Attunable
-    add(any_child(any_child, item, [](const net::Item& i) { return i.no_rent == 0; }), 0xc1c);       // Temporary
-    add(item.no_pet != 0, 0x22ac);                                                                    // No Pet
-    add(item.item_type == 54, 0xd1c);                                                                 // Augmentation
-    add(item.quest_item != 0, 0x11d1);                                                                // Quest
-    if (item.purity > 0) add(true, item.power > 0 ? 0x23de : 0x23dd);                                // Infused / Infusible
-    add(any_child(any_child, item, [](const net::Item& i) { return i.heirloom != 0; }), 0x1d54);     // Heirloom
-    add(m::item_prestige(item) > 0, 0x1552);                                                          // Glamour
-    add(item.placeable_flags() != 0, 0x190d);                                                         // Placeable
-    add(item.copied != 0, 0x1d9d);                                                                    // Copied
-    add(item.collectible(), 0x1e08);                                                                  // Collectible
-    add(item.no_destroy(), 0x1e0d);                                                                   // No Destroy
-    add(any_child(any_child, item, [](const net::Item& i) { return i.no_zone != 0; }), 0x1e0f);      // No Zone
-    add(any_child(any_child, item, [](const net::Item& i) { return i.no_ground != 0; }), 0x1e10);    // No Ground
+    add(any_child(any_child, item, [](const net::Item& i) { return i.magic != 0; }), 0xc16, "Magic");
+    add(item.is_lore(), 0xc17, "Lore");
+    add(item.artifact != 0, 0xc19, "Artifact");
+    add(item.summoned != 0, 0xc1a, "Summoned");
+    add(any_child(any_child, item, [](const net::Item& i) { return i.no_trade(); }), 0xc1b, "No Trade");
+    add(any_child(any_child, item, [](const net::Item& i) { return i.no_transfer != 0; }), 0x180b, "No Storage");
+    add(item.attuneable != 0, 0x1717, "Attunable");
+    add(any_child(any_child, item, [](const net::Item& i) { return i.no_rent == 0; }), 0xc1c, "Temporary");
+    add(item.no_pet != 0, 0x22ac, "No Pet");
+    add(item.item_type == 54, 0xd1c, "Augmentation");
+    add(item.quest_item != 0, 0x11d1, "Quest");
+    if (item.purity > 0) add(true, item.power > 0 ? 0x23de : 0x23dd, item.power > 0 ? "Infused" : "Infusible");
+    add(any_child(any_child, item, [](const net::Item& i) { return i.heirloom != 0; }), 0x1d54, "Heirloom");
+    add(m::item_prestige(item) > 0, 0x1552, "Prestige");
+    add(item.placeable_flags() != 0, 0x190d, "Placeable");
+    add(item.copied != 0, 0x1d9d, "Copied");
+    add(item.collectible(), 0x1e08, "Collectible");
+    add(item.no_destroy(), 0x1e0d, "No Destroy");
+    add(any_child(any_child, item, [](const net::Item& i) { return i.no_zone != 0; }), 0x1e0f, "No Zone");
+    add(any_child(any_child, item, [](const net::Item& i) { return i.no_ground != 0; }), 0x1e10, "No Ground");
     // CXStr::StripTrailing(' '), then (',').
     while (!s.empty() && s.back() == ' ') s.pop_back();
     while (!s.empty() && s.back() == ',') s.pop_back();
@@ -330,13 +331,9 @@ std::string spell_description(const SpellData& s, const ItemDisplayContext& ctx)
 std::string evolving_text(const net::Item& item, const ItemDisplayContext& ctx) {
     const net::EvolvingInfo& e = item.evolving;
     std::string link;
-    if (e.evolve_level < e.evolve_max_level) {
-        net::Item bare = item;
-        bare.contents.erase(std::remove_if(bare.contents.begin(), bare.contents.end(),
-                                           [](const net::BagItem& b) { return b.index < 6; }),
-                            bare.contents.end());
-        std::uint32_t hash = item_link_hash(item_link_hash_input(bare));
-        link = std::format("<a WndNotify=\"27,1^{}^{}^{}^{}\">{}</a>", item.id, e.final_item_id, e.evolve_level, hash,
+    if (const auto request = evolving_final_result(item)) {
+        link = std::format("<a WndNotify=\"27,1^{}^{}^{}^{}\">{}</a>", request->item_id, request->final_item_id,
+                           request->level, request->hash,
                            str(ctx, 6194));
     }
     return str_args(ctx, 6146, {std::to_string(e.evolve_level), std::to_string(e.evolve_max_level),
@@ -522,6 +519,18 @@ std::int32_t weapon_damage_bonus(std::int32_t level, std::uint8_t player_class, 
         bonus += s;
     }
     return bonus;
+}
+
+std::optional<net::EvolvingFinalResult> evolving_final_result(const net::Item& item) {
+    const auto& e = item.evolving;
+    if (!item.is_evolving || item.id == 0 || e.evolve_level < 0 || e.evolve_level >= e.evolve_max_level)
+        return std::nullopt;
+    net::Item bare = item;
+    bare.contents.erase(std::remove_if(bare.contents.begin(), bare.contents.end(),
+                                       [](const net::BagItem& b) { return b.index < 6; }),
+                        bare.contents.end());
+    return net::EvolvingFinalResult{item.id, e.final_item_id, static_cast<std::uint32_t>(e.evolve_level),
+                                   item_link_hash(item_link_hash_input(bare))};
 }
 
 ItemDisplay build_item_display(const net::Item& item, const ItemDisplayContext& ctx) {

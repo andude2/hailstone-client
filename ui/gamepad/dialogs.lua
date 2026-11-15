@@ -46,12 +46,16 @@ end
 
 -- ---------------------------------------------------------------- confirmation
 local CONFIRM = "ConfirmationDialogBox"
+local confirmFocused = false
 ui.window("Confirm", function()
-  if not W.shown(CONFIRM) then return end
+  if not W.shown(CONFIRM) then
+    confirmFocused = false
+    return
+  end
   T.frame()
   local okOnly = eq.ChildShown(CONFIRM, "OK_Button") == true and eq.ChildShown(CONFIRM, "Yes_Button") == false
   local hints = okOnly and { { "a", "OK" } } or { { "a", "Select" }, { "b", "No" } }
-  if W.begin("Confirm", { w = 760, h = 420, title = "Confirm", hints = hints }) then
+  if W.begin("Confirm", { w = 760, h = 420, title = "Confirm", hints = hints, alwaysFocus = true }) then
     local x0, y0, x1, y1, w = W.area()
     local text = plain((eq.WindowText(CONFIRM, "TextOutput")))
     wrapped(text, x0, y0, w, C.text)
@@ -64,6 +68,11 @@ ui.window("Confirm", function()
     else
       if T.button("##yes", "Yes", bw, bh, { primary = true, glyph = "a" }, pad) then eq.ClickChild(CONFIRM, "Yes_Button", "left") end
       ui.SameLine(0, T.px(16))
+      -- the focus starts on No (as W.confirm): an A carried over (a destroy, a buy) must not answer Yes
+      if not confirmFocused then
+        ui.SetKeyboardFocusHere()
+        confirmFocused = true
+      end
       if T.button("##no", "No", bw, bh, { glyph = "b" }, pad) then eq.ClickChild(CONFIRM, "No_Button", "left") end
     end
   end
@@ -101,7 +110,7 @@ ui.window("Quantity", function()
       if pad.menuPressed("rb") then set(value + 10) end
       if pad.menuPressed("x") then set(0) end
       if pad.menuPressed("y") then set(maxv) end
-      if pad.menuPressed("a") then accept = true end
+      if T.settledPress(pad, "a") then accept = true end
     end
     -- buttons (the mouse; the pad's buttons are drawn on them)
     local wx, wy = ui.GetWindowPos()
@@ -321,6 +330,7 @@ end)
 -- first"): the server, each plugin's name, file, size and the start of its SHA-256, the warning, Allow and Don't
 -- allow (kept for those bytes on this server). It stands in for the client's own prompt ("PluginConsent").
 local consentShown = nil -- the question's serial the pad's focus was put on Don't allow for
+local consentAt = 0 -- when that question showed: Allow and Don't allow wait a second (a press meant for something else)
 ui.window("Server Plugins", function()
   eq.WindowShown("PluginConsent")
   local q = eq.PluginConsent()
@@ -350,14 +360,16 @@ ui.window("Server Plugins", function()
     local bw, bh = T.px(260), T.px(64)
     local wx, wy = ui.GetWindowPos()
     ui.SetCursorPos(x1 - wx - 2 * bw - T.px(16), y1 - wy - bh)
-    if T.button("##consentallow", "Allow", bw, bh, {}, pad) then eq.AnswerPluginConsent(true) end
+    if consentShown ~= q.serial then consentAt = ui.GetTime() end
+    local off = { disabled = ui.GetTime() - consentAt < 1.0 }
+    if T.button("##consentallow", "Allow", bw, bh, off, pad) then eq.AnswerPluginConsent(true, q.serial) end
     ui.SameLine(0, T.px(16))
     if consentShown ~= q.serial then
       ui.SetKeyboardFocusHere()
       consentShown = q.serial
     end
-    if T.button("##consentdeny", "Don't allow", bw, bh, {}, pad) then eq.AnswerPluginConsent(false) end
+    if T.button("##consentdeny", "Don't allow", bw, bh, off, pad) then eq.AnswerPluginConsent(false, q.serial) end
   end
   -- B / the close button: not now (asked again at the next zone-in)
-  if W.finish() then eq.AnswerPluginConsent(nil) end
+  if W.finish() then eq.AnswerPluginConsent(nil, q.serial) end
 end)

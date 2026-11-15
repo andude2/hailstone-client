@@ -36,4 +36,41 @@ inline bool swapchain_outdated(Extent window, Extent requested, std::optional<Ex
     return surface && *surface != swapchain;
 }
 
+// When a new size of the 3D view's rectangle (/viewport, VkContext::set_scene_rect) makes the scene targets again.
+// Making them waits for the device and rebuilds every target, so while an edge is dragged (a new size each frame)
+// it waits for the size to hold for kSceneRectSettleFrames, or at the latest kSceneRectMaxWaitFrames after the
+// first change, so a long drag still follows along a few times a second. A size back at the targets' own cancels
+// the wait.
+inline constexpr std::uint32_t kSceneRectSettleFrames = 4;
+inline constexpr std::uint32_t kSceneRectMaxWaitFrames = 30;
+
+struct SceneResizeDebounce {
+    // Called once a frame: `wanted` the rectangle's size now, `current` the size the targets were made for. True
+    // when they are to be made again now.
+    bool update(Extent wanted, Extent current) {
+        if (wanted == current) {
+            pending_ = false;
+            return false;
+        }
+        if (!pending_ || wanted != last_) {
+            stable_ = 0;
+            if (!pending_) waited_ = 0;
+            pending_ = true;
+            last_ = wanted;
+        }
+        ++stable_;
+        ++waited_;
+        if (stable_ >= kSceneRectSettleFrames || waited_ >= kSceneRectMaxWaitFrames) {
+            pending_ = false;
+            return true;
+        }
+        return false;
+    }
+
+private:
+    Extent last_{};
+    std::uint32_t stable_ = 0, waited_ = 0;
+    bool pending_ = false;
+};
+
 } // namespace hailstone::render

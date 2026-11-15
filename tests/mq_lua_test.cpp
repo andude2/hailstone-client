@@ -558,6 +558,98 @@ print(load, io, os.execute)
     CHECK(h.printed_line("nil nil nil"));
 }
 
+TEST_CASE("MQ Lua: loadfile and dofile give back only data, never a function a file made") {
+    Host h;
+    fs::create_directories(h.config_dir);
+    auto put = [&](const char* name, const char* text) {
+        std::ofstream(h.config_dir / name, std::ios::binary) << text;
+    };
+    put("data.lua", "local t = {a = 1, list = {'x', 'y'}} t.self = t return t, 'second'\n");
+    put("closure.lua", "return {run = function(mq) mq.cmd('/sit') end}\n");
+    put("bare.lua", "return function() return 1 end\n");
+    put("method.lua", "return ('').rep\n");
+    put("key.lua", "return {[function() end] = true}\n");
+    put("broken.lua", "return {} + 1\n"); // (no `error` in its empty environment)
+    h.write("cfg_data.lua", R"(
+local mq = require('mq')
+local t, second = dofile('data.lua')
+print('data', t.a, t.list[2], t.self == t, second)
+local f = assert(loadfile('data.lua'))
+print('again', f().a, f().a)
+for _, name in ipairs({'closure.lua', 'bare.lua', 'method.lua', 'key.lua'}) do
+    local g, why = loadfile(name)
+    print(name, g, why and why:find('not data', 1, true) ~= nil)
+    print(name, pcall(dofile, name))
+end
+print('broken', loadfile('broken.lua'))
+-- What the script writes itself is held to the same: text through mq.pickle's write, then loaded.
+mq._write_config('written.lua', 'return function(m) return m end')
+print('written', loadfile('written.lua'))
+)");
+    REQUIRE(h.scripts->run("cfg_data", {}));
+    h.pulses(1);
+    CHECK(h.printed_line("data 1 y true second"));
+    CHECK(h.printed_line("again 1 1"));
+    for (const char* name : {"closure.lua", "bare.lua", "method.lua", "key.lua"}) {
+        CHECK(h.printed_line(std::string(name) + " nil true"));
+        bool refused = false;
+        for (const auto& l : h.printed) refused |= l.rfind(std::string(name) + " false", 0) == 0;
+        CHECK(refused);
+    }
+    bool broken = false, written = false;
+    for (const auto& l : h.printed) {
+        broken |= l.rfind("broken nil", 0) == 0 && l.find("broken.lua:1:") != std::string::npos;
+        written |= l.rfind("written nil", 0) == 0 && l.find("not data") != std::string::npos;
+    }
+    CHECK(broken);
+    CHECK(written);
+}
+
+TEST_CASE("MQ Lua: mq.pickle's writes are held to a size per file and per config directory") {
+    Host h(plugin::kCapRead | plugin::kCapCommands); // a folder of its own: scripts/config/limits/
+    const fs::path own = h.config_dir / "limits";
+    fs::create_directories(own);
+    for (std::size_t i = 0; i + 1 < mq::kMaxConfigFiles; ++i)
+        std::ofstream(own / ("f" + std::to_string(i) + ".lua"), std::ios::binary) << "return {}\n";
+    h.write("limits.lua", R"(
+local mq = require('mq')
+print('big', pcall(mq.pickle, 'big.lua', {s = string.rep('a', 9 * 1024 * 1024)}))
+print('last', pcall(mq.pickle, 'last.lua', {v = 1}))
+print('full', pcall(mq.pickle, 'more.lua', {v = 2}))
+print('replace', pcall(mq.pickle, 'f1.lua', {v = 3}))
+print('read', dofile('f1.lua').v)
+)");
+    REQUIRE(h.scripts->run("limits", {}));
+    h.pulses(1);
+    bool big = false, full = false;
+    for (const auto& l : h.printed) {
+        big |= l.rfind("big false", 0) == 0 && l.find("over 8 MiB") != std::string::npos;
+        full |= l.rfind("full false", 0) == 0 && l.find("config directory is full") != std::string::npos;
+    }
+    CHECK(big);
+    CHECK(h.printed_line("last true"));
+    CHECK(full);
+    CHECK(h.printed_line("replace true"));
+    CHECK(h.printed_line("read 3"));
+    CHECK_FALSE(fs::exists(own / "big.lua"));
+    CHECK_FALSE(fs::exists(own / "more.lua"));
+}
+
+TEST_CASE("MQ Lua: require of a huge name that is not there is a plain error, and the script goes on") {
+    Host h;
+    h.write("huge_require.lua", R"(
+for i = 1, 3 do
+    local ok, why = pcall(require, string.rep('a', 4 * 1024 * 1024))
+    print('try', i, ok, #why > 4 * 1024 * 1024, why:sub(1, 8))
+end
+print('parse', mq == nil, require('mq').parse('${Me.PctHPs}'))
+)");
+    REQUIRE(h.scripts->run("huge_require", {}));
+    h.pulses(1);
+    for (int i = 1; i <= 3; ++i) CHECK(h.printed_line("try " + std::to_string(i) + " false true module '"));
+    CHECK(h.printed_line("parse false 75"));
+}
+
 TEST_CASE("MQ commands: /target, ${} for typed lines, /noparse, /squelch") {
     Host h;
     h.run("/target fippy");
@@ -673,6 +765,29 @@ end
     std::string why;
     CHECK_FALSE(h.scripts->press_button(press("if then"), &why));
     CHECK(why.find("social 'Test' (press)") != std::string::npos);
+}
+
+// A string match runs no Lua instructions, so the count hook never stopped one: the vendored Lua's long-match check
+// (ui::lua::kMatchCheckKey, the script state's match_check) holds it to the same limit.
+TEST_CASE("Lua socials: a runaway string match is stopped at the press's limit") {
+    Host h(0);
+    allow_buttons(h, plugin::ButtonMode::Press, plugin::kCapRead, 2);
+    const auto start = std::chrono::steady_clock::now();
+    CHECK_FALSE(h.scripts->press_button(press("string.find(('a'):rep(1e5), ('a-'):rep(20) .. 'b')")));
+    CHECK(printed_part(h, "ran longer than 50 ms"));
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+    CHECK(h.scripts->press_button(press("assert(string.find(('a'):rep(100) .. 'b', 'a-b') == 1)")));
+}
+
+// The long-match stop is the runaway's own, so a pcall around the match passes it on (Script::runaway).
+TEST_CASE("Lua socials: a pcall around a runaway string match does not catch the stop") {
+    Host h(0);
+    allow_buttons(h, plugin::ButtonMode::Press, plugin::kCapRead, 2);
+    const auto start = std::chrono::steady_clock::now();
+    CHECK_FALSE(h.scripts->press_button(
+        press("while true do pcall(string.find, ('a'):rep(1e5), ('a-'):rep(20) .. 'b') end")));
+    CHECK(printed_part(h, "ran longer than 50 ms"));
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
 }
 
 TEST_CASE("Lua socials: editing the code starts a new state; forget_button drops it") {
@@ -1285,10 +1400,10 @@ TEST_CASE("MQ Lua: a bind that runs its own command is stopped, not left to over
 TEST_CASE("MQ Lua: a bind's command with too many words is refused; the script runs on") {
     Host h;
     h.write("words.lua", "local mq = require('mq') mq.bind('/words', function(...) print('words', select('#', ...)) end)"
-                         " mq.cmd('/words' .. string.rep(' w', 1200)) mq.cmd('/words a b') mq.delay(100000)\n");
+                         " mq.cmd('/words' .. string.rep(' w', 1001)) mq.cmd('/words a b') mq.delay(100000)\n");
     REQUIRE(h.scripts->run("words", {}));
     h.pulses(2);
-    CHECK(printed_part(h, "too many words for its bind (1200) is refused"));
+    CHECK(printed_part(h, "too many words for its bind (1001) is refused"));
     CHECK(printed_part(h, "words 2"));
     CHECK(h.scripts->running("words"));
 }
@@ -1598,4 +1713,154 @@ TEST_CASE("MQ Lua: the memory limit comes back after an error skipped a HostWork
     }
     CHECK(s.limited == 0);
     CHECK(s.runs == 0);
+}
+
+TEST_CASE("MQ commands: /docommand, /noparse and /squelch nest at most 16 deep; mq.cmd's line is at most 2047 bytes") {
+    Host h;
+    auto nest = [](int n, const std::string& tail) {
+        std::string line;
+        for (int i = 0; i < n; ++i) line += i % 3 == 0 ? "/docommand " : i % 3 == 1 ? "/noparse " : "/docommand ";
+        return line + tail;
+    };
+    h.run(nest(16, "/echo deep enough"));
+    CHECK(h.printed_line("deep enough"));
+    h.run(nest(17, "/echo too deep"));
+    CHECK_FALSE(h.printed_line("too deep"));
+    CHECK(printed_part(h, "nest at most 16 deep"));
+    // Without end: no stack overflow.
+    std::string huge;
+    for (int i = 0; i < 100000; ++i) huge += "/docommand ";
+    h.run(huge + "/echo never");
+    CHECK_FALSE(h.printed_line("never"));
+    // Nested /noparse keeps the outer one's: the line is still not parsed after the inner one ends.
+    h.run("/noparse /docommand /noparse /tell Groupie ${Me.PctHPs}");
+    CHECK(h.sent.back() == "/tell Groupie ${Me.PctHPs}");
+
+    h.write("nest.lua", R"(
+local mq = require('mq')
+print('long', pcall(mq.cmd, string.rep('/docommand ', 100000) .. '/echo x'))
+mq.cmd(string.rep('/docommand ', 100) .. '/echo y')
+mq.cmd(string.rep('/docommand ', 15) .. '/echo fits')
+print('max', pcall(mq.cmd, '/echo ' .. string.rep('z', 2041)))
+print('over', pcall(mq.cmd, '/echo ' .. string.rep('z', 2042)))
+)");
+    REQUIRE(h.scripts->run("nest", {}));
+    h.pulses(1);
+    CHECK(printed_part(h, "long false"));
+    CHECK(printed_part(h, "mq.cmd: a command line is at most 2047 bytes"));
+    CHECK_FALSE(h.printed_line("x"));
+    CHECK_FALSE(h.printed_line("y"));
+    CHECK(h.printed_line("fits"));
+    CHECK(h.printed_line("max true"));
+    CHECK(printed_part(h, "over false"));
+}
+
+TEST_CASE("MQ Lua: a runaway caught by pcall, xpcall or a coroutine of the script's own still stops it") {
+    ImGuiFrame frame;
+    for (const char* body : {
+             "while true do pcall(function() while true do end end) end",
+             "while true do xpcall(function() while true do end end, function(e) return e end) end",
+             "while true do coroutine.resume(coroutine.create(function() while true do end end)) end",
+             "while true do coroutine.resume(coroutine.create(function() while true do pcall(function() while true do end end) end end)) end",
+             "while true do pcall(table.sort, {3, 2, 1, 4, 5}, function(a, b) while true do end end) end",
+         }) {
+        CAPTURE(body);
+        Host h(plugin::kCapAll, nullptr, 200);
+        h.write("spin.lua", std::string("local mq = require('mq')\nmq.imgui.init('Spin', function() ") + body +
+                                " end)\nmq.delay(100000)\n");
+        REQUIRE(h.scripts->run("spin", {}));
+        h.pulses(1);
+        h.scripts->imgui();
+        CHECK(printed_part(h, "ran longer than 200 ms"));
+        CHECK_FALSE(h.scripts->running("spin"));
+    }
+}
+
+TEST_CASE("MQ Lua: pcall, xpcall and coroutine.resume still work, and mq.delay yields through pcall") {
+    Host h;
+    h.write("pc.lua", R"(
+local mq = require('mq')
+print('p', pcall(function(a, b) return a + b end, 2, 3))
+print('e', select(2, pcall(error, 'boom', 0)))
+print('x', xpcall(function() error('bad', 0) end, function(e) return 'handled ' .. e end))
+local co = coroutine.create(function(a) local b = coroutine.yield(a + 1) return b * 2 end)
+print('c', coroutine.resume(co, 1))
+print('c', coroutine.resume(co, 5))
+print('closed', coroutine.close(coroutine.create(function() end)))
+print('d', pcall(function() mq.delay(10) return 'waited' end))
+)");
+    REQUIRE(h.scripts->run("pc", {}));
+    h.pulses(3, 20);
+    CHECK(h.printed_line("p true 5"));
+    CHECK(h.printed_line("e boom"));
+    CHECK(h.printed_line("x false handled bad"));
+    CHECK(h.printed_line("c true 2"));
+    CHECK(h.printed_line("c true 10"));
+    CHECK(h.printed_line("closed true"));
+    CHECK(h.printed_line("d true waited"));
+}
+
+TEST_CASE("Lua socials: a press that caught its runaway is stopped, and the next press runs again") {
+    Host h;
+    allow_buttons(h, plugin::ButtonMode::Press, plugin::kCapAll);
+    auto p = press(R"(
+if state.ran then mq.cmd('/sit') return end
+state.ran = true
+while true do pcall(function() while true do end end) end
+)");
+    CHECK_FALSE(h.scripts->press_button(p));
+    CHECK(printed_part(h, "ran longer than 50 ms"));
+    CHECK(h.sent.empty());
+    CHECK(h.scripts->press_button(p));
+    REQUIRE(h.sent.size() == 1);
+    CHECK(h.sent.back() == "/sit");
+}
+
+TEST_CASE("Lua socials: hailstone.ui_function, option and menu are refused") {
+    Host h;
+    allow_buttons(h, plugin::ButtonMode::Full, plugin::kCapAll); // (full mode: a social may have 'ui')
+    h.scripts->press_button(press("hailstone.ui_function('f', function() end)"));
+    CHECK(printed_part(h, "hailstone.ui_function: a Lua social cannot add to the UI"));
+    h.scripts->press_button(press("hailstone.option{name = 'o', get = function() return 0 end, set = function(v) end}"));
+    CHECK(printed_part(h, "hailstone.option: a Lua social cannot add to the UI"));
+    h.scripts->press_button(press("hailstone.menu('M', '/sit')"));
+    CHECK(printed_part(h, "hailstone.menu: a Lua social cannot add to the UI"));
+}
+
+TEST_CASE("MQ Lua: a narrowed event handler whose own line raises its event again does not hold the client") {
+    Host h;
+    int fed = 0;
+    // A line a read-only add-on writes each time the handler runs: the same event again, with the add-on's origin.
+    h.hooks.add_command(h.hooks.new_owner("feeder"), "/feed", [&](std::string_view) {
+        ++fed;
+        plugin::ChatLine again{"Bob tells you, 'loop'", 0, 0};
+        again.from_code = true;
+        again.origin_caps = plugin::kCapRead | plugin::kCapEvents;
+        h.hooks.chat(again);
+    });
+    h.write("loop.lua", R"(
+local mq = require('mq')
+mq.event('loop', "#1# tells you, 'loop'", function() mq.cmd('/feed') end)
+while true do mq.doevents() mq.delay(10) end
+)");
+    REQUIRE(h.scripts->run("loop", {}));
+    h.pulses(1);
+    plugin::ChatLine first{"Bob tells you, 'loop'", 0, 0};
+    first.from_code = true;
+    first.origin_caps = plugin::kCapRead | plugin::kCapEvents;
+    h.hooks.chat(first);
+    h.pulses(2, 10); // each pulse ends: the doevents loop is the script's own Lua, which pauses after its slice
+    CHECK(fed > 1);
+    CHECK(h.scripts->running("loop"));
+}
+
+TEST_CASE("MQ Lua: no script may have a Lua social's name") {
+    Host h;
+    h.write("social 'test'.lua", "print('ran')\n");
+    std::string why;
+    CHECK_FALSE(h.scripts->run("social 'test'", {}, &why));
+    CHECK(why.find("a script's name cannot start with") != std::string::npos);
+    CHECK_FALSE(h.scripts->run("SOCIAL 'Test'", {}, &why));
+    h.pulses(1);
+    CHECK_FALSE(h.printed_line("ran"));
 }

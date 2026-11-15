@@ -97,6 +97,7 @@ local function byTrivial(a, b)
 end
 local SORT_BY = { false, byName, byTrivial }
 
+local trivialColor = { 0, 0, 0, 1 } -- a row's trivial colour, filled for each row (T.Text does not keep it)
 local ROWS = {
   rowH = 24,
   draw = function(_, texts, x0, y0, x1, y1, s_, state)
@@ -106,7 +107,8 @@ local ROWS = {
     T.Text(nx, ty, T.Fit(texts[1] or "", x1 - nx - 50 * s_, T.font.small), C.text, T.font.small)
     -- the trivial in the game's colour for trivial - skill (how hard the recipe is for the character)
     local tc = state.colors and state.colors[2] -- (the row's cell colours, from P.Rows' read of it)
-    T.Text(x1 - 8 * s_, ty, texts[2] or "", tc and { tc[1], tc[2], tc[3], 1 } or C.muted, T.font.small, "right")
+    if tc then trivialColor[1], trivialColor[2], trivialColor[3] = tc[1], tc[2], tc[3] end
+    T.Text(x1 - 8 * s_, ty, texts[2] or "", tc and trivialColor or C.muted, T.font.small, "right")
   end,
   tooltip = function(_, texts) return (texts[1] or "") .. "\nTrivial at skill " .. (texts[2] or "?") end,
   empty = "No recipes listed",

@@ -188,8 +188,10 @@ local function header(s, x, w)
   return st
 end
 
+local socialColors -- (eq.SocialColors: a fixed palette, read once)
 local function nameAndColour(s)
-  local colors = eq.SocialColors()
+  socialColors = socialColors or eq.SocialColors()
+  local colors = socialColors
   local c = colors[ed.color + 1] or { 1, 1, 1 }
   K.Caption("Name")
   ui.SameLine()

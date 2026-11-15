@@ -11,6 +11,8 @@ namespace hailstone {
 namespace {
 constexpr std::size_t kLocalHeader = 30, kCentralHeader = 46, kEndRecord = 22;
 constexpr std::size_t kMax = std::numeric_limits<std::uint32_t>::max();
+// The end record's count is 16 bits, and 0xffff in it means "see the zip64 record", which this does not write.
+constexpr std::size_t kMaxEntries = 0xfffe;
 
 void put16(std::vector<std::byte>& out, std::uint32_t v) {
     out.push_back(static_cast<std::byte>(v & 0xff));
@@ -29,7 +31,8 @@ std::uint16_t dos_time(const std::tm& t) {
     return static_cast<std::uint16_t>((t.tm_hour << 11) | (t.tm_min << 5) | (t.tm_sec / 2));
 }
 std::uint16_t dos_date(const std::tm& t) {
-    const int year = t.tm_year + 1900 < 1980 ? 0 : t.tm_year + 1900 - 1980;
+    // Seven bits of years from 1980: a date before is 1980, one after 2107 is 2107 (it would spill into the month).
+    const int year = t.tm_year + 1900 < 1980 ? 0 : (t.tm_year + 1900 - 1980 > 127 ? 127 : t.tm_year + 1900 - 1980);
     return static_cast<std::uint16_t>((year << 9) | ((t.tm_mon + 1) << 5) | t.tm_mday);
 }
 
@@ -71,7 +74,7 @@ std::size_t ZipWriter::finished_size() const {
 
 bool ZipWriter::append(std::string_view name, std::span<const std::byte> data, const std::tm& local,
                        std::size_t limit) {
-    if (finished_ || data.size() > kMax || name.size() > 0xffff) return false;
+    if (finished_ || data.size() > kMax || name.size() > 0xffff || entries_.size() >= kMaxEntries) return false;
     std::vector<std::byte> packed = data.empty() ? std::vector<std::byte>{} : deflate_raw(data);
     const bool stored = data.empty() || packed.empty() || packed.size() >= data.size();
     const std::span<const std::byte> body = stored ? data : std::span<const std::byte>(packed);
@@ -131,7 +134,7 @@ const std::vector<std::byte>& ZipWriter::finish() {
         put_name(out_, e.name);
     }
     const auto directory_size = static_cast<std::uint32_t>(out_.size() - directory);
-    const auto count = static_cast<std::uint32_t>(entries_.size() < 0xffff ? entries_.size() : 0xffff);
+    const auto count = static_cast<std::uint32_t>(entries_.size()); // at most kMaxEntries: append() refuses more
     put32(out_, 0x06054b50);
     put16(out_, 0);
     put16(out_, 0);

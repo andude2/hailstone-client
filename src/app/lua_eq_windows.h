@@ -9,11 +9,13 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "app/lua_eq.h"
@@ -36,6 +38,24 @@ constexpr int number_to_int(double v) {
     if (v <= -2147483648.0) return -2147483647 - 1;
     if (v >= 2147483647.0) return 2147483647;
     return static_cast<int>(v);
+}
+
+// A Lua integer narrowed without wrapping: a plain cast of a value past the type's range wraps it into another one
+// that may be a valid target (65536 as an int16 slot is slot 0; 2^32 + 3 as an int is 3). integer_as gives nullopt
+// when T does not hold v; held_int holds v to int's range, whose ends no index, slot or count takes.
+template <class T, class V> constexpr std::optional<T> integer_as(V v) {
+    if (!std::in_range<T>(v)) return std::nullopt;
+    return static_cast<T>(v);
+}
+template <class V> constexpr int held_int(V v) {
+    if (std::cmp_less(v, std::numeric_limits<int>::min())) return std::numeric_limits<int>::min();
+    if (std::cmp_greater(v, std::numeric_limits<int>::max())) return std::numeric_limits<int>::max();
+    return static_cast<int>(v);
+}
+// A 1-based Lua index as a 0-based int, held as held_int is (int's least value stays itself: nothing is below it).
+template <class V> constexpr int held_index(V v) {
+    const int i = held_int(v);
+    return i == std::numeric_limits<int>::min() ? i : i - 1;
 }
 
 // What a child shows of an image part (a button's background / decal, a spell gem's icon).
@@ -73,6 +93,9 @@ struct Child {
     // CButtonWnd's cool-down (SetCoolDown, drawn by vtable +0x16c @0x8970a0): its rectangle's fraction (the part
     // gone, at most 0.87; game/spell_gem.h ButtonCoolDown), none when idle.
     std::optional<double> cool_down;
+    // Optional timing detail from the window (combat ability buttons): milliseconds left and the ability's
+    // focus-adjusted reuse. A shared timer can exceed this ability's reuse; 64 bits keep seconds * 1000 exact.
+    std::uint64_t cool_down_left = 0, cool_down_duration = 0;
     bool under = false; // the window draws it in its own Draw, under its children (CTargetWnd::Draw)
 };
 
@@ -157,6 +180,7 @@ struct ListRow {
     std::optional<ui::UiTextures::Cell> icon;
     std::vector<std::optional<Rgb>> cell_colors; // CListWnd::SetItemColor(row, column): a cell's own colour
     int icon_column = 0; // CListWnd::SetItemIcon's column
+    bool disabled = false; // a line added or left disabled (CListWnd line flag 0x100 clear): the packs grey it
 };
 // A combo box's choices and the chosen one (-1 none).
 struct ComboData {
@@ -409,6 +433,9 @@ void help_window_set_file(StockWindow& help, EqHost& host, const std::string& fi
 // CStmlWnd::LoadPage of a game file (help\\..., help\\tips\\...): the page's body with its new lines as spaces, and
 // its <TITLE> in `title` (empty when it has none).
 std::string load_stml_page(const GameDir* game, const std::string& path, std::string* title);
+// An href link's page in the game folder, as CStmlWnd follows it from `page` (the page shown): file:///x is x from the
+// game folder, a bare name is beside the page; none for a web link (not followed).
+std::optional<std::string> stml_href_path(const std::string& page, std::string_view href);
 
 // CChatWindowManager::GetRGBAFromIndex as 0xRRGGBB (app/lua_eq_chat.cpp), and text made safe inside STML.
 std::uint32_t chat_index_rgb(int index);
@@ -457,5 +484,9 @@ std::string deity_desc(const net::GameConnection& c, std::uint32_t deity);
 
 // Pushes eq.Item's table for `item` (nil without one); app/lua_eq.cpp.
 int push_item(lua_State* L, const net::Item* item);
+
+// A slot and an optional bag place from arguments `first` and `first + 1` (a missing bag place is -1, none): false
+// when either is past int16's range, which a cast would wrap into another slot (app/lua_eq.cpp).
+bool slot_args(lua_State* L, int first, std::int16_t& slot, std::int16_t& bag);
 
 } // namespace hailstone::app

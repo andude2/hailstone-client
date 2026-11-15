@@ -67,15 +67,12 @@ end
 
 -- ---------------------------------------------------------------- clicks after A
 -- A click that opens the quantity dialog runs once A is released, so the A still held does not press the dialog.
-local waiting = nil
-function M.afterA(fn) waiting = fn end
+-- Dropped if the window it was asked in closes first (W.deferred).
+local waiting = {}
+function M.afterA(fn) W.deferred(waiting, fn) end
 function M.frame()
   T.frame()
-  if waiting and not pad.down("a") then
-    local fn = waiting
-    waiting = nil
-    fn()
-  end
+  W.runDeferred(waiting)
 end
 
 -- A pad shortcut of the current window, not in its first moments (the press that opened it is not one for it).

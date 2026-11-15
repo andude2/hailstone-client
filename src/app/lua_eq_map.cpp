@@ -59,6 +59,7 @@
 #include "game/zone_names.h"
 #include "game/zone_routes.h"
 #include "net/game_connection.h"
+#include "plugin/lua_keep.h"
 #include "ui/dev_screens.h"
 #include "ui/lua/lua_host.h"
 #include "ui/ui_ini.h"
@@ -209,6 +210,13 @@ struct MapState {
     bool panning = false, lasso = false;
     float anchor_x = 0, anchor_y = 0;
     bool drawn = false; // DrawMap ran this frame (the mouse functions use its mapping)
+    // The hover found by the last DrawMap and its mapping are forgotten whenever the view's lines or labels may go (a
+    // load, a clear, a removal, a join): the hover points into them, and a mouse press after would keep the pointer.
+    void forget_hover() {
+        hover_line = nullptr;
+        hover_label = nullptr;
+        drawn = false;
+    }
     float ox = 0, oy = 0, k = 1, area_w = 0, area_h = 0;
     bool toolbar_open = false;
     bool label_window_open = false;
@@ -325,6 +333,7 @@ struct MapState {
         if (name != zone) clear_search(); // 0x6c93a0
         zone = name;
         view.current_zone = true;
+        forget_hover();
         view.clear();
         scan_skins(h);
         view.pan_x = view.pan_y = 0;
@@ -347,6 +356,7 @@ struct MapState {
         if (!toolbar_open) editing = false;
         if (name != zone) clear_search();
         zone = name;
+        forget_hover();
         view.clear();
         view.pan_x = view.pan_y = 0;
         load_layers(h);
@@ -932,6 +942,7 @@ public:
         MapState& s = *s_;
         auto& v = s.view;
         auto me = s.player_map(h);
+        s.forget_hover(); // a button below may remove, join or clear lines and labels
         if (id == "MTW_StartLineButton") { if (me) v.start_line(*me); }
         else if (id == "MTW_EndLineButton") { if (me) v.end_line(*me); }
         else if (id == "MTW_AddPointButton") { if (me) v.add_point(*me); }
@@ -968,6 +979,7 @@ public:
             auto st = s_;
             q.done = [st, whole](bool yes) {
                 if (!yes) return;
+                st->forget_hover();
                 if (whole) st->view.clear();
                 else st->view.clear_active_layer();
                 st->view.relayout = true;
@@ -1136,19 +1148,38 @@ bool mark_shown(const game::MapView& v, const SpawnMark& m, std::optional<float>
     return *feet - static_cast<float>(v.min_z) <= m.at.z && m.at.z <= *feet + static_cast<float>(v.max_z);
 }
 
+// A screen rectangle's four numbers from argument i on, as floats (true), or false when one is not a number or lies
+// past any screen: cast as they are they could overflow float (undefined) and carry the map's mapping past int's range
+// (the pan and the label layout are ints).
+bool rect_arg(lua_State* L, int i, float out[4]) {
+    constexpr double kMaxCoord = 1e6;
+    bool sound = true;
+    for (int n = 0; n < 4; ++n) {
+        const double c = luaL_checknumber(L, i + n);
+        sound = sound && std::isfinite(c) && std::fabs(c) <= kMaxCoord;
+        out[n] = sound ? static_cast<float>(c) : 0.0f;
+    }
+    return sound;
+}
+// A scale (screen pixels per original pixel) from argument i: 1 when missing, not a number or outside 0.05..100.
+float scale_arg(lua_State* L, int i) {
+    const double scale = luaL_optnumber(L, i, 1.0);
+    return std::isfinite(scale) && scale >= 0.05 && scale <= 100.0 ? static_cast<float>(scale) : 1.0f;
+}
+
 // eq.DrawMap(x0, y0, x1, y1 [, hovered [, scale]])   -- draws the map into that screen rectangle of the current
 // window as MapViewMap::Draw draws it; scale: screen pixels per original pixel (the window's), default 1
 int DrawMap(lua_State* L) {
     MapState& s = *state_of(L);
     EqHost& h = *host_of(L);
-    float x0 = static_cast<float>(luaL_checknumber(L, 1)), y0 = static_cast<float>(luaL_checknumber(L, 2));
-    float x1 = static_cast<float>(luaL_checknumber(L, 3)), y1 = static_cast<float>(luaL_checknumber(L, 4));
+    float area[4];
+    const bool sound = rect_arg(L, 1, area);
     bool hovered = lua_toboolean(L, 5) != 0;
-    float k = static_cast<float>(luaL_optnumber(L, 6, 1.0));
-    if (k <= 0.0f) k = 1.0f;
+    const float k = scale_arg(L, 6);
     s.hover_line = nullptr;
     s.hover_label = nullptr;
-    if (!h.in_game || x1 <= x0 || y1 <= y0) return 0;
+    const float x0 = area[0], y0 = area[1], x1 = area[2], y1 = area[3];
+    if (!sound || !h.in_game || x1 <= x0 || y1 <= y0) return 0;
     auto& v = s.view;
     float cw = (x1 - x0) / k, ch = (y1 - y0) / k; // the client area in original pixels
     s.drawn = true;
@@ -1684,11 +1715,11 @@ int DrawZoneMap(lua_State* L) {
 int DrawAtlas(lua_State* L) {
     MapState& s = *state_of(L);
     EqHost& h = *host_of(L);
-    const float x0 = static_cast<float>(luaL_checknumber(L, 1)), y0 = static_cast<float>(luaL_checknumber(L, 2));
-    const float x1 = static_cast<float>(luaL_checknumber(L, 3)), y1 = static_cast<float>(luaL_checknumber(L, 4));
-    float k = static_cast<float>(luaL_optnumber(L, 5, 1.0));
-    if (k <= 0.0f) k = 1.0f;
-    if (x1 <= x0 || y1 <= y0 || !h.textures) return 0;
+    float area[4];
+    const bool sound = rect_arg(L, 1, area);
+    const float k = scale_arg(L, 5);
+    const float x0 = area[0], y0 = area[1], x1 = area[2], y1 = area[3];
+    if (!sound || x1 <= x0 || y1 <= y0 || !h.textures) return 0;
     if (!s.atlas_loaded) s.load_atlas(h, "Default.xml");
     const game::AtlasPage& page = s.atlas;
     const float pw = static_cast<float>(page.width()) * k, ph = static_cast<float>(page.height()) * k;
@@ -1855,6 +1886,14 @@ int MapMouseDown(lua_State* L) {
     ImVec2 mouse = ImGui::GetMousePos();
     float mx = (mouse.x - s.ox) / s.k, my = (mouse.y - s.oy) / s.k;
     bool edit = s.edit_mode();
+    // (the hover is still one of the view's: forget_hover; checked here as well, since a pointer kept past its erase
+    // would be written through as the marked label)
+    if (s.hover_label && std::none_of(s.view.labels.begin(), s.view.labels.end(),
+                                      [&](const game::MapLabel& l) { return &l == s.hover_label; }))
+        s.hover_label = nullptr;
+    if (s.hover_line && std::none_of(s.view.lines.begin(), s.view.lines.end(),
+                                     [&](const game::MapLine& l) { return &l == s.hover_line; }))
+        s.hover_line = nullptr;
     if (!ImGui::GetIO().KeyCtrl) {
         if (edit) {
             if (s.hover_label) {
@@ -2021,11 +2060,16 @@ std::string zone_title(std::uint32_t id) {
     std::string n = game::zone_long_name(id);
     return n.empty() ? game::zone_short_name(id) : n;
 }
+// A name made for a field, out of the caller's frame before the push (plugin/lua_keep.h).
+void set_made(lua_State* L, const char* key, std::string&& v) {
+    plugin::push_made(L, std::move(v));
+    lua_setfield(L, -2, key);
+}
 void push_zone(lua_State* L, std::uint32_t id) {
     lua_createtable(L, 0, 4);
     set_field(L, "id", id);
-    set_field(L, "zone", game::zone_short_name(id));
-    set_field(L, "name", zone_title(id));
+    set_made(L, "zone", game::zone_short_name(id));
+    set_made(L, "name", zone_title(id));
     set_field(L, "expansion", game::zone_expansion(id));
 }
 
@@ -2054,7 +2098,7 @@ int AtlasIndex(lua_State* L) {
         const auto& z = index.zones[i];
         const std::uint32_t id = game::zone_id_by_short_name(z.zone);
         lua_createtable(L, 0, 9);
-        set_field(L, "zone", id ? game::zone_short_name(id) : z.zone);
+        set_made(L, "zone", id ? game::zone_short_name(id) : std::string(z.zone));
         set_field(L, "name", z.name);
         set_field(L, "page", z.page);
         set_rect(L, z.rect);
@@ -2074,17 +2118,25 @@ int AtlasIndex(lua_State* L) {
 int AtlasPageData(lua_State* L) {
     MapState& s = *state_of(L);
     EqHost& h = *host_of(L);
-    const std::string file = luaL_checkstring(L, 1);
-    auto it = s.atlas_pages.find(lower(file));
-    if (it == s.atlas_pages.end()) {
-        auto text = s.read_atlas(h, file);
-        if (!text) {
-            lua_pushnil(L);
-            return 1;
+    const char* file_arg = luaL_checkstring(L, 1);
+    // Found or read in this scope: the page is the state's (MapState::atlas_pages), and nothing of this frame's is
+    // alive across the pushes after it (plugin/lua_keep.h).
+    const game::AtlasPage* found = nullptr;
+    plugin::cxx_guard(L, [&] {
+        const std::string file = file_arg;
+        auto it = s.atlas_pages.find(lower(file));
+        if (it == s.atlas_pages.end()) {
+            auto text = s.read_atlas(h, file);
+            if (!text) return;
+            it = s.atlas_pages.emplace(lower(file), game::parse_atlas_page(*text)).first;
         }
-        it = s.atlas_pages.emplace(lower(file), game::parse_atlas_page(*text)).first;
+        found = &it->second;
+    });
+    if (!found) {
+        lua_pushnil(L);
+        return 1;
     }
-    const game::AtlasPage& page = it->second;
+    const game::AtlasPage& page = *found;
     lua_createtable(L, 0, 9);
     set_field(L, "width", page.width());
     set_field(L, "height", page.height());
@@ -2120,7 +2172,7 @@ int AtlasPageData(lua_State* L) {
         lua_createtable(L, 0, 7);
         set_field(L, "action", l.action);
         const std::uint32_t id = l.action == 2 ? game::zone_id_by_short_name(l.target) : 0;
-        set_field(L, "target", id ? game::zone_short_name(id) : l.target);
+        set_made(L, "target", id ? game::zone_short_name(id) : std::string(l.target));
         set_field(L, "tip", l.tooltip);
         set_rect(L, l.rect);
         lua_rawseti(L, -2, static_cast<lua_Integer>(i + 1));
@@ -2134,7 +2186,8 @@ int AtlasPageData(lua_State* L) {
 int AtlasTexture(lua_State* L) {
     MapState& s = *state_of(L);
     EqHost& h = *host_of(L);
-    const auto* t = h.textures ? h.textures->game_file("Atlas/" + s.atlas_skin + "/" + luaL_checkstring(L, 1)) : nullptr;
+    const char* file = luaL_checkstring(L, 1); // (checked first: the path below is a std::string)
+    const auto* t = h.textures ? h.textures->game_file("Atlas/" + s.atlas_skin + "/" + file) : nullptr;
     if (!t) {
         lua_pushnil(L);
         return 1;

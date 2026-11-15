@@ -552,9 +552,27 @@ assert(T.gets == gets, "settings within 10 s: no read")
 T.data["hailstone:enabled"] = "0"
 T.now = T.now + 10
 assert(not settings_request(a), "the bucket's 0 is seen within 10 s")
-event_encounter_load({ encounter = {} })
 T.data["hailstone:enabled"] = "1"
+assert(not settings_request(a), "still the 0 read within 10 s")
+event_encounter_load({ encounter = {} }) -- (which reads enabled itself, for the file list)
 assert(settings_request(a), "#reloadquest reads them at once")
+)lua");
+}
+
+TEST_CASE("Server script: enabled 0 answers no file request and lists no files at the zone's start") {
+    check_run(R"lua(
+add_files(2, 40000)
+T.data["hailstone:enabled"] = "0"
+load_script()
+assert(T.finds == 0, "enabled 0: the zone's start lists nothing: " .. T.finds)
+local a = client(1, "Alpha")
+assert(list_request(a, 0) == nil, "no list sent")
+assert(chunk_request(a, 1, 0, 0) == nil, "no piece sent")
+assert(T.finds == 0 and T.stats == 0, "nothing looked at")
+T.data["hailstone:enabled"] = "1"
+event_encounter_load({ encounter = {} }) -- #reloadquest: the buckets read at once
+assert(T.finds == 1, "enabled again: listed")
+assert(list_request(a, 0):ReadInt32(12) == 2, "and answered")
 )lua");
 }
 

@@ -307,9 +307,10 @@ void from_switch(const mechanics::Switch& s, Door& d) {
 // ProcessSwitches' callees for the client's doors (game/mechanics/switches.h).
 class DoorFrame final : public mechanics::SwitchQueries {
 public:
-    DoorFrame(std::vector<Door*>& doors, std::uint32_t now, std::int32_t zone, const DoorRiders* riders)
-        : doors_(doors), now_(now), zone_(zone), riders_(riders) {}
-    std::vector<mechanics::Switch> switches;
+    DoorFrame(std::vector<Door*>& doors, std::vector<mechanics::Switch>& switches_, std::uint32_t now,
+              std::int32_t zone, const DoorRiders* riders)
+        : switches(switches_), doors_(doors), now_(now), zone_(zone), riders_(riders) {}
+    std::vector<mechanics::Switch>& switches;
     std::vector<std::uint8_t> use;
 
     void change_state(mechanics::Switch& s, std::uint32_t state) override {
@@ -380,23 +381,27 @@ private:
     const DoorRiders* riders_;
 };
 
-std::vector<std::uint8_t> run_frame(std::vector<Door*> doors, std::uint32_t elapsed_ms, std::uint32_t now_ms,
+// `scratch.doors` holds the frame's doors; its other lists are filled here.
+std::vector<std::uint8_t> run_frame(SwitchClock::Scratch& scratch, std::uint32_t elapsed_ms, std::uint32_t now_ms,
                                     std::int32_t zone, const DoorRiders* riders) {
-    DoorFrame frame(doors, now_ms, zone, riders);
-    frame.switches.reserve(doors.size());
+    std::vector<Door*>& doors = scratch.doors;
+    DoorFrame frame(doors, scratch.switches, now_ms, zone, riders);
+    frame.switches.clear();
     for (Door* d : doors) frame.switches.push_back(to_switch(*d));
-    std::vector<mechanics::Switch*> list;
-    for (auto& s : frame.switches) list.push_back(&s);
-    mechanics::process_switches(list, elapsed_ms, now_ms, frame);
+    scratch.list.clear();
+    for (auto& s : frame.switches) scratch.list.push_back(&s);
+    mechanics::process_switches(scratch.list, elapsed_ms, now_ms, frame);
     for (std::size_t i = 0; i < doors.size(); ++i) from_switch(frame.switches[i], *doors[i]);
-    return frame.use;
+    return std::move(frame.use);
 }
 
 } // namespace
 
 std::vector<std::uint8_t> process_door(Door& d, float ticks, std::uint32_t now_ms) {
     auto elapsed = static_cast<std::uint32_t>(std::lround(ticks / 0.02f));
-    return run_frame({&d}, elapsed, now_ms, 0, nullptr);
+    SwitchClock::Scratch scratch;
+    scratch.doors.push_back(&d);
+    return run_frame(scratch, elapsed, now_ms, 0, nullptr);
 }
 
 std::vector<std::uint8_t> process_doors(std::vector<Door>& doors, SwitchClock& clock, std::uint32_t now_ms,
@@ -407,9 +412,9 @@ std::vector<std::uint8_t> process_doors(std::vector<Door>& doors, SwitchClock& c
     }
     std::uint32_t elapsed = now_ms - clock.last_ms;
     clock.last_ms = now_ms;
-    std::vector<Door*> list;
-    for (auto& d : doors) list.push_back(&d);
-    return run_frame(std::move(list), elapsed, now_ms, zone, riders);
+    clock.scratch.doors.clear();
+    for (auto& d : doors) clock.scratch.doors.push_back(&d);
+    return run_frame(clock.scratch, elapsed, now_ms, zone, riders);
 }
 
 glm::mat4 door_transform(const Door& d) {

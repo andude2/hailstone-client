@@ -7,6 +7,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <unordered_map>
 
 #include <cgltf.h>
 
@@ -20,6 +21,31 @@ namespace {
 // Limits on what a replacement may hold: well past a detailed tree, short of what would stall a zone load.
 constexpr std::size_t kMaxVertices = 1u << 20;
 constexpr std::size_t kMaxIndices = 3u << 20;
+
+// Primitives read under one transform from the same accessors share their vertices (load_gltf_mesh). Kept in a hash
+// map: a file with many primitives would make a list's search quadratic.
+struct ReadKey {
+    std::array<const void*, 5> accessors;
+    glm::mat4 world;
+    // A NaN in the transform never equals itself, so such a primitive is never shared, as with ==.
+    bool operator==(const ReadKey& o) const { return accessors == o.accessors && world == o.world; }
+};
+
+struct ReadKeyHash {
+    std::size_t operator()(const ReadKey& k) const {
+        std::uint64_t h = 1469598103934665603ull;
+        auto mix = [&h](std::uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+        for (const void* a : k.accessors) mix(reinterpret_cast<std::uintptr_t>(a));
+        for (int c = 0; c < 4; ++c)
+            for (int r = 0; r < 4; ++r) {
+                const float f = k.world[c][r] + 0.0f; // -0 as +0: they compare equal
+                std::uint32_t bits = 0;
+                std::memcpy(&bits, &f, sizeof bits);
+                mix(bits);
+            }
+        return static_cast<std::size_t>(h);
+    }
+};
 
 glm::vec3 from_gltf(const glm::vec3& v) { return {v.x, -v.z, v.y}; }
 glm::vec3 to_gltf(const glm::vec3& v) { return {v.x, v.z, -v.y}; }
@@ -68,6 +94,10 @@ Material read_material(const cgltf_material* m, std::size_t index) {
     }
     out.two_sided = m->double_sided != 0;
     return out;
+}
+
+bool parse_sway_heights(const cgltf_data* data) {
+    return data->asset.extras.data && std::string_view(data->asset.extras.data).find("\"hailstone_sway\"") != std::string_view::npos;
 }
 
 std::uint64_t parse_source_hash(const cgltf_data* data) {
@@ -152,60 +182,85 @@ std::optional<GltfMesh> read_glb(std::span<const std::byte> bytes, std::string* 
     out.source_hash = parse_source_hash(data.get());
     Mesh& mesh = out.mesh;
     mesh.front_ccw = true;
+    mesh.sway_heights = parse_sway_heights(data.get());
     for (cgltf_size i = 0; i < data->materials_count; ++i) mesh.materials.push_back(read_material(&data->materials[i], i));
     std::size_t default_material = std::numeric_limits<std::size_t>::max();
 
     const cgltf_scene* scene = data->scene ? data->scene : data->scenes_count ? &data->scenes[0] : nullptr;
-    std::vector<const cgltf_node*> nodes;
-    struct ReadVertices {
-        std::array<const void*, 4> key;
+    // Each node with its world transform, made top-down as the tree is walked: cgltf_node_transform_world walks the
+    // parent chain for every node, quadratic in a deep chain.
+    struct PlacedNode {
+        const cgltf_node* node;
         glm::mat4 world;
-        std::size_t base;
     };
-    std::vector<ReadVertices> read_vertices;
+    std::vector<PlacedNode> nodes;
+    std::unordered_map<ReadKey, std::size_t, ReadKeyHash> read_vertices;
+    auto to_mat = [](const float m[16]) {
+        glm::mat4 mat;
+        std::memcpy(&mat[0][0], m, sizeof(float) * 16);
+        return mat;
+    };
     if (scene) {
         // In the file's order, depth first (a stack filled backwards).
-        std::vector<const cgltf_node*> stack(scene->nodes, scene->nodes + scene->nodes_count);
-        std::reverse(stack.begin(), stack.end());
+        // A scene's nodes are roots; one that is not (against the spec) keeps its parents' transform, as before. Those
+        // are made once each, remembered, so a scene listing every node of a deep chain stays linear too.
+        std::unordered_map<const cgltf_node*, glm::mat4> ancestors;
+        auto world_of = [&](const cgltf_node* node) {
+            std::vector<const cgltf_node*> chain;
+            glm::mat4 above(1.0f);
+            for (const cgltf_node* p = node->parent; p; p = p->parent) {
+                if (auto it = ancestors.find(p); it != ancestors.end()) {
+                    above = it->second;
+                    break;
+                }
+                chain.push_back(p);
+            }
+            for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+                float m[16];
+                cgltf_node_transform_local(*it, m);
+                above = above * to_mat(m);
+                ancestors.emplace(*it, above);
+            }
+            float m[16];
+            cgltf_node_transform_local(node, m);
+            return above * to_mat(m);
+        };
+        std::vector<PlacedNode> stack;
+        for (cgltf_size i = scene->nodes_count; i-- > 0;) stack.push_back({scene->nodes[i], world_of(scene->nodes[i])});
         while (!stack.empty() && nodes.size() < 65536) {
-            const cgltf_node* n = stack.back();
+            const PlacedNode n = stack.back();
             stack.pop_back();
             nodes.push_back(n);
-            for (cgltf_size c = n->children_count; c-- > 0;) stack.push_back(n->children[c]);
+            for (cgltf_size c = n.node->children_count; c-- > 0;) {
+                float m[16];
+                cgltf_node_transform_local(n.node->children[c], m);
+                stack.push_back({n.node->children[c], n.world * to_mat(m)});
+            }
         }
     }
-    for (const cgltf_node* node : nodes) {
+    for (const auto& [node, world] : nodes) {
         if (!node->mesh) continue;
         const auto lod = parse_lod(node->extras);
-        float m[16];
-        cgltf_node_transform_world(node, m);
-        glm::mat4 world;
-        std::memcpy(&world[0][0], m, sizeof m);
         const glm::mat3 normal_world = glm::transpose(glm::inverse(glm::mat3(world)));
         for (cgltf_size pi = 0; pi < node->mesh->primitives_count; ++pi) {
             const cgltf_primitive& prim = node->mesh->primitives[pi];
             if (prim.type != cgltf_primitive_type_triangles) continue;
-            const cgltf_accessor *pos = nullptr, *nrm = nullptr, *uv = nullptr, *col = nullptr;
+            const cgltf_accessor *pos = nullptr, *nrm = nullptr, *uv = nullptr, *uv2 = nullptr, *col = nullptr;
             for (cgltf_size a = 0; a < prim.attributes_count; ++a) {
                 const cgltf_attribute& at = prim.attributes[a];
                 if (at.type == cgltf_attribute_type_position) pos = at.data;
                 else if (at.type == cgltf_attribute_type_normal) nrm = at.data;
                 else if (at.type == cgltf_attribute_type_texcoord && at.index == 0) uv = at.data;
+                else if (at.type == cgltf_attribute_type_texcoord && at.index == 1) uv2 = at.data;
                 else if (at.type == cgltf_attribute_type_color && at.index == 0) col = at.data;
             }
             if (!pos || pos->count == 0) continue;
             // Primitives that share their vertex data under the same transform (one part per material, one node per
             // level of detail) share the vertices.
-            const std::array<const void*, 4> key{pos, nrm, uv, col};
-            std::size_t base = mesh.vertices.size();
-            bool shared = false;
-            for (const auto& r : read_vertices)
-                if (r.key == key && r.world == world) {
-                    base = r.base;
-                    shared = true;
-                    break;
-                }
-            if (!shared) read_vertices.push_back({key, world, base});
+            const std::array<const void*, 5> key{pos, nrm, uv, uv2, col};
+            const auto [found, added] = read_vertices.try_emplace(ReadKey{key, world}, mesh.vertices.size());
+            const std::size_t base = found->second;
+            const bool shared = !added;
             const std::size_t count = prim.indices ? prim.indices->count : pos->count;
             if (mesh.vertices.size() + pos->count > kMaxVertices || mesh.indices.size() + count > kMaxIndices) {
                 fail(error, "too many vertices");
@@ -221,6 +276,7 @@ std::optional<GltfMesh> read_glb(std::span<const std::byte> bytes, std::string* 
                     vx.normal = glm::dot(n, n) > 0.0f ? from_gltf(glm::normalize(n)) : glm::vec3(0, 0, 1);
                 }
                 if (uv && cgltf_accessor_read_float(uv, v, f, 2)) vx.uv = {f[0], f[1]};
+                if (uv2 && cgltf_accessor_read_float(uv2, v, f, 2)) vx.uv2 = {f[0], f[1]};
                 if (col) {
                     float c[4] = {1, 1, 1, 1};
                     cgltf_accessor_read_float(col, v, c, cgltf_num_components(col->type) >= 4 ? 4 : 3);
@@ -326,6 +382,9 @@ std::vector<std::byte> write_glb(const Mesh& mesh, std::uint64_t source_hash) {
     for (const auto& v : mesh.vertices) bin.f32(v.uv.x), bin.f32(v.uv.y);
     const std::size_t colors_at = bin.size();
     for (const auto& v : mesh.vertices) bin.le(v.color);
+    const std::size_t uv2s_at = bin.size();
+    if (mesh.sway_heights)
+        for (const auto& v : mesh.vertices) bin.f32(v.uv2.x), bin.f32(v.uv2.y);
     const std::size_t vertex_bytes = bin.size();
 
     std::string views, accessors;
@@ -337,14 +396,19 @@ std::vector<std::byte> write_glb(const Mesh& mesh, std::uint64_t source_hash) {
     view(0, normals_at, 34962);
     view(normals_at, uvs_at - normals_at, 34962);
     view(uvs_at, colors_at - uvs_at, 34962);
-    view(colors_at, vertex_bytes - colors_at, 34962);
+    view(colors_at, uv2s_at - colors_at, 34962);
+    if (mesh.sway_heights) view(uv2s_at, vertex_bytes - uv2s_at, 34962);
     const std::string count = std::to_string(n);
     accessors = "{\"bufferView\":0,\"componentType\":5126,\"count\":" + count + ",\"type\":\"VEC3\",\"min\":[" + num(lo.x) +
                 "," + num(lo.y) + "," + num(lo.z) + "],\"max\":[" + num(hi.x) + "," + num(hi.y) + "," + num(hi.z) + "]}";
     accessors += ",{\"bufferView\":1,\"componentType\":5126,\"count\":" + count + ",\"type\":\"VEC3\"}";
     accessors += ",{\"bufferView\":2,\"componentType\":5126,\"count\":" + count + ",\"type\":\"VEC2\"}";
     accessors += ",{\"bufferView\":3,\"componentType\":5121,\"normalized\":true,\"count\":" + count + ",\"type\":\"VEC4\"}";
-    int next_view = 4, next_accessor = 4;
+    if (mesh.sway_heights) accessors += ",{\"bufferView\":4,\"componentType\":5126,\"count\":" + count + ",\"type\":\"VEC2\"}";
+    int next_view = mesh.sway_heights ? 5 : 4, next_accessor = next_view;
+    const std::string attributes = mesh.sway_heights
+        ? "{\"POSITION\":0,\"NORMAL\":1,\"TEXCOORD_0\":2,\"COLOR_0\":3,\"TEXCOORD_1\":4}"
+        : "{\"POSITION\":0,\"NORMAL\":1,\"TEXCOORD_0\":2,\"COLOR_0\":3}";
     // One glTF mesh and node a level-of-detail band, its parts' primitives in it.
     std::vector<std::pair<float, float>> bands;
     for (const auto& part : mesh.parts)
@@ -364,7 +428,7 @@ std::vector<std::byte> write_glb(const Mesh& mesh, std::uint64_t source_hash) {
         accessors += ",{\"bufferView\":" + std::to_string(next_view++) + ",\"componentType\":5125,\"count\":" +
                      std::to_string(part.index_count / 3 * 3) + ",\"type\":\"SCALAR\"}";
         if (!prims.empty()) prims += ',';
-        prims += "{\"attributes\":{\"POSITION\":0,\"NORMAL\":1,\"TEXCOORD_0\":2,\"COLOR_0\":3},\"indices\":" +
+        prims += "{\"attributes\":" + attributes + ",\"indices\":" +
                  std::to_string(next_accessor++) + ",\"material\":" + std::to_string(part.material) + "}";
     }
 
@@ -389,7 +453,12 @@ std::vector<std::byte> write_glb(const Mesh& mesh, std::uint64_t source_hash) {
     char hash[17];
     std::snprintf(hash, sizeof hash, "%016llx", static_cast<unsigned long long>(source_hash));
     std::string json = "{\"asset\":{\"version\":\"2.0\",\"generator\":\"Hailstone\"";
-    if (source_hash) json += ",\"extras\":{\"hailstone_source\":\"" + std::string(hash) + "\"}";
+    if (source_hash || mesh.sway_heights) {
+        json += ",\"extras\":{";
+        if (source_hash) json += "\"hailstone_source\":\"" + std::string(hash) + "\"";
+        if (mesh.sway_heights) json += std::string(source_hash ? "," : "") + "\"hailstone_sway\":1";
+        json += "}";
+    }
     json += "},\"scene\":0,\"scenes\":[{\"nodes\":[";
     for (std::size_t b = 0; b < bands.size(); ++b) json += (b ? "," : "") + std::to_string(b);
     json += "]}],\"nodes\":[";

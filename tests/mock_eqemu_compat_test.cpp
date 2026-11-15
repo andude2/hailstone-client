@@ -260,6 +260,35 @@ TEST_CASE("mock server: the trade partner leaving cancels and closes the trade (
     CHECK(u32_at(*cancels[0], 4) == w.player_id);
 }
 
+TEST_CASE("mock server: the partner's coin in a trade is held at the maximum rather than wrapping") {
+    Rig rig;
+    REQUIRE(rig.to_zone());
+    auto& conn = rig.conn;
+    auto& w = conn.world_for_test();
+    const game::Spawn* me = w.player();
+    REQUIRE(me);
+    game::Spawn pc;
+    pc.id = 4100;
+    pc.name = "Partner";
+    pc.position = me->position + glm::vec3(3.0f, 0.0f, 0.0f);
+    pc.heights.avatar_height = 6.0f;
+    w.spawns[pc.id] = pc;
+    conn.destroy_cursor();
+    conn.give_to(pc.id);
+    REQUIRE(rig.until([&] { return MockEqServer::count(rig.server.zone_log, Op::TradeRequest) == 1; }));
+    rig.server.zone.send_reliable(encode_trade_request_ack({w.player_id, pc.id}));
+    REQUIRE(rig.until([&] { return conn.trade().has_value(); }));
+    TradeCoins coins;
+    coins.trader = w.player_id;
+    coins.type = 3;
+    coins.amount = 0xfffffff0u;
+    conn.receive_zone_packet_for_test(encode(coins));
+    coins.amount = 0x20;
+    conn.receive_zone_packet_for_test(encode(coins));
+    REQUIRE(conn.trade().has_value());
+    CHECK(conn.trade()->their_coins[3] == 0xffffffffu);
+}
+
 TEST_CASE("mock server: the duel partner leaving mid-duel sends the original's 8-byte OP_DuelDecline") {
     // Not EQEmu's 12-byte form: its Handle_OP_DuelDecline dereferences entity_list.GetID(target_id) without a null
     // check, and the partner has left. EQEmu clears both duels itself when a client goes (Client::~Client).

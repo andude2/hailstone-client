@@ -119,12 +119,15 @@ function T.ResetRightClick() mouse.rightTaken, mouse.altRightTaken = false, fals
 function T.TakeAltRightClick() mouse.rightTaken, mouse.altRightTaken = true, true end
 function T.AltRightClickTaken() return mouse.altRightTaken == true end
 
--- clicked = T.Hit(id, x0, y0, x1, y1)   -- an invisible button over a screen rectangle (then ui.IsItemHovered, ...)
+-- clicked = T.Hit(id, x0, y0, x1, y1 [, overlap])   -- an invisible button over a screen rectangle (then
+-- ui.IsItemHovered, ...). overlap (default true) lets a later item lie over this one. A piece that lies over the
+-- frame's own drag handle (a buff icon) passes false: ImGui hovers an overlapping item only once the frame before
+-- hovered it too, so with true the first click on it would go to the frame.
 -- (Hit boxes are ImGui items, placed relative to the current window.)
-function T.Hit(id, x0, y0, x1, y1)
+function T.Hit(id, x0, y0, x1, y1, overlap)
   local wx, wy = ui.GetWindowPos()
   ui.SetCursorPos(x0 - wx, y0 - wy + ui.GetScrollY()) -- (the cursor position is in scrolled window coordinates)
-  ui.SetNextItemAllowOverlap()
+  if overlap ~= false then ui.SetNextItemAllowOverlap() end
   return ui.InvisibleButton(id, math.max(x1 - x0, 1), math.max(y1 - y0, 1))
 end
 

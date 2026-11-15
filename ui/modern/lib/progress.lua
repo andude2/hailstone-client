@@ -89,16 +89,19 @@ function P.RowBack(x0, y0, x1, y1, s, selected, hovered)
 end
 
 -- ---------------------------------------------------------------- rows over a list child
--- P.Rows(win, id, w, h, opts): the list child's rows (eq.WindowList: every row's texts, once a frame) as a
+-- P.Rows(win, id, w, h, opts): the list child's rows (a copy of their texts, kept as below) as a
 -- scrolled column of rows drawn by opts.draw, only those in view (each asks eq.ListRow for its colour). A click
 -- selects the row in the original (eq.ListClick, so the window's handler runs), a right click is the original's,
 -- a drag picks up the hot button the row makes where the original lets it (opts.drag).
 --   w, h            the area (0: the rest; negative h: leave that much below)
---   opts.rows       the list's rows when the caller has them already (eq.WindowList's answer this frame)
+--   opts.rows       the list's rows when the caller has them already (eq.WindowList's answer this frame; not kept)
 --   opts.rowH       a row's height in design pixels (default: a line of small text and padding)
 --   opts.scale      the containing dialog's effective scale (default: the global UI scale)
 --   opts.filter(row, texts) -> bool   leaves rows out (row 0-based)
---   opts.sort(a, b) -> bool           orders rows (each { row, texts })
+--   opts.filterKey   any value that changes when the filter's answers would (the search text): the filtered rows
+--                    are kept while it, the rows and the sort stay the same, instead of filtered again each frame
+--   opts.sort(a, b) -> bool           orders rows (each { row, texts }); the same function from frame to frame
+--                                     sorts again only when the rows shown change
 --   opts.draw(row, texts, x0, y0, x1, y1, s, state)   state = { selected, hovered, color = { r, g, b }, colors (the
 --                                     row's cell colours, eq.ListRow's texts.colors, or nil) }; default: the first
 --                                     column's text. (state and its tables are reused: read them in the call.)
@@ -116,7 +119,7 @@ local function rowPool(win, id)
   if not byId then byId = {}; rowPools[win] = byId end
   local p = byId[id]
   if not p then
-    p = { entries = {}, order = {}, state = { color = { 1, 1, 1, 1 } } }
+    p = { entries = {}, order = {}, cand = {}, state = { color = { 1, 1, 1, 1 } } }
     byId[id] = p
   end
   return p
@@ -137,29 +140,104 @@ local function testSelect(win, id, count)
   none[id] = true
 end
 
+-- The list's rows are kept as a copy (eq.WindowList reads and makes every row's texts, and the sort ran over them,
+-- each frame): read whole when the row count, the first or the last row changes (or after a click on the list),
+-- else a few rows a frame, and the rows in view each frame, as lib/widgets.lua's sorted lists do. The rows shown are
+-- filtered again each frame over the copy (opts.filterKey, any value that changes when the filter would, keeps the
+-- filtered rows instead), and sorted again only when the copy, the filter's rows or the sort changes.
+local ROW_READS = 8 -- rows read a frame besides the first, the last and those in view
+
+local function sameTexts(a, b)
+  if not a or not b then return (not a) == (not b) end
+  local n = #a
+  if n ~= #b then return false end
+  for i = 1, n do if a[i] ~= b[i] then return false end end
+  return true
+end
+
+local function rowCopy(win, id, pool, n)
+  local c = pool.copy
+  if not c then
+    c = { n = -1, rows = {}, next = 0, version = 0 }
+    pool.copy = c
+  end
+  local whole = c.n ~= n or c.dirty
+  if not whole and n > ROW_READS then -- (a shorter list is read whole below anyway)
+    whole = not sameTexts(c.rows[1], eq.ListRow(win, id, 0) or false)
+      or not sameTexts(c.rows[n], eq.ListRow(win, id, n - 1) or false)
+  end
+  if whole then
+    local rows = c.rows
+    for r = 0, n - 1 do rows[r + 1] = eq.ListRow(win, id, r) or false end
+    for r = #rows, n + 1, -1 do rows[r] = nil end
+    c.n, c.next, c.dirty, c.version = n, 0, false, c.version + 1
+  elseif n > 0 then
+    for _ = 1, math.min(n, ROW_READS) do
+      local r = c.next
+      local texts = eq.ListRow(win, id, r) or false
+      if not sameTexts(c.rows[r + 1], texts) then
+        c.rows[r + 1] = texts
+        c.version = c.version + 1
+      end
+      c.next = (r + 1) % n
+    end
+  end
+  return c
+end
+
+-- The rows shown, in pool.order (entries { row, texts }): rebuilt only when they would come out different.
+local function rowOrder(pool, c, opts, given)
+  local filter, fkey, sort = opts.filter, opts.filterKey, opts.sort
+  local kept = not given and pool.version == c.version and pool.sort == sort and pool.hadFilter == (filter ~= nil)
+  if kept and fkey ~= nil and pool.filterKey == fkey then return end
+  -- the rows the filter keeps (1-based), compared with last frame's
+  local cand = pool.cand
+  local k = 0
+  local rows = c.rows
+  for r = 1, c.n do
+    local texts = rows[r]
+    if texts and (not filter or filter(r - 1, texts)) then
+      k = k + 1
+      if cand[k] ~= r then cand[k] = r; kept = false end
+    end
+  end
+  if #cand ~= k then
+    for i = #cand, k + 1, -1 do cand[i] = nil end
+    kept = false
+  end
+  pool.filterKey = fkey
+  if kept then return end
+  pool.version, pool.sort, pool.hadFilter = c.version, sort, filter ~= nil
+  local entries, order = pool.entries, pool.order
+  for i = 1, k do
+    local e = entries[i]
+    if not e then e = {}; entries[i] = e end
+    local r = cand[i]
+    e.row, e.texts = r - 1, rows[r]
+    order[i] = e
+  end
+  for i = #order, k + 1, -1 do order[i] = nil end
+  for i = k + 1, #entries do entries[i].texts = nil end -- (let go of rows no longer listed)
+  if sort then table.sort(order, sort) end
+end
+
 local NO_OPTS = {}
 function P.Rows(win, id, w, h, opts)
   opts = opts or NO_OPTS
   local s = opts.scale or ui.GetIO().uiScale or 1
-  local all = opts.rows or eq.WindowList(win, id) or {}
-  local _, _, selected = eq.ListInfo(win, id)
+  local count, _, selected = eq.ListInfo(win, id)
   selected = selected or -1
-  testSelect(win, id, #all)
   local pool = rowPool(win, id)
-  local entries, order = pool.entries, pool.order
-  local n = 0
-  for i, texts in ipairs(all) do
-    if not opts.filter or opts.filter(i - 1, texts) then
-      n = n + 1
-      local e = entries[n]
-      if not e then e = {}; entries[n] = e end
-      e.row, e.texts = i - 1, texts
-      order[n] = e
-    end
+  local c
+  if opts.rows then
+    c = { n = #opts.rows, rows = opts.rows, version = -1 }
+  else
+    c = rowCopy(win, id, pool, count or 0)
   end
-  for k = #order, n + 1, -1 do order[k] = nil end
-  for k = n + 1, #entries do entries[k].texts = nil end -- (let go of rows no longer listed)
-  if opts.sort then table.sort(order, opts.sort) end
+  local total = c.n
+  testSelect(win, id, total)
+  rowOrder(pool, c, opts, opts.rows ~= nil)
+  local order = pool.order
   local _, th = T.TextSize("Ag", T.font.small)
   local rowH = opts.rowH and opts.rowH * s or (th + 10 * s)
   ui.BeginChild("##rows" .. id, w or 0, h or 0, false)
@@ -169,7 +247,7 @@ function P.Rows(win, id, w, h, opts)
   if #order == 0 then
     P.Empty(cw, math.max(ch, 40 * s), opts.empty or "Nothing to show.", opts.emptySub)
     ui.EndChild()
-    return #all, selected, 0
+    return total, selected, 0
   end
   local scroll = ui.GetScrollY()
   local first = math.max(1, math.floor(scroll / rowH))
@@ -191,19 +269,27 @@ function P.Rows(win, id, w, h, opts)
     if ui.IsItemClicked(ui.Mouse.Right) and not io.alt then
       eq.ListClick(win, id, e.row, "right")
       T.TakeRightClick()
+      clicked = true
     end
+    if clicked and pool.copy == c then c.dirty = true end -- (a click may rebuild the list: read it whole next frame)
+    -- a row in view is drawn from what the list answers now, and brings the copy up to date
+    local full, r, g, b = eq.ListRow(win, id, e.row)
+    if full and pool.copy == c and not sameTexts(c.rows[e.row + 1], full) then
+      c.rows[e.row + 1] = full
+      c.version = c.version + 1
+    end
+    local texts = full or e.texts
     if hovered and opts.tooltip then
-      local tip = opts.tooltip(e.row, e.texts)
+      local tip = opts.tooltip(e.row, texts)
       if tip and tip ~= "" then ui.SetTooltip(tip) end
     end
-    local full, r, g, b = eq.ListRow(win, id, e.row)
     state.selected, state.hovered, state.colors = e.row == selected, hovered, full and full.colors or nil
     color[1], color[2], color[3], color[4] = r or 1, g or 1, b or 1, 1
     P.RowBack(ox, y0, x1, y0 + rowH - 1 * s, s, state.selected, hovered)
     if opts.draw then
-      opts.draw(e.row, e.texts, ox, y0, x1, y0 + rowH - 1 * s, s, state)
+      opts.draw(e.row, texts, ox, y0, x1, y0 + rowH - 1 * s, s, state)
     else
-      T.Text(ox + 8 * s, y0 + (rowH - th) / 2, T.Fit(e.texts[1] or "", cw - 16 * s, T.font.small), state.color,
+      T.Text(ox + 8 * s, y0 + (rowH - th) / 2, T.Fit(texts[1] or "", cw - 16 * s, T.font.small), state.color,
         T.font.small)
     end
   end
@@ -212,7 +298,7 @@ function P.Rows(win, id, w, h, opts)
   ui.SetCursorScreenPos(ox, oy)
   ui.Dummy(cw, #order * rowH)
   ui.EndChild()
-  return #all, selected, #order
+  return total, selected, #order
 end
 
 return P

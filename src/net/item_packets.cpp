@@ -859,6 +859,35 @@ AppPacket encode(const ApplyPoison& v) {
     return make_packet(Op::ApplyPoison, std::move(w));
 }
 
+AppPacket encode(const EvolvingFinalResult& v) {
+    // CItemDisplayWnd's 0x69ef60: hyperlink action 1 uses this action-specific layout, not the toggle's fields.
+    ByteWriter w;
+    w.le<std::uint32_t>(4);
+    w.le(v.item_id);
+    w.le(v.final_item_id);
+    w.le(v.level);
+    w.le(v.hash);
+    w.le(v.display_flags);
+    return make_packet(Op::EvolveItem, std::move(w));
+}
+
+std::optional<EvolvingItemUpdate> decode_evolving_item_update(const AppPacket& p) {
+    if (p.data.size() != 24) return std::nullopt;
+    auto update = decode_with(p, [](ByteReader& r) {
+        const auto action = r.le<std::uint32_t>();
+        r.skip(4);
+        EvolvingItemUpdate v;
+        v.unique_id = r.le<std::uint64_t>();
+        v.percentage = r.le<std::uint32_t>();
+        v.activated = r.le<std::uint32_t>();
+        // A large XP reward can overshoot 100 before the replacement arrives. Native reads a signed dword.
+        if (action != 0 || v.unique_id == 0 || v.percentage > 0x7fffffffu || v.activated > 1)
+            throw std::out_of_range("invalid evolving item update");
+        return v;
+    });
+    return update;
+}
+
 std::optional<ApplyPoison> decode_apply_poison(const AppPacket& p) {
     if (p.data.size() < kApplyPoisonSize) return std::nullopt;
     return decode_with(p, [](ByteReader& r) {

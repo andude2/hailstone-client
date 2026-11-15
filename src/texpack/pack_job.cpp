@@ -16,6 +16,16 @@ namespace hailstone::texpack {
 namespace fs = std::filesystem;
 using Clock = std::chrono::steady_clock;
 
+namespace {
+
+// A texture's name in messages: its first name, or its hash when it has none (load_scan refuses such records; the
+// scanner always gives one, but nothing here relies on it).
+std::string display_name(const TextureInfo& info) {
+    return info.names.empty() ? hash_name(info.hash) : *info.names.begin();
+}
+
+} // namespace
+
 // ---- GpuWorker -----------------------------------------------------------------------------------------------------
 
 GpuWorker::GpuWorker(ModelSetFactory factory) : thread_([this, f = std::move(factory)]() mutable { run(std::move(f)); }) {}
@@ -339,7 +349,7 @@ void PackJob::run() {
             auto sources = read_sources(t.info, cache.get(), &why);
             if (!sources) {
                 std::lock_guard lock(mutex_);
-                note_error(*t.info.names.begin() + ": " + why);
+                note_error(display_name(t.info) + ": " + why);
                 ++status_.failures;
                 ++status_.done;
                 continue;
@@ -369,7 +379,7 @@ void PackJob::run() {
                 if (!cancel_) {
                     {
                         std::lock_guard lock(mutex_);
-                        status_.current = *item->info.names.begin();
+                        status_.current = display_name(item->info);
                     }
                     const auto start = Clock::now();
                     try {
@@ -377,7 +387,7 @@ void PackJob::run() {
                         item->outputs = upscale_texture(item->info, *src, models, options_.settings, item->files);
                     } catch (const std::exception& e) {
                         std::lock_guard lock(mutex_);
-                        note_error(*item->info.names.begin() + ": " + e.what());
+                        note_error(display_name(item->info) + ": " + e.what());
                         ++status_.failures;
                         item->files.clear(); // (counted done by the encoder, with nothing to write)
                     }
@@ -495,7 +505,7 @@ void PackJob::encoder(unsigned index, unsigned count) {
         }
         std::lock_guard lock(mutex_);
         if (!error.empty()) {
-            note_error(*item->info.names.begin() + ": " + error);
+            note_error(display_name(item->info) + ": " + error);
             ++status_.failures;
         } else if (!cancel_ && !item->files.empty()) {
             if (item->material) material_record_[item->info.hash] = item->material->signature;

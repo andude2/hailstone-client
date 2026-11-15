@@ -30,13 +30,16 @@
 //   eq.DeleteSpellSet(n)         -- 1-based
 #include <array>
 #include <cstdint>
+#include <string>
 
 #include <lua.hpp>
 
 #include "app/lua_eq.h"
+#include "app/lua_eq_windows.h"
 #include "ui/lua/lua_host.h"
 #include "game/spell_display.h"
 #include "net/game_connection.h"
+#include "plugin/lua_keep.h"
 #include "ui/ui_textures.h"
 
 namespace hailstone::app {
@@ -66,6 +69,12 @@ std::int32_t as_id(std::uint32_t spell) { return spell == game::kNoSpell ? -1 : 
 
 int SpellBook(lua_State* L) {
     auto& h = host(L);
+    // The names made for a row, in a box the state owns across their pushes (plugin/lua_keep.h).
+    std::string& text = plugin::lua_keep<std::string>(L);
+    const auto set_made = [&](const char* k, const auto& make) {
+        plugin::cxx_guard(L, [&] { text = make(); });
+        set_str(L, k, text);
+    };
     lua_newtable(L);
     if (!h.conn) return 1;
     const auto& c = *h.conn;
@@ -95,12 +104,15 @@ int SpellBook(lua_State* L) {
         set_bool(L, "beneficial", s->spell_type != 0);
         set_int(L, "targetType", s->target_type);
         set_int(L, "skill", s->skill);
-        if (h.skill_name) set_str(L, "skillName", h.skill_name(s->skill));
+        if (h.skill_name) set_made("skillName", [&] { return h.skill_name(s->skill); });
         set_int(L, "category", s->category);
-        set_str(L, "categoryName", s->category > 0 ? strings.db_string(static_cast<std::uint32_t>(s->category), 5) : "");
+        set_made("categoryName", [&] {
+            return s->category > 0 ? strings.db_string(static_cast<std::uint32_t>(s->category), 5) : std::string();
+        });
         set_int(L, "subcategory", s->subcategory);
-        set_str(L, "subcategoryName",
-                s->subcategory > 0 ? strings.db_string(static_cast<std::uint32_t>(s->subcategory), 5) : "");
+        set_made("subcategoryName", [&] {
+            return s->subcategory > 0 ? strings.db_string(static_cast<std::uint32_t>(s->subcategory), 5) : std::string();
+        });
         set_int(L, "resist", s->resist);
         for (int g = 0; g < game::kSpellGems; ++g)
             if (st.gems[static_cast<std::size_t>(g)].spell == id) set_int(L, "gem", g);
@@ -155,7 +167,7 @@ int SpellIcon(lua_State* L) {
 
 int SpellBookClick(lua_State* L) {
     auto& h = host(L);
-    int slot = static_cast<int>(luaL_checkinteger(L, 1));
+    int slot = held_int(luaL_checkinteger(L, 1));
     bool ok = false;
     if (h.conn && slot >= 0 && slot < game::kSpellBookSize && h.conn->sitting()) {
         auto& c = *h.conn;
@@ -177,13 +189,13 @@ int SpellBookClick(lua_State* L) {
 
 int SpellBookSwap(lua_State* L) {
     auto& h = host(L);
-    if (h.conn) h.conn->spell_book_swap_click(static_cast<int>(luaL_checkinteger(L, 1)));
+    if (h.conn) h.conn->spell_book_swap_click(held_int(luaL_checkinteger(L, 1)));
     return 0;
 }
 
 int SpellBookMemorize(lua_State* L) {
     auto& h = host(L);
-    int slot = static_cast<int>(luaL_checkinteger(L, 1)), gem = static_cast<int>(luaL_checkinteger(L, 2));
+    int slot = held_int(luaL_checkinteger(L, 1)), gem = held_int(luaL_checkinteger(L, 2));
     // HandleSpellLeftClick's StartSpellMemorization(slot, gem, bReplace 0) @0x75bf30 refuses a gem that holds a
     // spell; Hailstone's replace_gem_spell lets it through (EqHost::gem_takes_book_spell). The book is never
     // written over.
@@ -208,13 +220,17 @@ int SpellDetails(lua_State* L) {
         return 1;
     }
     const auto& c = *h.conn;
-    game::SpellDisplayContext ctx;
-    ctx.strings = &c.strings();
-    ctx.character = h.character;
-    ctx.player_level = c.player_status().level;
-    ctx.player_class = c.profile() ? static_cast<std::uint8_t>(c.profile()->class_) : 0;
-    ctx.db_string = [&c](std::uint32_t id, std::uint32_t type) { return c.strings().db_string(id, type); };
-    game::SpellDisplay d = game::build_spell_display(*s, ctx);
+    // The display in a box the state owns across the pushes (plugin/lua_keep.h).
+    game::SpellDisplay& d = plugin::lua_keep<game::SpellDisplay>(L);
+    plugin::cxx_guard(L, [&] {
+        game::SpellDisplayContext ctx;
+        ctx.strings = &c.strings();
+        ctx.character = h.character;
+        ctx.player_level = c.player_status().level;
+        ctx.player_class = c.profile() ? static_cast<std::uint8_t>(c.profile()->class_) : 0;
+        ctx.db_string = [&c](std::uint32_t id, std::uint32_t type) { return c.strings().db_string(id, type); };
+        d = game::build_spell_display(*s, ctx);
+    });
     lua_pushlstring(L, d.title.data(), d.title.size());
     lua_pushlstring(L, d.description.data(), d.description.size());
     return 2;
@@ -263,7 +279,8 @@ int SpellSets(lua_State* L) {
     for (int n = 0; n < game::kSpellLoadouts; ++n) {
         const auto& s = h.conn->spell_loadouts().at(n);
         lua_createtable(L, 0, 3);
-        set_str(L, "name", s.in_use ? s.name : std::string());
+        static const std::string kNone; // (a std::string() here would be a copy alive across the push)
+        set_str(L, "name", s.in_use ? s.name : kNone);
         set_bool(L, "inUse", s.in_use);
         lua_createtable(L, game::kLoadoutGems, 0);
         for (int k = 0; k < game::kLoadoutGems; ++k) {
@@ -311,7 +328,7 @@ int SaveSpellSet(lua_State* L) {
 
 int EditSpellSet(lua_State* L) {
     auto& h = host(L);
-    int n = static_cast<int>(luaL_checkinteger(L, 1)) - 1;
+    int n = held_index(luaL_checkinteger(L, 1));
     std::size_t len = 0;
     const char* name = luaL_checklstring(L, 2, &len);
     auto spells = loadout_spells(L, 3);
@@ -325,13 +342,13 @@ int EditSpellSet(lua_State* L) {
 
 int MemorizeSpellSet(lua_State* L) {
     auto& h = host(L);
-    lua_pushboolean(L, h.conn && h.conn->memorize_loadout(static_cast<int>(luaL_checkinteger(L, 1)) - 1));
+    lua_pushboolean(L, h.conn && h.conn->memorize_loadout(held_index(luaL_checkinteger(L, 1))));
     return 1;
 }
 
 int DeleteSpellSet(lua_State* L) {
     auto& h = host(L);
-    if (h.conn) h.conn->delete_loadout(static_cast<int>(luaL_checkinteger(L, 1)) - 1);
+    if (h.conn) h.conn->delete_loadout(held_index(luaL_checkinteger(L, 1)));
     return 0;
 }
 

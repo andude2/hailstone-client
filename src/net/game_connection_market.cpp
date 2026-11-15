@@ -14,6 +14,7 @@
 #include "core/character_files.h"
 #include "core/ini_file.h"
 #include "core/log.h"
+#include "core/saturate.h"
 #include "game/bazaar.h"
 #include "game/distance.h"
 #include "game/feature_restrictions.h"
@@ -793,7 +794,7 @@ void GameConnection::barter_compensation_add(std::uint32_t quantity) {
     const auto& item = w.inventory[static_cast<std::size_t>(w.inventory_sel)];
     for (auto& t : w.editor.trade_items)
         if (t.item_id == item.item_id) {
-            t.quantity += quantity;
+            t.quantity = saturating_add(t.quantity, quantity); // held at the maximum rather than wrapping
             return;
         }
     if (static_cast<int>(w.editor.trade_items.size()) >= game::kMaxCompensation) return;
@@ -1272,6 +1273,7 @@ void GameConnection::handle_barter(const AppPacket& p) {
             } else if (barter_merchant_.buyer_id == 0 && world_.spawns.contains(r->spawn_id)) {
                 barter_merchant_ = game::BarterMerchantState{};
                 barter_merchant_.buyer_id = r->spawn_id;
+                barter_merchant_.serial = ++npc_session_serial_;
             }
         }
         break;
@@ -1460,6 +1462,8 @@ void GameConnection::handle_market(Op op, const AppPacket& p) {
                     auto it = world_.spawns.find(m->click->trader_id);
                     if (m->click->approval && it != world_.spawns.end() && !merchant_) {
                         merchant_ = MerchantSession{};
+                        merchant_->serial = ++npc_session_serial_;
+                        merchant_check_ms_ = 0;
                         merchant_->npc_id = m->click->trader_id;
                         merchant_->name = game::display_name(it->second.name);
                         merchant_->open = true;

@@ -76,11 +76,17 @@ bool sane_position(const glm::vec3& p) {
     return std::abs(p.x) <= kMaxFloraCoord && std::abs(p.y) <= kMaxFloraCoord && std::abs(p.z) <= kMaxFloraCoord;
 }
 
+// The terrain as drawn: the smoothed ground's (assets/ground_refine.h) when the zone has it.
+const std::vector<Mesh>& drawn_terrain(const Zone& zone) {
+    return zone.draw_terrain.size() == zone.terrain.size() ? zone.draw_terrain : zone.terrain;
+}
+
 class CoverGrid {
 public:
     explicit CoverGrid(const Zone& zone) {
         glm::vec2 lo(std::numeric_limits<float>::max()), hi(std::numeric_limits<float>::lowest());
-        for (const auto& mesh : zone.terrain)
+        // The drawn ground, which the plants stand on: the flat terrain lies up to the smoothing's offset over it.
+        for (const auto& mesh : drawn_terrain(zone))
             for (const auto& part : mesh.parts) {
                 if (part.material >= mesh.materials.size() || !casts_cover(mesh.materials[part.material])) continue;
                 const std::size_t end =
@@ -330,6 +336,7 @@ struct ZoneFloraGrower::Data {
         std::optional<std::uint32_t> at(glm::vec2 uv) const {
             if (rgb.empty()) return std::nullopt;
             auto wrap = [](float f, std::uint32_t n) {
+                if (!std::isfinite(f)) return 0u; // a damaged mesh's UV: the cast below would be undefined
                 const float t = f - std::floor(f);
                 return std::min(static_cast<std::uint32_t>(t * static_cast<float>(n)), n - 1);
             };
@@ -356,6 +363,13 @@ constexpr int kMaxSplits = 10; // 4^10 pieces at most, for a damaged mesh's tria
 // units a side makes some 400,000 (plus the triangles too small to split, a few hundred thousand in the densest
 // zone); only a damaged mesh asks for more, and its ground past this grows nothing.
 constexpr std::size_t kMaxPieces = std::size_t{1} << 21;
+
+// The most tiles one piece is binned into (its bounds with the lawn's margin): a piece is at most kMaxGrowArea, so
+// only a sliver comes near (a diagonal one 2,000 units long touches some 256); past this, only a damaged mesh's.
+constexpr std::uint64_t kMaxPieceTiles = 1024;
+// The most references the grower's tiles hold in all: 64 MB, some ten times the densest zone's pieces (kMaxPieces at
+// a few tiles each).
+constexpr std::uint64_t kMaxBinRefs = std::uint64_t{1} << 24;
 
 void add_split(std::vector<ZoneFloraGrower::Piece>& out, const ZoneFloraGrower::Piece& t, int depth) {
     if (out.size() >= kMaxPieces) return;
@@ -439,8 +453,11 @@ ZoneFloraGrower::ZoneFloraGrower(const Zone& zone, const ZoneFloraRules& rules,
                                                                    kMinGreenShare * static_cast<float>(g.rgb.size()));
         return std::pair<Data::Ground, bool>(std::move(g), none);
     };
-    for (std::size_t mi = 0; mi < zone.terrain.size(); ++mi) {
-        const Mesh& mesh = zone.terrain[mi];
+    // On the ground as drawn: the smoothed ground's (assets/ground_refine.h) when the zone has it, so the plants stand
+    // on its curves rather than in or over them.
+    const std::vector<Mesh>& drawn = drawn_terrain(zone);
+    for (std::size_t mi = 0; mi < drawn.size(); ++mi) {
+        const Mesh& mesh = drawn[mi];
         for (const auto& part : mesh.parts) {
             if (part.material >= mesh.materials.size()) continue;
             // Plants grow on solid ground: an opaque or cut-out surface. Not on one that is never drawn (the invisible
@@ -502,16 +519,25 @@ ZoneFloraGrower::ZoneFloraGrower(const Zone& zone, const ZoneFloraRules& rules,
 
     // Binned by the tiles their bounds touch (a plant belongs to the tile its foot is in). The pieces' corners are
     // within kMaxFloraCoord, so the tile numbers fit an int32.
+    // The split bounds a piece's area, not its extent: a long sliver (a damaged mesh's, kMaxFloraCoord long) would
+    // touch millions of tiles. As CoverGrid: a piece over kMaxPieceTiles tiles grows nothing, and the bins hold at
+    // most kMaxBinRefs references in all (the pieces past it grow nothing).
     auto tile_of = [](float v) { return static_cast<std::int32_t>(std::floor(v / kZoneFloraTile)); };
     std::map<std::pair<std::int32_t, std::int32_t>, std::vector<std::uint32_t>> bins;
+    std::uint64_t refs = 0;
     for (std::uint32_t i = 0; i < d.tris.size(); ++i) {
         const auto& t = d.tris[i];
         // A margin more: a tile grows the lawn of the squares round it too (soften_lawn_edges).
         const float margin = kLawnCell * static_cast<float>(kLawnEdgeCells);
         const glm::vec2 lo = glm::min(glm::min(glm::vec2(t.p[0]), glm::vec2(t.p[1])), glm::vec2(t.p[2])) - margin;
         const glm::vec2 hi = glm::max(glm::max(glm::vec2(t.p[0]), glm::vec2(t.p[1])), glm::vec2(t.p[2])) + margin;
-        for (std::int32_t y = tile_of(lo.y); y <= tile_of(hi.y); ++y)
-            for (std::int32_t x = tile_of(lo.x); x <= tile_of(hi.x); ++x) bins[{x, y}].push_back(i);
+        const std::int32_t x0 = tile_of(lo.x), x1 = tile_of(hi.x), y0 = tile_of(lo.y), y1 = tile_of(hi.y);
+        const std::uint64_t cells = std::uint64_t(x1 - x0 + 1) * std::uint64_t(y1 - y0 + 1);
+        if (cells > kMaxPieceTiles) continue;
+        if (refs + cells > kMaxBinRefs) break;
+        refs += cells;
+        for (std::int32_t y = y0; y <= y1; ++y)
+            for (std::int32_t x = x0; x <= x1; ++x) bins[{x, y}].push_back(i);
     }
     d.tile_start.push_back(0);
     for (const auto& [k, list] : bins) {
@@ -540,9 +566,10 @@ bool green_enough(const ZoneFloraRules::Ground& ground, const std::optional<std:
     return ground.greenish ? is_greenish_texel(r, g, b) : is_green_texel(r, g, b);
 }
 
-// `green` false: the caller has made +green's test (the lawn's, by a square's majority).
+// `green` false: the caller has made +green's test (the lawn's, by a square's majority); `cover` false, the cover's
+// (the lawn's, off the square's centre).
 bool may_grow(const ZoneFloraGrower::Data& d, const ZoneFloraRules::Ground& ground, const std::optional<std::uint32_t>& under,
-              const glm::vec3& p, bool green = true) {
+              const glm::vec3& p, bool green = true, bool cover = true) {
     if (green && ground.green_only && !green_enough(ground, under)) return false;
     if (!d.regions.empty()) {
         // In the water or lava, or standing on its surface (the region just under the foot), or in a zone line.
@@ -551,7 +578,7 @@ bool may_grow(const ZoneFloraGrower::Data& d, const ZoneFloraRules::Ground& grou
         const RegionInfo below = d.regions.lookup(p - glm::vec3(0.0f, 0.0f, 1.0f));
         if (below.is_water() || below.is_lava()) return false;
     }
-    return !(d.cover && d.cover->covered(p));
+    return !(cover && d.cover && d.cover->covered(p));
 }
 
 // Whether `q` lies in the triangle a b c seen from above, a point on an edge going to exactly one of the two
@@ -615,7 +642,15 @@ void grow_lawn(const ZoneFloraGrower::Data& d, const ZoneFloraGrower::Piece& t, 
                 }
                 if (green < 3) continue;
             }
-            if (!may_grow(d, ground, under, p, false)) continue;
+            if (!may_grow(d, ground, under, p, false, false)) continue;
+            if (d.cover) {
+                // Under cover by a spot off the centre (lawn_cover_offset), on the piece's plane there and a little
+                // over it (half the offset: the ground may rise beyond the piece), so the bare ground under a
+                // platform does not trace its outline.
+                const glm::vec2 off = lawn_cover_offset(q);
+                const glm::vec3 at(glm::vec2(p) + off, p.z + glm::dot(off, slope) + 0.5f * glm::length(off));
+                if (d.cover->covered(at)) continue;
+            }
             FloraInstance patch;
             patch.position = p;
             patch.width = kLawnCell;
@@ -635,15 +670,18 @@ float lawn_edge_factor(float squares) {
     return 0.55f + 0.45f * t * t * (3.0f - 2.0f * t);
 }
 
-float lawn_height_noise(glm::vec2 p) {
-    auto lattice = [](std::int32_t x, std::int32_t y) {
-        std::uint32_t h = static_cast<std::uint32_t>(x) * 73856093u ^ static_cast<std::uint32_t>(y) * 19349663u;
+namespace {
+
+// Smooth value noise over the world, 0..1, on a lattice of `cell` units; `salt` makes another field.
+float value_noise(glm::vec2 p, float cell, std::uint32_t salt) {
+    auto lattice = [salt](std::int32_t x, std::int32_t y) {
+        std::uint32_t h = static_cast<std::uint32_t>(x) * 73856093u ^ static_cast<std::uint32_t>(y) * 19349663u ^ salt;
         h ^= h >> 13;
         h *= 0x5bd1e995u;
         h ^= h >> 15;
         return static_cast<float>(h & 0xffffu) / 65535.0f;
     };
-    const glm::vec2 g = p / kLawnNoiseCell;
+    const glm::vec2 g = p / cell;
     const glm::vec2 f = glm::floor(g);
     glm::vec2 t = g - f;
     t = t * t * (3.0f - 2.0f * t);
@@ -651,6 +689,33 @@ float lawn_height_noise(glm::vec2 p) {
     const float bottom = lattice(x, y) + (lattice(x + 1, y) - lattice(x, y)) * t.x;
     const float top = lattice(x, y + 1) + (lattice(x + 1, y + 1) - lattice(x, y + 1)) * t.x;
     return std::clamp(bottom + (top - bottom) * t.y, 0.0f, 1.0f);
+}
+
+} // namespace
+
+float lawn_height_noise(glm::vec2 p) { return value_noise(p, kLawnNoiseCell, 0u); }
+
+glm::vec2 lawn_cover_offset(glm::vec2 p) {
+    // Two scales: a slow wander (bays and capes a few squares deep) and a quicker one (the fray along them).
+    auto field = [&](std::uint32_t salt) {
+        const float slow = value_noise(p, 14.0f, salt) * 2.0f - 1.0f;
+        const float quick = value_noise(p, 5.0f, salt ^ 0x68e31da4u) * 2.0f - 1.0f;
+        return std::clamp(slow * 1.3f + quick * 0.5f, -1.0f, 1.0f);
+    };
+    return glm::vec2(field(0x1b873593u), field(0xcc9e2d51u)) * kLawnCoverJitter;
+}
+
+float lawn_edge_cover(float squares, glm::vec2 p) {
+    const float t = std::clamp((squares - 1.0f) / (static_cast<float>(kLawnEdgeCells) - 0.5f), 0.0f, 1.0f);
+    const auto cx = static_cast<std::int32_t>(std::floor(p.x / kLawnCell)),
+               cy = static_cast<std::int32_t>(std::floor(p.y / kLawnCell));
+    std::uint32_t h = static_cast<std::uint32_t>(cx) * 2654435761u ^ static_cast<std::uint32_t>(cy) * 40503u;
+    h ^= h >> 15;
+    h *= 0x2c1b3c6du;
+    h ^= h >> 12;
+    const float draw = static_cast<float>(h & 0xffffu) / 65535.0f;
+    const float beside = 0.25f + 0.6f * draw;
+    return beside + (1.0f - beside) * t * t * (3.0f - 2.0f * t);
 }
 
 namespace {
@@ -720,7 +785,8 @@ void grow_tile(const ZoneFloraGrower::Data& d, std::size_t tile, std::vector<Flo
 
 // The lawn's edge where it meets bare ground (a path, a road, a texture +green turns down) tapers: a patch is the
 // shorter the nearer the nearest bare square within kLawnEdgeCells (lawn_edge_factor), so the carpet does not end in
-// a wall along a texture's straight border. `plants` holds the tile's and its margin's patches
+// a wall along a texture's straight border; and fewer of its blades stand, as many as a draw of its own says
+// (lawn_edge_cover), so the edge frays. `plants` holds the tile's and its margin's patches
 // (grow_lawn); the margin's are dropped after.
 void soften_lawn_edges(std::vector<FloraInstance>& out, std::size_t first, glm::vec2 lo, glm::vec2 hi) {
     std::span<FloraInstance> plants = std::span<FloraInstance>(out).subspan(first);
@@ -759,7 +825,9 @@ void soften_lawn_edges(std::vector<FloraInstance>& out, std::size_t first, glm::
                 if (d2 == 0 || d2 >= nearest2) continue;
                 if (!grown.contains(key(cx + dx, cy + dy))) nearest2 = d2;
             }
-        p.height *= lawn_edge_factor(std::sqrt(static_cast<float>(nearest2)));
+        const float squares = std::sqrt(static_cast<float>(nearest2));
+        p.height *= lawn_edge_factor(squares);
+        p.cover = lawn_edge_cover(squares, glm::vec2(p.position));
     }
     out.erase(std::remove_if(out.begin() + static_cast<std::ptrdiff_t>(first), out.end(),
                              [&](const FloraInstance& p) {
@@ -877,7 +945,8 @@ std::optional<FloraDonor> open_flora_donor(const GameDir& game, std::string_view
     }
     FloraDonor out;
     try {
-        out.archive = std::make_shared<const PfsArchive>(PfsArchive::open(*found, PfsArchive::storage_for(game, *found)));
+        out.archive = std::make_shared<const PfsArchive>(PfsArchive::open(
+            *found, PfsArchive::storage_for(game, *found), game.shared_file_cache()));
     } catch (const std::exception& e) {
         log::warn("zone flora: {}: {}", donor, e.what());
         return std::nullopt;

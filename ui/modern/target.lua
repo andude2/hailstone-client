@@ -1,8 +1,10 @@
 -- Target frame: replaces the game's TargetWindow. The target's name in its con colour, its health, its target (the
 -- target of target, when the server sends it), the aggro meter (the AggroMeterWnd's values: our share of the
 -- target's hate, gauge 149 / label 305, and the most hated besides us, labels 303 / 307; aggro.lua keeps the stock
--- window from showing) and its buffs under the frame. Hidden while nothing is targeted.
+-- window from showing) and its buffs under the frame, each with the buff's menu on a right click (lib/buffmenu.lua:
+-- Spell Info). Hidden while nothing is targeted.
 local hud = dofile("lib/hud.lua")
+local buffmenu = dofile("lib/buffmenu.lua")
 local T = hud.T
 local C = T.color
 local WINDOW = "TargetWindow"
@@ -36,7 +38,7 @@ local function targetBuffs()
         b = {}
         buffs[nBuffs] = b
       end
-      b.id, b.hit, b.ms, b.name, b.good = IDS[i], HITS[i], ms, name, good
+      b.id, b.hit, b.spell, b.ms, b.name, b.good = IDS[i], HITS[i], spell, ms, name, good
       -- the time left on it (T.Duration), formatted again only when what it shows changes
       local key = (not ms or ms < 0 or ms >= 100 * 3600000) and -1 or math.floor(ms / 1000)
       if b.durKey ~= key then b.durKey, b.duration = key, T.Duration(ms) end
@@ -78,10 +80,19 @@ local opts = {
   panel = false,
 }
 
+-- the drawing calls' options and colours, made once and filled each frame (the calls read them and keep nothing)
+local GLOW = { 0, 0, 0, 0.55 }
+local PANEL_OPTS = { glow = nil }
+local HP_BAR, TOT_BAR = { center = nil, font = nil }, { right = nil, font = nil }
+local NO_TRAIL = { noTrail = true }
+local BUFF_ICON = { radius = 4 }
+
 local function body(x, y, w, h, s)
   local con = conColor()
   local frameH = top * s
-  T.Panel(x, y, x + w, y + frameH, s, { glow = con and { con[1], con[2], con[3], 0.55 } or nil })
+  if con then GLOW[1], GLOW[2], GLOW[3] = con[1], con[2], con[3] end
+  PANEL_OPTS.glow = con and GLOW or nil
+  T.Panel(x, y, x + w, y + frameH, s, PANEL_OPTS)
   local pad = 10 * s
   local frac, _, raw = eq.Gauge(6)
   local pct = eq.Label(29) or ""
@@ -96,8 +107,8 @@ local function body(x, y, w, h, s)
   if pct ~= "" then T.Text(x + w - pad, y + pad - 3 * s, pct .. "%", C.text, T.font.large, "right") end
   local by = y + pad + nh + 4 * s
   local dead = raw == -3
-  T.Bar("target.hp", x + pad, by, x + w - pad, by + 18 * s, s, dead and 0 or frac, C.hp,
-    { center = dead and "Corpse" or nil, font = T.font.small })
+  HP_BAR.center, HP_BAR.font = dead and "Corpse" or nil, T.font.small
+  T.Bar("target.hp", x + pad, by, x + w - pad, by + 18 * s, s, dead and 0 or frac, C.hp, HP_BAR)
   if T.Hit("##hp", x + pad, by, x + w - pad, by + 18 * s) then eq.ClickChild(WINDOW, "TargetHP", "left") end
   by = by + 22 * s
   if hasTot then
@@ -107,8 +118,8 @@ local function body(x, y, w, h, s)
     local tx = x + pad + 12 * s
     local tw = (x + w - pad) - tx
     T.Text(tx, by - 2 * s, T.Fit(tname, tw * 0.5, T.font.small), C.muted, T.font.small)
-    T.Bar("target.tot", tx + tw * 0.52, by + 2 * s, x + w - pad, by + 10 * s, s, tf, C.hp,
-      { right = tpct ~= "" and (tpct .. "%") or nil, font = T.font.tiny })
+    TOT_BAR.right, TOT_BAR.font = tpct ~= "" and (tpct .. "%") or nil, T.font.tiny
+    T.Bar("target.tot", tx + tw * 0.52, by + 2 * s, x + w - pad, by + 10 * s, s, tf, C.hp, TOT_BAR)
   end
   if aggroOn then
     by = by + (hasTot and 18 or 0) * s
@@ -119,7 +130,7 @@ local function body(x, y, w, h, s)
     T.Text(x + pad, by, "Aggro", C.muted, T.font.tiny)
     local bx0 = x + pad + 44 * s
     T.Bar("target.aggro", bx0, by + 2 * s, x + w - pad - 40 * s, by + 10 * s, s, math.min(1, mine / 100), col,
-      { noTrail = true })
+      NO_TRAIL)
     T.Text(x + w - pad, by, mine .. "%", col, T.font.tiny, "right")
     local other, otherPct = eq.Label(303) or "", eq.Label(307) or ""
     if other ~= "" then
@@ -141,15 +152,20 @@ local function body(x, y, w, h, s)
     local yy = iy + row * (ICON + GAP) * s
     local tex, u0, v0, u1, v1 = eq.ChildArt(WINDOW, b.id, "decal")
     if type(tex) ~= "userdata" then tex = nil end
-    T.Icon(ix, yy, ICON * s, s, tex, u0, v0, u1, v1, b.good and C.good or C.bad, { radius = 4 })
-    T.Hit(b.hit, ix, yy, ix + ICON * s, yy + ICON * s)
+    T.Icon(ix, yy, ICON * s, s, tex, u0, v0, u1, v1, b.good and C.good or C.bad, BUFF_ICON)
+    T.Hit(b.hit, ix, yy, ix + ICON * s, yy + ICON * s, false)
     if ui.IsItemHovered() then
-      ui.SetTooltip(b.name .. "\n" .. T.LongDuration(b.ms))
+      ui.SetTooltip(b.name .. "\n" .. T.LongDuration(b.ms) .. "\n" .. buffmenu.Hint())
+    end
+    if ui.IsItemClicked(ui.Mouse.Right) and not ui.GetIO().alt then
+      buffmenu.Open(WINDOW, b)
+      T.TakeRightClick()
     end
     if b.ms and b.ms >= 0 and b.ms < 60000 then
       T.Text(ix + ICON * s / 2, yy + ICON * s - 9 * s, b.duration, C.text, T.font.tiny, "center")
     end
   end
+  buffmenu.Draw(WINDOW)
 end
 
 ui.window("Target", function()

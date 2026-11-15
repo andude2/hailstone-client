@@ -8,6 +8,10 @@ local K = dofile("lib/dialogs_kit.lua")
 local T = hud.T
 local C = T.color
 local WINDOW = "PluginConsent"
+-- The answer buttons wait this long after a question shows (or a new one takes its place), so a click or key meant
+-- for something else in the instant it pops up cannot answer it.
+local ARM_SECONDS = 1.0
+local shownSerial, shownAt = nil, 0
 
 local function sizeText(n)
   if n >= 1024 * 1024 then return string.format("%.1f MB", n / (1024 * 1024)) end
@@ -17,13 +21,18 @@ end
 
 ui.window("Server Plugins", function()
   local q = eq.PluginConsent()
+  if not q then
+    shownSerial = nil
+  elseif q.serial ~= shownSerial then
+    shownSerial, shownAt = q.serial, ui.GetTime()
+  end
   hud.Dialog(WINDOW, "Allow this server's plugin?", {
     shown = q ~= nil,
     keepTitle = true,
     rollup = false, -- (a question to answer: kept whole)
     size = function() return 460, 150 + 38 * (q and #q.plugins or 1) end,
     place = K.Centered,
-    onClose = function() eq.AnswerPluginConsent(nil) end,
+    onClose = function() if q then eq.AnswerPluginConsent(nil, q.serial) end end,
   }, function(x, y, w, h, s)
     local cx = ui.GetCursorPos()
     ui.PushTextWrapPos(cx + w)
@@ -44,8 +53,11 @@ ui.window("Server Plugins", function()
     ui.PopTextWrapPos()
     ui.Spacing()
     local bw = 150 * s
-    if ui.Button("Allow##consent", bw, K.ButtonH(s)) then eq.AnswerPluginConsent(true) end
+    local armed = ui.GetTime() - shownAt >= ARM_SECONDS
+    if not armed then ui.BeginDisabled() end
+    if ui.Button("Allow##consent", bw, K.ButtonH(s)) and armed then eq.AnswerPluginConsent(true, q.serial) end
     ui.SameLine()
-    if ui.Button("Don't allow##consent", bw, K.ButtonH(s)) then eq.AnswerPluginConsent(false) end
+    if ui.Button("Don't allow##consent", bw, K.ButtonH(s)) and armed then eq.AnswerPluginConsent(false, q.serial) end
+    if not armed then ui.EndDisabled() end
   end)
 end)

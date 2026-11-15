@@ -1,0 +1,76 @@
+#version 450
+
+// Frame generation, step 2: the motion at every place at the in-between time. A place step 1 marked takes its
+// winner's; a place none marked shows something this frame does not, because it is being covered between the frames
+// (or a surface stretched between its pixels): it takes the motion of the farthest mark near it (the background's),
+// flagged so step 3 takes it from the last frame alone.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 2, r32ui) uniform readonly uimage2D key_img;
+layout(set = 0, binding = 3, r32ui) uniform readonly uimage2D field_img;
+layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D motion_t; // xy the motion, z 1 where filled (0.25 a
+                                                                          // crack), w the depth it is of (reverse Z;
+                                                                          // 0 the sky, or none in a hole)
+
+layout(push_constant) uniform Push {
+    ivec2 size;
+    float t;
+    uint pass;
+} pc;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, pc.size))) return;
+    uint key = imageLoad(key_img, p).r;
+    if (key != 0u) {
+        imageStore(motion_t, p, vec4(unpackHalf2x16(imageLoad(field_img, p).r), 0.0, uintBitsToFloat(key - 1u)));
+        return;
+    }
+    // A crack: the same surface marks both sides of it, a few pixels away (a turning or stretching surface spreads
+    // its pixels apart between the frames). It shows that surface, not something being covered: it takes the nearer
+    // side's motion, flagged 0.25 so step 3 blends it as usual unless this frame shows something nearer along it (a
+    // thin figure that covers the background there).
+    const ivec2 kAxes[4] = ivec2[](ivec2(1, 0), ivec2(0, 1), ivec2(1, 1), ivec2(1, -1));
+    for (int a = 0; a < 4; ++a) {
+        uint k1 = 0u, k2 = 0u;
+        ivec2 q1 = p, q2 = p;
+        for (int r = 1; r <= 4 && k1 == 0u; ++r) {
+            q1 = clamp(p + kAxes[a] * r, ivec2(0), pc.size - 1);
+            k1 = imageLoad(key_img, q1).r;
+        }
+        for (int r = 1; r <= 4 && k2 == 0u; ++r) {
+            q2 = clamp(p - kAxes[a] * r, ivec2(0), pc.size - 1);
+            k2 = imageLoad(key_img, q2).r;
+        }
+        if (k1 == 0u || k2 == 0u) continue;
+        float d1 = uintBitsToFloat(k1 - 1u), d2 = uintBitsToFloat(k2 - 1u);
+        if (max(d1, d2) > min(d1, d2) * 1.05 + 1e-6) continue; // two surfaces: a hole between them
+        ivec2 q = k1 >= k2 ? q1 : q2;
+        imageStore(motion_t, p, vec4(unpackHalf2x16(imageLoad(field_img, q).r), 0.25, max(d1, d2)));
+        return;
+    }
+    // The farthest (least key) of the marks bordering it, looked for in eight directions at growing distances: a hole is as wide
+    // as half of how far the background moves against what covers it (tens of pixels as the camera turns past a
+    // still character). None: no motion, still flagged (the last frame shows what is here; this one's pixel at the
+    // same place is what covers it).
+    const int kRadii[10] = int[](1, 2, 3, 4, 6, 8, 12, 16, 24, 32);
+    const ivec2 kDirs[8] = ivec2[](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1), ivec2(1, 1), ivec2(-1, 1),
+                                   ivec2(1, -1), ivec2(-1, -1));
+    uint best = 0xffffffffu;
+    vec2 m = vec2(0.0);
+    // Of each direction's first mark (what borders the hole there), the farthest.
+    for (int d = 0; d < 8; ++d)
+        for (int r = 0; r < 10; ++r) {
+            ivec2 q = p + kDirs[d] * kRadii[r];
+            if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, pc.size))) break;
+            uint k = imageLoad(key_img, q).r;
+            if (k == 0u) continue;
+            if (k < best) {
+                best = k;
+                m = unpackHalf2x16(imageLoad(field_img, q).r);
+            }
+            break;
+        }
+    imageStore(motion_t, p, vec4(m, 1.0, best != 0xffffffffu ? uintBitsToFloat(best - 1u) : 0.0));
+}

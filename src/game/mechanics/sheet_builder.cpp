@@ -6,6 +6,7 @@
 #include "game/inventory.h"
 #include "game/spells.h"
 #include "game/world_state.h"
+#include "net/tribute_packets.h"
 #include "net/zone_packets.h"
 
 namespace hailstone::game::mechanics {
@@ -44,6 +45,11 @@ void build_sheet_into(CharacterSheet& s, const net::PlayerProfile& p, const Inve
     s.focus_classes = live.focus_classes;
     s.skill_rules = live.skill_rules;
     s.vitals = live.vitals;
+    s.leadership_active = (p.expansions & 0x40) != 0;
+    s.leadership_hp_bonus = live.leadership.hp;
+    s.leadership_mana_bonus = live.leadership.mana;
+    s.leadership_hp_regen_bonus = live.leadership.hp_regen;
+    s.leadership_offense_bonus = live.leadership.offense;
     s.level = live.level > 0 ? live.level : p.level;
     // PcBase_GetHighestLevel: the profile carries no separate value in EQEmu's RoF2 encoder; the current level.
     s.highest_level = s.level;
@@ -104,6 +110,16 @@ void build_sheet_into(CharacterSheet& s, const net::PlayerProfile& p, const Inve
         }
     }
 
+    // EQEmu's RoF2 translator addresses personal tribute as type 6, slots 0..4 and guild tribute as type 8,
+    // slots 0..1. Use those received items, including their normal stats and effects, rather than synthesizing
+    // bonuses from the tribute catalog. The connection retires their slots on received tribute state changes.
+    for (std::int16_t slot = 0; slot < net::kTributeSlots; ++slot)
+        if (const net::Item* item = inventory.at({net::kInvTribute, slot, -1, -1}))
+            s.extra_items[static_cast<std::size_t>(slot)] = *item;
+    for (std::int16_t slot = 0; slot < net::kGuildTributeSlots; ++slot)
+        if (const net::Item* item = inventory.at({net::kInvGuildTribute, slot, -1, -1}))
+            s.extra_items[15 + static_cast<std::size_t>(slot)] = *item;
+
     s.buffs.assign(kPlayerBuffSlots, SheetBuff{});
     for (std::size_t i = 0; i < s.buffs.size() && i < spells.buffs.size(); ++i) {
         const BuffSlot& b = spells.buffs[i];
@@ -115,9 +131,16 @@ void build_sheet_into(CharacterSheet& s, const net::PlayerProfile& p, const Inve
         out.level = b.level ? b.level : static_cast<std::uint8_t>(std::clamp(s.level, 0, 255));
         out.modifier = b.modifier;
         out.spell_id = static_cast<std::int32_t>(b.spell);
-        // Ticks left: the server's count less the 6 s ticks since it arrived.
-        std::int64_t elapsed = live.now_ms > b.received_ms ? (live.now_ms - b.received_ms) / kBuffTickMs : 0;
-        out.duration = static_cast<std::int32_t>(std::max<std::int64_t>(0, static_cast<std::int64_t>(b.tics) - elapsed));
+        // Ticks left: the server's count less the 6 s ticks since it arrived. A permanent buff (0xffffffff /
+        // 0xfffffffe) keeps its marker as the original's signed count (-1 / -2) rather than drifting below it, and
+        // nothing counts down while the buff timers are on hold (SPA 436): the server does not tick them then.
+        if (buff_is_permanent(b.tics, nullptr) || spells.buff_timers_on_hold) {
+            out.duration = static_cast<std::int32_t>(b.tics);
+        } else {
+            std::int64_t elapsed = live.now_ms > b.received_ms ? (live.now_ms - b.received_ms) / kBuffTickMs : 0;
+            out.duration =
+                static_cast<std::int32_t>(std::max<std::int64_t>(0, static_cast<std::int64_t>(b.tics) - elapsed));
+        }
         out.caster_id = b.caster_id;
         out.caster_is_self = b.caster_id != 0 && b.caster_id == live.player_id;
         if (world) {

@@ -8,6 +8,7 @@ local WINDOW = "BrowserWnd"
 local current, known = nil, {}
 local address, editing = "", false
 local problem = nil -- why the last address did not open
+local openFailed = nil -- why the first tab did not open (not tried again each frame; "Try again" does)
 
 local function label(st)
   local t = st.title ~= "" and st.title or st.url
@@ -34,8 +35,15 @@ local function drawWindow(x, y, w, h, s)
   end
   known = seen
   if current and not seen[current] then current = tabs[#tabs] end
-  if not current and #tabs == 0 then
-    current = eq.WebOpen("about:blank", math.floor(w), math.floor(h - 60 * s))
+  if #tabs > 0 then openFailed = nil end
+  if not current and #tabs == 0 and not openFailed then
+    local id, why = eq.WebOpen("about:blank", math.floor(w), math.floor(h - 60 * s))
+    if id then current = id else openFailed = why or "The browser could not open a page." end
+  end
+  if openFailed then
+    ui.TextColored(1, 0.55, 0.45, 1, openFailed)
+    if ui.Button("Try again##webretry") then openFailed = nil end
+    return
   end
 
   -- The tabs.
@@ -52,7 +60,9 @@ local function drawWindow(x, y, w, h, s)
   end
   ui.SameLine()
   if ui.SmallButton("+##newtab") then
-    current, editing = eq.WebOpen("about:blank"), false
+    local id, why = eq.WebOpen("about:blank")
+    if id then current, editing, problem = id, false, nil
+    else problem = why or "The browser could not open a page." end -- (the tab in front stays)
   end
 
   local st = current and eq.WebState(current)

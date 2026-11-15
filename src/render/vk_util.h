@@ -22,6 +22,14 @@ inline constexpr VkFrontFace opposite(VkFrontFace f) {
     return f == VK_FRONT_FACE_CLOCKWISE ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
 }
 
+// Whether end_frame's screenshot readback can take a swapchain of this format: it copies 4 bytes a pixel and
+// reads them as RGBA (swapping BGRA), so only the 8-bit four-channel formats will do; a surface that only offers
+// FP16 or 10-bit HDR formats is refused rather than read past its buffer.
+inline constexpr bool screenshot_format_supported(VkFormat f) {
+    return f == VK_FORMAT_B8G8R8A8_UNORM || f == VK_FORMAT_B8G8R8A8_SRGB || f == VK_FORMAT_R8G8B8A8_UNORM ||
+           f == VK_FORMAT_R8G8B8A8_SRGB;
+}
+
 inline void vk_check(VkResult r, const char* what) {
     if (r != VK_SUCCESS) throw std::runtime_error(std::string(what) + " failed: VkResult " + std::to_string(r));
 }

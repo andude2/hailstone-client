@@ -52,6 +52,11 @@ layout(location = 7) out float v_fog;
 layout(location = 8) out vec3 v_point; // the MPL point light term (in v_light; zone.frag's modern light)
 layout(location = 9) out vec3 v_rest;  // the position without the wind: the lights' shadow cubes are drawn so
 layout(location = 10) flat out float v_lod_distance; // an instanced model's placement's from the camera (its fades)
+layout(location = 11) out vec4 v_now;  // the motion (shaders/motion.glsl): this frame's place, unjittered
+layout(location = 12) out vec4 v_then; // and the last frame's (the wind a frame ago; the zone stands still)
+
+#define MOTION_SET 2
+#include "motion.glsl"
 
 // The depth pre-pass (zone_depth.frag) and the colour pass are two pipelines over this shader: the position must come
 // out bit for bit the same in both, or the colour pass's equal depth test drops pixels.
@@ -115,4 +120,8 @@ void main() {
     v_lod_distance = distance(scene.camera_pos.xyz, vec3(in_row0.w, in_row1.w, in_row2.w));
     v_fog = fog_factor(p);
     gl_Position = scene.view_proj * vec4(p, 1.0);
+    if (temporal.info.x > 0.0)
+        motion_clips(p, position + wind_offset(position, sway, scene.wind, scene.time.y), v_now, v_then);
+    else
+        v_now = v_then = vec4(0.0, 0.0, 0.0, 1.0);
 }

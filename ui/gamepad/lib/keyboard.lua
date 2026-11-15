@@ -38,6 +38,13 @@ function K.label(key, shift)
   return SHIFTED[key] or key:upper()
 end
 
+-- The keys' button ids, made once (not each frame).
+local KEY_IDS = {}
+for r, row in ipairs(KEYS) do
+  KEY_IDS[r] = {}
+  for k in ipairs(row) do KEY_IDS[r][k] = "##kb" .. r .. "_" .. k end
+end
+
 -- The window's hints while the keyboard is up.
 K.HINTS = { { "a", "Type" }, { "x", "Delete" }, { "y", "Space" }, { "lb", "Shift" }, { "b", "Cancel" } }
 
@@ -79,7 +86,7 @@ function K.draw(kb, pad, x0, y0, w)
         kb.focusFirst = false
       end
       local label = K.label(key, kb.shift)
-      if T.button("##kb" .. r .. "_" .. k, label, kw, T.px(60), {}, pad) and #kb.text < kb.max then
+      if T.button(KEY_IDS[r][k], label, kw, T.px(60), {}, pad) and #kb.text < kb.max then
         kb.text = kb.text .. label
         kb.shift = false
       end
@@ -92,14 +99,14 @@ function K.draw(kb, pad, x0, y0, w)
   ui.SameLine(0, T.px(8))
   if T.button("##kbspace", "Space", bw, T.px(60), { glyph = "y" }, pad) and #kb.text < kb.max then kb.text = kb.text .. " " end
   ui.SameLine(0, T.px(8))
-  if T.button("##kbdel", "Delete", bw, T.px(60), { glyph = "x" }, pad) then kb.text = kb.text:sub(1, -2) end
+  if T.button("##kbdel", "Delete", bw, T.px(60), { glyph = "x" }, pad) then kb.text = T.dropChar(kb.text) end
   ui.SameLine(0, T.px(8))
   if T.button("##kbcancel", "Cancel", bw, T.px(60), {}, pad) then result = "cancel" end
   ui.SameLine(0, T.px(8))
   if T.button("##kbok", "Done", bw, T.px(60), { primary = true }, pad) then result = "ok" end
   -- the pad's shortcuts while the window has the focus
   if ui.IsWindowFocused(3) then
-    if pad.menuPressed("x") then kb.text = kb.text:sub(1, -2) end
+    if pad.menuPressed("x") then kb.text = T.dropChar(kb.text) end
     if pad.menuPressed("y") and #kb.text < kb.max then kb.text = kb.text .. " " end
     if pad.menuPressed("lb") then kb.shift = not kb.shift end
   end

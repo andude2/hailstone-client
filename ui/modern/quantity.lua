@@ -13,6 +13,11 @@ local base = 0                -- the slider's minimum (the box shows slider + mi
 local wasShown = false
 local focusBox, boxActive = false, false
 
+-- the quick picks (label, tooltip); their slider values are worked out each frame from the minimum and the count
+local PICKS = { { "1##q", "One" }, { "Half##q", "Half of them" }, { "All##q", "All of them" } }
+local sliderMax = 0 -- the largest amount, for the slider's text
+local SLIDER_OPTS = { format = function(v) return tostring(v + base) .. " of " .. sliderMax end }
+
 local WINDOW_OPTS = {
   rollup = false, -- (a question to answer: kept whole)
   size = function() return 250, 118 end,
@@ -40,13 +45,15 @@ local function drawWindow(x, y, w, h, s)
     return
   end
   boxActive = active
-  for _, q in ipairs({ { "1", 1 - base, "One" }, { "Half", (count - 1) // 2, "Half of them" }, { "All", count - 1, "All of them" } }) do
+  for i, q in ipairs(PICKS) do
+    local to = i == 1 and 1 - base or (i == 2 and (count - 1) // 2 or count - 1)
     ui.SameLine(0, 6 * s)
-    if ui.Button(q[1] .. "##q", bw, 0) then eq.SetSlider(WINDOW, "QTYW_Slider", math.max(0, math.min(count - 1, q[2]))) end
-    if ui.IsItemHovered() then ui.SetTooltip(q[3]) end
+    if ui.Button(q[1], bw, 0) then eq.SetSlider(WINDOW, "QTYW_Slider", math.max(0, math.min(count - 1, to))) end
+    if ui.IsItemHovered() then ui.SetTooltip(q[2]) end
   end
   -- the slider
-  W.Slider(WINDOW, "QTYW_Slider", { format = function(v) return tostring(v + base) .. " of " .. max end })
+  sliderMax = max
+  W.Slider(WINDOW, "QTYW_Slider", SLIDER_OPTS)
   ui.Dummy(0, 2 * s)
   -- Accept, and Cancel (closing the window cancels, as the original's close box does)
   local half = (ui.GetContentRegionAvail() - 8) / 2
@@ -64,8 +71,9 @@ ui.window("Quantity", function()
     openX, openY = sx, sy
     ui.SetSetting("hud.pos." .. WINDOW, "")
   end
-  if shown and not wasShown then
-    -- the box starts at the slider's value plus the minimum
+  if shown and (not wasShown or place) then
+    -- the box starts at the slider's value plus the minimum (read again when the game opens it for another caller
+    -- while it is still up: that one's minimum may differ)
     local _, _, value = eq.ChildState(WINDOW, "QTYW_Slider")
     base = (tonumber(W.Text(WINDOW, "QTYW_SliderInput")) or 0) - (value or 0)
     focusBox, boxActive = true, false

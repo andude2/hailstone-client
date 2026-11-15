@@ -34,6 +34,7 @@ local filterCat, filterSub = nil, nil
 local search = ""
 local targetGem = nil     -- the gem picked in the strip (0-based)
 local drag = nil          -- the entry being dragged
+local dropTaken = false   -- the book's own gem strip memorized the drag this frame: the spell bar is not offered it
 local details = { id = nil }
 local tab = "details"
 local confirmDelete = nil
@@ -58,6 +59,17 @@ local function setSetting(key, v) ui.SetSetting("book." .. key, type(v) == "bool
 
 local function lower(s) return (s or ""):lower() end
 
+-- Tables T.Icon reads and does not keep, filled for each call rather than made: a ring colour, and the tiles' options.
+local RING = { 0, 0, 0, 1 }
+local function ringOf(c, a)
+  RING[1], RING[2], RING[3], RING[4] = T.rgba(c, a)
+  return RING
+end
+local GRID_ICON, ROW_ICON, DETAIL_ICON = { radius = 6, alpha = 1 }, { radius = 4, alpha = 1 }, { radius = 8 }
+local SLOT_ICON, SET_ICON = { radius = 7, wellAlpha = 1, alpha = 1 }, { radius = 3 }
+local GEM_ICON = { radius = 8, wellAlpha = 1 }
+local GEM_IDS = setmetatable({}, { __index = function(t, g) local id = "##gem" .. g; t[g] = id; return id end })
+
 -- The book's settings, read once a frame after the toolbar (which changes them): matches() and sorted() run over
 -- every spell, and a setting is a string concat and a lookup.
 local cfg = {}
@@ -70,11 +82,27 @@ local function readSettings()
   cfg.grid = setting("grid", false)
 end
 
-local bookStamp = 0 -- counts the reads of the book: the filtered lists below are kept until it (or a filter) changes
+-- Whether a read of the book holds what the last one did: the same spells in the same slots, memorized in the same
+-- gems (and read with the same level and names: the rest of an entry follows from its spell).
+local function sameBook(a, b)
+  if #a ~= #b then return false end
+  for i = 1, #a do
+    local x, y = a[i], b[i]
+    if x.slot ~= y.slot or x.id ~= y.id or x.gem ~= y.gem or x.level ~= y.level or x.name ~= y.name
+        or x.categoryName ~= y.categoryName or x.subcategoryName ~= y.subcategoryName then
+      return false
+    end
+  end
+  return true
+end
+
+local bookStamp = 0 -- counts the changes to the book: the filtered lists below are kept until it (or a filter) changes
 local function refresh()
   if ui.GetTime() - lastRead < 0.25 then return end
   lastRead = ui.GetTime()
-  book = eq.SpellBook() or {}
+  local read = eq.SpellBook() or {}
+  if sameBook(read, book) then return end -- nothing changed: the entries, lists and categories made are kept
+  book = read
   bookStamp = bookStamp + 1
   byId, bySlot = {}, {}
   for _, e in ipairs(book) do
@@ -494,9 +522,9 @@ local function gridEntry(i, e)
     local hovered = ui.IsItemHovered()
     local tex, u0, v0, u1, v1 = eq.SpellIcon(e.icon)
     local pad = 5 * s
+    GRID_ICON.alpha = e.level > lv.myLevel and 0.35 or 1
     T.Icon(px + pad, py + pad, GRID * s - 2 * pad, s, tex, u0, v0, u1, v1,
-      sel == e.id and C.accent or { T.rgba(e.beneficial and C.good or C.bad, 0.35) },
-      { radius = 6, alpha = e.level > lv.myLevel and 0.35 or 1 })
+      sel == e.id and C.accent or ringOf(e.beneficial and C.good or C.bad, 0.35), GRID_ICON)
     if e.gem then
       ui.DrawCircleFilled(px + GRID * s - 10 * s, py + 10 * s, 7 * s, C.accent[1], C.accent[2], C.accent[3], 1)
       T.Text(px + GRID * s - 10 * s, py + 3 * s, tostring(e.gem + 1), C.onAccent, T.font.tiny, "center")
@@ -528,8 +556,8 @@ local function listEntry(_, e)
     local dim = e.level > lv.myLevel
     local tex, u0, v0, u1, v1 = eq.SpellIcon(e.icon)
     local isz = (ROW_H - 6) * s
-    T.Icon(px + 4 * s, py + 3 * s, isz, s, tex, u0, v0, u1, v1,
-      { T.rgba(e.beneficial and C.good or C.bad, 0.5) }, { radius = 4, alpha = dim and 0.4 or 1 })
+    ROW_ICON.alpha = dim and 0.4 or 1
+    T.Icon(px + 4 * s, py + 3 * s, isz, s, tex, u0, v0, u1, v1, ringOf(e.beneficial and C.good or C.bad, 0.5), ROW_ICON)
     local nx = px + isz + 12 * s
     local ty = py + (ROW_H * s - th) / 2
     -- columns: name, level, mana, cast time, category
@@ -610,6 +638,7 @@ local function columnHeader(x, y, w, s)
   end
 end
 
+local TILE_LABELS, TILE_VALUES = { "Mana", "Cast", "Recast", "Range" }, {}
 local function detailsTab(x, y, w, h, s, st)
   local e = byId[sel]
   if not e then
@@ -617,7 +646,7 @@ local function detailsTab(x, y, w, h, s, st)
     return
   end
   local tex, u0, v0, u1, v1 = eq.SpellIcon(e.icon)
-  T.Icon(x, y, 52 * s, s, tex, u0, v0, u1, v1, e.beneficial and C.good or C.bad, { radius = 8 })
+  T.Icon(x, y, 52 * s, s, tex, u0, v0, u1, v1, e.beneficial and C.good or C.bad, DETAIL_ICON)
   local _, th = T.TextSize("Ag", T.font.large)
   T.Text(x + 62 * s, y + 2 * s, T.Fit(e.name, w - 62 * s, T.font.large), C.text, T.font.large)
   local sub = "Level " .. e.level .. (e.skillName and e.skillName ~= "" and ("  \xC2\xB7  " .. e.skillName) or "")
@@ -626,18 +655,17 @@ local function detailsTab(x, y, w, h, s, st)
   T.Text(x + 62 * s, y + th + 22 * s, T.Fit(cat, w - 62 * s, T.font.small), C.faint, T.font.small)
   -- the numbers in tiles
   local ty = y + 64 * s
-  local tiles = {
-    { "Mana", e.mana > 0 and tostring(e.mana) or "-" },
-    { "Cast", seconds(e.castTime) },
-    { "Recast", e.recastTime > 0 and seconds(e.recastTime) or "-" },
-    { "Range", e.range > 0 and tostring(math.floor(e.range)) or "-" },
-  }
+  local tiles = TILE_VALUES
+  tiles[1] = e.mana > 0 and tostring(e.mana) or "-"
+  tiles[2] = seconds(e.castTime)
+  tiles[3] = e.recastTime > 0 and seconds(e.recastTime) or "-"
+  tiles[4] = e.range > 0 and tostring(math.floor(e.range)) or "-"
   local tw = (w - 3 * 6 * s) / 4
-  for k, t in ipairs(tiles) do
+  for k, label in ipairs(TILE_LABELS) do
     local tx = x + (k - 1) * (tw + 6 * s)
     ui.DrawRectFilled(tx, ty, tx + tw, ty + 40 * s, C.ink[1], C.ink[2], C.ink[3], 0.04, 6 * s)
-    T.Text(tx + tw / 2, ty + 4 * s, t[1], C.faint, T.font.tiny, "center")
-    T.Text(tx + tw / 2, ty + 18 * s, t[2], C.text, T.font.small, "center")
+    T.Text(tx + tw / 2, ty + 4 * s, label, C.faint, T.font.tiny, "center")
+    T.Text(tx + tw / 2, ty + 18 * s, tiles[k], C.text, T.font.small, "center")
   end
   -- buttons
   local by = ty + 48 * s
@@ -718,8 +746,8 @@ local function setEditor(x, y, w, h, s, st, sets)
     local canUse = k <= usable
     local tex, u0, v0, u1, v1
     if id ~= -1 then tex, u0, v0, u1, v1 = spellIcon(id) end
-    T.Icon(sx, sy, size, s, tex, u0, v0, u1, v1, ed.pick == k and C.accent or nil,
-      { radius = 7, wellAlpha = canUse and 1 or 0.4, alpha = slotDrag == k and 0.3 or (canUse and 1 or 0.55) })
+    SLOT_ICON.wellAlpha, SLOT_ICON.alpha = canUse and 1 or 0.4, slotDrag == k and 0.3 or (canUse and 1 or 0.55)
+    T.Icon(sx, sy, size, s, tex, u0, v0, u1, v1, ed.pick == k and C.accent or nil, SLOT_ICON)
     if id == -1 then
       T.Text(sx + size / 2, sy + size / 2 - 7 * s, tostring(k), C.faint, T.font.small, "center")
     else
@@ -879,7 +907,7 @@ local function setList(x, y, w, h, s, st, sets)
         local hit = ui.IsMouseHoveringRect(ix, iy, ix + 20 * s, iy + 20 * s)
         if id ~= -1 then
           local tex, u0, v0, u1, v1 = spellIcon(id)
-          T.Icon(ix, iy, 20 * s, s, tex, u0, v0, u1, v1, nil, { radius = 3 })
+          T.Icon(ix, iy, 20 * s, s, tex, u0, v0, u1, v1, nil, SET_ICON)
           if not tex then T.Text(ix + 10 * s, iy + 3 * s, "?", C.danger, T.font.tiny, "center") end
         else
           ui.DrawRect(ix, iy, ix + 20 * s, iy + 20 * s, C.ink[1], C.ink[2], C.ink[3], 0.08, 3 * s, 1)
@@ -962,7 +990,8 @@ local function gemStrip(x, y, w, s, st)
     if id ~= -1 then tex, u0, v0, u1, v1 = spellIcon(id) end
     local ring = nil
     if targetGem == g then ring = C.accent end
-    T.Icon(gx, y, size, s, tex, u0, v0, u1, v1, ring, { radius = 8, wellAlpha = usable and 1 or 0.35 })
+    GEM_ICON.wellAlpha = usable and 1 or 0.35
+    T.Icon(gx, y, size, s, tex, u0, v0, u1, v1, ring, GEM_ICON)
     if not usable then
       T.Text(gx + size / 2, y + size / 2 - 7 * s, "-", C.faint, T.font.small, "center")
     elseif id == -1 then
@@ -976,12 +1005,17 @@ local function gemStrip(x, y, w, s, st)
       if mtex then ui.DrawImage(mtex, gx + 3 * s, y + 3 * s, gx + size - 3 * s, y + size - 3 * s, mu0, mv0, mu1, mv1, 1, 1, 1, 0.35) end
       ui.DrawRect(gx, y, gx + size, y + size, C.gold[1], C.gold[2], C.gold[3], 0.9, 8 * s, 1.5 * s)
     end
-    local hit = T.Hit("##gem" .. g, gx, y, gx + size, y + size)
+    local hit = T.Hit(GEM_IDS[g], gx, y, gx + size, y + size)
     local hovered = ui.IsItemHovered() or (drag and ui.IsMouseHoveringRect(gx, y, gx + size, y + size))
     if usable and hovered then T.HoverFx(gx, y, gx + size, y + size, s, 8) end
-    if drag and usable and ui.IsMouseHoveringRect(gx, y, gx + size, y + size) then
+    -- (only while the book is the window under the mouse: the spell bar over it takes the drop instead)
+    if drag and usable and ui.IsMouseHoveringRect(gx, y, gx + size, y + size)
+        and ui.IsWindowHovered(ui.HoveredFlags.ChildWindows | ui.HoveredFlags.AllowWhenBlockedByActiveItem) then
       ui.DrawRect(gx - 2 * s, y - 2 * s, gx + size + 2 * s, y + size + 2 * s, C.accent[1], C.accent[2], C.accent[3], 1, 9 * s, 2 * s)
-      if ui.IsMouseReleased(ui.Mouse.Left) then memorize(drag, g, st) end
+      if ui.IsMouseReleased(ui.Mouse.Left) then
+        memorize(drag, g, st)
+        dropTaken = true
+      end
     end
     if hit and usable then
       if st.cursorSpell then
@@ -1110,7 +1144,12 @@ local function body(x, y, w, h, s)
     ui.Foreground(false)
     -- shared with the spell bar (spellgems.lua, drawn after this), which takes the drop on the release frame: only
     -- this frame's (modern_spell_drag_frame), so a book closed mid-drag leaves nothing to memorize
-    modern_spell_drag, modern_spell_drag_frame = drag, ui.GetFrameCount()
+    -- (a drop the book's own gems took is not offered to it as well: one release memorizes once)
+    if dropTaken then
+      modern_spell_drag, dropTaken = nil, false
+    else
+      modern_spell_drag, modern_spell_drag_frame = drag, ui.GetFrameCount()
+    end
     if not ui.IsMouseDown(ui.Mouse.Left) then drag = nil end
   elseif modern_spell_drag and not ui.IsMouseReleased(ui.Mouse.Left) then
     modern_spell_drag = nil

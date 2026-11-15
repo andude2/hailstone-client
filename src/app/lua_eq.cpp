@@ -9,7 +9,10 @@
 #include <chrono>
 #include <filesystem>
 #include <format>
+#include <iterator>
+#include <limits>
 #include <cfloat>
+#include <cmath>
 #include <cctype>
 #include <cstdlib>
 #include <map>
@@ -30,6 +33,7 @@
 #include "ui/lua/lua_host.h"
 #include "app/lua_eq_caps.h"
 #include "app/lua_eq_plugins.h"
+#include "plugin/lua_keep.h"
 #include "plugin/ui_bridge.h"
 #include "core/ini_file.h"
 #include "core/log.h"
@@ -461,6 +465,16 @@ void push_cell(lua_State* L, const ui::UiTextures::Cell& c) {
 
 } // namespace
 
+bool slot_args(lua_State* L, int first, std::int16_t& slot, std::int16_t& bag) {
+    const lua_Integer s = luaL_checkinteger(L, first);
+    const lua_Integer b = lua_isnoneornil(L, first + 1) ? -1 : luaL_checkinteger(L, first + 1);
+    const auto s16 = integer_as<std::int16_t>(s), b16 = integer_as<std::int16_t>(b);
+    if (!s16 || !b16) return false;
+    slot = *s16;
+    bag = *b16;
+    return true;
+}
+
 // The item table of eq.Item.
 int push_item(lua_State* L, const net::Item* item) {
     if (!item) {
@@ -535,7 +549,7 @@ int Name(lua_State* L) {
 
 // eq.SlotName(slot) -> "Primary", ...
 int SlotName(lua_State* L) {
-    lua_pushstring(L, net::possessions_slot_name(static_cast<int>(luaL_checkinteger(L, 1))));
+    lua_pushstring(L, net::possessions_slot_name(held_int(luaL_checkinteger(L, 1))));
     return 1;
 }
 
@@ -545,8 +559,8 @@ int SlotName(lua_State* L) {
 int Item(lua_State* L) {
     auto& h = Impl::of(L).host;
     if (!h.conn || !h.in_game) return push_item(L, nullptr);
-    auto slot = static_cast<std::int16_t>(luaL_checkinteger(L, 1));
-    auto bag = static_cast<std::int16_t>(lua_isnoneornil(L, 2) ? -1 : luaL_checkinteger(L, 2));
+    std::int16_t slot = 0, bag = -1;
+    if (!slot_args(L, 1, slot, bag)) return push_item(L, nullptr);
     const net::Item* item = h.conn->inventory().at(net::ItemSlot::possessions(slot, bag));
     push_item(L, item);
     Impl::of(L).set_item_cool_down(L, std::format("inv:{}:{}", slot, bag), item);
@@ -576,7 +590,7 @@ int Money(lua_State* L) {
 
 // text [, r, g, b] = eq.Label(eqType)   -- the text a game label with this EQType shows
 int Label(lua_State* L) {
-    LabelValue v = eq_label(Impl::of(L).host, static_cast<int>(luaL_checkinteger(L, 1)));
+    LabelValue v = eq_label(Impl::of(L).host, held_int(luaL_checkinteger(L, 1)));
     lua_pushstring(L, v.text.c_str());
     if (!v.argb) return 1;
     Rgb c = argb_to_rgb(*v.argb);
@@ -589,7 +603,7 @@ int Label(lua_State* L) {
 // -110..-10 and -2000..-1000 the special bands); r, g, b the fill tint CGaugeWnd::Draw gives a special value
 // (gauge_fill), nil for a normal one.
 int Gauge(lua_State* L) {
-    GaugeValue g = eq_gauge(Impl::of(L).host, static_cast<int>(luaL_checkinteger(L, 1)));
+    GaugeValue g = eq_gauge(Impl::of(L).host, held_int(luaL_checkinteger(L, 1)));
     GaugeFill f = gauge_fill(g.value);
     if (f.fill < 0) lua_pushnil(L);
     else lua_pushnumber(L, std::min(f.fill, 1000) / 1000.0);
@@ -626,8 +640,11 @@ int ClickSlot(lua_State* L) {
         lua_pushboolean(L, false);
         return 1;
     }
-    auto slot = static_cast<std::int16_t>(luaL_checkinteger(L, 1));
-    auto bag = static_cast<std::int16_t>(lua_isnoneornil(L, 2) ? -1 : luaL_checkinteger(L, 2));
+    std::int16_t slot = 0, bag = -1;
+    if (!slot_args(L, 1, slot, bag)) {
+        lua_pushboolean(L, false);
+        return 1;
+    }
     std::string button = lua_isstring(L, 3) ? lua_tostring(L, 3) : "left";
     bool outside = lua_toboolean(L, 4) != 0;
     net::ItemSlot s = net::ItemSlot::possessions(slot, bag);
@@ -727,9 +744,17 @@ int UiAnimation(lua_State* L) {
 // defaults.ini as CSidlScreenWnd::LoadIniInfo reads them (ui/ui_ini.h; `sizable`: the XML window can be resized, so
 // a stored size counts). sized: w, h come from an ini; place: the window should be put there now (a character's
 // layout was just loaded) rather than only the first time it shows.
-// The client's own prompt for the server's compiled plugins ("PluginConsent") gives way only to the pack's own window:
-// a plugin's code could otherwise put it away and draw a question of its own.
-bool may_replace(std::string_view name) { return name != "PluginConsent" || ui::lua::LuaUi::caller_tag().empty(); }
+// The client's own prompt for the server's compiled plugins ("PluginConsent") and the dialogs that act when answered (a
+// confirmation, among them a destroy's; a trade, a give, a quantity, a bazaar purchase's, a group invitation, a
+// respawn choice, a large dialog, a task offer) give way only to the pack's own windows: a plugin's code could
+// otherwise put the client's away and draw a question of its own in its place.
+bool may_replace(std::string_view name) {
+    static constexpr std::string_view kPackOnly[] = {
+        "PluginConsent", "ConfirmationDialogBox", "TradeWnd",    "GiveWnd",          "QuantityWnd",
+        "BazaarConfirmationWnd", "GroupInvite", "RespawnWnd", "LargeDialogWindow", "TaskSelectWnd"};
+    if (ui::lua::LuaUi::caller_tag().empty()) return true;
+    return std::find(std::begin(kPackOnly), std::end(kPackOnly), name) == std::end(kPackOnly);
+}
 
 int ReplaceWindow(lua_State* L) {
     auto& m = Impl::of(L);
@@ -849,7 +874,7 @@ int ShowWindow(lua_State* L) {
 int WindowButton(lua_State* L) {
     auto& m = Impl::of(L);
     StockWindow* w = m.window(luaL_checkstring(L, 1));
-    int message = static_cast<int>(luaL_optinteger(L, 3, 1));
+    int message = held_int(luaL_optinteger(L, 3, 1));
     bool ok = w && w->click(m.host, luaL_checkstring(L, 2), message == 3 ? "remove" : "left", false);
     lua_pushboolean(L, ok);
     return 1;
@@ -889,7 +914,7 @@ int ClickChild(lua_State* L) {
 int StmlLink(lua_State* L) {
     auto& m = Impl::of(L);
     StockWindow* w = m.window(luaL_checkstring(L, 1));
-    int message = lua_isnumber(L, 3) ? static_cast<int>(lua_tointeger(L, 3)) : 0;
+    int message = lua_isnumber(L, 3) ? held_int(lua_tointeger(L, 3)) : 0;
     const char* data = lua_isstring(L, 4) ? lua_tostring(L, 4) : "";
     lua_pushboolean(L, w && w->stml_link(m.host, luaL_checkstring(L, 2), message, data));
     return 1;
@@ -1042,11 +1067,19 @@ void set_art_fields(lua_State* L, int n) {
     for (int k = 4; k >= 0; --k) lua_setfield(L, -2 - k, kFields[k]);
 }
 
-// The record table an eq.*Info call fills: the argument at `arg` when it is a table (a caller's, kept from frame to
-// frame), else a new one; left on the top of the stack.
+// The record table an eq.*Info call fills: the argument at `arg` when it is a plain table (a caller's, kept from frame
+// to frame), else a new one; left on the top of the stack. A table with a metatable (a plugin's view of the pack's,
+// or one of its own) is not filled: its __newindex or __index would run Lua code in the middle of the fill, which can
+// raise past the C++ objects the fill reads from, or call back in.
 void push_record(lua_State* L, int arg, int fields) {
-    if (lua_istable(L, arg)) lua_pushvalue(L, arg);
-    else lua_createtable(L, 0, fields);
+    if (lua_type(L, arg) == LUA_TTABLE) {
+        if (!lua_getmetatable(L, arg)) {
+            lua_pushvalue(L, arg);
+            return;
+        }
+        lua_pop(L, 1);
+    }
+    lua_createtable(L, 0, fields);
 }
 
 void set_number(lua_State* L, const char* field, double v) {
@@ -1098,8 +1131,11 @@ int GemInfo(lua_State* L) {
     auto& m = Impl::of(L);
     const bool span = lua_isnumber(L, 4) && lua_isnumber(L, 5);
     const std::int32_t y0 = span ? number_to_int(lua_tonumber(L, 4)) : 0, y1 = span ? number_to_int(lua_tonumber(L, 5)) : 0;
-    StockWindow* w = nullptr;
-    Child c = m.child(L, w);
+    // (as m.child, the arguments first; the child's looks in a box across the pushes: plugin/lua_keep.h)
+    StockWindow* w = m.window(luaL_checkstring(L, 1));
+    const char* id = w ? luaL_checkstring(L, 2) : nullptr;
+    Child& c = plugin::lua_keep<Child>(L);
+    if (w) w->child(m.host, id, c);
     push_record(L, 3, 16);
     if (c.shown) lua_pushboolean(L, *c.shown);
     else lua_pushnil(L);
@@ -1131,24 +1167,33 @@ int GemInfo(lua_State* L) {
     return 1;
 }
 
-// top, r, g, b, a = eq.ButtonCoolDown(name, child, y0, y1)   -- a button's cool-down (CButtonWnd's DrawCooldown
+// top, r, g, b, a, remainingMs, reuseMs = eq.ButtonCoolDown(name, child, y0, y1) -- a button's cool-down (CButtonWnd's DrawCooldown
 // @0x8970a0, the spell gem's rectangle): from y0 + ftol(fraction * (y1 - y0)) down to y1, the button's width, in
-// user colour 0x15f at alpha 0x40; nil while idle
+// user colour 0x15f at alpha 0x40; nil while idle. The window may also supply remaining/reuse milliseconds
+// (combat ability buttons); both are 0 while idle or when the window has no timing detail.
 int ButtonCoolDown(lua_State* L) {
     std::optional<double> cool_down;
+    std::uint64_t left = 0, duration = 0;
     { // the Child gone before the checks below
         StockWindow* w = nullptr;
-        cool_down = Impl::of(L).child(L, w).cool_down;
+        const Child child = Impl::of(L).child(L, w);
+        cool_down = child.cool_down;
+        left = child.cool_down_left;
+        duration = child.cool_down_duration;
     }
     if (!cool_down) {
-        lua_pushnil(L);
-        return 1;
+        for (int i = 0; i < 5; ++i) lua_pushnil(L);
+        lua_pushinteger(L, 0);
+        lua_pushinteger(L, 0);
+        return 7;
     }
     const std::int32_t y0 = number_to_int(luaL_checknumber(L, 3)), y1 = number_to_int(luaL_checknumber(L, 4));
     lua_pushinteger(L, game::spell_gem_overlay_top(*cool_down, y0, y1));
     const std::uint32_t argb = cool_down_color();
     for (int shift : {16, 8, 0, 24}) lua_pushnumber(L, static_cast<double>((argb >> shift) & 0xffu) / 255.0);
-    return 5;
+    lua_pushinteger(L, static_cast<lua_Integer>(left));
+    lua_pushinteger(L, static_cast<lua_Integer>(duration));
+    return 7;
 }
 
 // preview = eq.ItemPreview()   -- the item preview window's state (CObjectPreviewWnd, game/item_preview.h): nil while
@@ -1195,12 +1240,14 @@ int ItemPreviewImage(lua_State* L) {
 
 // eq.ItemPreviewControl(what [, x [, y [, view]]])   -- moves the preview's camera: "rotate" (radians across, up),
 // "pan" (fractions of the view across, up), "zoom" (a distance factor), "reset" (fitted again); view as
-// eq.ItemPreviewImage's
+// eq.ItemPreviewImage's. NaN, an infinity or a number past float's range moves nothing (any code may call it, and
+// the camera's matrices would carry it).
 int ItemPreviewControl(lua_State* L) {
     auto& h = Impl::of(L).host;
-    if (h.item_preview_control)
-        h.item_preview_control(luaL_checkstring(L, 1), static_cast<float>(luaL_optnumber(L, 2, 0.0)),
-                               static_cast<float>(luaL_optnumber(L, 3, 0.0)), preview_view(L, 4));
+    const char* what = luaL_checkstring(L, 1);
+    const float x = static_cast<float>(luaL_optnumber(L, 2, 0.0)), y = static_cast<float>(luaL_optnumber(L, 3, 0.0));
+    const int view = preview_view(L, 4);
+    if (h.item_preview_control && std::isfinite(x) && std::isfinite(y)) h.item_preview_control(what, x, y, view);
     return 0;
 }
 
@@ -1384,7 +1431,8 @@ int HotButtonInfoFn(lua_State* L) {
     const char* child = w ? luaL_checkstring(L, 2) : nullptr;
     const bool span = lua_isnumber(L, 4) && lua_isnumber(L, 5);
     const std::int32_t y0 = span ? number_to_int(lua_tonumber(L, 4)) : 0, y1 = span ? number_to_int(lua_tonumber(L, 5)) : 0;
-    auto hb = w ? w->hot_button(m.host, child) : std::nullopt;
+    auto& hb = plugin::lua_keep<std::optional<HotButtonInfo>>(L); // across the pushes (plugin/lua_keep.h)
+    if (w) hb = w->hot_button(m.host, child);
     const HotButtonInfo empty;
     const HotButtonInfo& info = hb ? *hb : empty;
     push_record(L, 3, 24);
@@ -1400,7 +1448,7 @@ int HotButtonInfoFn(lua_State* L) {
     }
     // Fills the table in field `name` with `n` numbers (a new table when the field holds none).
     auto set_list = [L](const char* name, const float* v, int n) {
-        lua_getfield(L, -1, name);
+        lua_getfield(L, -1, name); // (the record has no metatable: push_record; the list is written raw)
         if (!lua_istable(L, -1)) {
             lua_pop(L, 1);
             lua_createtable(L, n, 0);
@@ -1485,7 +1533,7 @@ int ClickHotButton(lua_State* L) {
 int PickUp(lua_State* L) {
     auto& m = Impl::of(L);
     StockWindow* w = m.window(luaL_checkstring(L, 1));
-    int row = lua_isinteger(L, 3) ? static_cast<int>(lua_tointeger(L, 3)) - 1 : -1;
+    int row = lua_isinteger(L, 3) ? held_index(lua_tointeger(L, 3)) : -1;
     auto b = w && !m.host.cursor_button && m.host.in_game ? w->pick_up(m.host, luaL_checkstring(L, 2), row) : std::nullopt;
     if (b) {
         m.host.cursor_button = *b;
@@ -1505,7 +1553,7 @@ int PressButtonFrom(lua_State* L) {
     const std::string_view name = luaL_checkstring(L, 1);
     StockWindow* w = name.starts_with("HotButtonWnd") ? nullptr : m.window(name);
     const char* child = w && m.host.in_game ? luaL_checkstring(L, 2) : nullptr;
-    int row = lua_isinteger(L, 3) ? static_cast<int>(lua_tointeger(L, 3)) - 1 : -1;
+    int row = lua_isinteger(L, 3) ? held_index(lua_tointeger(L, 3)) : -1;
     auto b = child ? w->pick_up(m.host, child, row) : std::nullopt;
     if (b && m.host.run_button) m.host.run_button(*b);
     lua_pushboolean(L, b && m.host.run_button);
@@ -1622,7 +1670,7 @@ const char* mode_name(net::GameConnection::ItemJobMode m) {
 // (or had nothing to do), else why not
 int SortItems(lua_State* L) {
     auto& m = Impl::of(L);
-    std::string where = luaL_checkstring(L, 1);
+    const char* where_arg = luaL_checkstring(L, 1);
     using M = net::GameConnection::ItemJobMode;
     M mode = M::Sort;
     if (lua_isboolean(L, 2)) mode = lua_toboolean(L, 2) ? M::Stack : M::Sort;
@@ -1634,48 +1682,61 @@ int SortItems(lua_State* L) {
         lua_pushstring(L, "Not in game.");
         return 1;
     }
-    net::GameConnection::ItemJobOptions opts;
+    // The options' fields onto the stack first (lua_getfield runs a table's __index, which may raise), then the
+    // options and the answer in a box the state owns across the reads and the push (plugin/lua_keep.h): a place
+    // that is a number becomes text on the stack, which allocates.
+    lua_settop(L, 3);
     ui::lua::unview(L, 3);
     if (lua_istable(L, 3)) {
         lua_getfield(L, 3, "locked");
-        ui::lua::unview(L, -1);
-        if (lua_istable(L, -1))
-            for (lua_Integer i = 1;; ++i) {
-                lua_rawgeti(L, -1, i);
-                bool more = lua_isstring(L, -1);
-                if (more)
-                    if (auto at = parse_place(lua_tostring(L, -1))) opts.locked.push_back(*at);
-                lua_pop(L, 1);
-                if (!more) break;
-            }
-        lua_pop(L, 1);
+        ui::lua::unview(L, 4);
         lua_getfield(L, 3, "filters");
-        ui::lua::unview(L, -1);
-        if (lua_istable(L, -1)) {
-            lua_pushnil(L);
-            while (lua_next(L, -2)) {
-                if (lua_type(L, -2) == LUA_TSTRING && lua_isstring(L, -1))
-                    if (auto at = parse_place(lua_tostring(L, -2)))
-                        if (auto c = game::category_by_name(lua_tostring(L, -1)); c != game::ItemCategory::None)
-                            opts.filters.push_back({at->parent(), c});
-                lua_pop(L, 1);
-            }
+        ui::lua::unview(L, 5);
+    } else {
+        lua_pushnil(L);
+        lua_pushnil(L);
+    }
+    struct Job {
+        net::GameConnection::ItemJobOptions opts;
+        std::string err;
+    };
+    Job& job = plugin::lua_keep<Job>(L);
+    auto& opts = job.opts;
+    if (lua_istable(L, 4))
+        for (lua_Integer i = 1;; ++i) {
+            lua_rawgeti(L, 4, i);
+            bool more = lua_isstring(L, -1);
+            if (more)
+                if (auto at = parse_place(lua_tostring(L, -1)))
+                    plugin::cxx_guard(L, [&] { opts.locked.push_back(*at); });
+            lua_pop(L, 1);
+            if (!more) break;
         }
-        lua_pop(L, 1);
+    if (lua_istable(L, 5)) {
+        lua_pushnil(L);
+        while (lua_next(L, 5)) {
+            if (lua_type(L, -2) == LUA_TSTRING && lua_isstring(L, -1))
+                if (auto at = parse_place(lua_tostring(L, -2)))
+                    if (auto c = game::category_by_name(lua_tostring(L, -1)); c != game::ItemCategory::None)
+                        plugin::cxx_guard(L, [&] { opts.filters.push_back({at->parent(), c}); });
+            lua_pop(L, 1);
+        }
     }
     using S = net::GameConnection::ItemJobScope;
-    std::string err;
-    if (where == "inventory") {
-        err = m.host.conn->start_item_job(S::Inventory, {}, mode, opts);
-    } else if (where == "bank") {
-        err = m.host.conn->start_item_job(S::Bank, {}, mode, opts);
-    } else {
-        StockWindow* w = m.window(where);
-        const net::ItemSlot* at = w ? w->bag_slot(m.host) : nullptr;
-        err = at ? m.host.conn->start_item_job(S::Bag, *at, mode, opts) : "That bag is not open.";
-    }
-    if (err.empty()) return 0;
-    lua_pushstring(L, err.c_str());
+    plugin::cxx_guard(L, [&] {
+        const std::string_view where = where_arg;
+        if (where == "inventory") {
+            job.err = m.host.conn->start_item_job(S::Inventory, {}, mode, opts);
+        } else if (where == "bank") {
+            job.err = m.host.conn->start_item_job(S::Bank, {}, mode, opts);
+        } else {
+            StockWindow* w = m.window(where);
+            const net::ItemSlot* at = w ? w->bag_slot(m.host) : nullptr;
+            job.err = at ? m.host.conn->start_item_job(S::Bag, *at, mode, opts) : "That bag is not open.";
+        }
+    });
+    if (job.err.empty()) return 0;
+    lua_pushstring(L, job.err.c_str());
     return 1;
 }
 
@@ -1897,7 +1958,9 @@ int SendParcel(lua_State* L) {
     const lua_Integer count = luaL_optinteger(L, 3, 1);
     const char* to = luaL_checkstring(L, 1);
     const char* note = luaL_optstring(L, 2, "");
-    std::string why = h.conn->send_parcel(*at, static_cast<std::uint32_t>(std::max<lua_Integer>(1, count)), to, note);
+    // (held to a count's range: a cast would wrap 2^32 to 0)
+    const auto n = static_cast<std::uint32_t>(std::clamp<lua_Integer>(count, 1, std::numeric_limits<std::uint32_t>::max()));
+    std::string why = h.conn->send_parcel(*at, n, to, note);
     if (why.empty()) return 0;
     lua_pushstring(L, why.c_str());
     return 1;
@@ -1919,7 +1982,8 @@ int SendParcelMoney(lua_State* L) {
 // eq.RetrieveParcel(slot)   -- takes one parcel;  eq.ClaimAllParcels()   -- takes them all, one after another
 int RetrieveParcel(lua_State* L) {
     auto& h = Impl::of(L).host;
-    if (h.conn) h.conn->retrieve_parcel(static_cast<std::uint32_t>(luaL_checkinteger(L, 1)));
+    const auto slot = integer_as<std::uint32_t>(luaL_checkinteger(L, 1)); // (not wrapped into another parcel's)
+    if (h.conn && slot) h.conn->retrieve_parcel(*slot);
     return 0;
 }
 
@@ -1954,7 +2018,7 @@ int PlaceClick(lua_State* L) {
 int BagSlotItem(lua_State* L) {
     auto& m = Impl::of(L);
     const char* name = luaL_checkstring(L, 1);
-    const int index = static_cast<int>(luaL_checkinteger(L, 2));
+    const int index = held_int(luaL_checkinteger(L, 2));
     StockWindow* w = m.window(name);
     const net::Item* item = w ? w->bag_item(m.host, index) : nullptr;
     push_item(L, item);
@@ -1967,7 +2031,7 @@ int BagSlotItem(lua_State* L) {
 int BagSlotClick(lua_State* L) {
     auto& m = Impl::of(L);
     StockWindow* w = m.window(luaL_checkstring(L, 1));
-    int index = static_cast<int>(luaL_checkinteger(L, 2));
+    int index = held_int(luaL_checkinteger(L, 2));
     std::string button = lua_isstring(L, 3) ? lua_tostring(L, 3) : "left";
     if (button == "rightheld" && w && w->bag_item(m.host, index) && index >= 0) {
         inspect_held(m.host, w->bag_item(m.host, index));
@@ -2010,7 +2074,7 @@ int ListInfo(lua_State* L) {
 }
 
 // texts, r, g, b [, texture, u0, v0, u1, v1] = eq.ListRow(name, child, row)   -- row from 0; texts.altRight,
-// texts.comboColumn, texts.iconColumn
+// texts.comboColumn, texts.disabled, texts.iconColumn
 // (from 0) when the icon is not in the first column
 int ListRowFn(lua_State* L) {
     auto& m = Impl::of(L);
@@ -2052,6 +2116,10 @@ int ListRowFn(lua_State* L) {
         lua_pushboolean(L, 1);
         lua_setfield(L, -2, "altRight");
     }
+    if (r.disabled) { // texts.disabled: the window left the line disabled
+        lua_pushboolean(L, 1);
+        lua_setfield(L, -2, "disabled");
+    }
     for (float f : r.color) lua_pushnumber(L, f);
     if (!r.icon) return 4;
     push_cell(L, *r.icon);
@@ -2065,17 +2133,18 @@ int ListClick(lua_State* L) {
     StockWindow* w = m.window(luaL_checkstring(L, 1));
     const std::string_view button = lua_isstring(L, 4) ? lua_tostring(L, 4) : "left"; // (nothing to destroy)
     bool right = button == "right";
-    int column = static_cast<int>(luaL_optinteger(L, 5, 0));
+    int column = held_int(luaL_optinteger(L, 5, 0));
     if (button == "double") {
-        lua_pushboolean(L, w && w->list_double_click(m.host, luaL_checkstring(L, 2), static_cast<int>(luaL_checkinteger(L, 3)), column));
+        lua_pushboolean(L, w && w->list_double_click(m.host, luaL_checkstring(L, 2), held_int(luaL_checkinteger(L, 3)), column));
         return 1;
     }
     if (!right && w && lua_isinteger(L, 6) &&
-        w->list_select(m.host, luaL_checkstring(L, 2), static_cast<int>(luaL_checkinteger(L, 3)), static_cast<int>(lua_tointeger(L, 6)))) {
+        w->list_select(m.host, luaL_checkstring(L, 2), held_int(luaL_checkinteger(L, 3)), held_int(lua_tointeger(L, 6)))) {
         lua_pushboolean(L, 1);
         return 1;
     }
-    lua_pushboolean(L, w && w->list_click(m.host, luaL_checkstring(L, 2), static_cast<int>(luaL_checkinteger(L, 3)),
+    if (right) note_click_rect(m.host);
+    lua_pushboolean(L, w && w->list_click(m.host, luaL_checkstring(L, 2), held_int(luaL_checkinteger(L, 3)),
                                           right, column));
     return 1;
 }
@@ -2084,7 +2153,7 @@ int ListClick(lua_State* L) {
 int ListHeaderClick(lua_State* L) {
     auto& m = Impl::of(L);
     StockWindow* w = m.window(luaL_checkstring(L, 1));
-    lua_pushboolean(L, w && w->list_header_click(m.host, luaL_checkstring(L, 2), static_cast<int>(luaL_checkinteger(L, 3))));
+    lua_pushboolean(L, w && w->list_header_click(m.host, luaL_checkstring(L, 2), held_int(luaL_checkinteger(L, 3))));
     return 1;
 }
 
@@ -2136,7 +2205,7 @@ int UiIniSet(lua_State* L) {
 // eq.SetOption(name, value)   -- changes, applies and saves a client option
 int SetOption(lua_State* L) {
     auto& m = Impl::of(L);
-    if (m.host.set_option) m.host.set_option(luaL_checkstring(L, 1), static_cast<int>(luaL_checkinteger(L, 2)));
+    if (m.host.set_option) m.host.set_option(luaL_checkstring(L, 1), held_int(luaL_checkinteger(L, 2)));
     return 0;
 }
 
@@ -2158,7 +2227,7 @@ int OptionChoices(lua_State* L) {
 int ComboSelect(lua_State* L) {
     auto& m = Impl::of(L);
     StockWindow* w = m.window(luaL_checkstring(L, 1));
-    lua_pushboolean(L, w && w->combo_select(m.host, luaL_checkstring(L, 2), static_cast<int>(luaL_checkinteger(L, 3))));
+    lua_pushboolean(L, w && w->combo_select(m.host, luaL_checkstring(L, 2), held_int(luaL_checkinteger(L, 3))));
     return 1;
 }
 
@@ -2194,7 +2263,7 @@ int TabPage(lua_State* L) {
 int SetTabPage(lua_State* L) {
     auto& m = Impl::of(L);
     if (StockWindow* w = m.window(luaL_checkstring(L, 1)))
-        w->set_tab_page(m.host, luaL_checkstring(L, 2), static_cast<int>(luaL_checkinteger(L, 3)));
+        w->set_tab_page(m.host, luaL_checkstring(L, 2), held_int(luaL_checkinteger(L, 3)));
     return 0;
 }
 
@@ -2255,7 +2324,7 @@ int SizeWindow(lua_State* L) {
 int SetSlider(lua_State* L) {
     auto& m = Impl::of(L);
     StockWindow* w = m.window(luaL_checkstring(L, 1));
-    lua_pushboolean(L, w && w->set_slider(m.host, luaL_checkstring(L, 2), static_cast<int>(luaL_checkinteger(L, 3))));
+    lua_pushboolean(L, w && w->set_slider(m.host, luaL_checkstring(L, 2), held_int(luaL_checkinteger(L, 3))));
     return 1;
 }
 
@@ -2401,7 +2470,7 @@ int CascadeMenus(lua_State* L) {
 // eq.CascadeClick(menu, item) / eq.CascadeHover(menu, item) / eq.CascadeClose()   -- 1-based menu and item
 int CascadeClick(lua_State* L) {
     auto& m = Impl::of(L);
-    auto cmd = m.cascade.click(static_cast<int>(luaL_checkinteger(L, 1)) - 1, static_cast<int>(luaL_checkinteger(L, 2)) - 1);
+    auto cmd = m.cascade.click(held_index(luaL_checkinteger(L, 1)), held_index(luaL_checkinteger(L, 2)));
     if (cmd && *cmd == kMenuReportBug) {
         if (m.host.conn) m.host.conn->set_bug_report_open(true);
     } else if (cmd && *cmd == kMenuScripts) {
@@ -2416,7 +2485,7 @@ int CascadeClick(lua_State* L) {
 int CascadeHover(lua_State* L) {
     auto& m = Impl::of(L);
     ImVec2 ds = ImGui::GetIO().DisplaySize;
-    m.cascade.hover(static_cast<int>(luaL_checkinteger(L, 1)) - 1, static_cast<int>(luaL_checkinteger(L, 2)) - 1,
+    m.cascade.hover(held_index(luaL_checkinteger(L, 1)), held_index(luaL_checkinteger(L, 2)),
                     static_cast<int>(ds.x), static_cast<int>(ds.y));
     return 0;
 }
@@ -2921,6 +2990,7 @@ void register_spellbook_api(lua_State* L, EqHost& host); // app/lua_eq_spellbook
 void register_abilities_api(lua_State* L, EqHost& host); // app/lua_eq_abilities.cpp
 void register_ability_book_api(lua_State* L, EqHost& host); // app/lua_eq_abilitybook.cpp
 void register_inventory_manager_api(lua_State* L, EqHost& host); // app/lua_eq_inventory_manager.cpp
+void register_item_transfer_api(lua_State* L, EqHost& host); // app/lua_eq_itemdisplay.cpp
 void register_reward_selection_api(lua_State* L, EqHost& host); // app/lua_eq_rewards.cpp
 void register_achievement_api(lua_State* L, EqHost& host); // app/lua_eq_achievements.cpp
 void register_exchange_api(lua_State* L, EqHost& host);  // app/lua_eq_exchange.cpp
@@ -2931,7 +3001,8 @@ void register_luasocial_api(lua_State* L, EqHost& host);  // app/lua_eq_luasocia
 void register_hotbar_api(lua_State* L, EqHost& host);     // app/lua_eq_hotbar.cpp
 void register_web_api(lua_State* L, EqHost& host);        // app/lua_eq_web.cpp
 void register_find_api(lua_State* L, EqHost& host);       // app/lua_eq_find.cpp
-void register_compare_api(lua_State* L, EqHost& host, std::vector<std::unique_ptr<StockWindow>>& windows); // app/lua_eq_compare.cpp
+void register_compare_api(lua_State* L, EqHost& host, std::function<StockWindow*(std::string_view)> find_window); // app/lua_eq_compare.cpp
+void register_task_api(lua_State* L, EqHost& host, std::vector<std::unique_ptr<StockWindow>>& windows); // app/lua_eq_progress.cpp
 int CompassStrips(lua_State* L);                     // app/lua_eq_misc.cpp
 int CompassMarkers(lua_State* L);                    // app/lua_eq_misc.cpp
 
@@ -2942,6 +3013,7 @@ void EqApi::register_functions(lua_State* L) {
     register_abilities_api(L, impl_->host);
     register_ability_book_api(L, impl_->host);
     register_inventory_manager_api(L, impl_->host);
+    register_item_transfer_api(L, impl_->host);
     register_reward_selection_api(L, impl_->host);
     register_achievement_api(L, impl_->host);
     register_exchange_api(L, impl_->host);
@@ -2952,7 +3024,20 @@ void EqApi::register_functions(lua_State* L) {
     register_hotbar_api(L, impl_->host);
     register_web_api(L, impl_->host);
     register_find_api(L, impl_->host);
-    register_compare_api(L, impl_->host, impl_->windows);
+    register_compare_api(L, impl_->host, [impl = impl_.get()](std::string_view name) { return impl->window(name); });
+    register_task_api(L, impl_->host, impl_->windows);
+    // Opening a tracker entry changes TaskWnd's selected objective list in this frame. Its next ListInfo/ListRow
+    // read must not retain the previously selected task's cached list.
+    lua_pushlightuserdata(L, impl_.get());
+    lua_getfield(L, -2, "OpenTask");
+    lua_pushcclosure(L, [](lua_State* state) -> int {
+        Impl::of(state).lists_changed();
+        lua_pushvalue(state, lua_upvalueindex(2));
+        lua_insert(state, 1);
+        lua_call(state, lua_gettop(state) - 1, LUA_MULTRET);
+        return lua_gettop(state);
+    }, 2);
+    lua_setfield(L, -2, "OpenTask");
     lua_pushlightuserdata(L, &impl_->host);
     lua_pushcclosure(L, CompassStrips, 1);
     lua_setfield(L, -2, "CompassStrips");

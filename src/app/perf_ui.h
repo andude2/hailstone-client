@@ -1,8 +1,8 @@
 #pragma once
 
 // The performance window (developer UI, Ctrl+Shift+P or ui.perf_window=1 in hailstone.ini): the frame rate and
-// frame times, where each frame's time goes (the main loop's phases), the renderers' counts, GPU and process
-// memory, and the world and zone sessions' traffic.
+// frame times, where each frame's time goes (the main loop's phases), frame generation's rates and costs, the
+// renderers' counts, GPU and process memory, and the world and zone sessions' traffic.
 
 #include <array>
 #include <chrono>
@@ -17,6 +17,7 @@
 
 namespace hailstone::net { class GameConnection; struct SessionStats; }
 namespace hailstone::render { struct ZoneRenderStats; struct ActorRenderStats; class VkContext; }
+namespace hailstone { class SharedFileCache; }
 
 namespace hailstone::app {
 
@@ -42,11 +43,58 @@ bool is_hitch(float frame_ms, float typical_ms);
 std::string hitch_text(float frame_ms, float typical_ms, const PhaseTimes& phases,
                        std::vector<std::pair<const char*, float>> sections = {});
 
+// The frame sections (core/frame_sections.h) of the last `frames` frames: each one's average per frame and its
+// slowest frame, longest average first, with the bytes each allocated a frame on average (frame_sections::add_bytes;
+// a section with bytes and no time is listed too). A section missing from a frame counts 0 there. Names are compared
+// by address, as frame_sections::add does (literals and frame_sections::intern).
+class SectionAverages {
+public:
+    using Sections = std::vector<std::pair<const char*, float>>;
+    using Allocations = std::vector<std::pair<const char*, std::size_t>>;
+    struct Row {
+        const char* name;
+        float avg_ms;
+        float max_ms;
+        float avg_bytes = 0.0f;
+        bool has_bytes = false; // bytes were counted for it (the Lua windows), so 0 means none allocated
+    };
+    explicit SectionAverages(std::size_t frames = 60) : frames_(frames == 0 ? 1 : frames) { history_.reserve(frames_); }
+    void add(Sections sections, Allocations bytes = {}) { add_swap(sections, bytes); }
+    // add() without a copy: the frame's vectors go into the ring and come back holding the dropped frame's (or
+    // empty), whose storage the caller reuses (frame_sections::take_into), so the steady state allocates nothing.
+    void add_swap(Sections& sections, Allocations& bytes);
+    std::vector<Row> rows() const;
+    std::size_t frames() const { return history_.size(); }
+
+private:
+    struct Frame {
+        Sections sections;
+        Allocations bytes;
+    };
+    std::size_t frames_;
+    std::vector<Frame> history_; // a ring of up to frames_ frames
+    std::size_t head_ = 0;       // next slot to write once full
+};
+
+// The frame rates over a history of frames: `ms` each real frame's time, `presented` how many images it put on the
+// screen (2 with an in-between frame from frame generation, else 1; same length). Rendered counts real frames,
+// displayed every image; `generated_share` is the share of real frames that had an in-between frame.
+struct FrameRates {
+    float rendered_fps = 0.0f;
+    float displayed_fps = 0.0f;
+    float generated_share = 0.0f;
+};
+// `generated`, when given (same length), says which frames' second image was an in-between frame (else the real
+// frame shown again: a cut); without it, every frame with two images had one.
+FrameRates frame_rates(const std::vector<float>& ms, const std::vector<std::uint8_t>& presented,
+                       const std::vector<std::uint8_t>& generated = {});
+
 struct PerfInputs {
     const render::ZoneRenderStats* zone = nullptr;
     const render::ActorRenderStats* actors = nullptr;
     const net::GameConnection* conn = nullptr;
     const render::VkContext* gpu = nullptr; // the GPU's name and memory heaps
+    const SharedFileCache* shared_files = nullptr;
     std::string zone_name;
     std::size_t spawns = 0;
     glm::vec3 camera{0.0f};
@@ -59,6 +107,11 @@ public:
     void begin_frame();
     // At the end of `phase`: the time since the last mark (or begin_frame) is charged to it.
     void mark(FramePhase phase);
+    // After the frame is presented: how many images it put on the screen (VkContext::frames_presented).
+    void set_presented(std::uint32_t images, bool generated) {
+        current_presented_ = static_cast<std::uint8_t>(images);
+        current_generated_ = generated ? 1u : 0u;
+    }
     void draw(const PerfInputs& in);
 
     void toggle() { open_ = !open_; }
@@ -88,7 +141,14 @@ private:
     Clock::time_point started_ = Clock::now();
     std::array<float, kFrames> frame_ms_{};
     std::array<PhaseTimes, kFrames> phase_ms_{};
+    std::array<std::uint8_t, kFrames> presented_{};
+    std::array<std::uint8_t, kFrames> generated_{};
     PhaseTimes current_{};
+    SectionAverages sections_;
+    SectionAverages::Sections taken_sections_; // the frame's sections, their storage recycled (add_swap)
+    SectionAverages::Allocations taken_bytes_;
+    std::uint8_t current_presented_ = 1;
+    std::uint8_t current_generated_ = 0;
     std::size_t head_ = 0;  // next slot to write
     std::size_t count_ = 0; // filled slots
     NetRate world_rate_, zone_rate_;

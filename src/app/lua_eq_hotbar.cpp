@@ -269,7 +269,7 @@ int IconSelectionIcon(lua_State* L) {
 
 // value = eq.HotBarSetting(bar, name)   -- bar 1..10's "PercentSize", "ShowKeyMap" or "ShowSpinner"
 int HotBarSetting(lua_State* L) {
-    int bar = static_cast<int>(luaL_checkinteger(L, 1)) - 1;
+    int bar = held_index(luaL_checkinteger(L, 1));
     std::string_view name = luaL_checkstring(L, 2);
     if (!valid_bar(bar)) return 0;
     const HotBarSettings& s = g_bars[static_cast<std::size_t>(bar)].settings;
@@ -283,12 +283,13 @@ int HotBarSetting(lua_State* L) {
 // ok = eq.HotBarMenu(bar [, x, y])   -- bar 1..10's window menu at x, y (default: the mouse; a pad's bar)
 int HotBarMenu(lua_State* L) {
     auto* host = static_cast<EqHost*>(lua_touserdata(L, lua_upvalueindex(1)));
-    int bar = static_cast<int>(luaL_checkinteger(L, 1)) - 1;
+    int bar = held_index(luaL_checkinteger(L, 1));
     if (!host || !valid_bar(bar)) return 0;
     ImVec2 mp = ImGui::GetMousePos();
     if (!ImGui::IsMousePosValid(&mp)) mp = ImVec2(ImGui::GetIO().DisplaySize.x / 2, ImGui::GetIO().DisplaySize.y / 2);
-    float x = lua_isnumber(L, 2) ? static_cast<float>(lua_tonumber(L, 2)) : mp.x;
-    float y = lua_isnumber(L, 3) ? static_cast<float>(lua_tonumber(L, 3)) : mp.y;
+    // (held to a screen's range: a double past float's would make the cast undefined)
+    float x = lua_isnumber(L, 2) ? static_cast<float>(std::clamp(lua_tonumber(L, 2), -1e6, 1e6)) : mp.x;
+    float y = lua_isnumber(L, 3) ? static_cast<float>(std::clamp(lua_tonumber(L, 3), -1e6, 1e6)) : mp.y;
     open_hot_bar_menu(*host, bar, x, y);
     lua_pushboolean(L, !host->menus.empty());
     return 1;

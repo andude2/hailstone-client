@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -17,6 +18,7 @@
 #include "core/update_manifest.h"
 #include "core/zip_read.h"
 #include "net/server_files.h"
+#include "platform/durable_file.h"
 #include "plugin/native_plugins.h"
 #include "plugin/policy.h"
 
@@ -59,11 +61,16 @@ std::string journal_path(const fs::path& data_dir, const fs::path& p) {
     return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
 }
 
+// Write-ahead: each line is on the disk before the change it names is made (platform/durable_file.h), so after a
+// power cut every moved file has its line and the undo at the next start finds it.
 class Journal {
 public:
-    explicit Journal(const fs::path& data_dir) : data_dir_(data_dir), out_(addons_dir(data_dir) / "journal.txt",
-                                                                            std::ios::binary | std::ios::trunc) {}
-    bool ok() const { return static_cast<bool>(out_); }
+    explicit Journal(const fs::path& data_dir) : data_dir_(data_dir), path_(addons_dir(data_dir) / "journal.txt") {
+        std::error_code ec;
+        fs::remove(path_, ec);
+        ok_ = platform::append_file_synced(path_, "");
+    }
+    bool ok() const { return ok_; }
     // Moves `from` to `to` (making its folder), written to the journal first.
     bool move(const fs::path& from, const fs::path& to, std::string* error) {
         // Something already there (a folder holding the player's files, where a file goes now) stops it before the
@@ -73,15 +80,13 @@ public:
             if (error) *error = "cannot move " + from.string() + " to " + to.string() + ": something is there";
             return false;
         }
-        out_ << "move\t" << journal_path(data_dir_, from) << "\t" << journal_path(data_dir_, to) << "\n";
-        out_.flush();
-        if (!out_) {
+        if (!write("move\t" + journal_path(data_dir_, from) + "\t" + journal_path(data_dir_, to) + "\n")) {
             if (error) *error = "cannot write the add-ons' journal";
             return false;
         }
         std::error_code ec;
         fs::create_directories(to.parent_path(), ec);
-        fs::rename(from, to, ec);
+        platform::replace_file_synced(from, to, ec);
         if (ec && error) *error = "cannot move " + from.string() + " to " + to.string() + ": " + ec.message();
         return !ec;
     }
@@ -98,25 +103,25 @@ public:
         } else {
             fs::remove(dir / "installed.prev.txt", ec);
         }
-        if (saved) {
-            out_ << "registry\t" << (had ? "saved" : "none") << "\n";
-            out_.flush();
-        }
-        if (!saved || !out_) {
+        if (saved) saved = write(std::string("registry\t") + (had ? "saved" : "none") + "\n");
+        if (!saved) {
             if (error) *error = "cannot save addons/installed.txt before changing it";
             return false;
         }
         return true;
     }
-    void done() {
-        out_ << "done\n";
-        out_.flush();
-    }
-    void close() { out_.close(); }
+    void done() { write("done\n"); }
+    void close() {}
 
 private:
+    bool write(const std::string& line) {
+        ok_ = ok_ && platform::append_file_synced(path_, line);
+        return ok_;
+    }
+
     fs::path data_dir_;
-    std::ofstream out_;
+    fs::path path_;
+    bool ok_ = false;
 };
 
 void remove_quietly(const fs::path& path) {
@@ -174,6 +179,14 @@ void undo_journal(const fs::path& data_dir) {
             fs::remove(dir / kRegistryBackup, ec);
         }
     }
+}
+
+bool holds_a_file(const fs::path& folder) {
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(folder, ec); !ec && it != fs::recursive_directory_iterator();
+         it.increment(ec))
+        if (!it->is_directory(ec)) return true;
+    return false;
 }
 
 bool journal_done(const fs::path& data_dir) {
@@ -603,7 +616,9 @@ std::optional<std::vector<AddonFile>> write_unpacked(const fs::path& data_dir, s
             return std::nullopt;
         }
         file.close();
-        if (!file) {
+        // On the disk before the journal's moves put it in place: a power cut must not leave an installed add-on's
+        // file empty (platform/durable_file.h).
+        if (!file || !platform::sync_file(to)) {
             remove_quietly(dir);
             if (error) *error = "cannot write " + to.string();
             return std::nullopt;
@@ -971,15 +986,32 @@ void addons_at_start(const fs::path& data_dir) {
     const fs::path dir = addons_dir(data_dir);
     std::error_code ec;
     if (!fs::exists(dir, ec)) return;
+    bool keep_previous = false;
     if (fs::exists(dir / "journal.txt", ec)) {
         if (!journal_done(data_dir)) {
             log::warn("Add-ons: an install was cut off; it is undone");
             undo_journal(data_dir);
+            // Each file the undo knew of went back: one still in previous/ is a copy the journal does not name (a
+            // damaged journal, a move back that failed), maybe the only one of a replaced file. It is kept aside.
+            keep_previous = holds_a_file(dir / "previous");
         }
         remove_quietly(dir / "journal.txt");
     }
     remove_quietly(dir / "installed.prev.txt");
-    remove_quietly(dir / "previous");
+    if (keep_previous) {
+        const auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
+        const fs::path kept = dir / ("kept-" + std::to_string(stamp));
+        fs::rename(dir / "previous", kept, ec);
+        if (ec)
+            log::warn("Add-ons: addons/previous/ still holds files the journal does not name, and cannot be moved "
+                      "aside: {}; it stays",
+                      ec.message());
+        else
+            log::warn("Add-ons: addons/previous/ still held files the journal does not name; they are kept in {}",
+                      kept.string());
+    } else {
+        remove_quietly(dir / "previous");
+    }
     remove_quietly(dir / "new");
     const AddonRegistry reg = read_addon_registry(data_dir);
     if (reg.problem.empty()) {

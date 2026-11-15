@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 
 #include <imgui.h>
@@ -229,6 +230,64 @@ TEST_CASE("Map windows: an earlier version's AutoZRange sets both Auto Z ranges"
         MapLua lua(dir / "maps", dir / "UI.ini");
         lua.api.begin_frame();
         CHECK(lua("local on, a, b = eq.MapAutoZ() return tostring(on) .. ',' .. a .. ',' .. b") == "true,60,60");
+    }
+    ImGui::DestroyContext(ctx);
+}
+
+// The map window's hover points into the view's labels: another zone's map loaded between the draw and the press
+// (eq.ShowZoneMap) frees them, and the press must not keep the freed label as the marked one (the toolbar's Edit
+// Label and Move Label to Me then write through it).
+TEST_CASE("Map windows: a press after another zone's map is loaded marks nothing") {
+    ImGuiContext* ctx = ImGui::CreateContext();
+    ImGui::GetIO().IniFilename = nullptr;
+    unsigned char* px = nullptr;
+    int w = 0, h = 0;
+    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    hailstone::test::ScratchDir dir_scratch("map_windows_hover_test");
+    const fs::path dir = dir_scratch.path();
+    fs::create_directories(dir / "maps");
+    std::ofstream(dir / "maps" / "qeynos.txt") << "L -100, 0, 0,  100, 0, 0,  0, 0, 0\nP 0, 0, 0,  0, 0, 0,  3,  Here\n";
+    {
+        app::EqHost host;
+        host.in_game = host.ui_ready = true;
+        host.zone_short_name = "qeynos";
+        host.maps_dir = dir / "maps";
+        host.feet_valid = true;
+        app::EqApi api(host);
+        api.load_layout(dir / "defaults.ini", dir / "UI_Test_Server.ini", {});
+        lua_State* L = luaL_newstate();
+        luaL_openlibs(L);
+        lua_newtable(L);
+        api.register_functions(L);
+        lua_setglobal(L, "eq");
+        api.begin_frame();
+        REQUIRE(api.click_child("MapViewWnd", "MVW_ToolbarButton")); // editing: a press marks the hovered label
+        // One frame of the map window with the mouse at (x, y): the draw, `between`, then the press.
+        auto press = [&](float x, float y, const std::string& between) {
+            ImGui::GetIO().DisplaySize = ImVec2(800, 600);
+            ImGui::GetIO().DeltaTime = 1.0f / 60.0f;
+            ImGui::GetIO().AddMousePosEvent(x, y);
+            api.begin_frame();
+            ImGui::NewFrame();
+            ImGui::SetNextWindowPos(ImVec2(0, 0));
+            ImGui::SetNextWindowSize(ImVec2(600, 500));
+            ImGui::Begin("map");
+            CHECK(run(L, "eq.DrawMap(0, 0, 600, 500, true) " + between + " eq.MapMouseDown() return 1") == "1");
+            ImGui::End();
+            ImGui::Render();
+            const bool marked = api.click_child("MapToolbarWnd", "MTW_EditLabelButton") && api.shown("EditLabelWnd");
+            if (api.shown("EditLabelWnd")) api.click_child("EditLabelWnd", "ELW_CancelButton");
+            return marked;
+        };
+        // Where the label is on screen: the first spot whose press marks it.
+        std::optional<ImVec2> at;
+        for (float y = 10; y < 500 && !at; y += 10)
+            for (float x = 10; x < 600 && !at; x += 10)
+                if (press(x, y, "")) at = ImVec2(x, y);
+        REQUIRE(at);
+        CHECK(press(at->x, at->y, ""));                              // the label is there
+        CHECK_FALSE(press(at->x, at->y, "eq.ShowZoneMap('freporte')")); // freed before the press: nothing marked
+        lua_close(L);
     }
     ImGui::DestroyContext(ctx);
 }

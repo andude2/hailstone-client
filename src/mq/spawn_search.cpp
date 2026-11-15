@@ -181,14 +181,22 @@ bool in_fellowship(const game::Spawn& s, const net::FellowshipState* fellowship,
     return false;
 }
 
-// MQ's IsPCNear: another player not in the group within `radius` (3D) of the spawn. Without a group the player
-// counts too, as IsInGroup is false for everyone then.
-bool pc_near(const game::Spawn& s, const game::WorldState& world, const game::GroupState* group, float radius) {
+// The players MQ's IsPCNear looks at: not NPCs or corpses, and not in the group. Without a group the player counts
+// too, as IsInGroup is false for everyone then. Found once per search (search_spawns), not once per spawn.
+std::vector<const game::Spawn*> near_candidates(const game::WorldState& world, const game::GroupState* group) {
+    std::vector<const game::Spawn*> out;
     for (const auto& [id, o] : world.spawns) {
-        if (o.is_npc || o.is_corpse || id == s.id) continue;
+        if (o.is_npc || o.is_corpse) continue;
         if (in_group(o, world, group, false)) continue;
-        if (distance3d(o, s) < radius) return true;
+        out.push_back(&o);
     }
+    return out;
+}
+
+// MQ's IsPCNear: another of those players within `radius` (3D) of the spawn.
+bool pc_near(const game::Spawn& s, const std::vector<const game::Spawn*>& players, float radius) {
+    for (const game::Spawn* o : players)
+        if (o->id != s.id && distance3d(*o, s) < radius) return true;
     return false;
 }
 
@@ -204,7 +212,7 @@ bool class_in(std::uint8_t c, std::initializer_list<std::uint8_t> set) { return 
 
 // SpawnMatchesSearch, in its order.
 bool matches(const SpawnSearch& q, const game::Spawn& s, const game::Spawn* me, const game::WorldState& world,
-             const SearchSources& src) {
+             const SearchSources& src, const std::vector<const game::Spawn*>& near_players) {
     const game::eSpawnType raw = spawn_type(s);
     K type = kind_of(raw);
     if (raw == game::eSpawnType::ITEM) return false;
@@ -278,7 +286,7 @@ bool matches(const SpawnSearch& q, const game::Spawn& s, const game::Spawn* me, 
     } else if (q.radius < 10000.0 && me && distance3d(*me, s) > q.radius) {
         return false;
     }
-    if (q.nopcnear > 0.0f && pc_near(s, world, src.group, q.nopcnear)) return false;
+    if (q.nopcnear > 0.0f && pc_near(s, near_players, q.nopcnear)) return false;
     if (q.zradius < 10000.0 && (p.z > z_from + q.zradius || p.z < z_from - q.zradius)) return false;
     if (q.light) {
         const std::string_view l = light_of(s);
@@ -534,8 +542,10 @@ std::vector<const game::Spawn*> search_spawns(const SpawnSearch& q, const game::
                                               const SearchSources& sources) {
     const game::Spawn* me = world.player();
     std::vector<std::pair<float, const game::Spawn*>> found;
+    const std::vector<const game::Spawn*> near_players =
+        q.nopcnear > 0.0f ? near_candidates(world, sources.group) : std::vector<const game::Spawn*>{};
     for (const auto& [id, s] : world.spawns) {
-        if (!matches(q, s, me, world, sources)) continue;
+        if (!matches(q, s, me, world, sources, near_players)) continue;
         found.emplace_back(me ? distance3d(*me, s) : 0.0f, &s);
     }
     std::sort(found.begin(), found.end(), [](const auto& a, const auto& b) {

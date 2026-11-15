@@ -12,12 +12,23 @@ local function currency()
   local row = eq.ListRow(WINDOW, "PointMerchant_PointList", 0)
   return row and row[1] or ""
 end
+-- The currency's icon number, by its name: found once in eq.AltCurrencies (a new list a call) rather than each frame;
+-- a name not found yet is looked for again at most once a second. The texture itself is asked for each frame.
+local iconOf, lookedAt = {}, {}
 local function icon()
   local name = currency()
-  for _, c in ipairs(eq.AltCurrencies(true)) do
-    if c.name == name and c.icon and c.icon > 0 then return eq.ItemIcon(c.icon) end
+  local n = iconOf[name]
+  if not n then
+    local now = ui.GetTime()
+    if lookedAt[name] and now >= lookedAt[name] and now - lookedAt[name] < 1 then return nil end
+    lookedAt[name] = now
+    for _, c in ipairs(eq.AltCurrencies(true)) do
+      if c.name == name and c.icon and c.icon > 0 then n = c.icon; break end
+    end
+    if not n then return nil end
+    iconOf[name] = n
   end
-  return nil
+  return eq.ItemIcon(n)
 end
 
 local CFG = { window = WINDOW, prefix = "PointMerchant_", currency = currency, icon = icon }

@@ -18,11 +18,39 @@
 
 namespace hailstone::game {
 
-// The slot types (EQEmu XTargetType): 0 empty, 1 auto hater, 2 / 3 a specific PC / NPC, 4 the target's target,
-// 5..10 the group's tank / assist / puller and their targets, 11..13 the group's marks, 14..19 the raid's assists
-// and their targets, 20..22 the raid's marks, 23 / 24 the pet and its target, 25 / 26 the mercenary and its target.
-inline constexpr std::uint32_t kXTargetEmpty = 0, kXTargetAutoHater = 1, kXTargetSpecificPc = 2,
-                               kXTargetSpecificNpc = 3, kXTargetTypes = 27;
+// The slot types, as the protocol carries them (EQEmu XTargetType, zone/client.h; the SDK's HS_BULK_XTARGET_*).
+// Unscoped over std::uint32_t, the type XTargetSlot::type and the packets hold, so a slot's type compares with them
+// as it is.
+enum XTargetType : std::uint32_t {
+    kXTargetEmpty = 0,
+    kXTargetAutoHater = 1,
+    kXTargetSpecificPc = 2,
+    kXTargetSpecificNpc = 3,
+    kXTargetTargetsTarget = 4,
+    kXTargetGroupTank = 5,
+    kXTargetGroupTanksTarget = 6,
+    kXTargetGroupAssist = 7,
+    kXTargetGroupAssistTarget = 8,
+    kXTargetGroupPuller = 9,
+    kXTargetGroupPullerTarget = 10,
+    kXTargetGroupMark1 = 11,
+    kXTargetGroupMark2 = 12,
+    kXTargetGroupMark3 = 13,
+    kXTargetRaidAssist1 = 14,
+    kXTargetRaidAssist2 = 15,
+    kXTargetRaidAssist3 = 16,
+    kXTargetRaidAssist1Target = 17,
+    kXTargetRaidAssist2Target = 18,
+    kXTargetRaidAssist3Target = 19,
+    kXTargetRaidMark1 = 20,
+    kXTargetRaidMark2 = 21,
+    kXTargetRaidMark3 = 22,
+    kXTargetMyPet = 23,
+    kXTargetMyPetTarget = 24,
+    kXTargetMyMercenary = 25,
+    kXTargetMyMercenaryTarget = 26,
+    kXTargetTypes = 27, // the count, not a type
+};
 inline constexpr int kXTargetMaxSlots = 20; // the window's 20 rows (CExtendedTargetWnd's ctor), EQEmu's hard cap
 
 // __GetXTargetType @0x8d3be0: the type's name ("Auto Hater", "Group Tank", ...); null past 26.

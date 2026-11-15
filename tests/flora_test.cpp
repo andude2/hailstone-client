@@ -168,6 +168,13 @@ TEST_CASE("radial flora: damaged .eco and .rfd numbers are bounded, not undefine
     std::vector<FloraInstance> out;
     place_flora(tile, many, d, rand, out);
     CHECK(out.size() == kMaxFloraPerTile);
+    // The zone's cap: a second tile adds only up to it, and a third nothing.
+    const std::size_t cap = kMaxFloraPerTile + 100;
+    place_flora(tile, many, d, rand, out, cap);
+    CHECK(out.size() == cap);
+    place_flora(tile, many, d, rand, out, cap);
+    CHECK(out.size() == cap);
+    CHECK(kMaxFloraPerZone >= 15u * 262194u); // well above Moors
 }
 
 TEST_CASE("radial flora: a tile's seed is the signed products' wrapped value, worked in unsigned") {

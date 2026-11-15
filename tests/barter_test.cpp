@@ -354,6 +354,14 @@ TEST_CASE("barter manager: a buy line's trade-item count is bounded by its text 
     CHECK(lines[0].second.trade_items.empty());
 }
 
+TEST_CASE("barter manager: OP_BuyerItems 5 counting more lines than its text holds makes no empty ones") {
+    // An empty record would be slot 0 and replace (and save over) the line there.
+    auto lines = game::parse_buy_lines_text("40$*2^3^1^1^1^A^500^5^1^0$*2^9^1^0^2^B^500^6^2^0$");
+    REQUIRE(lines.size() == 2);
+    CHECK(lines[1].first == 9);
+    CHECK(game::parse_buy_lines_text("3$").empty());
+}
+
 TEST_CASE("barter manager: an overflowing number field saturates at the 32-bit range") {
     // 4000000000 does not fit an int: it reads as INT32_MAX (MSVC's atoi), so the count is bounded, not wrapped.
     auto big = game::parse_buy_line_ini("*2^1^1^1^4000000000^X^500^5^1^4000000000^7^1^Cap^500");

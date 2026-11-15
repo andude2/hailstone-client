@@ -1,6 +1,6 @@
 // The Lua scripts' part of the `eq` table (app/lua_eq_plugins.h): the Scripts window's list, run, stop, pause and the
 // character's autorun list, over the script host (mq/lua_mq.h). Running, stopping and the autorun list are the
-// player's: a plugin's code in the UI (LuaUi::caller_tag) is refused them.
+// player's: a plugin's code in the UI (LuaUi::caller_tag) is refused them, and its list holds only its own row.
 #include "app/lua_eq_plugins.h"
 
 #include <algorithm>
@@ -15,6 +15,7 @@
 #include "app/lua_eq.h"
 #include "game/slash_commands.h"
 #include "mq/lua_mq.h"
+#include "plugin/lua_keep.h"
 #include "plugin/policy.h"
 #include "ui/lua/lua_host.h"
 
@@ -22,11 +23,21 @@ namespace hailstone::app {
 
 namespace {
 
-// found()'s last answer: it reads the folders, and the window asks each frame.
+// A row of eq.Scripts().
+struct Row {
+    std::string name, status, error, why, caps;
+    bool found = false, allowed = false, server = false, kept = false;
+};
+
+// found()'s last answer: it reads the folders, and the window asks each frame. It also holds eq.Scripts()'s rows and
+// folder names while they are pushed: it is the state's (its __gc frees it), and a push that fails longjmps past the
+// C function's own objects (Lua is built as C; plugin/lua_keep.h).
 struct FoundCache {
     std::vector<mq::ScriptHost::Found> found;
     std::chrono::steady_clock::time_point at{};
     bool valid = false;
+    std::vector<Row> rows;
+    std::vector<std::string> folders;
 };
 constexpr auto kRescan = std::chrono::seconds(1);
 
@@ -60,52 +71,59 @@ void set_bool(lua_State* L, const char* key, bool v) {
 int Scripts(lua_State* L) {
     EqHost& h = host_of(L);
     FoundCache& c = cache_of(L);
+    const bool rescan = lua_toboolean(L, 1) != 0;
     lua_newtable(L);
     lua_newtable(L); // info
     if (!h.scripts) return 2;
-    auto now = std::chrono::steady_clock::now();
-    if (!c.valid || lua_toboolean(L, 1) || now - c.at >= kRescan) {
-        c.found = h.scripts->found();
-        c.at = now;
-        c.valid = true;
-    }
+    auto& rows = c.rows;
+    plugin::cxx_guard(L, [&] {
+        auto now = std::chrono::steady_clock::now();
+        if (!c.valid || rescan || now - c.at >= kRescan) {
+            c.found = h.scripts->found();
+            c.at = now;
+            c.valid = true;
+        }
+        c.folders.clear();
+        for (const auto& f : h.scripts->folders()) c.folders.push_back(f.string());
+        rows.clear();
+        rows.reserve(c.found.size());
+        for (const auto& f : c.found) {
+            Row& r = rows.emplace_back();
+            r.name = f.name;
+            r.found = true;
+            r.allowed = f.caps != 0;
+            r.why = f.why;
+            r.server = f.server;
+            if (f.caps) r.caps = plugin::caps_text(f.caps);
+        }
+        for (const auto& i : h.scripts->list()) {
+            auto it = std::find_if(rows.begin(), rows.end(), [&](const Row& r) { return r.name == i.name; });
+            if (it == rows.end()) { // running, though its file is gone or was renamed
+                rows.emplace_back().name = i.name;
+                it = rows.end() - 1;
+            }
+            it->status = status_word(i.status);
+            it->error = i.error;
+            it->kept = i.kept;
+            if (i.caps) it->caps = plugin::caps_text(i.caps);
+        }
+        std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.name < b.name; });
+        // A plugin's code sees its own row alone (a script of its tag's name), and no folders: the others' errors,
+        // permissions and where the player keeps them are not its business.
+        if (plugin_code()) {
+            const std::string_view tag = ui::lua::LuaUi::caller_tag();
+            std::erase_if(rows, [&](const Row& r) { return r.name != tag; });
+            c.folders.clear();
+        }
+    });
     lua_newtable(L);
     lua_Integer k = 0;
-    for (const auto& f : h.scripts->folders()) {
-        std::string s = f.string();
-        lua_pushlstring(L, s.data(), s.size());
+    for (const std::string& f : c.folders) {
+        lua_pushlstring(L, f.data(), f.size());
         lua_rawseti(L, -2, ++k);
     }
     lua_setfield(L, -2, "folders");
     set_bool(L, "autorun", h.scripts->autorun_available()); // (set at a character's zone-in)
-
-    struct Row {
-        std::string name, status, error, why, caps;
-        bool found = false, allowed = false, server = false, kept = false;
-    };
-    std::vector<Row> rows;
-    rows.reserve(c.found.size());
-    for (const auto& f : c.found) {
-        Row& r = rows.emplace_back();
-        r.name = f.name;
-        r.found = true;
-        r.allowed = f.caps != 0;
-        r.why = f.why;
-        r.server = f.server;
-        if (f.caps) r.caps = plugin::caps_text(f.caps);
-    }
-    for (const auto& i : h.scripts->list()) {
-        auto it = std::find_if(rows.begin(), rows.end(), [&](const Row& r) { return r.name == i.name; });
-        if (it == rows.end()) { // running, though its file is gone or was renamed
-            rows.emplace_back().name = i.name;
-            it = rows.end() - 1;
-        }
-        it->status = status_word(i.status);
-        it->error = i.error;
-        it->kept = i.kept;
-        if (i.caps) it->caps = plugin::caps_text(i.caps);
-    }
-    std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.name < b.name; });
     lua_Integer n = 0;
     for (const Row& r : rows) {
         lua_createtable(L, 0, 10);
@@ -117,7 +135,7 @@ int Scripts(lua_State* L) {
         set_string(L, "why", r.why);
         set_bool(L, "server", r.server);
         set_bool(L, "kept", r.kept);
-        set_bool(L, "autorun", h.scripts->autorun(r.name));
+        set_bool(L, "autorun", h.scripts->autorun(r.name)); // (the push cannot raise)
         set_string(L, "caps", r.caps);
         lua_rawseti(L, -3, ++n);
     }
@@ -134,23 +152,25 @@ int ScriptRun(lua_State* L) {
         lua_pushliteral(L, "scripts are the player's to run");
         return 2;
     }
-    std::string name = name_arg;
-    std::vector<std::string> args;
-    if (a) {
-        std::string_view rest = a;
-        while (true) {
-            while (!rest.empty() && rest.front() == ' ') rest.remove_prefix(1);
-            if (rest.empty()) break;
-            args.push_back(game::next_cmd_arg(rest));
-        }
-    }
     if (!h.scripts) {
         lua_pushboolean(L, 0);
         lua_pushstring(L, "scripts are off");
         return 2;
     }
-    std::string why;
-    bool ok = h.scripts->run(name, args, &why);
+    std::string& why = plugin::lua_keep<std::string>(L); // across the push (plugin/lua_keep.h)
+    bool ok = false;
+    plugin::cxx_guard(L, [&] {
+        std::vector<std::string> args;
+        if (a) {
+            std::string_view rest = a;
+            while (true) {
+                while (!rest.empty() && rest.front() == ' ') rest.remove_prefix(1);
+                if (rest.empty()) break;
+                args.push_back(game::next_cmd_arg(rest));
+            }
+        }
+        ok = h.scripts->run(name_arg, args, &why);
+    });
     lua_pushboolean(L, ok);
     if (ok) return 1;
     lua_pushlstring(L, why.data(), why.size());

@@ -14,6 +14,8 @@
 //  - CMarketplaceWnd_HandlePurchaseResult @0x6d43b0: the purchase answer's text.
 
 #include <cstdint>
+#include <functional>
+#include <map>
 #include <optional>
 #include <utility>
 #include <set>
@@ -228,6 +230,9 @@ private:
     int find_row(const Catalog& c, std::uint32_t entry_id) const;
     MarketplaceView toggle_view() const { return list_button ? MarketplaceView::List : MarketplaceView::Icons; }
     std::uint32_t next_id_ = 3;
+    // find_or_create's index of `categories` by path (only find_or_create adds categories with a path of their own,
+    // so each path is there once). An entry is checked against its category before it is used; a miss scans.
+    std::map<std::string, int, std::less<>> path_index_;
 };
 
 } // namespace hailstone::game

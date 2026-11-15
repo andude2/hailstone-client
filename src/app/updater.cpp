@@ -231,9 +231,18 @@ void Updater::run_download() {
                 return;
             }
             log::info("Update: downloading {} ({} bytes)", p.file, p.size);
+            std::uint64_t written = 0;
+            bool too_large = false;
             auto got = env_.fetch(
                 beside(env_.feed, p.file),
                 [&](std::span<const std::byte> piece) {
+                    // The manifest's size is the limit, checked as the bytes come (the progress callback runs only
+                    // about once a second): a server sending more stops at once, before it fills the disk.
+                    if (piece.size() > p.size - written) {
+                        too_large = true;
+                        return false;
+                    }
+                    written += piece.size();
                     out.write(reinterpret_cast<const char*>(piece.data()), static_cast<std::streamsize>(piece.size()));
                     return static_cast<bool>(out) && !cancel_;
                 },
@@ -250,7 +259,9 @@ void Updater::run_download() {
             if (!got.ok || !package_file_ok(part, p)) {
                 fs::remove(part, ec);
                 s.state = UpdateState::Failed;
-                s.error = got.ok ? p.file + " did not match the manifest" : got.error;
+                s.error = got.ok      ? p.file + " did not match the manifest"
+                          : too_large ? p.file + " is larger than the manifest says"
+                                      : got.error;
                 log::warn("Update: {}", s.error);
                 set(s);
                 return;

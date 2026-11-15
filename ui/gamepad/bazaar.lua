@@ -27,9 +27,41 @@ local BW = "BazaarWnd"
 local SLOTS = 200
 local wares = {}
 local log = { scroll = 0 }
+-- The satchels' slots' ids, made once; the wares found in them ({ id, item, cell id, checked }) read again every
+-- quarter second, the frame after a click, and when the window opens: 200 slots are a lot to read each frame.
+local SLOT_IDS, CELL_IDS = {}, {}
+for i = 0, SLOTS - 1 do
+  SLOT_IDS[i] = "BZR_BazaarSlot" .. i
+  CELL_IDS[i] = "##bz" .. SLOT_IDS[i]
+end
+local cellOpts = {}
+local wareList, wareCount, wareSelected, wareReadAt, wareDirty = {}, 0, nil, -1, true
+local function readWares()
+  local n, selected = 0, nil
+  for i = 0, SLOTS - 1 do
+    local id = SLOT_IDS[i]
+    local item = eq.SlotItem(BW, id)
+    if item then
+      n = n + 1
+      local w = wareList[n]
+      if not w then
+        w = {}
+        wareList[n] = w
+      end
+      local _, checked = eq.ChildState(BW, id)
+      w[1], w[2], w[3], w[4] = id, item, CELL_IDS[i], checked
+      if checked then selected = item end
+    end
+  end
+  for j = #wareList, n + 1, -1 do wareList[j] = nil end
+  wareCount, wareSelected = n, selected
+end
 
 ui.window("Bazaar Trader", function()
-  if not M.visible(BW) then return end
+  if not M.visible(BW) then
+    wareDirty = true
+    return
+  end
   M.frame()
   local trading = M.shown(BW, "BZW_End_Button")
   if W.begin("Bazaar Trader", { w = 1640, h = 960, title = "Bazaar Trader",
@@ -41,16 +73,12 @@ ui.window("Bazaar Trader", function()
     local lx1 = rx0 - T.px(24)
     if M.pressed("Bazaar Trader", "x") then eq.ClickChild(BW, "BZW_SetPrice_Button", "left") end
     -- the wares: the satchels' items, the selected one (the slot the game marks checked) outlined
-    local ids, selectedItem = {}, nil
-    for i = 0, SLOTS - 1 do
-      local id = "BZR_BazaarSlot" .. i
-      local item = eq.SlotItem(BW, id)
-      if item then
-        ids[#ids + 1] = { id, item }
-        local _, checked = eq.ChildState(BW, id)
-        if checked then selectedItem = item end
-      end
+    local now = ui.GetTime()
+    if wareDirty or now - wareReadAt >= 0.25 or now < wareReadAt then
+      readWares()
+      wareReadAt, wareDirty = now, false
     end
+    local selectedItem = wareSelected
     ui.SetCursorPos(x0 - wx, y0 - wy)
     T.heading("Your wares", lx1 - x0)
     local size, gap = T.px(84), T.px(8)
@@ -59,20 +87,24 @@ ui.window("Bazaar Trader", function()
     local gy = select(2, ui.GetCursorScreenPos())
     local rows = math.max(1, math.floor((logY - T.px(20) - gy + gap) / (size + gap)))
     local focusedItem
-    if #ids == 0 then
+    if wareCount == 0 then
       T.font(20)
       T.draw(x0, gy + T.px(10), "Nothing to sell: put items in a Trader's Satchel.", C.faint)
       T.unfont()
     else
-      M.grid(wares, #ids, per, rows, x0, gap, function(i)
-        local id, item = ids[i][1], ids[i][2]
-        local _, checked = eq.ChildState(BW, id)
-        local clicked, focused = T.slot("##bz" .. id, item, size, { selected = checked }, pad)
+      M.grid(wares, wareCount, per, rows, x0, gap, function(i)
+        local w = wareList[i]
+        local id, item, checked = w[1], w[2], w[4]
+        cellOpts.selected = checked
+        local clicked, focused = T.slot(w[3], item, size, cellOpts, pad)
         if focused then
           focusedItem = item
           if W.pressed("y") then eq.ClickChild(BW, id, "rightheld") end
         end
-        if clicked then eq.ClickChild(BW, id, "left") end
+        if clicked then
+          eq.ClickChild(BW, id, "left")
+          wareDirty = true -- (the selection moves: read again next frame)
+        end
         if ui.IsItemClicked(ui.Mouse.Right) then eq.ClickChild(BW, id, "rightheld") end
         return focused
       end)
@@ -236,7 +268,7 @@ local CW = "BazaarConfirmationWnd"
 
 ui.window("Bazaar Confirmation", function()
   if not M.visible(CW) then
-    GPSTATE.bzcFocused = nil -- (the next time it opens, the focus goes to To Me again)
+    GPSTATE.bzcFocused = nil -- (the next time it opens, the focus goes to Cancel again)
     return
   end
   M.frame()
@@ -273,10 +305,6 @@ ui.window("Bazaar Confirmation", function()
     local vouchers = tonumber(((eq.WindowText(CW, "BZC_TokenLabel") or ""):match("%d+"))) or 0
     local fee = M.parse(eq.WindowText(CW, "BZC_PlatLabel") or "")
     ui.SetCursorPos(x0 - wx, cy + T.px(30) - wy)
-    if not GPSTATE.bzcFocused then
-      ui.SetKeyboardFocusHere()
-      GPSTATE.bzcFocused = true
-    end
     M.button(CW, "BZC_UseTokenButton", "To Me", cw, ch, { primary = true, align = 0,
       sub = "Into your inventory: " .. (vouchers == 1 and "1 voucher" or (vouchers .. " vouchers")) })
     ui.SameLine(0, gap)
@@ -288,6 +316,11 @@ ui.window("Bazaar Confirmation", function()
     end)() or (eq.WindowText(CW, "BZC_PlatLabel") or "")
     M.button(CW, "BZC_UsePlatButton", "To Parcels", cw, ch, { align = 0, sub = "Collect at a parcel merchant: fee " .. feeText })
     ui.SetCursorPos(x0 - wx, y1 - T.px(64) - wy)
+    -- the focus starts on Cancel: an A carried over from the bazaar's Buy must not spend the money (as W.confirm)
+    if not GPSTATE.bzcFocused then
+      ui.SetKeyboardFocusHere()
+      GPSTATE.bzcFocused = true
+    end
     M.button(CW, "BZC_CancelButton", "Cancel", x1 - x0, T.px(64))
   end
   if W.finish() then eq.ClickChild(CW, "BZC_CancelButton", "left") end

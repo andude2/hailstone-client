@@ -71,16 +71,14 @@ Commands::Commands(CommandEnv env) : env_(std::move(env)) {
 
     h.add_command(owner_, "/echo", [this](std::string_view args) { say(std::string(args)); });
     h.add_command(owner_, "/noparse", [this](std::string_view args) {
-        noparse_ = true;
-        if (env_.run) env_.run(std::string(args));
-        noparse_ = false;
+        const bool before = std::exchange(noparse_, true);
+        run_nested(args);
+        noparse_ = before;
     });
-    h.add_command(owner_, "/docommand", [this](std::string_view args) {
-        if (env_.run) env_.run(std::string(args));
-    });
+    h.add_command(owner_, "/docommand", [this](std::string_view args) { run_nested(args); });
     h.add_command(owner_, "/squelch", [this](std::string_view args) {
         ++squelch_;
-        if (env_.run) env_.run(std::string(args));
+        run_nested(args);
         --squelch_;
     });
     h.add_command(
@@ -194,6 +192,22 @@ Commands::Commands(CommandEnv env) : env_(std::move(env)) {
             say("Invalid key name: " + key);
     });
     add_nav_commands(h, owner_, env_, [this](const std::string& t) { say(t); });
+}
+
+// Each level is a few frames of the native stack (and two passes through the hooks for a script's line), so a line
+// that nests them without end ("/docommand /docommand ...") is cut off here rather than overflowing it.
+void Commands::run_nested(std::string_view args) {
+    if (!env_.run) return;
+    if (nested_ >= kMaxNestedCommands) {
+        if (env_.echo)
+            env_.echo(std::format("[MQ] /docommand, /noparse and /squelch nest at most {} deep: the rest of the line is "
+                                  "dropped",
+                                  kMaxNestedCommands));
+        return;
+    }
+    ++nested_;
+    env_.run(std::string(args));
+    --nested_;
 }
 
 void Commands::say(const std::string& text) const {

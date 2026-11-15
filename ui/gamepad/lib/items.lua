@@ -91,4 +91,34 @@ function I.summary(item, where, x0, y0, x1, y1, compare)
   I.comparison(compare, x0 + p, y, x1 - p, y1 - p)
 end
 
+-- The ImGui id "##<prefix><slot>_<bag>" of a cell of a bag grid (bag nil: the bag slot itself), made once, not each
+-- frame.
+local cellIds = {}
+function I.cellId(prefix, slot, bag)
+  local byPrefix = cellIds[prefix]
+  if not byPrefix then
+    byPrefix = {}
+    cellIds[prefix] = byPrefix
+  end
+  local bySlot = byPrefix[slot]
+  if not bySlot then
+    bySlot = {}
+    byPrefix[slot] = bySlot
+  end
+  local b = bag or -1
+  local id = bySlot[b]
+  if not id then
+    id = "##" .. prefix .. slot .. "_" .. b
+    bySlot[b] = id
+  end
+  return id
+end
+
+-- The ten bag slots' items read into `into` (slots 23..32), once a frame for the windows that walk them twice (the
+-- loose items, then each bag's contents).
+function I.readBagSlots(into)
+  for slot = 23, 32 do into[slot] = eq.Item(slot) end
+  return into
+end
+
 return I

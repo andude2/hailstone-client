@@ -156,9 +156,9 @@ ls rs up down left right touchpad`. Axis names are `lx ly rx ry lt rt` (-1..1 af
 | `eq.gamepad.set_cross_slot(set, slot, bar, button)` | bool: the slot set and saved (`gamepad.cross.*`) |
 | `eq.gamepad.glyph(b)` | the label for the connected pad: `"A"`/`"Cross"`/`"B"` ..., `"LB"`/`"L1"`/`"L"` ... |
 | `eq.gamepad.binding(input)` / `set_binding(input, action)` | the action string for an input such as `"x"` or `"lt+a"`: `""` for a chord with no binding of its own (its cross slot applies), nil for an unknown input; `set_binding` returns bool, and `""` or nil puts the default back |
-| `eq.gamepad.setting(name)` / `set_setting(name, value)` | the `gamepad.*` numbers above, by name with or without the `gamepad.` prefix (booleans 0 / 1; `set_setting` also takes true / false, clamps, saves and returns bool); nil for an unknown name |
-| `eq.gamepad.rumble(low, high, ms)` | bool (0..1 strengths); false without a pad, rumble or with `gamepad.rumble = 0` |
-| `eq.gamepad.request_focus(window)` | puts the pad in menu mode with ImGui's focus on that Lua window (its `ui.Begin` title), from the next frame once the window exists |
+| `eq.gamepad.setting(name)` / `set_setting(name, value)` | the `gamepad.*` numbers above, by name with or without the `gamepad.` prefix (booleans 0 / 1; `set_setting` also takes true / false, clamps, saves and returns bool, false for NaN or an infinity); nil for an unknown name. A NaN or infinite value in `hailstone.ini` loads as the default |
+| `eq.gamepad.rumble(low, high, ms)` | bool (0..1 strengths, clamped; `ms` at most 5000); false without a pad, rumble, with `gamepad.rumble = 0`, or for a NaN or infinite strength |
+| `eq.gamepad.request_focus(window)` | puts the pad in menu mode with ImGui's focus on that Lua window (its `ui.Begin` title), from the next frame once the window exists. As `set_mode`, a plugin's code needs `commands` for it (docs/plugins.md "What plugin windows may do"): a plugin's window without it does not take the pad's focus when it appears |
 | `eq.gamepad.drop_cursor()` | bool: drops the cursor item on the ground as a click on the world with it does (`request_drop_cursor`, its confirmation when the game asks); false when nothing is held. The pad has no pointer to click the world with |
 | `eq.gamepad.takes_b()` | a UI window will close itself on B this frame (game mode), so the client's B (stop casting, close the top window, clear the target) leaves the target alone, as Escape closes only the top window |
 
@@ -180,7 +180,9 @@ The `ui` table adds the navigation calls that the gamepad windows need: `ui.IsIt
 it draws shapes and uses only the item, spell and gem icon sheets. It is designed for 10-foot viewing: a base font
 of at least 20 px at 1080p, targets of at least 48 px, and every action reachable from the pad.
 
-- **HUD** (always on, no focus): player HP, mana and endurance (the panel pulses red while auto attack is on); the
+- **HUD** (always on, no focus): player HP, mana and endurance (the panel pulses red while auto attack is on; the
+  panel takes no mouse input, except in a group its name row: a click targets the player, a right click opens the
+  group role menu); the
   target with its con colour and distance; the group; the pet; the casting bar; short buff rows; the zone and the compass.
 - **Minimap** (top right, a client extension; the game has only the map window): the zone map in a circle
   around the player (`eq.DrawMinimap`), north up or turning with the player (right click), with the zone name
@@ -194,6 +196,11 @@ of at least 20 px at 1080p, targets of at least 48 px, and every action reachabl
 - **Cross hotbar** (bottom centre): the three sets as two diamonds (D-pad, face buttons) each, shown in the pad's
   glyphs. The held set is enlarged and the others dimmed. Each slot shows its icon, its cooldown and whether it is
   usable.
+- **Group roles** (group.lua, lib/role_icons.lua): the Group window (main menu, Group) lists the player first and
+  then the members, each with icons for the roles the server confirmed. Y on a row opens that member's group role
+  menu (Main Tank, Main Assist, Puller; the same menu a right click on a name opens, docs/dev-ui.md), which takes the
+  pad's focus as every game menu does: A toggles a role, B closes it. The rows are greyed for all but the group
+  leader. The HUD's group rows and player name open it with a right click too.
 - **Main menu** (Start, `mainmenu.lua`): a tiled, focus-driven menu with Inventory, Spells, Abilities, AA, Skills,
   Map, Group, Pet, Raid, Guild, Friends, Who, Bazaar, Quests, Mail, Chat, Options, All Windows (every window of the
   EQ menu), More (`system.lua`, the game's other windows: help, a bug report, the storyline, the NPC journal,
@@ -202,7 +209,8 @@ of at least 20 px at 1080p, targets of at least 48 px, and every action reachabl
   button does (`eq.UseSkill(53)`: the skill opens the tracking window)), Hot Bars and Camp. Each tile opens the gamepad window, or, where there is none
   yet, the C++ window in cursor mode.
 - **Gamepad windows**: inventory and equipment (a slot grid, A picks up and moves an item, Y shows its details;
-  holding an item, X puts it away, LB destroys it and RB drops it on the ground; with nothing held LB puts the focused
+  holding an item, X puts it away, LB destroys it (the game's confirmation; with Fast Item Destroy on, a Yes / No of
+  the window's own first, since LB pages elsewhere) and RB drops it on the ground; with nothing held LB puts the focused
   item on a hot button through the slot picker, a link that follows the item wherever it is moved; under the coins the alternate
   currencies: A claims one onto the cursor as items, and A holding its item reclaims it, every currency listed
   while something is held),
@@ -214,9 +222,17 @@ of at least 20 px at 1080p, targets of at least 48 px, and every action reachabl
   does; B closes), merchant, the chat log (read only, with a quick-chat list and an on-screen
   keyboard: digits, letters, `' , . ?` and a row of `/ # @ % : - ! ( ) +` for slash commands, #commands, %t and the
   like; shift gives capitals and the keys' second characters, `! @ # $ % ^ & * ( )` over the digits; the windows'
-  smaller keyboards, lib/keyboard.lua, have the same keys), confirmation dialogs (A / B), and Options > Gamepad (the bindings, dead zone, camera speed and
+  smaller keyboards, lib/keyboard.lua, have the same keys), confirmation dialogs (A / B; the focus starts on No), and Options > Gamepad (the bindings, dead zone, camera speed and
   inversion).
-- **Abilities, skills and AAs** (abilities.lua, skills.lua, aa.lua): the Actions window's four pages (LB / RB; Y
+- **Raid** (raid.lua): right-click a member or press Y on the focused row for the shared member menu, including
+  Main Assist, Mark NPC delegation, Find PC, leadership and looter actions. The selected member's Member actions
+  button opens the same menu. A chooses, B closes; the group picker, tell and note controls remain beside the
+  roster, and raid-wide controls, including Invite Expedition and Invite Task, remain above it.
+- **Abilities, skills and AAs** (abilities.lua, skills.lua, aa.lua): the active discipline above the combat ability
+  list shows its remaining duration to the second and a draining bar; click its icon or press LB to end it (the icon
+  is left out of the pad's navigation, so the first focus is the list and A never ends the discipline).
+  Cooling entries have a faded red reuse fill and a seconds countdown, including every entry sharing the same timer.
+  The Actions window's four pages (LB / RB; Y
   chooses an ability button's skill), the combat abilities (disciplines: icon, level, reuse time left and the
   spell's description), the skills (value / cap, the usable ones used with A and their reuse time) and the AA
   window (its tabs, Train with the game's confirmation, Use for an owned ability with a reuse time, the "Can
@@ -279,7 +295,7 @@ of at least 20 px at 1080p, targets of at least 48 px, and every action reachabl
 - **Markets and services** (bazaar.lua, barter.lua, pointmerchant.lua, mercenary.lua, guildbank.lua, train.lua,
   tracking.lua; shared pieces in `lib/markets.lua`): the bazaar trader (wares as slots, the price as coin buttons,
   begin / end trading, add / remove, the activity text), the bazaar search (filters as keyboard fields and pickers,
-  results where A buys and Y inspects) and its purchase confirmation; the barter buyer (item, offer and buy-line
+  results where A buys and Y inspects) and its purchase confirmation (the focus starts on Cancel); the barter buyer (item, offer and buy-line
   pages), a buyer's window and the barter search; the point and adventure merchants (buy, Y inspects a good, and a sell
   page with your bags); the mercenary merchant, manager and info; the guild bank (bank and deposits pages, with your bags to
   deposit from); a guildmaster's training (X trains, Y changes the order); and tracking (con filters, options, A

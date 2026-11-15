@@ -188,6 +188,21 @@ TEST_CASE("marketplace states: length-prefixed categories; a short entry keeps t
     CHECK(v->empty());
 }
 
+TEST_CASE("marketplace states: a category longer than the packet takes what is left and ends the list") {
+    std::vector<std::byte> b;
+    put32(b, 3);
+    put32(b, 5);
+    put32(b, 1);
+    put32(b, 600);
+    put32(b, 0);
+    put32(b, 1000); // a length far past the end
+    for (char c : std::string("Abc")) b.push_back(static_cast<std::byte>(c));
+    auto v = decode_marketplace_states(AppPacket(kOpMarketplaceStates, b));
+    REQUIRE(v);
+    REQUIRE(v->size() == 1);
+    CHECK((*v)[0].category == "Abc");
+}
+
 TEST_CASE("marketplace states: a huge count over a few stray bytes ends at once") {
     std::vector<std::byte> b;
     put32(b, 0xffffffffu);

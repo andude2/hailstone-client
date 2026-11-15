@@ -55,8 +55,7 @@ std::int32_t reliable_give_time(ReliableChannel& ch, std::int64_t now, const Rel
         auto cutoff = static_cast<std::int64_t>(static_cast<std::uint64_t>(now) -
                                                 static_cast<std::uint64_t>(static_cast<std::int64_t>(timeout)));
         if (cutoff < ch.last_acked_first_send) cutoff = ch.last_acked_first_send;
-        std::vector<std::int64_t> list; // the sequences of the listed slots
-        list.reserve(64);
+        std::vector<std::int64_t>& list = ch.resend_list; // the sequences of the listed slots
         for (;;) {
             std::int32_t limit = min32(ch.congestion_window, ch.max_outstanding_bytes);
             bool overflow = false;

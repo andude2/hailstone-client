@@ -273,3 +273,17 @@ TEST_CASE("Asset folder: a live base needs the server-matched files from the ser
     CHECK(missing_server_files(live) ==
           std::vector<std::string>{"eqstr_us.txt", "dbstr_us.txt", "Resources/BaseData.txt", "Resources/GlobalLoad.txt"});
 }
+
+TEST_CASE("Asset folder: a file named outside ASCII is indexed by its UTF-8 name beside the others") {
+    TempDir base("utf8");
+    std::ofstream(base.path / "spells_us.txt") << "x";
+    fs::create_directories(base.path / "maps");
+    std::ofstream(base.path / "maps" / fs::path(std::u8string(u8"Карта 地図.txt"))) << "x";
+    GameDir game(base.path);
+    CHECK(game.exists("spells_us.txt")); // (the scan went on past it)
+    const std::u8string name = u8"maps/Карта 地図.txt";
+    CHECK(game.exists(std::string(name.begin(), name.end())));
+    const auto listed = game.list("maps");
+    REQUIRE(listed.size() == 1);
+    CHECK(listed[0].relative == std::string(name.begin(), name.end()));
+}

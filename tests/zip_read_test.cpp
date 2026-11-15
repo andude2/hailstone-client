@@ -327,6 +327,34 @@ TEST_CASE("zip_read: wrong CRC, wrong sizes, unsupported entries") {
     }
 }
 
+// Without zip64 the end record counts at most 0xfffe entries (0xffff means a zip64 record follows): the next file is
+// refused, not written into an archive that would read wrongly.
+TEST_CASE("zip_write: no more files than the end record can count, and dates past 2107 clamped") {
+    std::tm when{};
+    when.tm_year = 80;
+    when.tm_mday = 1;
+    ZipWriter z;
+    for (int i = 0; i < 0xfffe; ++i) REQUIRE(z.add("f" + std::to_string(i), std::string_view(), when));
+    CHECK_FALSE(z.add("one-too-many", std::string_view(), when));
+    ZipReader zip;
+    REQUIRE(zip.open(std::vector<std::byte>(z.finish())));
+    CHECK(zip.entries().size() == 0xfffe);
+    CHECK(zip.find("one-too-many") == nullptr);
+
+    // 2200-03-04: the year field is 7 bits from 1980, so it becomes 2107 and the month and day stay.
+    std::tm late{};
+    late.tm_year = 300;
+    late.tm_mon = 2;
+    late.tm_mday = 4;
+    ZipWriter d;
+    REQUIRE(d.add("x", std::string_view("x"), late));
+    const auto& bytes = d.finish();
+    const unsigned date = std::to_integer<unsigned>(bytes[12]) | std::to_integer<unsigned>(bytes[13]) << 8;
+    CHECK((date >> 9) == 127);
+    CHECK(((date >> 5) & 15) == 3);
+    CHECK((date & 31) == 4);
+}
+
 TEST_CASE("zip_read: truncated and non-zip input is refused cleanly") {
     const auto good = writer_zip();
     for (std::size_t n = 0; n < good.size(); n += 97) {

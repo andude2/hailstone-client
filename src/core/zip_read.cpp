@@ -12,6 +12,7 @@
 
 #include "core/byte_io.h"
 #include "core/windows_names.h"
+#include "platform/durable_file.h"
 
 namespace hailstone {
 
@@ -286,8 +287,11 @@ bool ZipReader::extract_to_file(const ZipEntry& entry, const std::filesystem::pa
         if (ec) ok = fail("cannot set the permissions of " + tmp.string() + ": " + ec.message());
     }
 #endif
+    // On the disk before the rename (platform/durable_file.h): the update's state may say the new files are in
+    // place soon after, and a power cut must not leave one of them empty.
+    if (ok && !platform::sync_file(tmp)) ok = fail("cannot write " + tmp.string() + " to the disk");
     if (ok) {
-        fs::rename(tmp, path, ec);
+        platform::replace_file_synced(tmp, path, ec);
         if (ec) ok = fail("cannot replace " + path.string() + ": " + ec.message());
     }
     if (!ok) fs::remove(tmp, ec);

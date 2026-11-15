@@ -432,7 +432,9 @@ public:
         }
         if (id == "MemberGroupCombo") {
             net::ReAccess a = access(host);
-            if (member_sel_ < 0 || member_sel_ >= static_cast<int>(a.members.size()) || index < 0) return true;
+            if (member_sel_ < 0 || member_sel_ >= static_cast<int>(a.members.size()) || index < 0 ||
+                index >= net::kReAccessGroups)
+                return true; // (a group the combo offers: its choices are the access groups)
             a.members[static_cast<std::size_t>(member_sel_)].group = static_cast<std::uint32_t>(index);
             save(host, a);
             return true;

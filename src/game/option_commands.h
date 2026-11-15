@@ -27,6 +27,9 @@ bool starts_no_case(std::string_view a, std::string_view b, std::size_t n);
 bool same_no_case(std::string_view a, std::string_view b);
 // _atoi: leading spaces, a sign, digits.
 std::int32_t eq_atoi(std::string_view text);
+// A file name a command may look up in its own folder (/copylayout's ini): not empty, not "." or "..", and no
+// '/', '\\', ':' (a drive or a stream) or NUL, so it names no other folder, absolute or relative.
+bool bare_file_name(std::string_view name);
 
 // The "off" (Utf8StrNICmp, 3 characters) / "on" (2) / anything else toggles shape of /secondslog, /invwinlabels,
 // /dynamiclights and /log. `off` and `on` are eqstr 12946 / 12947 (the exe's "off" / "on" for the first two: the

@@ -1,5 +1,6 @@
 #include "net/social_packets.h"
 
+#include "core/ascii_case.h"
 #include "core/byte_io.h"
 #include "net/packet_io.h"
 
@@ -54,6 +55,22 @@ std::optional<WhoRequest> decode_who_request(const AppPacket& p) {
         v.type = r.le<std::uint32_t>();
         return v;
     });
+}
+
+AppPacket encode_friends_who(const std::vector<std::string>& friends, bool all, std::string_view server_short_name) {
+    ByteWriter w;
+    w.le<std::uint8_t>(all ? '1' : '0');
+    for (const auto& name : friends) {
+        std::string_view text = name;
+        // CChatService::GetFriendName @0x7efa90 compares with __strnicmp: the prefix is matched case-insensitively.
+        if (!server_short_name.empty() && istarts_with(text, server_short_name) &&
+            text.size() > server_short_name.size() && text[server_short_name.size()] == '.')
+            text.remove_prefix(server_short_name.size() + 1);
+        w.le<std::uint8_t>(',');
+        w.bytes({reinterpret_cast<const std::byte*>(text.data()), text.size()});
+    }
+    w.le<std::uint8_t>(0);
+    return make_packet(Op::FriendsWho, std::move(w));
 }
 
 AppPacket encode(const WhoResponse& v) {
@@ -578,10 +595,11 @@ AppPacket encode_guild_manage_banker(const std::string& member, std::uint32_t fl
 }
 
 namespace {
-ByteWriter guild_update(std::uint32_t action) {
+ByteWriter guild_update(std::uint32_t action, std::uint32_t guild_id = 0) {
     ByteWriter w;
     w.le(action);
-    w.zeros(0x4c);
+    w.zeros(0x48);
+    w.le(guild_id);
     return w;
 }
 } // namespace
@@ -599,8 +617,8 @@ AppPacket encode_guild_rank_name(std::uint32_t rank, const std::string& name) {
     return make_packet(Op::GuildUpdate, std::move(w));
 }
 
-AppPacket encode_guild_rank_permission(std::uint32_t rank, std::uint32_t permission, bool on) {
-    ByteWriter w = guild_update(5);
+AppPacket encode_guild_rank_permission(std::uint32_t rank, std::uint32_t permission, bool on, std::uint32_t guild_id) {
+    ByteWriter w = guild_update(5, guild_id);
     w.le(rank);
     w.le(permission);
     w.le<std::uint8_t>(on ? 1 : 0);
@@ -614,7 +632,8 @@ std::optional<GuildUpdate> decode_guild_update(const AppPacket& p) {
     return decode_with(p, [n](ByteReader& r) -> std::optional<GuildUpdate> {
         GuildUpdate v;
         v.action = r.le<std::uint32_t>();
-        r.skip(0x4c);
+        r.skip(0x48);
+        v.guild_id = r.le<std::uint32_t>();
         if (v.action == 5) {
             if (n < 0x59) return std::nullopt;
             v.rank = r.le<std::uint32_t>();

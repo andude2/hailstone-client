@@ -29,16 +29,15 @@ bool iequal(std::string_view a, std::string_view b) {
 // on their own line: a line break in a key or section would write lines of its own ("\n[Server]\nhost=..."), an '='
 // in a key would split it in the wrong place on the next load, a ']' would end a section name early, and a key that
 // starts like a comment or a section header would not come back as a key. Such characters become '_'; get, set and
-// erase clean the name the same way, so a cleaned name is found again.
+// erase clean the name the same way, so a cleaned name is found again. Spaces and tabs around a name are dropped, as
+// parse() drops them, so a name set with them is the one found after a reload.
 std::string clean_name(std::string_view name, bool section) {
-    std::string out(name);
+    const std::size_t b = name.find_first_not_of(" \t");
+    if (b == std::string_view::npos) return {};
+    std::string out(name.substr(b, name.find_last_not_of(" \t") - b + 1));
     for (char& c : out)
         if (c == '\n' || c == '\r' || (section ? c == ']' : c == '=')) c = '_';
-    if (!section) {
-        std::size_t first = out.find_first_not_of(" \t");
-        if (first != std::string::npos && (out[first] == ';' || out[first] == '#' || out[first] == '['))
-            out[first] = '_';
-    }
+    if (!section && !out.empty() && (out[0] == ';' || out[0] == '#' || out[0] == '[')) out[0] = '_';
     return out;
 }
 } // namespace
@@ -140,6 +139,8 @@ void IniFile::set(std::string_view section, std::string_view key, std::string_vi
     std::string v(value);
     std::replace(v.begin(), v.end(), '\n', ' ');
     std::replace(v.begin(), v.end(), '\r', ' ');
+    // A value's trailing spaces are written as given: the original writes some (PetButtonState ends in a space), and
+    // reads them back trimmed, as GetPrivateProfileString does and parse() does here.
     std::string clean = clean_name(key, false);
     Section* s = find(section);
     if (!s) {

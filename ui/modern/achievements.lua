@@ -23,21 +23,30 @@ local function size(scale)
   local io = ui.GetIO()
   return math.min(1280, (io.width - 60) / scale), math.min(760, (io.height - 70) / scale)
 end
+-- (the dialogs' options and bodies are made once, not each frame)
+local MAIN_OPTS = {shown=true,size=size,resizable={760,580},
+  place=function(sw,sh,w,h) return (sw-w)/2,(sh-h)/2 end,
+  onClose=function() browser.closeMain() end}
+local mainState
+local function mainBody(_,_,_,_,scale) browser.main(mainState,scale) end
 ui.window("Achievements", function()
   if not eq.InGame() then browser.reset(); return end
   eq.ReplaceWindow("AchievementsWnd") -- every frame, hidden too: the achievement key toggles it only while claimed
   local state = browser.readState()
   if not state or not state.shown then return end
-  hud.Dialog("AchievementsWnd", "Achievements", {shown=true,size=size,resizable={760,580},
-    place=function(sw,sh,w,h) return (sw-w)/2,(sh-h)/2 end,
-    onClose=function() browser.closeMain() end},
-    function(_,_,_,_,scale) browser.main(state,scale) end)
+  mainState = state
+  hud.Dialog("AchievementsWnd", "Achievements", MAIN_OPTS, mainBody)
+  mainState = nil
 end)
+local DETAIL_OPTS = {shown=true,size=function() return 680,580 end,
+  resizable={480,350},onClose=function() eq.ShowWindow("AchievementWnd",false) end}
+local shownDetail
+local function detailBody(_,_,_,_,scale) browser.detail(shownDetail,scale,false) end
 ui.window("Achievement", function()
   if not eq.InGame() then browser.reset(); return end
   local detail = browser.floating()
   if not detail then return end
-  hud.Dialog("AchievementWnd", "Achievement", {shown=true,size=function() return 680,580 end,
-    resizable={480,350},onClose=function() eq.ShowWindow("AchievementWnd",false) end},
-    function(_,_,_,_,scale) browser.detail(detail,scale,false) end)
+  shownDetail = detail
+  hud.Dialog("AchievementWnd", "Achievement", DETAIL_OPTS, detailBody)
+  shownDetail = nil
 end)

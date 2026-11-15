@@ -5,9 +5,11 @@
 -- the game's CastingWindow: shown while the game shows it, the spell's name over a bar that fills as the cast
 -- completes (the casting gauge counts the time left down from 1).
 local hud = dofile("lib/hud.lua")
+local roles = dofile("lib/role_icons.lua")
 local T = hud.T
 local C = T.color
 local WINDOW = "PlayerWindow"
+local ROLE_COLORS = { C.mana, C.accent, C.endurance }
 local CAST_H = 24 -- the cast bar's row (design pixels)
 
 -- The classes' short names, for a multiclass server's list when the full names do not fit (a level title the
@@ -99,6 +101,7 @@ local frame = { caster = false, casting = false, manaFrac = nil, attack = nil } 
 local GLOW = { 0, 0, 0, 0 }
 local PANEL_OPTS = { glowWidth = 3 }
 local NO_TRAIL = { noTrail = true }
+local pctXp, pctXpText, pctAa, pctAaText = nil, "", nil, "" -- the XP and AA percentages as last drawn
 local HP_BAR = {}
 local NAME_COLOR = { 0, 0, 0, 1 }
 local OPTS = {
@@ -137,7 +140,20 @@ local function body(x, y, w, h, s)
     end
   end
   local _, nameH = T.TextSize("Ag", T.font.normal)
-  T.Text(bx0, y + pad - 2 * s, T.Fit(name, bx1 - bx0, T.font.normal), nameColor, T.font.normal)
+  local mask = roles.Mask(WINDOW)
+  local iconSize, iconGap = 16 * s, 3 * s
+  local iconW = roles.Width(mask, iconSize, iconGap)
+  local fittedName = T.Fit(name, bx1 - bx0 - (iconW > 0 and iconW + 5 * s or 0), T.font.normal)
+  local nameW = T.TextSize(fittedName, T.font.normal)
+  local nameY = y + pad - 2 * s
+  T.Text(bx0, nameY, fittedName, nameColor, T.font.normal)
+  roles.Draw(mask, bx0 + nameW + 5 * s, nameY + (nameH - iconSize) / 2, iconSize, iconGap, ROLE_COLORS)
+  -- a right click on the name: the group role menu (in a group); solo, or with Alt, the frame's own menu as anywhere
+  -- else on the frame (the click is taken only when the role menu opened)
+  if ui.IsWindowHovered() and ui.IsMouseHoveringRect(bx0, nameY, bx1, nameY + nameH)
+      and not ui.GetIO().alt and ui.IsMouseClicked(ui.Mouse.Right) then
+    if eq.ClickChild(WINDOW, "PlayerHP", "right") then T.TakeRightClick() end
+  end
   -- the classes on their own line: the full names when they fit, else the short ones, the full list on hover
   local list, full, short, tip = classes()
   local text = full
@@ -174,7 +190,7 @@ local function body(x, y, w, h, s)
     local e, maxE = eq.Label(126), eq.Label(127)
     if e then ui.SetTooltip("Endurance " .. T.Thousands(e) .. " / " .. T.Thousands(maxE)) end
   end
-  -- experience and AA experience, across the frame
+  -- experience and AA experience, across the frame (their percentages made again only when the gauges move)
   by = by + 12 * s
   do
     local xp, aa = eq.Gauge(4) or 0, eq.Gauge(5) or 0
@@ -182,12 +198,14 @@ local function body(x, y, w, h, s)
     local split = x0 + (x1 - x0) * 0.64
     local _, th = T.TextSize("Ag", T.font.tiny)
     T.Text(x0, by, "XP", C.muted, T.font.tiny)
-    T.Text(split - 6 * s, by, string.format("%.1f%%", xp * 100), C.text, T.font.tiny, "right")
+    if xp ~= pctXp then pctXp, pctXpText = xp, string.format("%.1f%%", xp * 100) end
+    T.Text(split - 6 * s, by, pctXpText, C.text, T.font.tiny, "right")
     T.Text(split + 6 * s, by, "AA", C.muted, T.font.tiny)
     local banked = eq.Label(71) or "0" -- unspent AA points
     local aw = T.TextSize("AA ", T.font.tiny)
     T.Text(split + 6 * s + aw, by, banked, C.aa, T.font.tiny)
-    T.Text(x1, by, string.format("%.1f%%", aa * 100), C.text, T.font.tiny, "right")
+    if aa ~= pctAa then pctAa, pctAaText = aa, string.format("%.1f%%", aa * 100) end
+    T.Text(x1, by, pctAaText, C.text, T.font.tiny, "right")
     local yb = by + th + 2 * s
     T.Bar("player.xp", x0, yb, split - 6 * s, yb + 5 * s, s, xp, C.xp, NO_TRAIL)
     for k = 1, 9 do -- a tick every tenth

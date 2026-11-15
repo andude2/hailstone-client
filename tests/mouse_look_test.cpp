@@ -136,3 +136,13 @@ TEST_CASE("mouse buttons: a click inside one frame is a press and a release") {
     CHECK_FALSE(again.released);
     CHECK_FALSE(button_edges(false, false, false).pressed);
 }
+
+TEST_CASE("pointer speed: /mousespeed's number is held to eqclient.ini's 0..10") {
+    using hailstone::game::held_pointer_speed;
+    CHECK(held_pointer_speed(0) == 0);
+    CHECK(held_pointer_speed(7) == 7);
+    CHECK(held_pointer_speed(10) == 10);
+    CHECK(held_pointer_speed(999999) == 10);
+    CHECK(held_pointer_speed(-5) == 0);
+    CHECK(held_pointer_speed(INT32_MIN) == 0);
+}

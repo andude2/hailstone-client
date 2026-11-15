@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <cmath>
 #include <cstdlib>
 #include <format>
 #include <utility>
@@ -375,7 +376,8 @@ std::optional<float> GamepadSettings::get(std::string_view name) const {
 
 bool GamepadSettings::set(std::string_view name, float value) {
     const SettingField* f = setting_field(name);
-    if (!f) return false;
+    // NaN would pass std::clamp and be saved to hailstone.ini; an infinity is no setting either.
+    if (!f || !std::isfinite(value)) return false;
     if (f->flag) this->*f->flag = value != 0.0f;
     else this->*f->number = std::clamp(value, f->lo, f->hi);
     return true;

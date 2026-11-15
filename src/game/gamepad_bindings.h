@@ -147,7 +147,8 @@ struct GamepadSettings {
 
     void load(const Config& config);
     void save(Config& config) const;
-    // By name ("deadzone" or "gamepad.deadzone"; booleans 0 / 1); nullopt / false for an unknown name. set clamps.
+    // By name ("deadzone" or "gamepad.deadzone"; booleans 0 / 1); nullopt / false for an unknown name. set clamps,
+    // and refuses NaN and the infinities (false, the setting unchanged; load keeps the default for one).
     std::optional<float> get(std::string_view name) const;
     bool set(std::string_view name, float value);
     static const std::vector<std::string_view>& names();

@@ -26,7 +26,7 @@ link. A pasted link (below the store in the Modern pack) still works for any add
 The client fetches the add-on's manifest and shows a card before it writes anything. The card holds:
 
 - the name, version, kind (script or plugin), author, description and repository;
-- what the add-on asks to do, in plain words ("read the game state", "cast spells, use abilities and items, attack");
+- what the add-on asks to do, in plain words ("read the game state", "cast spells, use abilities, items and AAs, attack, loot, order your pet");
 - whether it is signed, and the start of its key;
 - for a plugin, a warning: it is a program, so its permissions limit what it does through Hailstone, not what it can
   do on the computer;
@@ -354,6 +354,7 @@ addons/
   previous/<name>/ what an install or a removal is moving out, until it has finished
   journal.txt     an install's or a removal's moves, one a line, and a line once installed.txt is saved
   installed.prev.txt installed.txt as it was before an install or a removal rewrote it, until that has finished
+  kept-<time>/    what an undo found in previous/ that the journal did not name (never removed by the client)
 scripts/<name>/   an installed script
 plugins/<name>/   an installed plugin
 tools/<name>/     an installed tool (its program, its libraries, its data)
@@ -367,10 +368,15 @@ tools/<name>/     an installed tool (its program, its libraries, its data)
   goes once it is empty.
 - **A cut-off install or removal** (the client died between its moves) is undone at the next start from the journal.
   `installed.txt` is saved as `installed.prev.txt` before it is rewritten, and put back with the old files, so the
-  list matches what is on disk. One that wrote `done` is left as it is.
+  list matches what is on disk. One that wrote `done` is left as it is. Each journal line is flushed to the disk
+  before the move it names (write-ahead), each move is on the disk before the next, and each unpacked file is
+  flushed before it moves, so a power cut leaves no empty file and no moved file without its line. Should a file
+  still be in `previous/` after an undo (a journal the disk lost or damaged, a move back that failed), it may be the
+  only copy of the player's old file: `previous/` is renamed `kept-<time>/` and a warning logged, not removed.
 - **The core updater** (docs/updater.md) never writes `addons/`, and skips its optional plugin package of a folder an
-  add-on installed, both when it downloads and again when it installs (an add-on installed in between wins). `scripts/` is the player's to it already. Its `core` package, though, is not yet kept out of an
-  add-on's plugin folder: a release that shipped a plugin of an installed add-on's name would write over it.
+  add-on installed, both when it downloads and again when it installs (an add-on installed in between wins).
+  `scripts/` and `tools/` are the player's to it already. Its `core` package's files in a plugin folder an add-on
+  installed are left out of the install, and those it shipped there before are not taken out.
 
 ## Settings (`hailstone.ini`)
 

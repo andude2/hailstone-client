@@ -34,6 +34,26 @@ local shared = modern
 
 local Setting = T.Setting -- (ui.GetSetting, read once a frame: lib/theme.lua)
 
+-- A saved "a,b" setting's two parts (a size, a place), kept by the raw text so a window's frame does not take the
+-- string apart again each frame. (Emptied when it grows: a drag makes a new place a frame.)
+local SIZE, POS = "([%d.]+),([%d.]+)", "(-?[%d.]+),(-?[%d.]+)"
+local pairCache, pairCount = { [SIZE] = {}, [POS] = {} }, 0
+local function settingPair(raw, pattern)
+  local byRaw = pairCache[pattern]
+  local m = byRaw[raw]
+  if not m then
+    if pairCount >= 512 then
+      for _, t in pairs(pairCache) do for r in pairs(t) do t[r] = nil end end
+      pairCount = 0
+    end
+    local a, b = raw:match(pattern)
+    m = { a or false, b or false }
+    byRaw[raw] = m
+    pairCount = pairCount + 1
+  end
+  return m[1] or nil, m[2] or nil
+end
+
 local function num(key, default)
   local v = tonumber(Setting(key))
   if v == nil then return default end
@@ -142,6 +162,21 @@ local wasShown, opened = {}, {}
 local frameStates = {}
 local current = nil
 local pressMoved = false
+local dialogResizes = {}
+
+local function dialogExtent(key, id, origin, size, coord, minSize, scale, screen, grid)
+  local byId = dialogResizes[key]
+  if not byId then byId = {}; dialogResizes[key] = byId end
+  local drag = byId[id]
+  if not drag then drag = { coord = coord, size = size }; byId[id] = drag end
+  return snap.Extent(origin, drag.size, coord - drag.coord, minSize, scale, screen, grid)
+end
+
+local function endDialogResize(key, id)
+  local byId = dialogResizes[key]
+  if byId then byId[id] = nil end
+end
+
 -- window -> where the drag has taken it before snapping ({ x, y }), while one goes on with the grid on: each
 -- frame's mouse move is too small to reach the next grid line on its own
 local drags = {}
@@ -329,8 +364,9 @@ function hud.CloseX(id, x, y, size, onClose)
 end
 
 -- A resizable frame's right (right = true) or bottom edge: a drag changes its size (design pixels); `setSize`
--- applies the new size (hud.size.<window>, or the frame's own reflow).
-local function frameEdge(st, id, x0, y0, x1, y1, right, s, minW, minH, setSize)
+-- applies the new size (hud.size.<window>, or the frame's own reflow). With `snaps` the edge lands on the grid (or
+-- the screen's edge) while the grid is on.
+local function frameEdge(st, id, x0, y0, x1, y1, right, s, minW, minH, snaps, setSize)
   T.Hit(id, x0, y0, x1, y1)
   local active, over = ui.IsItemActive(), ui.IsItemHovered()
   local wx, wy, w, h = st.wx, st.wy, st.w, st.h
@@ -340,15 +376,19 @@ local function frameEdge(st, id, x0, y0, x1, y1, right, s, minW, minH, setSize)
     if right then ui.DrawLine(wx + w - 2 * s, wy + 6 * s, wx + w - 2 * s, y1, c[1], c[2], c[3], a, 2 * s)
     else ui.DrawLine(wx + 6 * s, wy + h - 2 * s, x1, wy + h - 2 * s, c[1], c[2], c[3], a, 2 * s) end
   end
-  if active and ui.IsMouseDragging(ui.Mouse.Left) then
-    if not st.resize then
-      local mx, my = ui.GetMousePos()
-      st.resize = { x = mx, y = my, w = st.w, h = st.h }
-    end
+  if active and not st.resize then
     local mx, my = ui.GetMousePos()
-    local nw = math.max(minW, right and (st.resize.w + mx - st.resize.x) / s or st.w / s)
-    local nh = math.max(minH, right and st.h / s or (st.resize.h + my - st.resize.y) / s)
-    setSize(nw, nh)
+    st.resize = { x = mx, y = my, w = st.w, h = st.h }
+  end
+  if active and ui.IsMouseDragging(ui.Mouse.Left) then
+    local mx, my = ui.GetMousePos()
+    local grid = snaps and snap.Grid() or nil
+    if grid then snap.DrawGrid(grid, T.color.accent) end
+    local nw = right and snap.Extent(wx, st.resize.w / s, mx - st.resize.x, minW, s, st.W, grid)
+      or math.max(minW, st.w / s)
+    local nh = right and math.max(minH, st.h / s)
+      or snap.Extent(wy, st.resize.h / s, my - st.resize.y, minH, s, st.H, grid)
+    setSize(nw, nh, grid)
   end
 end
 
@@ -366,7 +406,8 @@ end
 --   opts.resizable = { minW, minH }   its right and bottom edges and its bottom-right corner change its size
 --                                (hud.size.<window>); a frame without it has no grip (its scale is the menu's)
 --   opts.onResize(nw, nh)        with resizable: the drag changes the frame's own layout instead of hud.size (the hot
---                                bars' buttons per row); opts.size must then give the frame its size from that layout
+--                                bars' buttons per row); opts.size must then give the frame its size from that layout.
+--                                Such a drag is not snapped to the grid (the frame rounds the size its own way)
 --   opts.onClose()               a frame that can be put away (not a HUD piece): an X in its top right corner calls it
 --   opts.rollup = true           the frame rolls up into its title bar (hud.rolled.<window>): rolled up, only the
 --                                title bar is drawn and the frame is as tall as it (opts.titleHeight, design pixels);
@@ -398,7 +439,7 @@ function hud.Window(screen, title, opts, body)
   local fit = false
   if opts.resizable and not opts.onResize then
     local sz = Setting(k.size)
-    local sw, sh = (sz or ""):match("([%d.]+),([%d.]+)")
+    local sw, sh = settingPair(sz or "", SIZE)
     if sw then
       dw, dh = math.max(tonumber(sw), opts.resizable[1]), math.max(tonumber(sh), opts.resizable[2])
     elseif opts.fit then
@@ -425,7 +466,7 @@ function hud.Window(screen, title, opts, body)
   pending[key] = nil
   local x, y
   if saved and saved ~= "" then
-    local sx, sy = saved:match("(-?[%d.]+),(-?[%d.]+)")
+    local sx, sy = settingPair(saved, POS)
     x, y = tonumber(sx), tonumber(sy)
   end
   if not x then x, y = defaults.Place(hud.Layout(), key, w, h, (io.uiScale or 1) * hudScale) end
@@ -512,11 +553,15 @@ function hud.Window(screen, title, opts, body)
         local hovered = ui.IsMouseHoveringRect(wx, wy, wx + w, wy + h)
         local e = math.max(5, 6 * s)
         local minW, minH = opts.resizable[1], opts.resizable[2]
-        local setSize = function(nw, nh)
-          if opts.onResize then opts.onResize(nw, nh) else ui.SetSetting(k.size, string.format("%.0f,%.0f", nw, nh)) end
+        -- a frame that lays itself out from the drag (opts.onResize: the hot bars' whole buttons) takes the mouse's
+        -- size as it is and shows no grid: its own rounding would put it off the grid lines anyway
+        local snaps = not opts.onResize
+        local setSize = function(nw, nh, grid)
+          if opts.onResize then opts.onResize(nw, nh)
+          else ui.SetSetting(k.size, string.format(grid and "%.3f,%.3f" or "%.0f,%.0f", nw, nh)) end
         end
-        frameEdge(st, "##resizeright", wx + w - e, wy, wx + w, wy + h - g, true, s, minW, minH, setSize)
-        frameEdge(st, "##resizebottom", wx, wy + h - e, wx + w - g, wy + h, false, s, minW, minH, setSize)
+        frameEdge(st, "##resizeright", wx + w - e, wy, wx + w, wy + h - g, true, s, minW, minH, snaps, setSize)
+        frameEdge(st, "##resizebottom", wx, wy + h - e, wx + w - g, wy + h, false, s, minW, minH, snaps, setSize)
         T.Hit("##resize", wx + w - g, wy + h - g, wx + w, wy + h)
         local active, over = ui.IsItemActive(), ui.IsItemHovered()
         if hovered or active then
@@ -528,15 +573,17 @@ function hud.Window(screen, title, opts, body)
           end
         end
         if over and not active then ui.SetTooltip("Drag to resize") end
-        if active and ui.IsMouseDragging(ui.Mouse.Left) then
-          if not st.resize then
-            local mx, my = ui.GetMousePos()
-            st.resize = { x = mx, y = my, w = st.w, h = st.h }
-          end
+        if active and not st.resize then
           local mx, my = ui.GetMousePos()
-          local nw = math.max(minW, (st.resize.w + mx - st.resize.x) / s)
-          local nh = math.max(minH, (st.resize.h + my - st.resize.y) / s)
-          setSize(nw, nh)
+          st.resize = { x = mx, y = my, w = st.w, h = st.h }
+        end
+        if active and ui.IsMouseDragging(ui.Mouse.Left) then
+          local mx, my = ui.GetMousePos()
+          local grid = snaps and snap.Grid() or nil
+          if grid then snap.DrawGrid(grid, T.color.accent) end
+          local nw = snap.Extent(wx, st.resize.w / s, mx - st.resize.x, minW, s, W, grid)
+          local nh = snap.Extent(wy, st.resize.h / s, my - st.resize.y, minH, s, H, grid)
+          setSize(nw, nh, grid)
         end
       end
     end
@@ -574,7 +621,7 @@ local function dialogEdge(id, x0, y0, x1, y1, right, gx, gy, s, c)
     local lx1, ly1 = right and gx - 2 * s or x1, right and y1 or gy - 2 * s
     ui.DrawLine(lx0, ly0, lx1, ly1, c[1], c[2], c[3], active and 1 or 0.6, 2 * s)
   end
-  return active and ui.IsMouseDragging(ui.Mouse.Left)
+  return active, active and ui.IsMouseDragging(ui.Mouse.Left)
 end
 
 -- hud.Dialog(screen, title, opts, body): a window with a title bar and a close box (inventory, bags, ...), always
@@ -597,7 +644,7 @@ function hud.Dialog(screen, title, opts, body)
   local shown, sx, sy = gameShown(screen)
   if opts.shown ~= nil then shown = opts.shown end
   if not shown then return end
-  if sx == nil then _, sx, sy = eq.ReplaceWindow(screen) end -- (where the stock window sits)
+  if sx == nil then sx, sy = select(2, eq.ReplaceWindow(screen)) end -- (where the stock window sits)
   local k = keysOf(key)
   local io = ui.GetIO()
   local ownScale = num(k.scale, 1.0)
@@ -613,7 +660,7 @@ function hud.Dialog(screen, title, opts, body)
   pending[key] = nil
   local x, y
   if saved and saved ~= "" then
-    local px, py = saved:match("(-?[%d.]+),(-?[%d.]+)")
+    local px, py = settingPair(saved, POS)
     x, y = tonumber(px), tonumber(py)
   end
   if not x then
@@ -623,7 +670,7 @@ function hud.Dialog(screen, title, opts, body)
   -- on screen as a whole where it fits (its title bar's close box too), else its top left corner
   local outerW, outerH = w + 20 * s, h + 40 * s -- (the padding and title bar)
   if opts.resizable then
-    local a, b = (Setting(k.size) or ""):match("([%d.]+),([%d.]+)")
+    local a, b = settingPair(Setting(k.size) or "", SIZE)
     outerW, outerH = (tonumber(a) or dw) * s, (tonumber(b) or dh) * s
   end
   x = math.max(0, math.min(x, io.width - math.min(outerW, io.width)))
@@ -654,7 +701,7 @@ function hud.Dialog(screen, title, opts, body)
   local savedW, savedH
   if opts.resizable then
     local sz = Setting(k.size) or ""
-    local a, b = sz:match("([%d.]+),([%d.]+)")
+    local a, b = settingPair(sz, SIZE)
     savedW, savedH = tonumber(a), tonumber(b)
     savedW = savedW and math.max(savedW, opts.resizable[1])
     savedH = savedH and math.max(savedH, opts.resizable[2])
@@ -735,13 +782,31 @@ function hud.Dialog(screen, title, opts, body)
       local e = math.max(5, 6 * s)
       local curW, curH = savedW or dw, savedH or dh
       local minW, minH = opts.resizable[1], opts.resizable[2]
-      if dialogEdge("##dlgright", gx - e, cy, gx, gy - g, true, gx, gy, s, c) then
-        local nw, nh = math.max(minW, (ww + io.mouseDX) / s), math.max(minH, curH)
-        ui.SetSetting(k.size, string.format("%.0f,%.0f", nw, nh))
+      local rightActive, rightDragging = dialogEdge("##dlgright", gx - e, cy, gx, gy - g, true, gx, gy, s, c)
+      if rightActive then
+        local mx = ui.GetMousePos()
+        local grid = snap.Grid()
+        local nw = dialogExtent(key, "right", wx, ww / s, mx, minW, s, io.width, grid)
+        if rightDragging then
+          if grid then snap.DrawGrid(grid, c) end
+          local nh = math.max(minH, curH)
+          ui.SetSetting(k.size, string.format(grid and "%.3f,%.3f" or "%.0f,%.0f", nw, nh))
+        end
+      else
+        endDialogResize(key, "right")
       end
-      if dialogEdge("##dlgbottom", wx, gy - e, gx - g, gy, false, gx, gy, s, c) then
-        local nw, nh = math.max(minW, curW), math.max(minH, (wh + io.mouseDY) / s)
-        ui.SetSetting(k.size, string.format("%.0f,%.0f", nw, nh))
+      local bottomActive, bottomDragging = dialogEdge("##dlgbottom", wx, gy - e, gx - g, gy, false, gx, gy, s, c)
+      if bottomActive then
+        local _, my = ui.GetMousePos()
+        local grid = snap.Grid()
+        local nh = dialogExtent(key, "bottom", wy, wh / s, my, minH, s, io.height, grid)
+        if bottomDragging then
+          if grid then snap.DrawGrid(grid, c) end
+          local nw = math.max(minW, curW)
+          ui.SetSetting(k.size, string.format(grid and "%.3f,%.3f" or "%.0f,%.0f", nw, nh))
+        end
+      else
+        endDialogResize(key, "bottom")
       end
       ui.EdgeButton("##dlgresize", gx - g, gy - g, gx, gy)
       local active, over = ui.IsItemActive(), ui.IsItemHovered()
@@ -754,9 +819,18 @@ function hud.Dialog(screen, title, opts, body)
         end
       end
       if over and not active then ui.SetTooltip("Drag to resize") end
-      if active and ui.IsMouseDragging(ui.Mouse.Left) then
-        local nw, nh = math.max(minW, (ww + io.mouseDX) / s), math.max(minH, (wh + io.mouseDY) / s)
-        ui.SetSetting(k.size, string.format("%.0f,%.0f", nw, nh))
+      if active then
+        local mx, my = ui.GetMousePos()
+        local grid = snap.Grid()
+        local nw = dialogExtent(key, "corner-x", wx, ww / s, mx, minW, s, io.width, grid)
+        local nh = dialogExtent(key, "corner-y", wy, wh / s, my, minH, s, io.height, grid)
+        if ui.IsMouseDragging(ui.Mouse.Left) then
+          if grid then snap.DrawGrid(grid, c) end
+          ui.SetSetting(k.size, string.format(grid and "%.3f,%.3f" or "%.0f,%.0f", nw, nh))
+        end
+      else
+        endDialogResize(key, "corner-x")
+        endDialogResize(key, "corner-y")
       end
     end
     ui.SetCursorPos(cpx, cpy)

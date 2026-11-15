@@ -61,6 +61,11 @@ bool same_no_case(std::string_view a, std::string_view b) {
 
 std::int32_t eq_atoi(std::string_view text) { return core::msvc_atoi(text); }
 
+bool bare_file_name(std::string_view name) {
+    return !name.empty() && name != "." && name != ".." &&
+           name.find_first_of(std::string_view("/\\:\0", 4)) == std::string_view::npos;
+}
+
 Switch off_on_toggle(std::string_view args, std::string_view off, std::string_view on) {
     if (starts_no_case(args, off, 3)) return Switch::Off;
     if (starts_no_case(args, on, 2)) return Switch::On;

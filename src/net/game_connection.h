@@ -45,6 +45,7 @@
 #include "game/eq_names.h"
 #include "game/eq_strings.h"
 #include "game/group.h"
+#include "game/leadership_bonuses.h"
 #include "game/pet_buttons.h"
 #include "game/social.h"
 #include "game/interact.h"
@@ -88,6 +89,7 @@
 #include "net/guild_bank_packets.h"
 #include "net/fellowship_packets.h"
 #include "net/item_packets.h"
+#include "net/evolving_packets.h"
 #include "net/commerce.h"
 #include "net/market_packets.h"
 #include "net/settings_packets.h"
@@ -500,7 +502,9 @@ public:
     void set_player_motion(const glm::vec3& position, float heading, const glm::vec3& velocity, bool moving);
     // Where the local player (and the mount it rides) is drawn this frame: the camera's place between the game
     // clock's steps (game::WorldState::set_local_drawn). Nothing is sent.
-    void set_player_drawn(const glm::vec3& position, float heading) { world_.set_local_drawn(position, heading); }
+    void set_player_drawn(const glm::vec3& position, float heading) {
+        if (!pstatus_.dead) world_.set_local_drawn(position, heading);
+    }
     // What set_player_motion last gave: whether the player is moving, and the heading (0..512).
     bool player_moving() const { return moving_; }
     float player_heading() const { return heading_; }
@@ -665,6 +669,10 @@ public:
     // game::report_hit_line): 0 full sentence (the default), 1 short, 2 number.
     const game::HitModes& hit_modes() const { return hit_modes_; }
     void set_hit_modes(const game::HitModes& modes) { hit_modes_ = modes; }
+    // Hailstone's spell display modes: direct damage, DoTs, heals and HoTs.
+    // Logging and incoming-chat hooks always receive the full sentence.
+    const game::SpellHitModes& spell_hit_modes() const { return spell_hit_modes_; }
+    void set_spell_hit_modes(const game::SpellHitModes& modes) { spell_hit_modes_ = modes; }
     // OP_Consider for the current target; the answer prints the con line.
     void consider();
     // unk_SetStandState @0x5a0bc0 (PlayerZoneClient::ChangePosition)
@@ -706,16 +714,29 @@ public:
     // the list and button are then disabled until OP_ZonePlayerToBind closes the window.
     const std::optional<RespawnWindow>& respawn_window() const { return respawn_; }
     bool respawn_ready() const;
+    bool respawn_option_available(std::uint32_t option_id) const;
+    bool respawn_option_is_resurrection(std::uint32_t option_id) const;
+    std::optional<std::uint32_t> accepted_hover_rez_option() const;
     bool respawn_chosen() const { return respawn_chosen_; }
+    std::uint32_t respawn_session() const { return respawn_session_; }
     // The respawn timer's milliseconds left (the window's time less the time since it came), and its whole span.
     // How long the window has been up (ms): the respawn gauge's and Select's clock (the original counts from the
     // corpse's time, PlayerZoneClient +0x2bc; taken as the window's arrival here).
-    std::int64_t respawn_age_ms() const { return respawn_ ? now_ms() - respawn_shown_ms_ : 0; }
+    std::int64_t respawn_age_ms() const { return respawn_ ? std::max<std::int64_t>(0, respawn_now_ms() - respawn_shown_ms_) : 0; }
     std::int64_t respawn_ms_left() const {
         if (!respawn_) return 0;
-        return std::max<std::int64_t>(0, static_cast<std::int64_t>(respawn_->time_remaining_ms) - (now_ms() - respawn_shown_ms_));
+        return std::max<std::int64_t>(0, static_cast<std::int64_t>(respawn_->time_remaining_ms) - respawn_age_ms());
     }
     void choose_respawn(std::uint32_t option_id);
+    // Same-zone hover completion publishes a new living spawn. The app must place its physics body there before
+    // the next movement step; a full zone change uses the ordinary zone-in placement instead.
+    struct RespawnPlacement {
+        glm::vec3 position{};
+        float heading = 0;
+    };
+    std::optional<RespawnPlacement> take_respawn_placement() {
+        return std::exchange(respawn_placement_, std::nullopt);
+    }
 
     // ---- personal tribute (net/game_connection_tribute.cpp, net/tribute_packets.h): the tributes the server offers
     // (asked for while zoning in), our chosen benefits, favour, the active timer, and the tribute master's window
@@ -723,11 +744,13 @@ public:
     struct Tribute {
         std::map<std::uint32_t, TributeAbility> abilities; // by tribute id
         TributeSettings settings;                           // the server's (OP_TributeUpdate)
+        bool settings_known = false; // received settings, rather than the initial profile's selected ids
         std::int32_t points = 0, career = 0;
         std::uint32_t timer_ms = 0;      // OP_TributeTimer's value
         std::int64_t timer_at = 0;       // when it came (now_ms)
         std::map<std::uint32_t, std::string> descriptions; // OP_SelectTribute's answers
         std::uint32_t master_id = 0;     // the tribute master whose window is open
+        std::uint64_t master_serial = 0;
         bool benefit_open = false;       // TributeBenefitWnd
         std::int32_t last_donation = 0;  // the favour the last donation gave
         std::uint32_t donation_answers = 0; // OP_TributeItem answers so far (the Advanced Inventory's job waits on them)
@@ -983,6 +1006,7 @@ public:
     // and CGuildBankWnd's state: the banker a right click on a class-66 guild banker opened it at, the selected item
     // (key: area << 16 | slot) and the requests awaiting an answer (its share of EverQuestinfo::IsItemPending).
     struct GuildBank {
+        std::uint64_t serial = 0;
         std::vector<std::optional<GuildBankItem>> deposit, main;
         std::uint32_t banker = 0;  // the banker's spawn id while the window is open (+0xd0b0)
         std::int32_t selected = -1; // +0xd0a8
@@ -1095,21 +1119,34 @@ public:
     // ---- LDoN adventures (net/game_connection_adventure.cpp, net/adventure_packets.h): the recruiter's window (a
     // right click on a class-60 NPC: OP_AdventureInfoRequest), the request and the offer to accept, the current
     // adventure, points, stats and the leaderboard. EQEmu's world server picks the adventure and checks the group.
+    struct AdventureLeaderboardSelection {
+        std::uint32_t order = 0, theme = 0, risk = 0;
+        bool operator==(const AdventureLeaderboardSelection&) const = default;
+    };
     struct Adventure {
         std::uint32_t recruiter = 0;     // the recruiter whose window is open
         std::string npc_text;            // OP_AdventureInfo: the recruiter's words or the server's refusal
         std::string offer;               // OP_AdventureDetails: awaiting accept / decline
         AdventureData data;              // the current adventure (assigned false: none)
-        std::int64_t data_at = 0;        // when it came (now_ms); its times count down from there
+        std::int64_t data_at = 0;        // when it came (session_now_ms); its times count down from there
         AdventureCount count;
         AdventurePoints points;
         std::optional<AdventureStats> stats;
         std::optional<AdventureLeaderboard> leaderboard;
-        bool stats_open = false, leaderboard_open = false;
+        bool window_open = false, stats_open = false, leaderboard_open = false;
+        std::int64_t request_next_ms = 0, stats_next_ms = 0, leaderboard_next_ms = 0, leaderboard_deadline_ms = 0;
+        AdventureLeaderboardSelection leaderboard_selection;
+        std::optional<AdventureLeaderboardSelection> leaderboard_inflight;
+        bool stats_queued = false, leaderboard_queued = false, leaderboard_failed = false;
     };
     const Adventure& adventure() const { return adventure_; }
     bool open_adventure_recruiter(std::uint32_t npc);
-    void close_adventure_recruiter() { adventure_.recruiter = 0; }
+    void set_adventure_window_open(bool open);
+    // CAdventureRequestWnd::AboutToHide @0x618420: declines an offer up and forgets the recruiter after its words or
+    // an offer; a request still awaiting its answer keeps the recruiter, and the answer shows the window again.
+    void close_adventure_recruiter();
+    bool adventure_recruiter_available() const;
+    bool adventure_request_ready() const;
     void adventure_request(std::uint32_t risk, std::uint32_t type);
     void adventure_answer(bool accept);
     // OP_LeaveAdventure (no body): leave the current adventure (EQEmu's world server may refuse, with its own line).
@@ -1118,6 +1155,12 @@ public:
     void set_adventure_leaderboard_open(bool open);
     void adventure_stats_request();
     void adventure_leaderboard_request(std::uint32_t order, std::uint32_t theme, std::uint32_t risk);
+    bool adventure_stats_ready() const;
+    bool adventure_leaderboard_ready() const;
+    std::int64_t adventure_elapsed_seconds() const;
+    // Process the latest queued leaderboard selection after the native window's ten-second request guard.
+    void adventure_frame();
+    void reset_adventure_for_zone();
 
     // ---- guild tribute (net/game_connection_tribute.cpp): the guild's tributes (asked for while zoning in), its two
     // benefits, favour and timer, our opt-in, and a guild tribute master's window (class 64:
@@ -1126,9 +1169,11 @@ public:
         std::map<std::uint32_t, TributeAbility> abilities;
         std::map<std::uint32_t, std::string> descriptions;
         GuildTributeActive active;
+        bool active_known = false; // a first active update may follow the zone-in's item packets
         std::int64_t timer_at = 0; // when active.timer_ms came (now_ms)
         std::optional<bool> opted_in;
         std::uint32_t master_id = 0;
+        std::uint64_t master_serial = 0;
         std::int32_t last_donation = 0;
         std::uint32_t donation_answers = 0;
         std::uint32_t active_cost() const;
@@ -1137,6 +1182,7 @@ public:
     const GuildTribute& guild_tribute() const { return guild_tribute_; }
     void close_guild_tribute_master() { guild_tribute_.master_id = 0; }
     void guild_tribute_describe(std::uint32_t tribute_id, std::uint32_t tier = 0);
+    bool can_change_guild_tribute() const;
     // Saves the guild's two benefits (OP_GuildSaveActiveTributes, then OP_GuildModifyBenefits).
     void guild_tribute_change(const GuildTributeActive& v);
     void guild_tribute_toggle(bool on);
@@ -1146,7 +1192,10 @@ public:
     void guild_tribute_opt_out(const std::string& member);
     void guild_trophy_opt_out(const std::string& member);
     bool guild_tribute_donate_cursor();
+    // Sends only while carried platinum covers the amount and no platinum donation is waiting for its reply.
     bool guild_tribute_donate_platinum(std::uint32_t platinum);
+    // A guild platinum donation waits for its reply (CTributeMasterWnd+0x2d8): the master window greys Donate.
+    bool guild_platinum_pending() const { return guild_platinum_pending_ != 0; }
 
     // ---- alternate currencies and point merchants (net/game_connection_commerce.cpp, net/merchant_packets.h)
     struct AltCurrency {
@@ -1164,7 +1213,7 @@ public:
     };
     const PointMerchant& point_merchant() const { return point_merchant_; }
     bool open_point_merchant(std::uint32_t npc);
-    void close_point_merchant() { point_merchant_ = {}; }
+    void close_point_merchant();
     // Adventure merchants (classes 59, 61, 67, 68: NewPointMerchantWnd), paid in LDoN points, PvP points or crystals.
     struct AdventureMerchant {
         std::uint32_t npc = 0, type = 0; // type: 1 LDoN, 2 Discord, 4 Norrath's Keepers, 5 Dark Reign
@@ -1172,7 +1221,7 @@ public:
     };
     const AdventureMerchant& adventure_merchant() const { return adventure_merchant_; }
     bool open_adventure_merchant(std::uint32_t npc);
-    void close_adventure_merchant() { adventure_merchant_ = {}; }
+    void close_adventure_merchant();
     void adventure_merchant_buy(std::uint32_t item_id);
     // The adventure merchant window's Purchase (CPointMerchantWnd_ConfirmPurchase @0x71bba0, one item): with
     // pointMerchantNoConfirm it buys at once, else it asks first (the merchant's point system's question).
@@ -1207,6 +1256,8 @@ public:
         std::uint32_t group_marker = 0, group_assist = 0;
         std::array<std::uint32_t, 3> raid_assists{}, raid_markers{}, raid_waypointers{}, group_marks{}, raid_marks{};
         std::array<std::string, 3> raid_assist_names;
+        std::array<std::string, 3> raid_marker_names;
+        std::array<bool, 3> raid_assist_slots_known{};
         std::array<std::uint32_t, 4> assist_targets{};
     };
     const Leadership& leadership() const { return leadership_; }
@@ -1533,6 +1584,7 @@ public:
     // What the character sheet is built from besides the profile, inventory and buffs (game_connection_ticks.cpp):
     // the level, the pools as the server sent them and the ticks moved them, sitting, hunger, auto attack.
     game::mechanics::LiveState live_state() const;
+    game::LeadershipBonuses leadership_bonuses() const;
     std::int32_t drunkenness() const { return drunkenness_; }
     std::uint32_t drunkenness_updates() const { return drunkenness_updates_; }
     std::uint32_t drunkenness_motion_updates() const { return drunkenness_motion_updates_; }
@@ -1611,6 +1663,14 @@ public:
 
     // ---- items (game/inventory.h; net/game_connection_items.cpp) ----
     const game::Inventory& inventory() const { return inventory_; }
+    // Hailstone: how the item now on the cursor got there (the plugin host's cursor_origin, docs/plugins.md), as
+    // HAILSTONE_CURSOR_ORIGIN_*: 0 unknown or empty, 1 the player's own pickup, 2 the server put it there. The note
+    // is kept with the cursor placement it describes (Inventory::cursor_placement), so any change to the cursor
+    // that no path marked reads as unknown; unknown must never be used for automated destruction.
+    std::uint32_t cursor_origin() const {
+        if (!inventory_.cursor() || cursor_origin_placement_ != inventory_.cursor_placement()) return 0;
+        return static_cast<std::uint32_t>(cursor_origin_);
+    }
     const net::Coins& coins() const { return coins_; }
     // A left click on an inventory, bank or shared bank slot
     // (CInvSlot::HandleLButtonUp): with an empty cursor picks the item up
@@ -1700,6 +1760,7 @@ public:
         net::Coins money;
         bool open = false;     // the server accepted the request
         bool complete = false; // every item sent
+        std::size_t pending_requests = 0; // OP_LootItem requests awaiting an answer, including individual loots
     };
     void loot(std::uint32_t corpse_id);
     // CLootWnd::RequestLootSlot: a corpse slot onto the cursor (or auto looted); a no-drop item may ask first
@@ -1713,12 +1774,30 @@ public:
     // Item links: asks the server for the linked item (OP_ItemLinkClick); its
     // OP_ItemLinkResponse arrives through take_item_display().
     void request_item(const game::ItemLink& link);
+    // Read-only Final Result inspection: native OP_EvolveItem action 4, answered as an ordinary item display.
+    bool request_evolving_final_result(const Item& item, bool shift = false);
     // Send_OP_ItemLinkResponse(id, name, flags) (net/item_packets.h ItemLinkRequest): `shift` adds flag 2.
     void request_item_link(std::uint32_t item_id, const std::string& name, std::uint32_t flags, bool shift);
     std::optional<Item> take_item_display();
-    // An item the server sent again as OP_ItemPacket type 0x67 (CEverQuest_HandleItemPacket @004c2570 → 0x6ae710
-    // @006ae710): every open item display showing the same serial (+0xf8) is set to it in place.
+    // An item the server sent again as OP_ItemPacket type 0x67, or whose evolving progress it updated: every open
+    // item display showing the same two-part instance id is set to it in place.
     std::optional<Item> take_item_refresh();
+
+    struct EvolvingTransfer {
+        bool shown = false, pending = false, submitted = false;
+        std::uint64_t source_id = 0, destination_id = 0, revision = 0;
+        std::optional<EvolvingTransferDetails> details;
+        std::string status;
+    };
+    const EvolvingTransfer& evolving_transfer() const { return evolving_transfer_; }
+    // Cached on the inventory's revision (Inventory::revision); valid until the inventory next changes.
+    const std::vector<Item>& evolving_transfer_items() const;
+    void open_evolving_transfer();
+    void close_evolving_transfer();
+    bool select_evolving_transfer(bool source, std::uint64_t id);
+    bool can_transfer_evolving() const;
+    // Called only after the UI's confirmation for this exact revision. Rechecks the live items before sending.
+    bool request_evolving_transfer(std::uint64_t expected_revision);
 
     // ---- augments (game/augments.h; net/game_connection_augments.cpp) ----
     // What the request rules read: the cursor, the inventory searches, the class check.
@@ -2221,6 +2300,8 @@ public:
     // LocalPC_HasGuildPermission @0x4241f0 (game/guild_ranks.h): a GM always; else the rank's bit of the table
     // OP_GuildUpdate action 5 fills.
     bool has_guild_permission(std::int32_t permission) const;
+    // Tagged SendGuildRanks rows can arrive before the own GuildID appearance during a membership change.
+    std::uint32_t received_guild_permission_context() const;
     const game::RaidState& raid() const { return raid_; }
     const FellowshipState& fellowship() const { return fellowship_; }
     void fellowship_create();
@@ -2260,6 +2341,10 @@ public:
     bool guild_world_invites() const { return guild_world_invites_; }
     // /raidinvite [name] (Cmd_raidinvite @0x4de470): invites the name or, without one, the targeted player.
     void raid_invite(const std::string& args);
+    // The raid window's roster invitations: invite expedition/shared task members into the raid, skipping members
+    // already present and the local character. Each invitation uses the ordinary raid protocol and server checks.
+    void raid_invite_expedition();
+    void raid_invite_shared_task();
     // CRaid::SendInviteResponse @0x47d700: /raidaccept and /raiddecline.
     void answer_raid_invite(bool accept);
     // /raiddisband and the raid window's Leave: leave the raid, or for its leader remove the raid target (OP_RaidInvite
@@ -2290,6 +2375,11 @@ public:
     void raid_delegate_ability(std::uint32_t ability, const std::string& member);
     // The raid window's Find PC (Leadership_FindPathToPlayer on the raid target).
     void raid_find_path_to_target();
+    void reset_raid_leadership();
+    // The zone-change part of it: spawn ids and ranks go, the delegates' names and members' flags stay.
+    void reset_raid_leadership_for_zone();
+    void reset_group_leadership();
+    void forget_leadership_spawn(std::uint32_t id);
     // RaidOptionsWindow's open flag.
     struct RaidOptions {
         bool open = false;
@@ -2681,7 +2771,7 @@ private:
     void set_spawn_motion(game::Spawn& s, const Motion& m);
     void connect_world(bool zoning);
     void chat(ChatEvent::Kind kind, std::string text, std::uint32_t rgb = 0, std::uint32_t color = 0,
-              std::string peer = {});
+              std::string peer = {}, std::optional<std::string> display_text = std::nullopt);
     // ReportSuccessfulHit's melee line for an attack by `source`, through the chat filters (`report`: its argument).
     void report_hit(const game::HitLine& line, std::uint32_t source, bool report = true);
     void handle_combat(Op op, const AppPacket& p);
@@ -2798,6 +2888,7 @@ private:
     mutable std::unique_ptr<game::mechanics::CharacterSheet> character_sheet_;
     mutable bool character_sheet_busy_ = false;
     void update_merchant();
+    void update_npc_interactions();
     void update_barter();
     void update_bank();
     void update_loot();
@@ -3151,13 +3242,30 @@ private:
     std::uint32_t bard_twist_pos_ = 0;                // +0x1eac
     std::function<bool(std::string_view, const std::string&)> app_commands_;
     std::optional<RespawnWindow> respawn_;
+    // A hover resurrection answer stages a choice locally; only OP_RespawnWindow commits the destination.
+    std::optional<RespawnOption> hover_rez_choice_;
+    bool hover_rez_accepted_ = false;
+    const RespawnOption* respawn_resurrection_option() const;
+    void clear_hover_rez() { hover_rez_choice_.reset(); hover_rez_accepted_ = false; }
+    bool respawn_spawn_pending_ = false; // same-zone bind acknowledged; still waiting for our living OP_ZoneEntry
+    std::optional<RespawnPlacement> respawn_placement_;
+    std::int64_t respawn_now_ms() const;
 
     // Spells.
     std::shared_ptr<const game::SpellTable> spell_table_;
     game::HitModes hit_modes_{};
+    game::SpellHitModes spell_hit_modes_{};
     game::SpellState spells_;
 
     // Items.
+    enum class CursorOrigin : std::uint8_t { Unknown = 0, Inventory = 1, Server = 2 };
+    // Notes the origin of the item on the cursor now; call it after the inventory change that put it there.
+    void mark_cursor_origin(CursorOrigin origin) {
+        cursor_origin_ = origin;
+        cursor_origin_placement_ = inventory_.cursor_placement();
+    }
+    CursorOrigin cursor_origin_ = CursorOrigin::Unknown;
+    std::uint64_t cursor_origin_placement_ = 0;
     game::Inventory inventory_;
     game::KeptItems kept_items_;  // Hailstone: the Keep marks (kept_items.txt)
     std::uint64_t kept_revision_ = 0;
@@ -3172,6 +3280,10 @@ private:
     bool loot_popup_pending_ = false; // CLootWnd +0x398 (bPopupPending): a no-drop question is showing
     bool loot_close_on_complete_ = false; // +0x2f8 (bCloseOnComplete): a Loot All closes the window when done
     bool loot_all_deferred_ = false;      // +0x2f9: Loot All asked for before every item arrived
+    // +0x3a0 (the Loot All list) exists: set when a Loot All sends its first request, cleared by the reply that
+    // finds the queue empty (Handle_OP_LootItem @0x6bd43b frees the list there). The last slot has left
+    // loot_all_queue_ by then, so the queue alone cannot tell.
+    bool loot_all_active_ = false;
     std::int64_t loot_check_ms_ = 0;      // CLootWnd::nNextRefreshTime
     void loot_all_now();              // CLootWnd::LootAll(1)
     void send_loot_item(std::int16_t corpse_slot, bool auto_loot, std::uint32_t quantity = 0); // OP_LootItem
@@ -3181,6 +3293,24 @@ private:
     std::deque<Item> item_displays_;
     std::deque<Item> item_refreshes_;                     // for take_item_refresh()
     std::map<std::uint32_t, std::string> augment_info_;   // SolventText by display window (OP_AugmentInfo)
+    EvolvingTransfer evolving_transfer_;
+    std::vector<std::byte> evolving_source_snapshot_, evolving_destination_snapshot_;
+    // The evolving possessions, and whether the selected pair still matches its snapshots, as of an inventory
+    // revision: update(), ItemExpTransfer and each item display read them every frame, and building them copies
+    // every evolving item and serialises two. An edit made in place through Inventory::at() (a stack count) does
+    // not count as a change until the next one that does; the transfer itself rechecks uncached before it is sent.
+    struct EvolvingCache {
+        bool items_valid = false, match_valid = false, match = false;
+        std::uint64_t items_revision = 0, match_revision = 0;
+        std::vector<Item> items;
+        std::uint64_t builds = 0, checks = 0; // for tests
+    };
+    mutable EvolvingCache evolving_cache_;
+    std::vector<Item> collect_evolving_items() const;
+    bool evolving_originals_match(bool fresh = false) const;
+    void handle_evolving_item(const AppPacket& p);
+    void update_evolving_transfer();
+    void request_evolving_details();
     // PcZoneClient::GetItemByID @00585a10 / GetItemByItemClass @00586210: the possessions searched recursively.
     std::optional<game::FoundItem> find_possession(const std::function<bool(const Item&)>& match) const;
     void handle_augment_info(const AppPacket& p);
@@ -3196,6 +3326,7 @@ private:
     game::SwitchClock switch_clock_;
     std::vector<game::GroundObject> ground_objects_;
     std::optional<game::WorldContainer> world_container_;
+    std::optional<std::uint32_t> world_container_requested_;
     std::uint32_t door_moves_seen_ = 0;
     std::vector<SoundCue> sound_cues_;
     std::vector<SpellEffectCue> effect_cues_;
@@ -3213,7 +3344,29 @@ private:
     std::chrono::steady_clock::time_point last_eye_position_send_{};
     bool eye_motion_dirty_ = false;
     std::optional<MerchantSession> merchant_;
+    std::uint64_t npc_session_serial_ = 0;
     std::int64_t merchant_check_ms_ = 0; // CMerchantWnd::NextRefreshTime: the range check every 500 ms
+    // The other service windows' range checks (update_npc_interactions), each on its window's own 500 ms timer:
+    // the time of the next check (NextRefreshTime-style), or of the last one (`recruiter`, `world`: AdventureMgr
+    // +0x458 and CContainerMgr::Timer, which check once more than 500 ms have passed).
+    struct NpcRangeChecks {
+        std::int64_t point_merchant = 0;     // CNewPointMerchantWnd +0x25c
+        std::int64_t adventure_merchant = 0; // CPointMerchantWnd +0x29c
+        std::int64_t tribute = 0;            // CTributeMasterWnd +0x2a0 (personal and guild share the window)
+        std::int64_t trainer = 0;            // CTrainWnd's NextRefreshTime
+        std::int64_t trade = 0;              // CTradeWnd::NextRefreshTime
+        std::int64_t recruiter = 0;          // AdventureMgr +0x458, set when the state becomes 1 or 2
+        std::int64_t world = 0;              // CContainerMgr::Timer
+    };
+    NpcRangeChecks npc_checks_;
+    // AdventureMgr +4 as far as the recruiter's range check needs it: 1 the recruiter's words shown
+    // (OP_AdventureInfo), 2 an offer up (OP_AdventureDetails), 0 otherwise (none, a request sent, answered, or on
+    // an adventure).
+    std::uint8_t recruiter_state_ = 0;
+    void set_recruiter_state(std::uint8_t state) {
+        recruiter_state_ = state;
+        npc_checks_.recruiter = now_ms();
+    }
     std::optional<TradeSession> trade_;
     std::optional<BankSession> bank_;
     game::BankSnapshot bank_seen_;     // Hailstone: the bank as last seen (bank.dat)
@@ -3258,6 +3411,13 @@ private:
     // Social, guilds, raids, the chat server.
     game::SocialState social_;
     game::GuildState guild_;
+    struct PendingGuildPermissions {
+        std::uint32_t guild_id = 0;
+        game::GuildPermissions permissions;
+        std::array<std::string, 9> rank_names;
+    };
+    std::optional<PendingGuildPermissions> pending_guild_permissions_;
+    void reset_guild_permissions(std::uint32_t next_guild_id);
     Tracking tracking_;
     void handle_track_reply(const AppPacket& p);
     void track_filter_all();
@@ -3413,8 +3573,17 @@ private:
     bool begin_tribute_donation(bool guild, const Item& item, std::uint32_t master_id);
     bool finish_tribute_donation(bool guild, const ItemSlot& slot, std::uint32_t quantity,
                                 std::uint32_t master_id, bool consumed);
-    void reset_tribute_donations() { pending_tribute_donation_.reset(); }
-    std::uint32_t guild_platinum_pending_ = 0; // a guild platinum donation awaiting its answer
+    void reset_tribute_donations() {
+        pending_tribute_donation_.reset();
+        guild_platinum_pending_ = 0;
+    }
+    // One request at a time: the reply identifies only the quantity, not a transaction. A later master-open
+    // reply also clears this fence, after any donation reply on the same ordered zone connection.
+    std::uint32_t guild_platinum_pending_ = 0;
+    void reset_guild_tribute_bonuses(std::uint32_t next_guild_id = kTributeNone);
+    // Zone/session ended: no received tribute items belong to the next zone. The guild's rank permissions and
+    // names are not cleared here: they belong to the membership, and EQEmu sends them again on every zone-in.
+    void reset_tribute_bonuses();
     void handle_tribute(Op op, const AppPacket& p);
     Expedition expedition_;
     Adventure adventure_;
@@ -3541,6 +3710,8 @@ private:
     bool waiting_for_port_ = false; // PlayerZoneClient +0x1f05
     std::int64_t respawn_shown_ms_ = 0;
     bool respawn_chosen_ = false;
+    bool respawn_selection_sending_ = false; // outgoing hooks cannot recursively commit another choice
+    std::uint32_t respawn_session_ = 0;
 };
 
 } // namespace hailstone::net

@@ -414,6 +414,16 @@ TEST_CASE("Actor emitters: PRT versions widen as the EQGM loader widens them") {
     CHECK(v3[0].variant == 2);
     CHECK(v3[0].alternate == 1059u);
     CHECK(assets::parse_prt(file(6, 0x6c)).empty());
+    // A count whose records would wrap a 32-bit size: refused as truncated, as on 64 bits.
+    for (const char* magic : {"PTCL", "EQPT"}) {
+        std::vector<std::byte> d(12 + 0x6c);
+        std::memcpy(d.data(), magic, 4);
+        const std::uint32_t n = 0xffffffffu, version = magic[0] == 'P' ? 5u : 1u;
+        std::memcpy(d.data() + 4, &n, 4);
+        std::memcpy(d.data() + 8, &version, 4);
+        if (magic[0] == 'P') CHECK_THROWS(assets::parse_prt(d));
+        else CHECK_THROWS(assets::parse_pts(d));
+    }
 }
 
 TEST_CASE("NMS actor emitters: a fire elemental and a glowing sword" * doctest::skip(!hailstone::test::game_dir())) {

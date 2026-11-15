@@ -85,6 +85,19 @@ std::string read_text(const std::filesystem::path& p) {
 }
 } // namespace
 
+TEST_CASE("Socials: a running social stops when another character enters the world, not on zoning") {
+    test::ScratchDir scratch("actions_social_character");
+    Config config;
+    app::ActionsUi actions(config, scratch.path() / "hailstone.ini");
+    actions.enter_zone(scratch.path() / "first.ini");
+    actions.press_social(4);
+    REQUIRE(actions.current_social() == 4);
+    actions.enter_zone(scratch.path() / "first.ini"); // the same character in another zone
+    CHECK(actions.current_social() == 4);
+    actions.enter_zone(scratch.path() / "second.ini");
+    CHECK(actions.current_social() == -1);
+}
+
 TEST_CASE("Hot buttons: changes are saved once they have waited, at once on zoning and at the end; not a page flip") {
     test::ScratchDir scratch("actions_save_delay");
     const std::filesystem::path file = scratch.path() / "hotbuttons.ini";

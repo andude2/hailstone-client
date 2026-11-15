@@ -139,6 +139,9 @@ TEST_CASE("calc: GetArg's arguments") {
     CHECK(get_arg("a b,c", 2, false, ',') == "c");
     CHECK(get_arg("1, 2,3", 2, true) == "2");
     CHECK(get_arg("1, 2,3", 3, true) == "3");
+    // An argument far past the text's end is empty at once, not after 2^31 passes over nothing.
+    CHECK(get_arg("a b", 2147483647) == "");
+    CHECK(get_arg("a b", 2147483647, true, ',') == "");
 }
 
 TEST_CASE("calc: mutated formulas and arguments never crash") {

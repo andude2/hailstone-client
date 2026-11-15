@@ -39,10 +39,12 @@ local function chip(text, c, s)
   ui.Dummy(tw + 2 * pw, lh)
 end
 
-local function coins(prefix)
-  local v = {}
-  for i = 0, 3 do v[#v + 1] = tonumber(W.Text(WINDOW, prefix .. i)) or 0 end
-  return v
+-- the partner's coin (TRDW_HisMoney0..3), read into one table each frame (TC.Amount reads it and keeps nothing)
+local HIS_MONEY = { "TRDW_HisMoney0", "TRDW_HisMoney1", "TRDW_HisMoney2", "TRDW_HisMoney3" }
+local hisCoins = { 0, 0, 0, 0 }
+local function theirCoins()
+  for i = 1, 4 do hisCoins[i] = tonumber(W.Text(WINDOW, HIS_MONEY[i])) or 0 end
+  return hisCoins
 end
 
 -- One side's card: a title, the slots, the coin. mine: your side (the coin piles take clicks). ready: that side
@@ -79,7 +81,7 @@ local function offer(title, who, first, last, mine, s, width, ready, flash)
   else
     ui.TextColored(C.muted[1], C.muted[2], C.muted[3], 1, "Coin")
     ui.SameLine()
-    TC.Amount(coins("TRDW_HisMoney"))
+    TC.Amount(theirCoins())
   end
   ui.EndGroup()
   local _, y1 = ui.GetCursorScreenPos()

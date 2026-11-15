@@ -88,6 +88,10 @@ struct ItemDisplay {
 
 ItemDisplay build_item_display(const net::Item& item, const ItemDisplayContext& ctx);
 
+// The source/final template ids, current level and unaugmented link hash used by the native Final Result link.
+// No request for a non-evolving, complete or unusable evolution record.
+std::optional<net::EvolvingFinalResult> evolving_final_result(const net::Item& item);
+
 // @006a9e6b: the widest of `measured` in pSystemFont (FontsArray[2], CDisplay @0048e71b); of the name and the
 // flags only the longer string (CXStr length) is measured.
 int item_display_text_width(const ItemDisplay& d, const std::function<int(std::string_view)>& extent);

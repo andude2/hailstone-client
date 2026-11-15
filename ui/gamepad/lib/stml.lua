@@ -1,6 +1,6 @@
 -- STML (the game's text markup) for the gamepad pack: a chat line into coloured pieces, and drawing them
 -- word-wrapped with the theme's text. <c "#rrggbb"> colours (nested), links are shown in the link colour; other
--- tags are dropped.
+-- tags are dropped, and a "<" with no ">" after it is shown as text.
 local T = dofile("lib/theme.lua")
 local S = {}
 
@@ -25,7 +25,10 @@ function S.parse(line, color)
     if text ~= "" then out[#out + 1] = { entities(text), link and S.LINK or colors[#colors] } end
     if not lt then break end
     local gt = line:find(">", lt, true)
-    if not gt then break end
+    if not gt then -- a "<" that opens no tag ("<3" in a chat line): the rest is text, not dropped
+      out[#out + 1] = { entities(line:sub(lt)), link and S.LINK or colors[#colors] }
+      break
+    end
     local tag = line:sub(lt + 1, gt - 1)
     local name = (tag:match("^/?(%a+)") or ""):lower()
     if name == "c" and tag:sub(1, 1) ~= "/" then table.insert(colors, hex(tag:match("#(%x+)") or "") or colors[#colors])

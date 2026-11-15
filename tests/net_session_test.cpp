@@ -365,6 +365,7 @@ TEST_CASE("udp socket: a datagram larger than the buffer is dropped, not cut sho
     platform::UdpSocket a, rx;
     REQUIRE(a.open(platform::Endpoint::Family::V4, err, &local));
     REQUIRE(rx.open(platform::Endpoint::Family::V4, err, &local));
+    CHECK_FALSE(rx.inherited_by_children()); // close-on-exec (Windows: not inheritable)
     auto to = *rx.local_endpoint();
     REQUIRE(a.send_to(to, noise(200, 1)));
     Bytes fits = noise(50, 2);
@@ -382,6 +383,35 @@ TEST_CASE("udp socket: a datagram larger than the buffer is dropped, not cut sho
     CHECK(*n == fits.size());
     CHECK(Bytes(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(*n)) == fits);
     CHECK(rx.last_error().empty());
+}
+
+TEST_CASE("udp socket: one recv_from skips a bounded number of dropped datagrams, then returns nothing") {
+    std::string err;
+    auto local = platform::Endpoint::v4(127, 0, 0, 1, 0);
+    platform::UdpSocket a, rx;
+    REQUIRE(a.open(platform::Endpoint::Family::V4, err, &local));
+    REQUIRE(rx.open(platform::Endpoint::Family::V4, err, &local));
+    auto to = *rx.local_endpoint();
+    constexpr int kDropped = platform::UdpSocket::kMaxSkippedPerRecv + 6;
+    for (int i = 0; i < kDropped; ++i) REQUIRE(a.send_to(to, noise(200, static_cast<std::uint32_t>(i))));
+    Bytes fits = noise(50, 2);
+    REQUIRE(a.send_to(to, fits));
+    std::array<std::byte, 100> buf;
+    platform::Endpoint from;
+    REQUIRE(rx.wait_readable(std::chrono::milliseconds(2000)));
+    int empty_calls = 0;
+    std::optional<std::size_t> n;
+    for (int i = 0; i < 400 && !n; ++i) {
+        n = rx.recv_from(buf, from);
+        if (!n) {
+            ++empty_calls;
+            CHECK(rx.last_error().empty());
+            rx.wait_readable(std::chrono::milliseconds(10));
+        }
+    }
+    REQUIRE(n);
+    CHECK(*n == fits.size());
+    CHECK(empty_calls >= 1); // the first call gave up after kMaxSkippedPerRecv drops
 }
 
 // --- loopback: the real Session against a minimal fake server -------------

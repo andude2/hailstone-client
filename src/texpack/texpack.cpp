@@ -584,6 +584,8 @@ std::optional<TextureInfo> parse_manifest_line(std::string_view line) {
     if (auto* v = get("names")) e.names.insert(v->list.begin(), v->list.end());
     if (auto* v = get("archives")) e.archives.insert(v->list.begin(), v->list.end());
     if (auto* v = get("src_name")) e.source_name = v->text;
+    // A texture is known by its names (the pack's files, the messages): a record without one is damaged.
+    if (e.names.empty() || e.names.contains(std::string{})) return std::nullopt;
     return e;
 }
 

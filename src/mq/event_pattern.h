@@ -49,6 +49,11 @@ public:
     // When the line matches: what the callback gets after the line, MQ's way: #n#'s text at [n - 1], "" for a number
     // the pattern lacks, up to the highest #n# (a number used twice: its last). Empty without any #n#.
     std::optional<std::vector<std::string>> match(std::string_view line, const Resolve& resolve = {}) const;
+    // The same, given fold(line) too: a caller matching one line against many patterns folds it once.
+    std::optional<std::vector<std::string>> match(std::string_view line, std::string_view low,
+                                                  const Resolve& resolve = {}) const;
+    // The line as patterns compare it (A-Z to a-z, other bytes as they are).
+    static std::string fold(std::string_view line);
 
     // The pattern's bytes as written (what a script's events are held to, mq/lua_script.h).
     std::size_t size() const { return size_; }

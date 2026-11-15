@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <format>
 #include <string>
@@ -17,9 +18,13 @@ void write(Level level, std::string_view message);
 // Also writes every line to `path` from now on (the client's logs/hailstone.log), as well as to stdout and stderr.
 // The earlier runs' files are kept as <name>.1<ext> to <name>.3<ext> (hailstone.1.log is the last run's). A program
 // that runs while another holds `path` (a second client; <name>.lock beside it is the lock) leaves it alone and
-// writes <name>.<process id><ext> instead. False when the file cannot be created: the log then goes to stdout and
-// stderr only.
+// writes <name>.<process id><ext> instead; such files are removed at a later open, but for the newest 5 and those
+// written in the last day. A run's file stops at a size limit (100 MiB), with a last line saying so; the lines after
+// it go to stdout and stderr only. False when the file cannot be created: the log then goes to stdout and stderr
+// only.
 bool open_file(const std::filesystem::path& path);
+// The size at which the file stops (0: the default, 100 MiB); for tests.
+void set_file_limit(std::uint64_t bytes);
 // The file the log writes to (empty when none).
 std::filesystem::path file_path();
 void close_file();

@@ -187,3 +187,26 @@ TEST_CASE("mq.event patterns: many arguments on a long line that does not match 
     CHECK_FALSE(p.match(spaces));
     CHECK(p.match(spaces + "!"));
 }
+
+TEST_CASE("mq.event patterns: a line folded once by the caller matches as the line alone; huge |...| values fail fast") {
+    mq::EventPattern hits("#2# hits #1# for #3# points.");
+    const std::string line = "A Gnoll HITS you for 12 points.";
+    const std::string low = mq::EventPattern::fold(line);
+    CHECK(low == "a gnoll hits you for 12 points.");
+    CHECK(hits.match(line, low) == hits.match(line));
+    CHECK(hits.match(line, low) == Args{"you", "A Gnoll", "12"});
+    // A NUL ends the line for both.
+    const std::string nul = std::string("A hits B for 1 points.") + '\0' + "junk";
+    CHECK(hits.match(nul, mq::EventPattern::fold(nul)) == Args{"B", "A", "1"});
+    // A |...| value longer than the line: no match, and the walk stops there.
+    mq::EventPattern big("#*#|x|#*#");
+    int resolved = 0;
+    auto resolve = [&](std::string_view) {
+        ++resolved;
+        return std::string(5000, 'a');
+    };
+    CHECK_FALSE(big.match(std::string(100, 'a'), resolve));
+    CHECK(resolved == 1);
+    mq::EventPattern fits("#*#|x|#*#");
+    CHECK(fits.match("xx aaa yy", [](std::string_view) { return std::string("AAA"); }) == Args{});
+}

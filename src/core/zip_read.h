@@ -53,8 +53,9 @@ public:
     // or CRC-32 that does not match, or when the sink refused a piece.
     bool extract(const ZipEntry& entry, const Sink& sink);
     // The entry written to `path` (its parent folders made) through a temporary file beside it, renamed into place
-    // once complete and checked; `path` is left as it was on failure. On Unix the entry's permission bits (rwx for
-    // owner, group and others) are applied when the archive has them. A folder entry makes the folder.
+    // once complete, checked and flushed to the disk (platform/durable_file.h); `path` is left as it was on failure. On
+    // Unix the entry's permission bits (rwx for owner, group and others) are applied when the archive has them. A
+    // folder entry makes the folder.
     bool extract_to_file(const ZipEntry& entry, const std::filesystem::path& path);
 
     const std::string& error() const { return error_; }

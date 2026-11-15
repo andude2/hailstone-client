@@ -4,6 +4,7 @@
 #include <doctest/doctest.h>
 
 #include <limits>
+#include <optional>
 #include <string>
 
 #include <imgui.h>
@@ -13,6 +14,7 @@
 #include "app/lua_eq_windows.h"
 #include "plugin/lua_value.h"
 #include "net/item_packets.h"
+#include "mq_test_world.h"
 #include "scratch_dir.h"
 
 using namespace hailstone;
@@ -57,6 +59,8 @@ TEST_CASE("eq API: bad arguments are Lua errors before anything is made; odd num
             preview_h = h;
             return nullptr;
         };
+        int controls = 0;
+        host.item_preview_control = [&](std::string_view, float, float, int) { ++controls; };
         app::EqApi api(host);
         api.load_layout(dir.path() / "defaults.ini", dir.path() / "UI_Test_Server.ini", {});
         lua_State* L = luaL_newstate();
@@ -96,7 +100,20 @@ TEST_CASE("eq API: bad arguments are Lua errors before anything is made; odd num
         CHECK(run(L, "return eq.ItemPreviewImage(0/0, 1e300)") == "nil");
         CHECK(preview_w == 0);
         CHECK(preview_h == std::numeric_limits<int>::max());
+        // The preview's camera takes no NaN, infinity or number past float's range.
+        CHECK(run(L, "eq.ItemPreviewControl('rotate', 0.5, 0.1) return 'ok'") == "ok");
+        CHECK(controls == 1);
+        CHECK(run(L, "eq.ItemPreviewControl('zoom', 0/0) eq.ItemPreviewControl('pan', 0, math.huge) "
+                     "eq.ItemPreviewControl('rotate', 1e300, 0) return 'ok'") == "ok");
+        CHECK(controls == 1);
         CHECK(run(L, "return (pcall(eq.GemOverlay, 'CastSpellWnd', 'CSPW_Spell0', 0/0, -math.huge))") == "true");
+        // A record table with a metatable is not filled (its metamethods would run mid-fill): a new one comes back.
+        CHECK(run(L, "local t = setmetatable({}, {__newindex = function() error('no') end, __index = function() "
+                     "error('no') end}) local r = eq.GemInfo('CastSpellWnd', 'CSPW_Spell0', t) "
+                     "return tostring(r ~= t and rawget(t, 'tooltip') == nil and r.tooltip ~= nil)") == "true");
+        CHECK(run(L, "local t = setmetatable({}, {__newindex = function() error('no') end}) "
+                     "local r = eq.HotButtonInfo('HotButtonWnd', 'HB_Button1', t) return tostring(r ~= t)") == "true");
+        CHECK(run(L, "local t = {} return tostring(eq.GemInfo('CastSpellWnd', 'CSPW_Spell0', t) == t)") == "true");
         lua_close(L);
     }
     ImGui::DestroyContext(ctx);
@@ -272,4 +289,67 @@ TEST_CASE("plugin values: number keys get Lua's own text without a Lua string ma
     // 2.0 is the integer key 2 in a Lua table.
     CHECK(v.field("2"));
     lua_close(L);
+}
+
+TEST_CASE("eq API: integer_as, held_int and held_index narrow without wrapping") {
+    CHECK(app::integer_as<std::int16_t>(23LL) == std::optional<std::int16_t>(23));
+    CHECK_FALSE(app::integer_as<std::int16_t>(65536LL + 23));
+    CHECK_FALSE(app::integer_as<std::int16_t>(-32769LL));
+    CHECK_FALSE(app::integer_as<std::uint32_t>(-1LL));
+    CHECK_FALSE(app::integer_as<std::uint32_t>(4294967296LL));
+    CHECK(app::held_int(4294967296LL + 3) == std::numeric_limits<int>::max());
+    CHECK(app::held_int(std::numeric_limits<long long>::min()) == std::numeric_limits<int>::min());
+    CHECK(app::held_int(-7LL) == -7);
+    CHECK(app::held_index(1LL) == 0);
+    CHECK(app::held_index(0LL) == -1);
+    CHECK(app::held_index(std::numeric_limits<long long>::min()) == std::numeric_limits<int>::min());
+}
+
+// A number past a slot's, an index's or a choice's range reaches no other slot, row or choice than it names: a cast
+// would wrap 65536 + 23 to slot 23 and 2^32 + 3 to choice 3.
+TEST_CASE("eq API: slots, indexes and combo choices past their range are refused, not wrapped") {
+    mq_test::World world("hailstone_lua_eq_args_narrow_test");
+    ImGuiContext* ctx = ImGui::CreateContext();
+    ImGui::GetIO().DisplaySize = ImVec2(1600, 900);
+    ImGui::GetIO().IniFilename = nullptr;
+    {
+        test::ScratchDir dir("lua_eq_args_narrow");
+        net::Item item;
+        item.id = 1001;
+        item.name = "Rusty Dagger";
+        net::GameConnectionTestAccess::inventory(*world.conn).put(net::ItemSlot::possessions(23), item);
+        app::EqHost host;
+        host.in_game = host.ui_ready = true;
+        host.game = world.game.get();
+        host.conn = world.conn.get();
+        app::EqApi api(host);
+        api.load_layout(dir.path() / "defaults.ini", dir.path() / "UI_Test_Server.ini", {});
+        lua_State* L = luaL_newstate();
+        luaL_openlibs(L);
+        lua_newtable(L);
+        api.register_functions(L);
+        lua_setglobal(L, "eq");
+        api.begin_frame();
+        CHECK(run(L, "return eq.Item(23).id") == "1001");
+        CHECK(run(L, "return eq.Item(65536 + 23)") == "nil");
+        CHECK(run(L, "return eq.Item(23, 65536 - 1)") == "nil");
+        CHECK(run(L, "return eq.ClickSlot(65536 + 23, nil, 'rightheld')") == "false");
+        CHECK(run(L, "return eq.ClickSlot(23, nil, 'rightheld')") == "true");
+        CHECK(run(L, "return eq.BankItem(65536 + 1)") == "nil");
+        CHECK(run(L, "return eq.CompareItem(65536 + 23)") == "nil");
+        // The LFGuild window's class and time zone go into its packets as chosen: only the combo's own choices.
+        CHECK(run(L, "return eq.ComboSelect('LFGuildWnd', 'PSFG_ClassCombo', 4294967296 + 3)") == "true");
+        CHECK(run(L, "return select(2, eq.ComboInfo('LFGuildWnd', 'PSFG_ClassCombo'))") == "0");
+        CHECK(run(L, "eq.ComboSelect('LFGuildWnd', 'PSFG_ClassCombo', 99) "
+                     "return select(2, eq.ComboInfo('LFGuildWnd', 'PSFG_ClassCombo'))") == "0");
+        CHECK(run(L, "eq.ComboSelect('LFGuildWnd', 'PSFG_ClassCombo', 3) "
+                     "return select(2, eq.ComboInfo('LFGuildWnd', 'PSFG_ClassCombo'))") == "3");
+        // Huge and odd indexes elsewhere are held, not wrapped or overflowed.
+        CHECK(run(L, "eq.ListClick('LFGuildWnd', 'GSFP_SearchResultList', 4294967296, 'left', math.mininteger, "
+                     "math.maxinteger) eq.PickUp('ActionsWindow', 'AMP_WhoButton', math.mininteger) "
+                     "eq.CascadeClick(math.mininteger, math.maxinteger) return 'ok'") == "ok");
+        CHECK(run(L, "return eq.BagSlotItem('Bag1', 4294967296)") == "nil");
+        lua_close(L);
+    }
+    ImGui::DestroyContext(ctx);
 }

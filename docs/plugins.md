@@ -85,7 +85,11 @@ Hailstone's limits.
 - **The close box** (Gamepad UI: B) puts the question away without an answer: the next zone-in asks again.
 - **Nothing covers it.** While the question is up, its window (the UI pack's, or the client's own when the pack has
   none) is raised above every other window at the end of each frame, and no plugin's window or script's ImGui can
-  draw over all windows (`ui.Foreground` is refused them) or find where the question is (`ui.FindWindowRect`).
+  draw over all windows (`ui.Foreground` is refused them), find where the question is (`ui.FindWindowRect`), or
+  draw into it: `ui.Begin` on the question's window (or the client's prompt's name, before its first frame too)
+  returns not visible and begins nothing, `ui.BeginChild` inside it likewise, and `ui.End` cannot close it. What a
+  script's draw function leaves open, or sets for a next window it never begins, is closed and dropped when it
+  returns, so it never reaches the question's window drawn after it.
   Only the pack's own code puts the client's prompt away for a window of its own (`eq.WindowShown("PluginConsent")`
   from a plugin's code does not), and a plugin's code neither sees the question nor answers it. A compiled plugin
   already loaded is native code and is not held by this.
@@ -107,8 +111,11 @@ one window settles the same question in the others within a second.
 
 The packs draw the question (`ui/modern/pluginconsent.lua`, the Gamepad UI's `dialogs.lua`) with
 `eq.PluginConsent()` (nil, or `{server, serial, warning, plugins = {{name, file, size, sha256, short}}}`) and
-`eq.AnswerPluginConsent(true | false | nil)`. A plugin's own code in the UI gets nil and cannot answer. Without a
-pack window for it (`eq.ReplaceWindow("PluginConsent")`) the client draws its own.
+`eq.AnswerPluginConsent(true | false | nil, serial)`, where `serial` is the question's: an answer to a question that has
+since been replaced by another (another server's, or other bytes) is refused (false) and nothing is kept. Both packs
+leave Allow and Don't allow off for a second after a question shows or a new one takes its place, so a click or press
+meant for something else cannot answer it. A plugin's own code in the UI gets nil and cannot answer. Without a pack
+window for it (`eq.ReplaceWindow("PluginConsent")`) the client draws its own.
 
 ## For players
 
@@ -150,9 +157,9 @@ extension's `command_line`) from the moment it lost the bit, and its web tabs cl
 | Bit | Name | Lets a script or plugin |
 |---|---|---|
 | 1 | `read` | read game state: `mq.TLO`, `${...}`, `mq.parse`, `ParseMacroData`, spawn events |
-| 2 | `commands` | run commands outside the groups below: windows, options, `/who`, other plugins' commands, `/lua`; add commands of its own (`mq.bind`, `AddCommand`) |
+| 2 | `commands` | run commands outside the groups below: windows, options, `/who`, other plugins' commands, `/lua`; add commands of its own (`mq.bind`, `AddCommand`). The player is told "run other commands (windows, options, /who, other plugins' commands)" |
 | 4 | `target` | change the target: `/target`, `/assist`, `/xtarget`, ... |
-| 8 | `actions` | act: `/cast`, `/disc`, `/doability`, `/useitem`, `/attack`, `/memspellset`, non-movement `/keypress` |
+| 8 | `actions` | act: `/cast`, `/disc`, `/doability`, `/useitem`, `/attack`, `/memspellset`, `/pet`, `/loot`, `/autoinventory`, `/alternateadv` (`/alt`), `/split`, `/consent`, `/guilddelete`, non-movement `/keypress`; Hailstone's own item commands `/destroy`, `/destroycursor` and `/stowcursor` |
 | 16 | `move` | move: `/face`, movement `/keypress` (forward, jump, ...), `/follow`, `/sit`, `/stand`, `/duck`, `/camp` |
 | 32 | `chat` | speak: plain text, `/say`, `/tell`, `/g`, `/gu`, `/rs`, channels, emotes |
 | 64 | `events` | see chat lines: `mq.event`, `OnIncomingChat`, and hide them (`OnFilterChat`) |
@@ -166,7 +173,9 @@ extension's `command_line`) from the moment it lost the bit, and its web tabs cl
 The check sits in one place, the command filter (`src/mq/commands.cpp`). It looks at the capabilities of the code
 running now (`plugin::caller_caps()`). So a command reaches the same check whether a script sends it with `mq.cmd`,
 `/docommand`, `/squelch`, a bind, or a plugin's `DoCommand`. The game's own commands are classified by their entry in the
-command table (`plugin::command_caps`). MQ's and plugins' commands declare what they need.
+command table (`plugin::command_caps`). Hailstone's own commands are not in that table and need `commands`, except
+the ones that destroy or move items (`/destroy`, `/destroycursor`, `/stowcursor`, the short `kOwnActions` list in
+`src/plugin/policy.cpp`), which need `actions`. MQ's and plugins' commands declare what they need.
 
 ## MacroQuest Lua scripts
 
@@ -176,12 +185,17 @@ A script is `lua/<name>.lua` or `lua/<name>/init.lua`, the same layout MacroQues
 5.4 state and runs as a coroutine that the client resumes once a frame. `mq.delay` yields to the next frame. A
 script that runs more than 3 ms without yielding is paused until the next frame, like MQ's turbo, so a busy loop
 cannot freeze the client. One that cannot pause for 5 s is stopped; an `mq.imgui` window's function, which cannot
-pause, is stopped the same way. Only the script's own run and its binds are paused: a coroutine the script made itself
+pause, is stopped the same way, and so is a long string match (a pattern that backtracks), which cannot pause either. Only the script's own run and its binds are paused: a coroutine the script made itself
 (`coroutine.create`, `coroutine.wrap`) is never yielded by the pause, which would hand its `coroutine.resume` an
-early yield with no values, so long work inside one counts towards the 5 s and is not spread over frames. A bind
+early yield with no values, so long work inside one counts towards the 5 s and is not spread over frames. Catching
+that stop does not keep code running: once it fires, every further instruction of the script, and every `pcall`,
+`xpcall`, `coroutine.resume` or `coroutine.close` it returns to, raises it again, until the client next enters the
+script (its next frame, a social's next press). A bind
 whose function runs commands that start binds of the same script again (`mq.bind('/x', function() mq.cmd('/x')
 end)`) ends the script once they nest 16 deep; a command of more than 1000 words for a bind is refused (a line in
-the chat) and the script runs on. Each script's memory is capped at 256 MB: past it the script's own
+the chat) and the script runs on. An `mq.cmd` line is at most 2047 bytes (MQ's command buffer; longer is an
+error), and `/docommand`, `/noparse` and `/squelch` nest at most 16 deep in one line (the rest is dropped, with a
+line in the chat). Each script's memory is capped at 256 MB: past it the script's own
 code gets "not enough memory", and a script that ends that way is stopped with its error. A script's tables cannot have a `__gc`
 finalizer (`setmetatable` refuses one): Lua runs finalizers with no way to stop them, and the last at the script's
 end, after what it registered is taken back. For the same reason an `mq.TLO` value's metatable is locked
@@ -194,13 +208,13 @@ end, after what it registered is taken back. For the same reason an `mq.TLO` val
 | `mq.TLO.<Name>...` | MQ's TLOs (below). Call with no arguments for the plain value (`mq.TLO.Me.PctHPs()`, `nil` for NULL). Call with arguments for an indexed member (`mq.TLO.Me.Buff(1).Duration.TotalSeconds()`, `mq.TLO.Spawn('npc radius 50').ID()`). Values also work with `tostring`, `..`, `==`, `<` and `<=`. |
 | `mq.cmd(line)`, `mq.cmd.<name>(args...)`, `mq.cmdf(fmt, ...)` | a command line, with `${...}` parsed |
 | `mq.delay(ms \| '2s' \| '500ms' \| '1m' [, condition])` | wait, until the time passes or `condition()` is true. A wait beyond 9e15 ms (`math.huge`) is cut to that; NaN is an error |
-| `mq.event(name, pattern, fn [, {keepLinks = true}])`, `mq.unevent`, `mq.doevents([name])`, `mq.flushevents([name])` | chat events, matched as MacroQuest's Lua events match them (its Blech: `mq/event_pattern.h`): text is compared ignoring the case of A-Z; a literal before the first `#...#` must start the line, and a pattern without any must be the whole line; each `#...#` (`#*#`, `#1#`, `#2#`, ..., or any other name, such as `#who#`) takes text up to the first place the literal after it is found, the last one the rest of the line, and the literal after that one must be found first at the line's end (so `#*# says #1#` on `A says B says C` gives `B says C`); line breaks are ordinary text. `fn(line, arg1, arg2, ...)` gets each `#n#`'s text by its number, `""` for a number the pattern lacks, up to the highest `#n#` (at most 255; a larger one, `#*#` and other names match without being passed on). `|text|` matches what the script's `${...}` in it reads when the line comes (with the script's `read`; without it, the text as written), and its value is never parsed again; `##` and `||` stand for `#` and `|`. The line is matched and passed with its item links shown as their text, unless the event has `keepLinks`; lines of 2048 bytes or more and empty lines raise no events. Each pattern is matched on its own, where MQ's shared tree of patterns can turn down a line (a deliberate difference). A script has at most 256 events, a pattern is at most 1024 bytes and a name 256, and a script's patterns together at most 32 KB (an error past them): every pattern is matched against every chat line, outside the script's time slice. A line another script or a plugin wrote (`print`, `/echo`, `WriteChatf`) raises events too, as `/echo` does in MQ, but a handler then gets no more than that code may do: one that would get more runs as a thread of its own (as a bind), held to both scripts' capabilities for each of its resumes, and `doevents` goes on without waiting for it |
+| `mq.event(name, pattern, fn [, {keepLinks = true}])`, `mq.unevent`, `mq.doevents([name])`, `mq.flushevents([name])` | chat events, matched as MacroQuest's Lua events match them (its Blech: `mq/event_pattern.h`): text is compared ignoring the case of A-Z; a literal before the first `#...#` must start the line, and a pattern without any must be the whole line; each `#...#` (`#*#`, `#1#`, `#2#`, ..., or any other name, such as `#who#`) takes text up to the first place the literal after it is found, the last one the rest of the line, and the literal after that one must be found first at the line's end (so `#*# says #1#` on `A says B says C` gives `B says C`); line breaks are ordinary text. `fn(line, arg1, arg2, ...)` gets each `#n#`'s text by its number, `""` for a number the pattern lacks, up to the highest `#n#` (at most 255; a larger one, `#*#` and other names match without being passed on). `|text|` matches what the script's `${...}` in it reads when the line comes (with the script's `read`; without it, the text as written), and its value is never parsed again; `##` and `||` stand for `#` and `|`. The line is matched and passed with its item links shown as their text, unless the event has `keepLinks`; lines of 2048 bytes or more and empty lines raise no events. Each pattern is matched on its own, where MQ's shared tree of patterns can turn down a line (a deliberate difference). A script has at most 256 events, a pattern is at most 1024 bytes and a name 256, and a script's patterns together at most 32 KB (an error past them): every pattern is matched against every chat line, outside the script's time slice. A line another script or a plugin wrote (`print`, `/echo`, `WriteChatf`) raises events too, as `/echo` does in MQ, but a handler then gets no more than that code may do: one that would get more runs as a thread of its own (as a bind), held to both scripts' capabilities for each of its resumes, and `doevents` goes on without waiting for it (back in its own Lua loop, so a handler whose own line raises its event again keeps the script busy, paused each frame like any loop, but cannot hold the client) |
 | `mq.bind('/cmd', fn)`, `mq.unbind` | a command (needs `commands`); `fn` gets the words and may `mq.delay`. The client's own commands cannot be bound: the game's (with their abbreviations, so not `/g` or `/r` either), `/lua`, `/plugin` and MQ's (`/echo`, ...), nor a name another script or plugin has now (an error naming it): what the player types for one is never handed to another. A bind runs with the script's capabilities and those of whoever ran the command (another script, a plugin, the player all) together, at its start and again after each `mq.delay` |
 | `mq.imgui.init(name, fn)`, `mq.imgui.destroy`, `mq.imgui.exists` | a window drawn each frame with `ImGui` |
 | `mq.web.open(url [, w, h])`, `.navigate`, `.nav`, `.close`, `.eval`, `.post`, `.messages`, `.text`, `.state`, `.tabs`, `.view(tab, w, h)`, `.available` | the script's own tabs of the in-game browser ("Web pages" below); `view` in an `mq.imgui` window |
 | `mq.parse(text)`, `mq.gettime()`, `mq.exit()` | |
 | `mq.getAllSpawns()`, `mq.getFilteredSpawns(fn)` | spawn values |
-| `mq.pickle(path, table)`, `dofile(path)` / `loadfile(path)` | settings files under `mq.configDir` (`scripts/config/`, or `scripts/config/<script>/` for a script without every capability, above); read back as data, with nothing to call |
+| `mq.pickle(path, table)`, `dofile(path)` / `loadfile(path)` | settings files under `mq.configDir` (`scripts/config/`, or `scripts/config/<script>/` for a script without every capability, above); read back as data, with nothing to call: the file runs with an empty environment, and `loadfile` hands back only what it returned, refusing a file whose values are or hold a function (`nil` and why; `dofile` raises it), since a script writes these files as it likes. A file is at most 8 MiB, and a write that would leave `mq.configDir` holding more than 1000 files or 64 MiB is refused (an error) |
 | `mq.luaDir`, `mq.configDir` | |
 | `print(...)`, `printf(fmt, ...)` | the chat window |
 | `require('mq')`, `require('ImGui')`, `require('mymodule')` | modules next to the script or in the script folders. **Each module file is checked like the script: the server's, or the player's when allowed. A module runs with the requiring script's capabilities, so its own file must be allowed at least those:** an add-on's module (under its manifest's ceiling) does not run in a script that may do more, while the player's own libraries (`lib/Write.lua`) still serve the player's scripts and add-ons. |
@@ -227,7 +241,8 @@ The data types use MQ's member names and inheritance:
   `Lower`, `Left`, `Right`, `Mid`, `Find`, `Compare`, `CompareCS`, `Equal`, `NotEqual`, `EqualCS`, `NotEqualCS`, `Arg`,
   `Count`, `Token`, `Replace`, `StripLinks`), `bool`. They follow MQ2BasicTypes.cpp, edge cases included: a member
   that needs an index is NULL without one (`Left[0]` too), `Arg` splits as MQ's GetArg (a run of separators is one, a
-  "quoted run" is one argument), `Token` looks for each next separator from one past the last. MQ's int and int64 are
+  "quoted run" is one argument), `Token` looks for each next separator from one past the last. `Replace`'s result is
+  cut to 2047 bytes (an MQ string's room), so a `Replace` nested in itself cannot grow without end. MQ's int and int64 are
   one type here: a value that fits 32 bits has int's `Hex` ("0xFFFFFFFF" for -1) and 16-bit `LowPart`/`HighPart`, a
   larger one int64's. Two deliberate differences: `float.Prettify` groups the number (MQ's prints the float's bits as
   an integer), and `Compare` gives -1, 0 or 1 (MQ's only promises the sign). `Int[...]` and `float.Int` cut toward
@@ -324,7 +339,7 @@ A script can extend the client as a compiled plugin does, with no native code: t
 | `set_player_classes(mask)`, `set_character_classes(name, mask)`, `set_pet_list{{spawn =, class =}}`, `set_vitals{max_hp =, ...}` | what the server knows (`extend`) |
 | `on_packet(stream, direction, opcode, fn)` | `fn(opcode, data)` for each such packet (`'world'` / `'zone'`, `'in'` / `'out'`, opcode 0 all): `true` drops it, a string replaces its data. With Lua's `string.pack` / `string.unpack` a script reads and writes any layout (`packets`) |
 | `send_packet(stream, opcode, data)` | a packet to the server (`packets`) |
-| `ui_function(name, fn)`, `option{name, label, min, max, get, set}`, `menu(label, command)` | for its windows, as a compiled plugin's (`ui`); `eq.Plugin("<script name>")` |
+| `ui_function(name, fn)`, `option{name, label, min, max, get, set}`, `menu(label, command)` | for its windows, as a compiled plugin's (`ui`); `eq.Plugin("<script name>")`. A Lua social cannot call them (an error): its state goes whenever the social is edited, and its name is only its title |
 | `player()`, `spawn(id)`, `spawns()`, `spell(id)`, `item(slot [, sub])`, `buff(i)`, `xtarget(i)`, `eqstr(id, ...)`, `zone_name(id)`, `server()` | the game state as tables (`read`); `server()` is the server this login is on (`{name, host, port, world, world_host}`, nil before the world login); `player()`'s `cur_hp` and `max_hp`, like a compiled plugin's `HailstonePlayer` and `Me.CurrentHPs`, include the items' HP that EQEmu's own HP update leaves out, as the windows show them |
 | `spell(id)` display fields | raw spell data: `range`, `ae_range`, `push_back`, `duration_formula`, `duration_cap` (ticks), `spell_type`, `resist`, `resist_adj`, `spell_icon`, `category`, `subcategory`, `cast_on_you`, `cast_on_other`, `wear_off`, and `effects` (12 1-based entries with `effect`, `base`, `base2`, `max`, `formula`). These are the loaded record values, not computed duration or effect descriptions; a script decides how to present them. |
 | `eq.DisplaySpellId(n)`, `eq.DisplayItemData(n)` | in a Lua UI window, read the actual spell ID or item in display instance 1..6, or nil when absent. Item data gives `id`, `name`, `icon`, `lore`, `value` (copper), `stackCount`, `damage`, `delay`, `itemType` and `favor` (`stack_count` and `item_type`, the names before, are kept); this is the inspected item, not necessarily one in inventory. |
@@ -395,6 +410,9 @@ command lines, and its hot button then runs that Lua with the same `mq` module s
   cooldown (0..1 of a sweep left), overlay (corner text), enabled (false: dimmed), tooltip}`, or just a label string.
   It runs at most every 200 ms, reads the game state only, and cannot send commands.
 
+A social is named `social '<title>'` in messages, its `mq.configDir` and its other folders; no script may have a name
+that starts `social '`.
+
 ```lua
 -- [press]: heal the target, the big heal under 50% health; Shift heals yourself
 if button.shift then mq.cmd('/target id ' .. mq.TLO.Me.ID()) end
@@ -463,6 +481,10 @@ Callbacks:
   client's own, not those a script or plugin writes (`print`, `/echo`, `WriteChatf`, a reply to its command), as MQ
   hands its own lines to `OnWriteChatColor` and not here: a plugin that answers "Bob tells you, ..." would otherwise
   answer whatever another add-on printed
+  Combat hit lines (melee and spell damage, heals) reach these hooks as the full sentence whatever the player's Hit
+  Modes: unlike MQ, whose hook sees the line as RoF2 displays it, an abbreviated or number-only line is never what a
+  hook gets, so a parser matches one form. A hook that rewrites such a line shows its rewrite in full, the hit mode
+  set aside for that line
 - `OnUpdateImGui`, `OnPacket(stream, direction, packet)` (nonzero drops it)
 
 Host functions: `WriteChatf`, `DoCommand(f)`, `AddCommand` (needs `commands`; 0 for one of the client's own commands, as `mq.bind`), `RemoveCommand`, `ParseMacroData` (`${...}`, so the
@@ -584,12 +606,48 @@ call, since a client older than the call has a shorter table. The structs a plug
 ..., `HailstoneWebState`) carry their size too and the client fills what both know; `HailstoneWebState`'s `size` is a `size_t`
 (as ABI 3 shipped it), the others' a `uint32_t`.
 
-Buff and spawn records: `get_buff_data_bulk(host, out, out_size)`, `get_pet_buff_data_bulk(host, out, out_size)` and
-`get_spawns_data_bulk(host, out, out_size)` (with `read`; added later in ABI 3, so test `HAILSTONE_HOST_HAS(host, <field>)` first;
+The cursor item's origin: `cursor_origin(host)` (with `read`; added later in ABI 3, so test
+`HAILSTONE_HOST_HAS(host, cursor_origin)` first) says how the item on the cursor now got there, for a plugin that
+puts away or destroys what the server hands the player:
+
+| Value | Meaning |
+|---|---|
+| `HAILSTONE_CURSOR_ORIGIN_UNKNOWN` (0) | not known, or nothing on the cursor, or the plugin lacks `read`. The item was on the cursor at the zone-in (OP_CharInventory), replaced an item already on the cursor, or got there some way the client does not mark. Treat it as the player's: never destroy it unattended. |
+| `HAILSTONE_CURSOR_ORIGIN_INVENTORY` (1) | the player picked it up from their own inventory: a click on a slot, or part of a stack split off with the quantity slider. |
+| `HAILSTONE_CURSOR_ORIGIN_SERVER` (2) | the server put it on the empty cursor. |
+
+SERVER goes by how the item arrives, not by whether the player chose it. Traced in EQEmu's zone code: summoned items,
+tradeskill results and quest rewards (`Client::SummonItem`), and anything else EQEmu queues on the cursor
+(`Client::PushItemOnCursor`: the cursor queue's item packet type 0x6a, and the queue's next item moved up with
+OP_MoveItem), arrive that way; so do a ground item the player clicks to pick up (`Object::HandleClick`) and an item
+looted onto the cursor (`Client::PutLootInInventory`), which come as item packets of type 0x67 to the empty cursor.
+An item packet or a server OP_MoveItem onto a cursor that already holds an item (a merge, a swap) reads UNKNOWN.
+
+The answer belongs to the item it was noted for: every change to the cursor slot counts
+(`game::Inventory::cursor_placement`), and the origin is kept with the count it was noted at, so when the cursor
+changes by a path that marks nothing the answer is UNKNOWN, never an earlier item's origin. Read it beside
+`get_item` on the cursor, then act with one of the two commands below, giving the id just read; each does nothing
+when the cursor no longer holds an item of that id, so an item the player put there in the meantime is not touched
+(the check is by item id, so it cannot tell two items of the same id apart):
+
+- `/destroycursor <id>`: destroys the item on the cursor (OP_MoveItem to nowhere, as `/destroy` without its
+  question). Never coin, never a bag (it may hold other items), never an item with a Keep mark, and only in a zone.
+  It does not refuse a real-estate item (docs/unknowns.md).
+- `/stowcursor <id>`: puts the item on the cursor into the first free general slot, else the first bag with room
+  that takes it, never a worn slot; "There are no open slots for the held item in your inventory." when there is none.
+
+Both need `actions`, as `/destroy` does. The id is a plain decimal number above 0; anything else does nothing.
+
+Buff and spawn records: `get_buff_data_bulk(host, out, out_size)`, `get_pet_buff_data_bulk(host, out, out_size)`,
+`get_spawns_data_bulk(host, out, out_size)` and `get_xtarget_data_bulk(host, out, out_size)` (with `read`; added later in ABI 3, so test `HAILSTONE_HOST_HAS(host, <field>)` first;
 `out` is an `unsigned char*` and `out_size` an `int32_t`) write records into `out` and return the bytes written.
-The client copies its own packed structs into the buffer, so the fields are in the machine's byte order
-(little-endian on every platform Hailstone runs on) and unaligned: read them with `ByteReader` or `memcpy`, never by
-casting a struct onto the buffer. Without `read` they return 0 and say so in the chat window.
+The records are the SDK's packed structs (`HS_Bulk_BuffData`, `HS_Bulk_PetBuffData`, `HS_Bulk_SpawnHeader`,
+`HS_Bulk_SpawnFixedRecord`, `HS_Bulk_XTargetData`, all in `#pragma pack(push, 1)`), in the machine's byte order (little-endian on every
+platform Hailstone runs on) and unaligned. For speed, the bulk reads are the one place where a struct may be cast
+onto the buffer, by the client writing it and by a plugin reading it: read each field through the packed struct
+(`rec->level`), which the compiler reads unaligned, and never keep a plain pointer or reference to a field (`&rec->x`),
+which may fault on a processor that needs aligned reads. `ByteReader` or `memcpy` work too. Without `read` they return 0
+and say so in the chat window.
 
 - `get_buff_data_bulk`: one record of `HAILSTONE_BUFF_RECORD_SIZE` (29) bytes per buff slot, slot 0 first, in the
   client's order: the long buff slots, then the song slots, then the one discipline slot, always last. RoF2 has 42
@@ -617,10 +675,11 @@ casting a struct onto the buffer. Without `read` they return 0 and say so in the
   spell's type (as above). An entry with spell id 0 is all zeros. The pet window's slot number is not included.
 
 - `get_spawns_data_bulk`: every spawn in the zone, as a 16-byte header followed by one record per spawn. Records are
-  added until fewer than 4096 bytes are left in `out`: below 4096 bytes it returns 0, and it needs at least 4112
-  bytes to write any record and a few hundred bytes per spawn on top; the header's count says how many records follow.
+  added until fewer than 4096 bytes are left in `out`, or until the next record (its fixed part and seven strings)
+  would not fit in what is left: below 4096 bytes it returns 0, and it needs at least 4112 bytes to write any record
+  and a few hundred bytes per spawn on top. Only whole records are written; the header's count says how many follow.
 
-  Header:
+  Header (`HS_Bulk_SpawnHeader`, `HS_BULK_SPAWN_HEADER_SIZE` = 16 bytes):
 
   | Offset | Type | Field |
   |---|---|---|
@@ -629,48 +688,53 @@ casting a struct onto the buffer. Without `read` they return 0 and say so in the
   | 8 | f32 | the player's y |
   | 12 | f32 | the player's z |
 
-  Each record is 128 fixed bytes:
+  Each record (`HS_Bulk_SpawnFixedRecord`) is `HS_BULK_SPAWN_RECORD_SIZE` = 92 fixed bytes:
 
   | Offset | Type | Field |
   |---|---|---|
   | 0 | i32 | spawn id |
   | 4 | u32 | flags (below) |
-  | 8 | i32 | blind: always 0 |
-  | 12 | i32 | body type id |
-  | 16 | i32 | class id |
-  | 20 | i32 | con colour against the player's level, as a chat colour (`CONCOLOR_*`: 6 grey, 2 green, 18 light blue, 4 blue, 10 white, 15 yellow, 13 red) |
-  | 24 | i32 | current endurance: always 0 |
-  | 28 | i64 | current HP: the HP percent, as the server sends it |
-  | 36 | i32 | current mana: always 0 |
-  | 40 | i32 | gender |
-  | 44 | i64 | guild id |
-  | 52 | f32 | heading in degrees (the server's heading x 0.703125) |
-  | 56 | f32 | height (the model's avatar height) |
-  | 60 | i32 | level |
-  | 64 | f32 | look: always 0 |
-  | 68 | i32 | master: the pet owner's spawn id, 0 for none |
-  | 72 | i32 | max endurance: always 0 |
-  | 76 | f32 | max range: 14.5, or 0 for a ground item |
-  | 80 | f32 | max range to: 14.5, or 0 for a ground item |
-  | 84 | i64 | HP percent |
-  | 92 | i32 | mana percent: always 0 |
-  | 96 | i32 | pet id: always 0 |
-  | 100 | i32 | player state, as the server sends it |
-  | 104 | i32 | race id |
-  | 108 | i32 | target of target id: always 0 |
-  | 112 | f32 | x |
-  | 116 | f32 | y |
-  | 120 | f32 | z |
-  | 124 | i32 | deity (tells a player's corpse from an NPC's) |
+  | 8 | i32 | body type id |
+  | 12 | i32 | class id |
+  | 16 | i32 | consider colour, the one `/consider` and the target window show (the original's con level, with the server's PvP rules), as a chat colour (`CONCOLOR_*`: 6 grey, 2 green, 18 light blue, 4 blue, 10 white, 15 yellow, 13 red); 6 also for a corpse |
+  | 20 | i64 | current HP: the HP percent, as the server sends it |
+  | 28 | i32 | gender |
+  | 32 | i64 | guild id |
+  | 40 | f32 | heading in degrees (the server's heading x 0.703125) |
+  | 44 | f32 | height (the model's avatar height) |
+  | 48 | i32 | level |
+  | 52 | i32 | master: the pet owner's spawn id, 0 for none |
+  | 56 | f32 | max range: 14.5, or 0 for a ground item |
+  | 60 | f32 | max range to: 14.5, or 0 for a ground item |
+  | 64 | i32 | HP percent |
+  | 68 | i32 | player state, as the server sends it |
+  | 72 | i32 | race id |
+  | 76 | f32 | x |
+  | 80 | f32 | y |
+  | 84 | f32 | z |
+  | 88 | i32 | deity (tells a player's corpse from an NPC's) |
 
   Then seven strings, each a u16 length followed by that many bytes with no terminating NUL: the body type's
-  description, the clean name, the display name, the name, the race's name, the suffix, and the spawn type's
+  description, the clean name, the display name (the same text as the clean name, as `${Spawn.CleanName}` and
+  `${Spawn.DisplayName}` give them), the name, the race's name, the suffix, and the spawn type's
   description.
 
   Flags (bit: meaning): 0 AFK, 1 aggressive (player state 0x04 or 0x08), 2 anonymous, 3 buyer, 4 dead, 5 ducking,
   6 feigning death, 7 GM, 8 invisible, 9 summoned, 10 levitating, 11 link dead, 12 on a mount, 13 moving (a run speed
   other than 0), 14 named, 15 roleplaying, 16 sitting, 17 sneaking, 18 standing, 19 stunned (player state 0x20),
   20 targetable, 21 trader, 22 underwater. Bits 8, 17 and 22 are never set at present.
+
+- `get_xtarget_data_bulk`: one record (`HS_Bulk_XTargetData`) of `HS_BULK_XTARGET_RECORD_SIZE` (16) bytes per extended target slot, slot 0
+  first, as many as fit in `out_size` (only whole records; 0 bytes before the server sent the list). The slots are
+  the same ones `get_xtarget` reads by index, a slot the server's extension hides from the window included. RoF2 has
+  at most 20 slots (EQEmu: 5 plus the AA's), so 512 bytes is plenty.
+
+  | Offset | Type | Field |
+  |---|---|---|
+  | 0 | i32 | the slot's type, as `HailstoneXTarget.type`: an `HS_BULK_XTARGET_*` value (`enum HS_BULK_XTargetTypes`, the protocol's 0 to 26: 0 empty, 1 auto hater, 2 / 3 a specific PC / NPC, ... 25 / 26 the mercenary and its target) |
+  | 4 | i32 | the slot's spawn id, 0 for none |
+  | 8 | i32 | the aggro meter's percent for the slot's spawn, as the server sent it (entries 7 to 26 of the meter, the extended target window's aggro labels; on EQEmu an NPC's is our hate against its current target's, a player's is its hate against our target's top). 0 with no spawn in the zone, without the meter (EQEmu's `Character:EnableAggroMeter`), or for a slot past the 20th |
+  | 12 | i32 | the spawn's HP percent, as the extended target window draws it: the player's own from its points (items' HP included), anyone else's as the server last sent it (EQEmu sends it to everyone with the spawn on their list when the percent changes); 0 with no spawn in the zone or for a corpse |
 
 ### Connections (ABI 2)
 
@@ -733,7 +797,9 @@ The Modern pack's extended target window does too (`ui/modern/lib/xtarget.lua`):
 {width = n, draw = fn(r, x0, y0, x1, y1, s), style = fn(r)}}` keeps `row.width` pixels at the right of each filled row
 for the plugin's part (its buttons take their own clicks; a click on the rest still targets), and `style` can fade a
 row, outline it, strike its name through or put a small label after it. `r.n` is the slot (0-based:
-`hailstone.xtarget(r.n + 1)` in a script). A window named "Extended Target" that calls it covers the pack's:
+`hailstone.xtarget(r.n + 1)` in a script). Every slot has a row, an empty one too, but `draw` and `style` are called
+for filled rows only. The rows sit in a scrolling child window of the frame, which clips them (`width` is the frame's
+width until the player resizes it); the screen coordinates `draw` is given already follow the scroll. A window named "Extended Target" that calls it covers the pack's:
 
 ```lua
 local ok, xtarget = pcall(dofile, "lib/xtarget.lua")   -- an older client has no lib/xtarget.lua
@@ -806,20 +872,26 @@ declared (docs/addons.md). Whatever its capabilities, a plugin's code:
   `dofile` sets;
 - sees `eq`, `ui` and the standard libraries read-only, so it cannot change what the pack's windows call;
 - reaches only its own owner's exported functions, options and menu entries: `eq.Plugin` gives nil for another
-  plugin (and an object for another that it finds elsewhere does nothing), `eq.PluginOptions` lists only its own,
-  and `eq.SetPluginOption` and `eq.PluginMenuClick` leave another's alone, since those run the other plugin's code
+  plugin (and an object for another that it finds elsewhere does nothing), `eq.PluginOptions` and `eq.PluginMenu`
+  list only its own (`eq.PluginMenuClick(i)` numbers its entries as that list does), and `eq.SetPluginOption` and
+  `eq.PluginMenuClick` leave another's alone, since those run the other plugin's code
   with the other's capabilities. The pack's own windows reach every plugin's;
 - keeps settings of its own: `ui.SetSetting(key, v)` writes `plugin.<owner>.<key>` in the pack's settings file (a
   window's place under `hud.` is the character's, as the pack's are), `ui.GetSetting(key)` reads that, else the
   pack's own key of that name (the palette, the place of a window it took over), and neither reaches the pack's test
   hooks (`test.*`, which click windows' children), the windows' switches (`enabled.*`) or another plugin's keys
   (`ui.SetSetting` refuses, and returns false for, a key with `=` or a line break or a value with a line break, since
-  the file is one `key=value` a line and such text would be read back as other keys);
-  `ui.DisableWindow(name)` turns off only its own window of that name;
+  the file is one `key=value` a line and such text would be read back as other keys); a plugin keeps at most 1024
+  keys, each at most 256 bytes with a value of at most 16 KiB (past that `ui.SetSetting` returns false, and a key it
+  has can still change); `ui.DisableWindow(name)` turns off only its own window of that name; it has at most 128
+  windows (`ui.window` raises past that);
 - runs for at most a second at a time (a window's draw, its file's load, a function of its that the pack calls) and
   the pack's own code for five: code that runs longer is stopped with an error, which a `pcall` of its own cannot
-  catch, and its window is turned off until its file changes; the UI's Lua state as a whole holds at most 1 GiB, and
-  an allocation past that fails in the code that asked for it. `collectgarbage` takes only `"count"` and `"step"`;
+  catch, and its window is turned off until its file changes. A long string match (`string.find`, `match`,
+  `gmatch`, `gsub` with a pattern that backtracks) counts too, and is stopped the same way. The UI's Lua state as a
+  whole holds at most 1 GiB, and an allocation past that fails in the code that asked for it; a plugin's code gets
+  three quarters of it, so what plugins hold leaves the pack's windows room. `collectgarbage` takes only `"count"`
+  and `"step"`;
 - uses the player's clipboard (`ui.GetClipboardText`, `ui.SetClipboardText`) only when its owner has every
   capability, as for a script: it holds whatever the player copied, a password too;
 - gets nil from the pre-game screens (`eq.LoginScreen` and the others hold the typed or saved password) and cannot
@@ -834,12 +906,13 @@ a line in the log once.
 
 | Needs | `eq` functions |
 |---|---|
+| never | the player's one-shot keys and requests, which the pack's windows take once: the chat input's (`eq.ChatTakeFocus`, with a pending Link All; `eq.ChatPage`, `eq.ChatHistory`) and the Lua social editor's (`eq.LuaSocialEditRequest`); nil to a plugin's code. `eq.ReplaceWindow` and `eq.WindowShown` do not put away the client's consent prompt nor its dialogs that act when answered (a confirmation, among them a destroy's; a trade, give, quantity, bazaar purchase, group invitation, respawn, large dialog or task offer) for a plugin |
 | nothing | everything that reads or draws (`eq.Item`, `eq.AllItems`, `eq.ItemStats`, `eq.ItemKept`, `eq.ItemJob`, `eq.ChildState`, `eq.ListRow`, `eq.SpellBook`, `eq.DrawMap`, ...), a window's place and size (`eq.ReplaceWindow`, `eq.WindowPlaced`, `eq.SizeWindow`), the map's zoom and pan, opening a menu (`eq.WindowContextMenu`, `eq.ChatMenu`, `eq.HotBarMenu`; choosing a row is below), the close-top-window key's press (`eq.TakeCloseTopWindow`) |
-| `commands` | `eq.ShowWindow`, `eq.SetOption`, `eq.SetUiIni`, `eq.ShowSpell`, the chat windows' setup (`eq.ChatNewWindow`, `eq.ChatSetFilter`, ...), the spell sets' and the autoskill list's editing, the map's find path, the Find window (`eq.FindOpen`) and its guide path (`eq.FindNpcPath`), the social editors, `eq.gamepad.set_*` |
+| `commands` | `eq.ShowWindow`, `eq.SetOption`, `eq.SetUiIni`, `eq.ShowSpell`, the chat windows' setup (`eq.ChatNewWindow`, `eq.ChatSetFilter`, ...), the spell sets' and the autoskill list's editing, the map's find path, the Find window (`eq.FindOpen`) and its guide path (`eq.FindNpcPath`), the social editors, `eq.gamepad.set_*` and `eq.gamepad.request_focus` (menu mode, as `set_mode`) |
 | `target` | `eq.FindNpcTarget` (the Find window's row) |
-| `move` | `eq.FindNpcWalk` (the Find window's Walk there) and `eq.ZoneExitWalk` (the zone finder's), both `/nav` walks |
-| `actions` | a stock window's controls (`eq.ClickChild`, `eq.ClickChildAt`, `eq.WindowButton`, `eq.StmlLink`, `eq.SetWindowText`, `eq.ListClick`, `eq.ListHeaderClick`, `eq.ComboSelect`, `eq.SetSlider`, `eq.SetTabPage`), the menus' rows (`eq.CascadeClick`, `eq.GameMenuClick`), items and the cursor (`eq.ClickSlot`, `eq.BagSlotClick`, `eq.BankSlotClick`, `eq.PlaceClick`, `eq.PickUp`, `eq.SortItems`, `eq.SellJunk`, `eq.BulkItems` (sell, tribute, destroy or withdraw chosen items), `eq.StopItemJob`, `eq.SetItemKept` / `eq.SetItemsKept` (a Keep mark taken off lets the item be destroyed), the parcels, `eq.gamepad.drop_cursor`), hot buttons and gems (`eq.ClickHotButton`, `eq.PressButtonFrom`, `eq.ClearCursorButton`, `eq.SpellGemClick`), spells and abilities (`eq.SpellBookClick`, `eq.SpellBookMemorize`, `eq.SpellBookSwap`, `eq.MemorizeSpellSet`, `eq.UseSkill`, `eq.AbilityBookUse`, `eq.AbilityBookAutoskillEnable`), socials (`eq.PressLuaSocial`, `eq.PressSocial`, `eq.StopSocial`, `eq.SocialToCursor`; `eq.SetLuaSocial` and `eq.LuaSocialDryRun`, which runs the code it is given with the server's Lua social capabilities, need `commands` too) |
-| checked by the function | the plugins' (above), the scripts' (refused), the pre-game screens' (nil), the web's (`web`); `eq.ChatSubmit`'s line goes through the command filter, which holds it to the plugin's capabilities as any command it sends (plain text needs `chat`, `/cast` needs `actions`) |
+| `move` | `eq.FindNpcWalk` (the Find window's Walk there) and `eq.ZoneExitWalk` (the zone finder's), both `/nav` walks. (`/nav` itself needs `move`, and the doors a walk opens on its way come with it; `/nav door ... click`, which clicks the door on arrival, needs `actions` too) |
+| `actions` | a stock window's controls (`eq.ClickChild`, `eq.ClickChildAt`, `eq.WindowButton`, `eq.StmlLink`, `eq.SetWindowText`, `eq.ListClick`, `eq.ListHeaderClick`, `eq.ComboSelect`, `eq.SetSlider`, `eq.SetTabPage`), the menus' rows (`eq.CascadeClick`, `eq.GameMenuClick`), items and the cursor (`eq.ClickSlot`, `eq.BagSlotClick`, `eq.BankSlotClick`, `eq.PlaceClick`, `eq.PickUp`, `eq.SortItems`, `eq.SellJunk`, `eq.BulkItems` (sell, tribute, destroy or withdraw chosen items), `eq.StopItemJob`, `eq.SetItemKept` / `eq.SetItemsKept` (a Keep mark taken off lets the item be destroyed), the parcels, `eq.gamepad.drop_cursor`), hot buttons and gems (`eq.ClickHotButton`, `eq.PressButtonFrom`, `eq.ClearCursorButton`, `eq.SpellGemClick`), spells and abilities (`eq.SpellBookClick`, `eq.SpellBookMemorize`, `eq.SpellBookSwap`, `eq.MemorizeSpellSet`, `eq.UseSkill`, `eq.AbilityBookUse`, `eq.AbilityBookAutoskillEnable`; `eq.AbilityBookAutoskill` and `eq.AbilityBookAutoskillRule`, which choose what the autoskill list uses later, need `commands` too), socials (`eq.PressLuaSocial`, `eq.PressSocial`, `eq.StopSocial`, `eq.SocialToCursor`; `eq.SetLuaSocial` and `eq.LuaSocialDryRun`, which runs the code it is given with the server's Lua social capabilities, need `commands` too) |
+| checked by the function | the plugins' (above), the scripts' (refused; `eq.Scripts` lists only a script of the plugin's own name, with no folders), the pre-game screens' (nil), the web's (`web`); `eq.ChatSubmit`'s line goes through the command filter, which holds it to the plugin's capabilities as any command it sends (plain text needs `chat`, `/cast` needs `actions`) |
 
 What stays shared: a plugin can still write into the tables the pack keeps in its globals (that is how its windows
 take part in the pack's focus and palette), so a plugin can upset how the pack's windows look or behave. It sees
@@ -847,9 +920,13 @@ each of those tables through a view: reads and writes go through to the table, b
 (or into a table of its own that it puts there) runs as the plugin whenever the pack calls it, does nothing once the
 plugin unloads, and cannot be called by another plugin's code; the view's metatable cannot be read or changed,
 `rawset` refuses it, and a plugin's tables cannot have a `__gc` finalizer. `next` and `rawget` see nothing through a
-view (`pairs`, `ipairs`, `#` and `table.*` work). It cannot get the pack's own `eq` or `ui` functions to do
-something under the player's authority. What is not covered: a function or table the plugin hands a pack function
-as an argument, which that function may keep as it is (docs/todo.md). A player who copies the same files into a UI
+view (`pairs`, `ipairs`, `#` and `table.*` work). The pack's tables reach the plugin only as views, whatever the way:
+a pack function it calls (one of the pack's globals, one in a shared table, one the pack put in `ui`) returns views,
+and raises them; the tables the pack passes the plugin's functions as arguments are views (its own tables handed back
+are its own); and `getmetatable` gives a metatable the plugin did not set itself (a pack table's, a userdata's) as a
+view. It cannot get the pack's own `eq` or `ui` functions to do something under the player's authority. What is not
+covered: a function or table the plugin hands a pack function as an argument, or returns to the pack from a
+function the pack calls, which the pack may keep as it is (docs/todo.md). A player who copies the same files into a UI
 pack makes them the pack's own, with the player's authority.
 
 How plugins load:

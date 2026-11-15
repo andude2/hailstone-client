@@ -176,6 +176,17 @@ int code_editors_oldest() {
     return oldest;
 }
 
+namespace {
+// The complete function (1) with the text before the cursor (2: a std::string), as CodeEditor's protected call.
+int complete_call(lua_State* L) {
+    const auto* before = static_cast<const std::string*>(lua_touserdata(L, 2));
+    lua_settop(L, 1);
+    lua_pushlstring(L, before->data(), before->size());
+    lua_call(L, 1, 2);
+    return 2;
+}
+} // namespace
+
 int CodeEditor(lua_State* L) {
     const char* id = luaL_checkstring(L, 1);
     std::size_t len = 0;
@@ -187,7 +198,7 @@ int CodeEditor(lua_State* L) {
     int error_line = 0, complete = 0;
     bool read_only = false;
     if (lua_istable(L, 5)) {
-        lua_getfield(L, 5, "error_line");
+        lua_getfield(L, 5, "error_line"); // (a metamethod here may raise: nothing with a destructor exists yet)
         error_line = static_cast<int>(lua_tointeger(L, -1));
         lua_getfield(L, 5, "read_only");
         read_only = lua_toboolean(L, -1) != 0;
@@ -296,9 +307,12 @@ int CodeEditor(lua_State* L) {
             st.asked = before;
             st.names.clear();
             st.selected = 0;
+            // The text is pushed inside the protected call (complete_call): a push that raised here (the state's
+            // memory limit) would skip `text`'s and `before`'s destructors and the ID pushed.
+            lua_pushcfunction(L, &complete_call);
             lua_pushvalue(L, complete);
-            lua_pushlstring(L, before.data(), before.size());
-            if (lua_pcall(L, 1, 2, 0) == LUA_OK) {
+            lua_pushlightuserdata(L, &before);
+            if (lua_pcall(L, 2, 2, 0) == LUA_OK) {
                 st.start = static_cast<int>(lua_tointeger(L, -2)) - 1;
                 if (lua_istable(L, -1)) {
                     // Raw: a __len of the script's could raise here, outside the pcall, past `text` and the ID pushed.
@@ -346,7 +360,11 @@ int CodeEditor(lua_State* L) {
     }
     ImGui::PopID();
 
-    lua_pushlstring(L, text.data(), text.size());
+    // (Moved out of this frame first: a push that raised would skip its destructor.)
+    thread_local std::string held;
+    held = std::move(text);
+    std::string().swap(text);
+    lua_pushlstring(L, held.data(), held.size());
     lua_pushboolean(L, changed);
     lua_pushinteger(L, st.cursor);
     lua_pushboolean(L, active);

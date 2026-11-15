@@ -361,6 +361,7 @@ typedef struct MatchState {
   const char *p_end;  /* end ('\0') of pattern */
   lua_State *L;
   int matchdepth;  /* control for recursive depth (to avoid C stack overflow) */
+  int hs_steps;  /* Hailstone: steps left before the next hs_match_check */
   unsigned char level;  /* total number of captures (finished or unfinished) */
   struct {
     const char *init;
@@ -371,6 +372,31 @@ typedef struct MatchState {
 
 /* recursive function */
 static const char *match (MatchState *ms, const char *s, const char *p);
+
+
+/*
+** Hailstone (a change to Lua 5.4.7, listed in THIRD_PARTY.md): a long match
+** is held to the time limit of the code that runs it. A match runs no Lua
+** instructions, so the count hook that stops a runaway script never sees it
+** (string.find(("a"):rep(1e5), ("a-"):rep(20).."b") ran for minutes). Every
+** HS_MATCH_STEPS steps (match, singlematch, a character of %b) the function
+** the state's registry holds under HS_MATCH_CHECK, when it holds one, is
+** called; it raises an error once that code has run too long.
+*/
+#define HS_MATCH_CHECK	"hailstone.match_check"
+#define HS_MATCH_STEPS	0x10000
+
+static void hs_match_check (MatchState *ms) {
+  ms->hs_steps = HS_MATCH_STEPS;
+  luaL_checkstack(ms->L, 2, "pattern too complex");
+  if (lua_getfield(ms->L, LUA_REGISTRYINDEX, HS_MATCH_CHECK) == LUA_TFUNCTION)
+    lua_call(ms->L, 0, 0);
+  else
+    lua_pop(ms->L, 1);
+}
+
+#define hs_step(ms) \
+  { if (l_unlikely(--(ms)->hs_steps <= 0)) hs_match_check(ms); }
 
 
 /* maximum recursion depth for 'match' */
@@ -469,6 +495,7 @@ static int matchbracketclass (int c, const char *p, const char *ec) {
 
 static int singlematch (MatchState *ms, const char *s, const char *p,
                         const char *ep) {
+  hs_step(ms);  /* Hailstone */
   if (s >= ms->src_end)
     return 0;
   else {
@@ -493,6 +520,7 @@ static const char *matchbalance (MatchState *ms, const char *s,
     int e = *(p+1);
     int cont = 1;
     while (++s < ms->src_end) {
+      hs_step(ms);  /* Hailstone */
       if (*s == e) {
         if (--cont == 0) return s+1;
       }
@@ -570,6 +598,7 @@ static const char *match_capture (MatchState *ms, const char *s, int l) {
 static const char *match (MatchState *ms, const char *s, const char *p) {
   if (l_unlikely(ms->matchdepth-- == 0))
     luaL_error(ms->L, "pattern too complex");
+  hs_step(ms);  /* Hailstone */
   init: /* using goto to optimize tail recursion */
   if (p != ms->p_end) {  /* end of pattern? */
     switch (*p) {
@@ -758,6 +787,7 @@ static void prepstate (MatchState *ms, lua_State *L,
                        const char *s, size_t ls, const char *p, size_t lp) {
   ms->L = L;
   ms->matchdepth = MAXCCALLS;
+  ms->hs_steps = HS_MATCH_STEPS;  /* Hailstone */
   ms->src_init = s;
   ms->src_end = s + ls;
   ms->p_end = p + lp;

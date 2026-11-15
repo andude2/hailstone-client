@@ -105,18 +105,25 @@ local function filtersMenu(slot)
     end
   end
   drawGroup(0, rootName)
+  ui.EndMenu()
+end
+
+local function hitModesMenu()
   if ui.BeginMenu("Hit Modes") then
-    for i, h in ipairs(eq.ChatHitModes()) do
-      if ui.BeginMenu(h.name .. "##hit" .. i) then
+    local modes = eq.ChatHitModes()
+    local function drawMode(h)
+      local id = h.id
+      if ui.BeginMenu(h.name .. "##hit" .. id) then
         for m, label in ipairs(h.modes) do
-          if ui.MenuItem(label .. "##hitmode" .. i .. m, h.mode == m - 1) then eq.ChatSetHitMode(i, m - 1) end
+          if ui.MenuItem(label .. "##hitmode" .. id .. m, h.mode == m - 1) then eq.ChatSetHitMode(id, m - 1) end
         end
         ui.EndMenu()
       end
     end
+    for i, h in ipairs(modes) do if i ~= 7 then drawMode(h) end end
+    if modes[7] then drawMode(modes[7]) end
     ui.EndMenu()
   end
-  ui.EndMenu()
 end
 
 local function menu(slot, c, w)
@@ -131,6 +138,7 @@ local function menu(slot, c, w)
     if ui.MenuItem("Always Chat Here", here) then eq.ChatSetAlwaysHere(slot, not here) end
     ui.Separator()
     filtersMenu(slot)
+    hitModesMenu()
     local _, _, current = eq.ChatInfo(slot)
     if not (w.tabs[w.tab] or {}).tell and ui.BeginMenu("Default Channel") then
       for i, name in ipairs(eq.ChatDefaultChannels()) do
@@ -355,9 +363,28 @@ local function chatWindow(slot)
   return bySlot[slot]
 end
 
+-- What is kept by slot (a half-typed line, its links) belongs to the character: it is dropped when the character
+-- select (or creation) screen opens, or another character is seen in game. (Checked once a frame, before the
+-- windows' own check: zoning shows no character for a while, and keeps it all.)
+local checkedFrame, lastName, lastAtSelect = -1, nil, false
+local function forgetOnCharacterChange()
+  local frame = ui.GetFrameCount()
+  if frame == checkedFrame then return end
+  checkedFrame = frame
+  local gs = eq.GameState and eq.GameState()
+  local atSelect = gs == 1 or gs == 2
+  local name = eq.Name and eq.Name()
+  if (atSelect and not lastAtSelect) or (name and lastName and name ~= lastName) then
+    for k in pairs(chats) do chats[k] = nil end
+  end
+  lastAtSelect = atSelect
+  if atSelect then lastName = nil elseif name then lastName = name end
+end
+
 for slot = 1, 32 do
   local window = "Chat" .. slot
   ui.window("Chat " .. slot, function()
+    forgetOnCharacterChange()
     if not (eq.UiReady or eq.InGame)() then return end
     local win = chatWindow(slot)
     if not win then chats[slot] = nil; return end

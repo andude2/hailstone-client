@@ -46,7 +46,8 @@ struct Window {
     std::string tag; // its script's folder tag: "" the UI's own (LuaUi::set_folders)
     int draw_ref = LUA_NOREF; // registry reference to the draw function
     bool enabled = true;      // the player's choice (saved as enabled.<name>)
-    bool failed = false;      // a script error turned it off until the file reloads
+    bool failed = false;      // a script error turned it off until the file reloads (or, with no file, it is retried)
+    std::string error;        // with no file (registered outside its folder's loading): its error, shown on its own
     const char* section = nullptr; // its name in the frame's timed sections (core/frame_sections.h)
 };
 
@@ -67,6 +68,16 @@ constexpr std::size_t kMemoryLimit = std::size_t{1} << 30;
 constexpr auto kPackBudget = std::chrono::milliseconds(5000); // the pack's own code, one window's draw or one load
 constexpr auto kPluginBudget = std::chrono::milliseconds(1000); // a plugin folder's
 constexpr int kHookCount = 10000; // instructions between the budget's checks
+// What the plugin folders' code may allocate: the limit less this share, which the pack's own code keeps, so a
+// plugin that holds what it allocated (a huge string in its globals) cannot leave the pack's windows without memory.
+constexpr std::size_t kPackReserveShare = 4; // a quarter
+// A plugin folder's share of the host's C++ state, which its code could otherwise grow without end: its settings
+// (ui.SetSetting with ever new keys, saved to the file), the length of each, and its windows (ui.window with ever new
+// names; each window's name is also kept for the frame's timed sections).
+constexpr std::size_t kPluginSettings = 1024;
+constexpr std::size_t kPluginSettingKey = 256, kPluginSettingValue = 16384;
+constexpr std::size_t kPluginWindows = 128;
+constexpr std::size_t kPluginSections = 512; // plugin windows' timed sections kept by name, all plugins together
 
 constexpr auto kGcSlice = std::chrono::microseconds(1000);
 constexpr int kGcStart = 2; // a cycle starts when the heap is this many times the live heap after the last
@@ -96,15 +107,19 @@ struct LuaUi::Impl {
     int eq_ref = LUA_NOREF, ui_ref = LUA_NOREF; // the pack's eq and ui tables
     bool show_demo = false;
     bool show_control = false;
-    std::map<std::string, std::string> settings;
+    using Settings = std::map<std::string, std::string, std::less<>>;
+    Settings settings;
     bool settings_dirty = false;
     Clock::time_point settings_changed{};
     // the character's layout (set_character_settings): its window keys over the shared file's
     fs::path character_file;
-    std::map<std::string, std::string> character_settings;
+    Settings character_settings;
     bool character_dirty = false;
+    std::map<std::string, std::size_t, std::less<>> plugin_settings; // each plugin's count of keys (plugin_keys)
+    std::size_t plugin_sections = 0; // plugin windows' timed sections kept by name (kPluginSections)
     Clock::time_point last_scan{};
     std::size_t memory = 0; // what the state holds now (alloc)
+    std::size_t allocated = 0; // every byte the state has allocated (alloc: what grew), freed or not; it wraps
     std::size_t memory_limit = kMemoryLimit;
     int limited = 0; // >0: Lua code of ours runs (Budget), so an allocation past the limit fails
     Clock::time_point deadline = Clock::time_point::max(); // the running code's end (Budget; budget_hook)
@@ -150,9 +165,16 @@ struct LuaUi::Impl {
             m->memory -= old;
             return nullptr;
         }
-        if (m->limited > 0 && new_size > old && m->memory + (new_size - old) > m->memory_limit) return nullptr;
+        if (m->limited > 0 && new_size > old) {
+            const std::size_t limit =
+                g_caller_tag.empty() ? m->memory_limit : m->memory_limit - m->memory_limit / kPackReserveShare;
+            if (m->memory + (new_size - old) > limit) return nullptr;
+        }
         void* p = std::realloc(ptr, new_size);
-        if (p) m->memory = m->memory - old + new_size;
+        if (p) {
+            m->memory = m->memory - old + new_size;
+            if (new_size > old) m->allocated += new_size - old;
+        }
         return p;
     }
 
@@ -168,6 +190,12 @@ struct LuaUi::Impl {
                                             .count()));
         }
         if (lua_gethookcount(L) == 1) lua_sethook(L, &budget_hook, LUA_MASKCOUNT, kHookCount);
+    }
+
+    // The state's long-match check (kMatchCheckKey): a string match past the deadline is stopped as Lua code is.
+    static int match_check(lua_State* L) {
+        budget_hook(L, nullptr);
+        return 0;
     }
 
     // While it lives, Lua code of ours runs: the memory limit holds, and the code may run until `budget` from now
@@ -190,8 +218,8 @@ struct LuaUi::Impl {
     Clock::duration budget_for(const std::string& tag) const { return tag.empty() ? pack_budget : plugin_budget; }
 
     // ---- settings: key=value lines, for window options the scripts keep
-    static std::map<std::string, std::string> read_settings(const fs::path& file) {
-        std::map<std::string, std::string> out;
+    static Settings read_settings(const fs::path& file) {
+        Settings out;
         std::ifstream f(file);
         std::string line;
         while (std::getline(f, line)) {
@@ -201,12 +229,15 @@ struct LuaUi::Impl {
         return out;
     }
     // Atomically (core/atomic_file.h): a crash, a full disk or another client reading it never finds it half written.
-    static void write_settings(const fs::path& file, const std::map<std::string, std::string>& values) {
+    static void write_settings(const fs::path& file, const Settings& values) {
         std::string text;
         for (const auto& [k, v] : values) text += k + '=' + v + '\n';
         write_file_atomic(file, text);
     }
-    void load_settings() { settings = read_settings(settings_file); }
+    void load_settings() {
+        settings = read_settings(settings_file);
+        plugin_settings.clear();
+    }
     void save_settings_now() {
         if (settings_dirty) write_settings(settings_file, settings);
         if (character_dirty && !character_file.empty()) write_settings(character_file, character_settings);
@@ -217,14 +248,24 @@ struct LuaUi::Impl {
         if ((!settings_dirty && !character_dirty) || Clock::now() - settings_changed < std::chrono::seconds(1)) return;
         save_settings_now();
     }
-    bool per_character(const std::string& key) const {
+    bool per_character(std::string_view key) const {
         return !character_file.empty() && LuaUi::character_setting(plugin_key_rest(key));
     }
-    const std::string* get_setting(const std::string& key) const {
-        if (per_character(key))
+    const std::string* get_setting(std::string_view key) const {
+        if (per_character(key)) {
             if (auto it = character_settings.find(key); it != character_settings.end()) return &it->second;
+            const auto rest = plugin_key_rest(key);
+            // Quest identities and open sections belong to this character, never to a shared layout or another
+            // character's old global settings. Window geometry still inherits the shared layout as before.
+            if (rest.starts_with("tasks.tracked.") || rest.starts_with("tasks.tracker.") ||
+                rest.starts_with("tasks.section.") || rest == "tasks.category") return nullptr;
+        }
         auto it = settings.find(key);
         return it == settings.end() ? nullptr : &it->second;
+    }
+    static bool task_default(std::string_view key, std::string_view value) {
+        return ((key.starts_with("tasks.tracked.") || key.starts_with("tasks.tracker.collapsed.")) && value == "0") ||
+               (key.starts_with("tasks.section.") && value == "objectives");
     }
     // The file is one key=value a line: a key with '=' or a line break, or a value with a line break, would be read
     // back as other keys (a plugin's value as the pack's test hooks), so it is refused.
@@ -232,23 +273,77 @@ struct LuaUi::Impl {
         return !key.empty() && key.find_first_of("=\r\n") == std::string_view::npos &&
                value.find_first_of("\r\n") == std::string_view::npos;
     }
-    bool set_setting(const std::string& key, const std::string& value) {
+    // The plugin tag a key of a plugin's is under ("plugin:X" of "plugin.plugin:X.key"), else "".
+    static std::string_view plugin_key_tag(std::string_view key) {
+        const std::string_view rest = plugin_key_rest(key);
+        if (rest.size() == key.size()) return {};
+        return key.substr(7, key.size() - rest.size() - 8); // between "plugin." and the '.' before rest
+    }
+    // How many keys the plugin `tag` has in either file, counted once and then kept as keys are added and dropped.
+    std::size_t& plugin_keys(std::string_view tag) {
+        auto it = plugin_settings.find(tag);
+        if (it != plugin_settings.end()) return it->second;
+        const std::string prefix = plugin_key(tag, "");
+        std::size_t n = 0;
+        for (const Settings* map : {&settings, &character_settings})
+            for (auto k = map->lower_bound(prefix); k != map->end() && k->first.starts_with(prefix); ++k) ++n;
+        return plugin_settings.emplace(std::string(tag), n).first->second;
+    }
+    // Writes `key` into `map`: false for a plugin's new key past its share (kPluginSettings).
+    bool store(Settings& map, std::string_view key, std::string_view value) {
+        auto it = map.find(key);
+        if (it != map.end()) {
+            it->second.assign(value);
+            return true;
+        }
+        const std::string_view tag = plugin_key_tag(key);
+        if (!tag.empty()) {
+            std::size_t& n = plugin_keys(tag);
+            if (n >= kPluginSettings) return false;
+            ++n;
+        }
+        map.emplace(std::string(key), std::string(value));
+        return true;
+    }
+    void erase(Settings& map, std::string_view key) {
+        auto it = map.find(key);
+        if (it == map.end()) return;
+        if (const std::string_view tag = plugin_key_tag(key); !tag.empty()) {
+            std::size_t& n = plugin_keys(tag);
+            if (n > 0) --n;
+        }
+        map.erase(it);
+    }
+    bool set_setting(std::string_view key, std::string_view value) {
         if (!storable(key, value)) return false;
+        if (!plugin_key_tag(key).empty() &&
+            (key.size() > kPluginSettingKey || value.size() > kPluginSettingValue)) return false;
         const std::string* now = get_setting(key);
         if (now && *now == value) return true;
         if (per_character(key)) {
-            character_settings[key] = value;
-            character_dirty = true;
+            // A quest's flag at its default (not tracked, expanded, on Objectives) is dropped, not written: these
+            // keys never fall back to the shared file, so a missing one reads as the default, and the file does
+            // not gain a line for every quest ever opened.
+            if (task_default(plugin_key_rest(key), value)) {
+                if (character_settings.find(key) != character_settings.end()) {
+                    erase(character_settings, key);
+                    character_dirty = true;
+                }
+            } else {
+                if (!store(character_settings, key, value)) return false;
+                character_dirty = true;
+            }
         } else {
-            settings[key] = value;
+            if (!store(settings, key, value)) return false;
             settings_dirty = true;
         }
         settings_changed = Clock::now();
         return true;
     }
     // A plugin's window keeps its own switch (ui.DisableWindow): its key under the plugin's prefix.
-    bool saved_enabled(const std::string& name, const std::string& tag = {}) const {
-        auto it = settings.find(tag.empty() ? "enabled." + name : plugin_key(tag, "enabled." + name));
+    bool saved_enabled(std::string_view name, std::string_view tag = {}) const {
+        const std::string key = "enabled." + std::string(name);
+        auto it = settings.find(tag.empty() ? key : plugin_key(tag, key));
         return it == settings.end() || it->second != "0";
     }
 
@@ -269,18 +364,21 @@ struct LuaUi::Impl {
     // across a Lua error: Lua is built as C and longjmps past destructors, so each lives in a block around a pcall.
     struct Acting {
         Impl& m;
-        std::string before;
+        std::string before; // (only when a folder's code runs: the pack's windows copy nothing)
         std::shared_ptr<void> held;
         Clock::time_point deadline_before;
-        Acting(Impl& im, std::string_view tag) : m(im), before(g_caller_tag), deadline_before(im.deadline) {
+        bool acting = false;
+        Acting(Impl& im, std::string_view tag) : m(im), deadline_before(im.deadline) {
             if (tag.empty()) return;
+            acting = true;
+            before = g_caller_tag;
             if (g_caller_tag != tag) m.deadline = std::min(m.deadline, Clock::now() + m.plugin_budget);
             g_caller_tag = tag;
             if (m.scope) held = m.scope(tag);
         }
         ~Acting() {
             held.reset();
-            g_caller_tag = std::move(before);
+            if (acting) g_caller_tag = std::move(before);
             m.deadline = deadline_before;
         }
         Acting(const Acting&) = delete;
@@ -316,6 +414,20 @@ struct LuaUi::Impl {
         s.error = message ? message : "(error)";
         log::warn("ui script error: {}", s.error);
     }
+    // A window's draw function failed: the error goes to its script, or, for a window registered outside its folder's
+    // loading (no file), to the window itself, shown and logged as a script's is.
+    void report_window(Window& w, const char* message) {
+        w.failed = true; // off until its script reloads, it is registered again, or (no file) it is retried
+        if (!w.file.empty()) {
+            for (Script& s : scripts)
+                if (s.file == w.file) {
+                    report(s, message);
+                    return;
+                }
+        }
+        w.error = message ? message : "(error)";
+        log::warn("ui window error ({}{}{}): {}", w.tag, w.tag.empty() ? "" : "/", w.name, w.error);
+    }
 
     void load_file(Script& s) {
         // Drop the windows this file registered before; the reloaded script registers them again.
@@ -331,13 +443,17 @@ struct LuaUi::Impl {
         const std::string path = s.path.string();
         std::string file_before = std::exchange(running_file, s.file), tag_before = std::exchange(running_tag, s.tag);
         log::debug("ui: loading {}", path);
+        // A plugin's chunk runs with its own globals, made before the limits hold: made (make_env) outside any
+        // protected call, an allocation the limit refused there would abort the client.
+        if (!s.tag.empty()) push_env(s.tag);
+        else lua_pushnil(L);
         int status = LUA_OK;
         {
             Budget budget(*this, budget_for(s.tag));
             Acting acting(*this, s.tag);
             status = luaL_loadfilex(L, path.c_str(), "t"); // text only: a binary chunk can corrupt memory
-            if (status == LUA_OK && !s.tag.empty()) { // a plugin's: its own globals
-                push_env(s.tag);
+            if (status == LUA_OK && !s.tag.empty()) {
+                lua_pushvalue(L, -2);
                 lua_setupvalue(L, -2, 1); // the chunk's _ENV
             }
             if (status == LUA_OK) status = lua_pcall(L, 0, 0, 0);
@@ -346,6 +462,7 @@ struct LuaUi::Impl {
             report(s, lua_tostring(L, -1));
             lua_pop(L, 1);
         }
+        lua_pop(L, 1); // (the env)
         running_file = std::move(file_before);
         running_tag = std::move(tag_before);
     }
@@ -457,6 +574,7 @@ struct LuaUi::Impl {
     void draw_errors() {
         bool any = false;
         for (const Script& s : scripts) any |= !s.error.empty();
+        for (const Window& w : windows) any |= !w.error.empty();
         if (!any) return;
         ImGui::SetNextWindowSize(ImVec2(520, 160), ImGuiCond_FirstUseEver);
         if (ImGui::Begin("UI errors")) {
@@ -467,6 +585,20 @@ struct LuaUi::Impl {
                 ImGui::SameLine();
                 if (ImGui::SmallButton("reload")) load_file(s);
                 ImGui::TextWrapped("%s", s.error.c_str());
+                ImGui::Separator();
+                ImGui::PopID();
+            }
+            for (Window& w : windows) {
+                if (w.error.empty()) continue;
+                ImGui::PushID(&w);
+                ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.40f, 1.0f), "%s%s%s (window)", w.tag.c_str(),
+                                   w.tag.empty() ? "" : "/", w.name.c_str());
+                ImGui::SameLine();
+                if (ImGui::SmallButton("retry")) {
+                    w.error.clear();
+                    w.failed = false;
+                }
+                ImGui::TextWrapped("%s", w.error.c_str());
                 ImGui::Separator();
                 ImGui::PopID();
             }
@@ -513,20 +645,25 @@ bool plugin_reserved(std::string_view key) {
 // ("plugin.<tag>.<key>"), else the pack's of that name (the palette, a window's place it took over), never a
 // reserved one (plugin_reserved).
 int lua_get_setting(lua_State* L) {
-    const char* key = luaL_checkstring(L, 1);
+    std::size_t len = 0;
+    const char* key_text = luaL_checklstring(L, 1, &len);
+    const std::string_view key(key_text, len);
     auto& ui = LuaUi::Impl::of(L);
     const std::string* value = nullptr;
     if (g_caller_tag.empty()) {
         value = ui.get_setting(key);
     } else {
-        value = ui.get_setting(LuaUi::Impl::plugin_key(g_caller_tag, key));
+        {
+            const std::string own = LuaUi::Impl::plugin_key(g_caller_tag, key); // (gone before anything can raise)
+            value = ui.get_setting(own);
+        }
         if (!value && !plugin_reserved(key)) value = ui.get_setting(key);
     }
     if (!value) {
         lua_settop(L, 2);
         return 1;
     }
-    lua_pushstring(L, value->c_str());
+    lua_pushlstring(L, value->data(), value->size());
     return 1;
 }
 
@@ -543,9 +680,8 @@ int lua_set_setting(lua_State* L) {
     // (A NUL would cut the text short: refused as the line breaks are.)
     const bool nul = k.find('\0') != std::string_view::npos || v.find('\0') != std::string_view::npos;
     bool saved = false;
-    if (!nul && g_caller_tag.empty()) saved = ui.set_setting(std::string(k), std::string(v));
-    else if (!nul && !k.starts_with("test."))
-        saved = ui.set_setting(LuaUi::Impl::plugin_key(g_caller_tag, k), std::string(v));
+    if (!nul && g_caller_tag.empty()) saved = ui.set_setting(k, v);
+    else if (!nul && !k.starts_with("test.")) saved = ui.set_setting(LuaUi::Impl::plugin_key(g_caller_tag, k), v);
     lua_pushboolean(L, saved);
     return 1;
 }
@@ -591,13 +727,21 @@ int lua_window(lua_State* L) {
         luaL_unref(L, LUA_REGISTRYINDEX, ref);
         return 0;
     }
+    std::size_t mine = 0;
     for (Window& w : ui.windows) {
         if (w.name == name && w.tag == tag) {
             luaL_unref(L, LUA_REGISTRYINDEX, w.draw_ref);
             w.draw_ref = ref;
             w.file = ui.running_tag == tag ? ui.running_file : std::string();
+            w.failed = false; // (a new draw function: it may draw again)
+            w.error.clear();
             return 0;
         }
+        if (w.tag == tag) ++mine;
+    }
+    if (!tag.empty() && mine >= kPluginWindows) { // (each window is kept in C++: a plugin's are held to a share)
+        luaL_unref(L, LUA_REGISTRYINDEX, ref);
+        return luaL_error(L, "ui.window: a plugin may have %d windows", static_cast<int>(kPluginWindows));
     }
     Window w;
     w.name = name;
@@ -737,24 +881,35 @@ void push_read_only(lua_State* L, int real) {
     lua_setmetatable(L, -2);
 }
 
+void push_in(lua_State* L, int v, int S, int tag);
+
 // A function a plugin took from eq or ui, or one it left in a table the pack shares (shared-table views, below):
 // runs the real one (upvalue 1) as the plugin (upvalue 2, its tag), whoever calls it. Only the pack's code or the
 // plugin's own may call it: another plugin would act with this one's capabilities. Once the plugin's folder is gone
-// (it unloaded) it does nothing.
+// (it unloaded) it does nothing. A plugin's own Lua function (upvalue 3: its folder's view state, below) is handed
+// its arguments as the plugin sees the pack's values (push_in: a table as a view), whoever passes them: a pack
+// library a plugin calls runs as the plugin and passes its own tables to the plugin's callbacks.
 int call_as(lua_State* L) {
     auto& ui = LuaUi::Impl::of(L);
     const char* tag = lua_tostring(L, lua_upvalueindex(2));
     if (!tag || !ui.folder_dir(tag)) return 0;
-    if (g_caller_tag == tag) { // already the plugin: as it is
-        lua_pushvalue(L, lua_upvalueindex(1));
-        lua_insert(L, 1);
-        lua_call(L, lua_gettop(L) - 1, LUA_MULTRET);
-        return lua_gettop(L);
-    }
-    if (!g_caller_tag.empty()) return luaL_error(L, "this function is %s's: %s's code cannot call it", tag, g_caller_tag.c_str());
+    const bool same = g_caller_tag == tag;
+    if (!same && !g_caller_tag.empty())
+        return luaL_error(L, "this function is %s's: %s's code cannot call it", tag, g_caller_tag.c_str());
     const int n = lua_gettop(L);
+    if (lua_type(L, lua_upvalueindex(3)) == LUA_TTABLE && !lua_iscfunction(L, lua_upvalueindex(1))) {
+        luaL_checkstack(L, 8, nullptr);
+        for (int i = 1; i <= n; ++i) {
+            push_in(L, i, lua_upvalueindex(3), lua_upvalueindex(2));
+            lua_replace(L, i);
+        }
+    }
     lua_pushvalue(L, lua_upvalueindex(1));
     lua_insert(L, 1);
+    if (same) { // already the plugin: as it is
+        lua_call(L, n, LUA_MULTRET);
+        return lua_gettop(L);
+    }
     int status = LUA_OK;
     {
         LuaUi::Impl::Acting acting(ui, tag);
@@ -770,13 +925,17 @@ int call_as(lua_State* L) {
 // plugin (call_as) and a table of its own is put in as an owned view, whose functions run as the plugin whoever
 // reads them. So nothing the plugin leaves there runs with the player's authority when the pack calls it, and
 // nothing of it works once the plugin unloads. A view's metatable cannot be read or changed, and rawset cannot get
-// past it. What is still the plugin's to reach: a value it hands to a pack function as an argument, which that
-// function keeps as it is (docs/todo.md).
+// past it. A pack function the plugin gets (a global, a table's, ui's) comes wrapped (call_pack): what it returns
+// comes as the plugin sees the pack's values, so a pack table it returns is a view too; and what the pack passes the
+// plugin's functions comes the same way (call_as). getmetatable gives the plugin a metatable it set itself as it is,
+// any other as a view. What is still the plugin's to reach: a value it hands to a pack function as an argument (or
+// returns to the pack from a callback), which the pack keeps as it is (docs/todo.md).
 //
 // Each folder's state S (an upvalue of the closures below): [kPackReal] pack view -> its table, [kOwnReal] owned view
-// -> the plugin's table, [kPackOf] / [kOwnOf] the other way, [kWrapped] function -> its call_as, [kPackMeta] /
-// [kOwnMeta] the views' metatables. All weak-keyed.
-enum ViewSlot : int { kPackReal = 1, kOwnReal, kPackOf, kOwnOf, kWrapped, kPackMeta, kOwnMeta };
+// -> the plugin's table, [kPackOf] / [kOwnOf] the other way, [kWrapped] function -> its call_as, [kPackFn] pack
+// function -> its call_pack, [kMetas] the metatables the plugin set (plugin_setmetatable), [kPackMeta] / [kOwnMeta]
+// the views' metatables. All but the last two weak-keyed.
+enum ViewSlot : int { kPackReal = 1, kOwnReal, kPackOf, kOwnOf, kWrapped, kPackFn, kMetas, kPackMeta, kOwnMeta };
 enum ViewKind : int { kPackView = 0, kOwnView = 1 };
 
 bool is_view(lua_State* L, int v) {
@@ -806,7 +965,8 @@ void push_wrapped(lua_State* L, int fn, int S, int tag) {
     lua_pop(L, 1);
     lua_pushvalue(L, fn);
     lua_pushvalue(L, tag);
-    lua_pushcclosure(L, &call_as, 2);
+    lua_pushvalue(L, S);
+    lua_pushcclosure(L, &call_as, 3);
     lua_rawgeti(L, S, kWrapped);
     lua_pushvalue(L, fn);
     lua_pushvalue(L, -3);
@@ -840,20 +1000,74 @@ void push_view(lua_State* L, int real, int S, int kind) {
     lua_pop(L, 1);
 }
 
-// A value read through a view of `kind`, pushed as the plugin gets it: a table as a view of the same kind (a view
-// as it is), and through an owned view a function as the plugin's (call_as).
+int call_pack(lua_State* L);
+
+// Pushes call_pack(the pack's Lua function at fn), one per function.
+void push_pack_fn(lua_State* L, int fn, int S, int tag) {
+    fn = lua_absindex(L, fn);
+    if (s_get(L, S, kPackFn, fn) == LUA_TFUNCTION) return;
+    lua_pop(L, 1);
+    lua_pushvalue(L, fn);
+    lua_pushvalue(L, tag);
+    lua_pushvalue(L, S);
+    lua_pushcclosure(L, &call_pack, 3);
+    lua_rawgeti(L, S, kPackFn);
+    lua_pushvalue(L, fn);
+    lua_pushvalue(L, -3);
+    lua_rawset(L, -3);
+    lua_pop(L, 1);
+}
+
+// A value from the pack's side (read through a pack view or from the pack's globals, returned by a pack function,
+// passed to the plugin's function), pushed as the plugin gets it: a table as a pack view (a view as it is, an owned
+// view of the plugin's as its own table), the pack's Lua function wrapped (call_pack), a function of the plugin's
+// that the pack held (its call_as) as the plugin's own. C functions are the client's and come as they are.
+void push_in(lua_State* L, int v, int S, int tag) {
+    v = lua_absindex(L, v);
+    switch (lua_type(L, v)) {
+    case LUA_TTABLE:
+        if (s_get(L, S, kOwnReal, v) == LUA_TTABLE) return;
+        lua_pop(L, 1);
+        if (is_view(L, v)) lua_pushvalue(L, v);
+        else push_view(L, v, S, kPackView);
+        return;
+    case LUA_TFUNCTION:
+        if (!lua_iscfunction(L, v)) {
+            push_pack_fn(L, v, S, tag);
+            return;
+        }
+        if (lua_tocfunction(L, v) == &call_as && lua_getupvalue(L, v, 2)) {
+            const bool own = lua_rawequal(L, -1, tag) != 0;
+            lua_pop(L, 1);
+            if (own && lua_getupvalue(L, v, 1)) return;
+        }
+        lua_pushvalue(L, v);
+        return;
+    default:
+        lua_pushvalue(L, v);
+        return;
+    }
+}
+
+// A value read through a view of `kind`, pushed as the plugin gets it: through a pack view as push_in gives it,
+// through an owned view a table as an owned view (a view as it is) and a function as the plugin's (call_as).
 void push_out(lua_State* L, int v, int S, int tag, int kind) {
+    if (kind == kPackView) {
+        push_in(L, v, S, tag);
+        return;
+    }
     v = lua_absindex(L, v);
     if (lua_type(L, v) == LUA_TTABLE && !is_view(L, v)) push_view(L, v, S, kind);
-    else if (kind == kOwnView && lua_type(L, v) == LUA_TFUNCTION) push_wrapped(L, v, S, tag);
+    else if (lua_type(L, v) == LUA_TFUNCTION) push_wrapped(L, v, S, tag);
     else lua_pushvalue(L, v);
 }
 
-// A value the plugin writes into a shared table, pushed as it is stored: a function wrapped as the plugin's, a table
-// of its own as an owned view, a pack view as its table.
+// A value the plugin writes into a shared table, pushed as it is stored: a function wrapped as the plugin's (a pack
+// function it was given, call_pack, as the pack's own), a table of its own as an owned view, a pack view as its table.
 void push_export(lua_State* L, int v, int S, int tag) {
     v = lua_absindex(L, v);
     if (lua_type(L, v) == LUA_TFUNCTION) {
+        if (lua_tocfunction(L, v) == &call_pack && lua_getupvalue(L, v, 1)) return;
         push_wrapped(L, v, S, tag);
     } else if (lua_type(L, v) == LUA_TTABLE) {
         if (s_get(L, S, kPackReal, v) == LUA_TTABLE) return;
@@ -969,16 +1183,41 @@ int view_pairs(lua_State* L) {
     return 3;
 }
 
-// The env's fallback to the pack's globals (upvalue 1 the globals, 2 S, 3 the tag): a table as a pack view.
+// A pack's Lua function as a plugin gets it (push_in): upvalue 1 the function, 2 the plugin's tag, 3 its S. Called
+// by the plugin's code it runs as ever (as the plugin), but what it returns, or raises, comes as push_in gives it.
+// Called by anyone else (the pack, which got it back) it is the pack's function as it is.
+int call_pack(lua_State* L) {
+    const int n = lua_gettop(L);
+    const char* tag = lua_tostring(L, lua_upvalueindex(2));
+    lua_pushvalue(L, lua_upvalueindex(1));
+    lua_insert(L, 1);
+    if (!tag || g_caller_tag != tag) {
+        lua_call(L, n, LUA_MULTRET);
+        return lua_gettop(L);
+    }
+    const int status = lua_pcall(L, n, LUA_MULTRET, 0);
+    const int results = lua_gettop(L);
+    luaL_checkstack(L, 8, nullptr);
+    for (int i = 1; i <= results; ++i) {
+        push_in(L, i, lua_upvalueindex(3), lua_upvalueindex(2));
+        lua_replace(L, i);
+    }
+    if (status != LUA_OK) return lua_error(L);
+    return results;
+}
+
+// The env's fallback to the pack's globals, and the plugin's ui to the pack's ui (upvalue 1 that table, 2 S, 3 the
+// tag): the value as push_in gives it.
 int pack_global(lua_State* L) {
     lua_pushvalue(L, 2);
     lua_rawget(L, lua_upvalueindex(1)); // 3
-    if (lua_type(L, 3) == LUA_TTABLE && !is_view(L, 3)) push_view(L, 3, lua_upvalueindex(2), kPackView);
+    push_in(L, 3, lua_upvalueindex(2), lua_upvalueindex(3));
     return 1;
 }
 
 // setmetatable and rawset for a plugin: never on a view, and no __gc (a finalizer runs whenever the collector
-// likes, as whoever runs then). Upvalue 1: Lua's own.
+// likes, as whoever runs then). Upvalue 1: Lua's own; setmetatable's 2: S, where the metatables it sets are noted
+// (plugin_getmetatable).
 int plugin_setmetatable(lua_State* L) {
     if (is_view(L, 1)) return luaL_error(L, "this table is the UI's: its metatable cannot be changed");
     if (lua_type(L, 2) == LUA_TTABLE) {
@@ -986,11 +1225,33 @@ int plugin_setmetatable(lua_State* L) {
         const bool gc = lua_rawget(L, 2) != LUA_TNIL;
         lua_pop(L, 1);
         if (gc) return luaL_error(L, "setmetatable: a plugin's tables cannot have __gc");
+        lua_rawgeti(L, lua_upvalueindex(2), kMetas);
+        lua_pushvalue(L, 2);
+        lua_pushboolean(L, 1);
+        lua_rawset(L, -3);
+        lua_pop(L, 1);
     }
     lua_pushvalue(L, lua_upvalueindex(1));
     lua_insert(L, 1);
     lua_call(L, lua_gettop(L) - 1, LUA_MULTRET);
     return lua_gettop(L);
+}
+// getmetatable for a plugin (upvalue 1 Lua's own, 2 S, 3 the tag): a metatable it set itself as it is, any other (a
+// pack table's or a userdata's) as a pack view, so the plugin cannot plant a metamethod the pack's code would run.
+int plugin_getmetatable(lua_State* L) {
+    luaL_checkany(L, 1);
+    lua_settop(L, 1);
+    lua_pushvalue(L, lua_upvalueindex(1));
+    lua_insert(L, 1);
+    lua_call(L, 1, 1);
+    if (lua_type(L, 1) != LUA_TTABLE) return 1;
+    if (s_get(L, lua_upvalueindex(2), kMetas, 1) != LUA_TNIL) {
+        lua_pop(L, 1);
+        return 1;
+    }
+    lua_pop(L, 1);
+    push_in(L, 1, lua_upvalueindex(2), lua_upvalueindex(3));
+    return 1;
 }
 int plugin_rawset(lua_State* L) {
     if (is_view(L, 1)) return luaL_error(L, "this table is the UI's: rawset cannot be used on it");
@@ -1005,7 +1266,7 @@ void push_view_state(lua_State* L, int tag) {
     tag = lua_absindex(L, tag);
     lua_createtable(L, kOwnMeta, 0);
     const int S = lua_gettop(L);
-    for (int slot = kPackReal; slot <= kWrapped; ++slot) {
+    for (int slot = kPackReal; slot <= kMetas; ++slot) {
         lua_newtable(L);
         lua_createtable(L, 0, 1);
         lua_pushliteral(L, "k");
@@ -1088,6 +1349,8 @@ void LuaUi::Impl::make_env(const std::string& tag) {
     lua_setfield(L, layer, "_G");
     lua_pushstring(L, tag.c_str());
     const int tag_at = lua_gettop(L);
+    push_view_state(L, tag_at); // the views' state (S)
+    const int S = lua_gettop(L);
 
     lua_newtable(L); // the cache of wrapped functions and views, by the real one
     lua_createtable(L, 0, 1);
@@ -1119,8 +1382,11 @@ void LuaUi::Impl::make_env(const std::string& tag) {
     lua_pushvalue(L, tag_at);
     lua_pushcclosure(L, &call_as, 2);
     lua_setfield(L, ui_layer, "window");
-    lua_createtable(L, 0, 1);
+    lua_createtable(L, 0, 1); // the rest as push_in gives it (a pack's Lua function in ui: its ui.SetSetting cache)
     lua_pushvalue(L, real_ui);
+    lua_pushvalue(L, S);
+    lua_pushvalue(L, tag_at);
+    lua_pushcclosure(L, &pack_global, 3);
     lua_setfield(L, -2, "__index");
     lua_setmetatable(L, ui_layer);
     push_read_only(L, ui_layer);
@@ -1144,16 +1410,20 @@ void LuaUi::Impl::make_env(const std::string& tag) {
     }
     lua_pushcfunction(L, &plugin_collectgarbage);
     lua_setfield(L, layer, "collectgarbage");
-    for (auto [name, fn] : std::initializer_list<std::pair<const char*, lua_CFunction>>{
-             {"setmetatable", &plugin_setmetatable}, {"rawset", &plugin_rawset}}) {
-        lua_getglobal(L, name);
-        lua_pushcclosure(L, fn, 1);
-        lua_setfield(L, layer, name);
-    }
+    lua_getglobal(L, "rawset");
+    lua_pushcclosure(L, &plugin_rawset, 1);
+    lua_setfield(L, layer, "rawset");
+    lua_getglobal(L, "setmetatable");
+    lua_pushvalue(L, S);
+    lua_pushcclosure(L, &plugin_setmetatable, 2);
+    lua_setfield(L, layer, "setmetatable");
+    lua_getglobal(L, "getmetatable");
+    lua_pushvalue(L, S);
+    lua_pushvalue(L, tag_at);
+    lua_pushcclosure(L, &plugin_getmetatable, 3);
+    lua_setfield(L, layer, "getmetatable");
 
-    // The pack's globals, its tables as views (pack_global).
-    push_view_state(L, tag_at);
-    const int S = lua_gettop(L);
+    // The pack's globals as push_in gives them (pack_global).
     lua_createtable(L, 0, 1);
     lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS);
     lua_pushvalue(L, S);
@@ -1224,6 +1494,8 @@ LuaUi::LuaUi(fs::path scripts, fs::path settings) : impl_(std::make_unique<Impl>
         return 1;
     });
     lua_setfield(L, LUA_REGISTRYINDEX, "hailstone.clipboard_allowed");
+    lua_pushcfunction(L, &Impl::match_check);
+    lua_setfield(L, LUA_REGISTRYINDEX, kMatchCheckKey);
     // Libraries: no io (scripts do not need file access); os is reduced to clock/time/date.
     luaL_requiref(L, "_G", luaopen_base, 1);
     luaL_requiref(L, LUA_TABLIBNAME, luaopen_table, 1);
@@ -1298,39 +1570,46 @@ LuaUi::~LuaUi() {
 bool LuaUi::layout_setting(std::string_view key) { return key.starts_with("hud.") || key == "tasks.listw"; }
 
 std::string LuaUi::setting(std::string_view key) const {
-    if (auto v = impl_->get_setting(std::string(key))) return *v;
+    if (auto v = impl_->get_setting(key)) return *v;
     return {};
 }
 
 bool LuaUi::set_setting(std::string_view key, std::string_view value) {
-    return impl_->set_setting(std::string(key), std::string(value));
+    return impl_->set_setting(key, value);
 }
 
-bool LuaUi::character_setting(std::string_view key) { return layout_setting(key) || key.starts_with("items."); }
+bool LuaUi::character_setting(std::string_view key) {
+    return layout_setting(key) || key.starts_with("items.") || key.starts_with("tasks.tracked.") ||
+           key.starts_with("tasks.tracker.") || key.starts_with("tasks.section.") || key == "tasks.category";
+}
 
 void LuaUi::set_character_settings(const fs::path& file) {
     Impl& m = *impl_;
     if (file == m.character_file) return;
     m.save_settings_now();
     m.character_file = file;
-    m.character_settings = file.empty() ? std::map<std::string, std::string>{} : Impl::read_settings(file);
+    m.character_settings = file.empty() ? Impl::Settings{} : Impl::read_settings(file);
+    m.plugin_settings.clear(); // (counted again)
 }
 
 void LuaUi::copy_character_layout(const fs::path& from) {
     Impl& m = *impl_;
     if (m.character_file.empty()) return;
-    std::map<std::string, std::string> copied;
+    Impl::Settings copied;
     for (auto& [k, v] : m.character_settings)
         if (!layout_setting(Impl::plugin_key_rest(k))) copied[k] = v; // its item marks stay its own
     if (!from.empty())
         for (auto& [k, v] : Impl::read_settings(from))
             if (layout_setting(Impl::plugin_key_rest(k))) copied[k] = std::move(v);
     m.character_settings = std::move(copied);
+    m.plugin_settings.clear(); // (counted again)
     m.character_dirty = true;
     m.save_settings_now();
 }
 
 lua_State* LuaUi::state() const { return impl_->L; }
+
+std::size_t LuaUi::allocated_bytes() const { return impl_->allocated; }
 
 void LuaUi::set_gc_steps_for_test(int steps) { impl_->gc_steps = steps; }
 
@@ -1359,15 +1638,18 @@ std::string LuaUi::run_for_test(std::string_view tag_view, const std::string& co
     lua_State* L = m.L;
     const std::string tag(tag_view);
     const int top = lua_gettop(L);
-    int status = luaL_loadbufferx(L, code.data(), code.size(), "=test", "t");
-    if (status == LUA_OK && !tag.empty()) {
-        m.push_env(tag);
-        lua_setupvalue(L, -2, 1);
-    }
-    if (status == LUA_OK) {
+    if (!tag.empty()) m.push_env(tag); // (before the limits hold, as load_file)
+    else lua_pushnil(L);
+    int status = LUA_OK;
+    {
         Impl::Budget budget(m, m.budget_for(tag));
         Impl::Acting acting(m, tag);
-        status = lua_pcall(L, 0, 1, 0);
+        status = luaL_loadbufferx(L, code.data(), code.size(), "=test", "t");
+        if (status == LUA_OK && !tag.empty()) {
+            lua_pushvalue(L, -2);
+            lua_setupvalue(L, -2, 1);
+        }
+        if (status == LUA_OK) status = lua_pcall(L, 0, 1, 0);
     }
     std::string out;
     if (status != LUA_OK) out = std::string("error: ") + (lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
@@ -1412,29 +1694,34 @@ void LuaUi::frame() {
     lap.mark("Lua script scan");
     if (m.show_control) m.draw_control();
     // Each name's top layer draws (Window); by index, since a draw function can add windows.
+    // (Only with plugin windows; each window's layer found once, and names compared only among the plugins' and the
+    // pack's windows they could cover.)
     std::vector<bool> covered;
     if (std::any_of(m.windows.begin(), m.windows.end(), [](const Window& w) { return !w.tag.empty(); })) {
-        std::map<std::string, int> top;
-        for (const Window& w : m.windows) {
-            auto [it, added] = top.try_emplace(w.name, m.layer(w.tag));
-            if (!added) it->second = std::max(it->second, m.layer(w.tag));
+        const std::size_t n = m.windows.size();
+        std::vector<int> layers(n);
+        for (std::size_t i = 0; i < n; ++i) layers[i] = m.layer(m.windows[i].tag);
+        covered.assign(n, false);
+        for (std::size_t i = 0; i < n; ++i) {
+            if (layers[i] <= 0) continue; // (a plugin's window covers; the pack's never does)
+            for (std::size_t j = 0; j < n; ++j)
+                if (j != i && layers[j] < layers[i] && m.windows[j].name == m.windows[i].name) covered[j] = true;
         }
-        covered.resize(m.windows.size());
-        for (std::size_t i = 0; i < m.windows.size(); ++i)
-            covered[i] = m.layer(m.windows[i].tag) < top[m.windows[i].name];
     }
     for (std::size_t i = 0; i < m.windows.size(); ++i) {
         Window& w = m.windows[i];
         if (!w.enabled || w.failed || (i < covered.size() && covered[i])) continue;
         ImGuiErrorRecoveryState state;
         ImGui::ErrorRecoveryStoreState(&state);
+        const std::size_t begun = windows_begun();
         lua_rawgeti(L, LUA_REGISTRYINDEX, w.draw_ref);
+        // (w may move while it draws: a draw function can add windows, never remove one, so index i stays its own)
         g_drawing = w.name;
         m.drawing_tag = w.tag;
         m.running_tag = w.tag;
         m.running_file = w.file;
-        const std::string file = w.file; // (w may move: a draw function can add windows)
         int status = LUA_OK;
+        const std::size_t allocated_before = m.allocated;
         {
             Impl::Budget budget(m, m.budget_for(w.tag));
             Impl::Acting acting(m, w.tag);
@@ -1444,16 +1731,28 @@ void LuaUi::frame() {
         m.running_tag.clear();
         m.drawing_tag.clear();
         g_drawing.clear();
+        // A window the script left open (a Begin without its End) is closed here, error or not, so the windows
+        // drawn after it do not nest inside it.
+        ImGui::ErrorRecoveryTryToRecoverState(&state);
+        end_script_windows(begun);
+        Window& drawn = m.windows[i];
         if (status != LUA_OK) {
-            ImGui::ErrorRecoveryTryToRecoverState(&state);
-            for (Script& s : m.scripts)
-                if (s.file == file) m.report(s, lua_tostring(L, -1));
+            m.report_window(drawn, lua_tostring(L, -1)); // stays off until the script is fixed and reloads
             lua_pop(L, 1);
-            m.windows[i].failed = true; // stays off until the script is fixed and reloads
         }
-        Window& drawn = m.windows[i]; // (w may have moved: a draw function can add windows)
-        if (!drawn.section) drawn.section = core::frame_sections::intern("Lua window " + drawn.name);
+        if (!drawn.section) {
+            // Every name kept is kept for good (core/frame_sections.h): the plugins' windows share a few hundred.
+            if (drawn.tag.empty()) drawn.section = core::frame_sections::intern("Lua window " + drawn.name);
+            else if (m.plugin_sections < kPluginSections) {
+                const std::string name = "Lua window " + drawn.tag + "/" + drawn.name;
+                ++m.plugin_sections;
+                drawn.section = core::frame_sections::intern(name);
+            } else {
+                drawn.section = "Lua windows of plugins (more)";
+            }
+        }
         lap.mark(drawn.section);
+        core::frame_sections::add_bytes(drawn.section, m.allocated - allocated_before);
     }
     m.draw_errors();
     m.save_settings_if_due();

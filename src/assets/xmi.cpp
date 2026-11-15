@@ -44,6 +44,9 @@ public:
         if (pos_ >= d_.size()) throw std::runtime_error("xmi: event past the end of EVNT");
         return std::to_integer<std::uint8_t>(d_[pos_++]);
     }
+    // A MIDI data byte: 7 bits. A forged file's high bit would take a pitch wheel past 14 bits or a velocity past
+    // 127 (the player divides it by 127); it is dropped, as a synth reading the byte as data would.
+    std::uint8_t data() { return static_cast<std::uint8_t>(byte() & 0x7fu); }
     std::uint32_t vlq() {
         std::uint32_t v = 0;
         for (int i = 0; i < 4; ++i) {
@@ -78,20 +81,20 @@ XmiSequence parse_events(std::span<const std::byte> evnt) {
         e.status = r.byte();
         switch (e.status & 0xf0u) {
         case 0x90:
-            e.data1 = r.byte();
-            e.data2 = r.byte();
+            e.data1 = r.data();
+            e.data2 = r.data();
             e.duration = r.vlq();
             break;
         case 0x80:
         case 0xa0:
         case 0xb0:
         case 0xe0:
-            e.data1 = r.byte();
-            e.data2 = r.byte();
+            e.data1 = r.data();
+            e.data2 = r.data();
             break;
         case 0xc0:
         case 0xd0:
-            e.data1 = r.byte();
+            e.data1 = r.data();
             break;
         default:
             if (e.status == 0xff) {

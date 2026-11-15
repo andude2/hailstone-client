@@ -60,6 +60,32 @@ bool set_nonblocking(NativeSocket s) {
     return ioctlsocket(s, FIONBIO, &nonblocking) == 0;
 }
 constexpr int kSendFlags = 0;
+// winsock2.h's since Windows 7 SP1; older SDKs lack the name.
+#ifndef WSA_FLAG_NO_HANDLE_INHERIT
+#define WSA_FLAG_NO_HANDLE_INHERIT 0x80
+#endif
+void keep_from_children(NativeSocket s) {
+    if (s != kInvalid) SetHandleInformation(reinterpret_cast<HANDLE>(s), HANDLE_FLAG_INHERIT, 0);
+}
+bool inheritable(NativeSocket s) {
+    DWORD flags = 0;
+    return GetHandleInformation(reinterpret_cast<HANDLE>(s), &flags) && (flags & HANDLE_FLAG_INHERIT) != 0;
+}
+// A socket no child process inherits (SDL starts the helpers with inheritable pipes, so handles are passed on).
+// WSA_FLAG_OVERLAPPED is what socket() gives; a system without the no-inherit flag takes the plain call instead.
+NativeSocket open_socket(int af, int type, int protocol) {
+    NativeSocket s = WSASocketW(af, type, protocol, nullptr, 0, WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
+    if (s == kInvalid) {
+        s = ::socket(af, type, protocol);
+        keep_from_children(s);
+    }
+    return s;
+}
+NativeSocket accept_socket(NativeSocket listener) {
+    NativeSocket s = ::accept(listener, nullptr, nullptr);
+    keep_from_children(s);
+    return s;
+}
 #else
 using NativeSocket = int;
 const NativeSocket kInvalid = -1;
@@ -74,6 +100,35 @@ void close_native(NativeSocket s) { ::close(s); }
 bool set_nonblocking(NativeSocket s) {
     int flags = fcntl(s, F_GETFL, 0);
     return flags >= 0 && fcntl(s, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+void keep_from_children(NativeSocket s) {
+    if (s == kInvalid) return;
+    const int flags = fcntl(s, F_GETFD);
+    if (flags >= 0) fcntl(s, F_SETFD, flags | FD_CLOEXEC);
+}
+bool inheritable(NativeSocket s) {
+    const int flags = fcntl(s, F_GETFD);
+    return flags >= 0 && (flags & FD_CLOEXEC) == 0;
+}
+// A socket closed across exec, so no child process (the browser helper) holds it. SOCK_CLOEXEC where the system has
+// it (Linux, the BSDs), set at creation; macOS has only fcntl after it.
+NativeSocket open_socket(int af, int type, int protocol) {
+#ifdef SOCK_CLOEXEC
+    NativeSocket s = ::socket(af, type | SOCK_CLOEXEC, protocol);
+    if (s != kInvalid) return s;
+#endif
+    NativeSocket plain = ::socket(af, type, protocol);
+    keep_from_children(plain);
+    return plain;
+}
+NativeSocket accept_socket(NativeSocket listener) {
+#if defined(__linux__) && defined(SOCK_CLOEXEC)
+    NativeSocket s = ::accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
+#else
+    NativeSocket s = ::accept(listener, nullptr, nullptr);
+    keep_from_children(s);
+#endif
+    return s;
 }
 // A write to a connection the peer closed must give an error, not SIGPIPE (macOS: SO_NOSIGPIPE at creation).
 #ifdef MSG_NOSIGNAL
@@ -220,7 +275,7 @@ bool TcpSocket::start(const Endpoint& to, std::string& error) {
         error = "socket library initialisation failed";
         return false;
     }
-    NativeSocket s = ::socket(to.family == Endpoint::Family::V4 ? AF_INET : AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+    NativeSocket s = open_socket(to.family == Endpoint::Family::V4 ? AF_INET : AF_INET6, SOCK_STREAM, IPPROTO_TCP);
     if (s == kInvalid) {
         error = "socket(): " + error_text(last_socket_error());
         return false;
@@ -329,7 +384,7 @@ bool TcpListener::listen(const Endpoint& at, std::string& error) {
         error = "socket library initialisation failed";
         return false;
     }
-    NativeSocket s = ::socket(at.family == Endpoint::Family::V4 ? AF_INET : AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+    NativeSocket s = open_socket(at.family == Endpoint::Family::V4 ? AF_INET : AF_INET6, SOCK_STREAM, IPPROTO_TCP);
     if (s == kInvalid) {
         error = "socket(): " + error_text(last_socket_error());
         return false;
@@ -358,9 +413,11 @@ std::optional<Endpoint> TcpListener::local_endpoint() const {
     return from_sockaddr(reinterpret_cast<const sockaddr*>(&ss));
 }
 
+bool TcpSocket::inherited_by_children() const { return valid(handle_) && inheritable(native(handle_)); }
+
 std::optional<TcpSocket> TcpListener::accept() {
     if (!valid(handle_)) return std::nullopt;
-    NativeSocket s = ::accept(native(handle_), nullptr, nullptr);
+    NativeSocket s = accept_socket(native(handle_));
     if (s == kInvalid) return std::nullopt;
     std::string error;
     if (!prepare(s, error)) {

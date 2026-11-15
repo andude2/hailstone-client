@@ -13,6 +13,18 @@ if(NOT SDL3_FOUND)
     SYSTEM)
   set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(SDL3)
+  # SDL finds Wayland only through pkg-config and quietly builds without it when a package is missing, which left
+  # every Linux release up to 0.7.0-beta X11-only. Stop instead; HAILSTONE_ALLOW_NO_WAYLAND=ON builds X11-only on purpose.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    option(HAILSTONE_ALLOW_NO_WAYLAND "Allow a fetched SDL3 built without Wayland (X11 only)" OFF)
+    get_directory_property(hailstone_sdl_has_wayland DIRECTORY "${sdl3_SOURCE_DIR}" DEFINITION HAVE_WAYLAND)
+    if(NOT hailstone_sdl_has_wayland AND NOT HAILSTONE_ALLOW_NO_WAYLAND)
+      message(FATAL_ERROR "SDL3 was configured without Wayland. Install pkg-config and the development packages of "
+        "wayland-client, wayland-egl, wayland-cursor, egl and xkbcommon (Debian/Ubuntu: pkg-config libwayland-dev "
+        "wayland-protocols libegl-dev libxkbcommon-dev, and libdecor-0-dev for window borders on GNOME), delete "
+        "the build folder and configure again; or pass -DHAILSTONE_ALLOW_NO_WAYLAND=ON for an X11-only build.")
+    endif()
+  endif()
 endif()
 
 # Vulkan headers and the volk loader (no link-time libvulkan dependency).

@@ -206,15 +206,17 @@ public:
 private:
     void play(const XmiSequencer::Event& e) {
         int ch = e.status & 0x0f;
+        // Data bytes are 7 bits (assets/xmi.cpp masks them as it reads; kept here for any other source of events).
+        const int d1 = e.data1 & 0x7f, d2 = e.data2 & 0x7f;
         switch (e.kind) {
-        case XmiSequencer::Event::Kind::NoteOn: tsf_channel_note_on(synth_, ch, e.data1, e.data2 / 127.0f); break;
-        case XmiSequencer::Event::Kind::NoteOff: tsf_channel_note_off(synth_, ch, e.data1); break;
+        case XmiSequencer::Event::Kind::NoteOn: tsf_channel_note_on(synth_, ch, d1, static_cast<float>(d2) / 127.0f); break;
+        case XmiSequencer::Event::Kind::NoteOff: tsf_channel_note_off(synth_, ch, d1); break;
         case XmiSequencer::Event::Kind::Channel:
             switch (e.status & 0xf0) {
-            case 0x80: tsf_channel_note_off(synth_, ch, e.data1); break;
-            case 0xb0: tsf_channel_midi_control(synth_, ch, e.data1, e.data2); break;
-            case 0xc0: tsf_channel_set_presetnumber(synth_, ch, e.data1, ch == 9); break;
-            case 0xe0: tsf_channel_set_pitchwheel(synth_, ch, (e.data2 << 7) | e.data1); break;
+            case 0x80: tsf_channel_note_off(synth_, ch, d1); break;
+            case 0xb0: tsf_channel_midi_control(synth_, ch, d1, d2); break;
+            case 0xc0: tsf_channel_set_presetnumber(synth_, ch, d1, ch == 9); break;
+            case 0xe0: tsf_channel_set_pitchwheel(synth_, ch, (d2 << 7) | d1); break;
             default: break; // aftertouch: not supported by TinySoundFont
             }
             break;

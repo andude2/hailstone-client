@@ -15,17 +15,13 @@ function X.isBag(item) return item and (item.bagSlots or 0) > 0 end
 -- A frame's state: what the pad holds and what is focused. ctx = X.frame(nav, sections); ctx.focusedItem,
 -- ctx.focusedWhere. nav (kept by the window) and sections (names in order) give LB / RB, which move the focus to the
 -- previous / next section (X.section marks where each begins): a grid of slots is a long way across with the D-pad.
-local deferred = nil
+local deferred = {}
 -- Runs fn once A is released: a click that opens the quantity dialog, so the A still held does not keep the focus
--- (and the dialog behind) in this window.
-function X.afterA(fn) deferred = fn end
+-- (and the dialog behind) in this window. Dropped if the window it was asked in closes first (W.deferred).
+function X.afterA(fn) W.deferred(deferred, fn) end
 
 function X.frame(nav, sections)
-  if deferred and not pad.down("a") then
-    local fn = deferred
-    deferred = nil
-    fn()
-  end
+  W.runDeferred(deferred)
   local ctx = { held = eq.Item(eq.CursorSlot or 33), nav = nav, sections = sections }
   if eq.CursorCoin then ctx.coinType, ctx.coinAmount = eq.CursorCoin() end
   return ctx

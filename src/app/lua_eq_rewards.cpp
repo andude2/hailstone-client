@@ -7,11 +7,13 @@
 #include <cmath>
 #include <format>
 #include <limits>
+#include <string>
 #include <string_view>
 
 #include <lua.hpp>
 
 #include "net/game_connection.h"
+#include "plugin/lua_keep.h"
 
 namespace hailstone::app {
 namespace {
@@ -20,6 +22,12 @@ EqHost& host(lua_State* L) { return *static_cast<EqHost*>(lua_touserdata(L, lua_
 void text(lua_State* L, const char* key, std::string_view value) {
     lua_pushlstring(L, value.data(), value.size());
     lua_setfield(L, -2, key);
+}
+// A number as text, made on the stack (no std::string alive across the push: plugin/lua_keep.h).
+void number_text(lua_State* L, const char* key, std::uint64_t value) {
+    char buf[24];
+    const auto r = std::to_chars(buf, buf + sizeof buf, value);
+    text(L, key, std::string_view(buf, static_cast<std::size_t>(r.ptr - buf)));
 }
 void integer(lua_State* L, const char* key, std::uint32_t value) {
     lua_pushinteger(L, static_cast<lua_Integer>(value));
@@ -100,7 +108,8 @@ std::string details(const net::RewardEntry& entry, float multiplier) {
     default: return {};
     }
 }
-void push_entry(lua_State* L, const net::RewardEntry& entry, float multiplier) {
+// `made`: a string in a box the state owns (plugin/lua_keep.h), for the text this makes.
+void push_entry(lua_State* L, const net::RewardEntry& entry, float multiplier, std::string& made) {
     lua_createtable(L, 0, 10);
     integer(L, "entry_id", entry.entry_id);
     integer(L, "string_id", entry.string_id);
@@ -114,7 +123,8 @@ void push_entry(lua_State* L, const net::RewardEntry& entry, float multiplier) {
     lua_setfield(L, -2, "values");
     text(L, "kind_label", kind_label(entry.type));
     text(L, "description", entry.description);
-    text(L, "details", details(entry, multiplier));
+    plugin::cxx_guard(L, [&] { made = details(entry, multiplier); });
+    text(L, "details", made);
     lua_createtable(L, static_cast<int>(entry.items.size()), 0);
     lua_Integer i = 0;
     for (const auto& item : entry.items) {
@@ -128,9 +138,9 @@ void push_entry(lua_State* L, const net::RewardEntry& entry, float multiplier) {
     }
     lua_setfield(L, -2, "items");
 }
-void push_lane(lua_State* L, const game::RewardLaneState& state, int cached_at) {
+void push_lane(lua_State* L, const game::RewardLaneState& state, int cached_at, std::string& made) {
     lua_createtable(L, 0, 8);
-    text(L, "revision", std::to_string(state.revision));
+    number_text(L, "revision", state.revision);
     boolean(L, "shown", state.shown);
     boolean(L, "claim_pending", state.claim_pending);
     boolean(L, "claim_uncertain", state.claim_uncertain);
@@ -144,7 +154,7 @@ void push_lane(lua_State* L, const game::RewardLaneState& state, int cached_at) 
     lua_Integer tab_index = 0;
     for (const auto& tab : state.tabs) {
         lua_createtable(L, 0, 7);
-        text(L, "token", std::to_string(tab.token));
+        number_text(L, "token", tab.token);
         text(L, "title", tab.reward.title);
         integer(L, "pending_id", tab.reward.pending_id);
         integer(L, "set_id", tab.reward.set_id);
@@ -162,7 +172,7 @@ void push_lane(lua_State* L, const game::RewardLaneState& state, int cached_at) 
             lua_createtable(L, static_cast<int>(option.entries.size()), 0);
             lua_Integer entry_index = 0;
             for (const auto& entry : option.entries) {
-                push_entry(L, entry, tab.reward.multiplier);
+                push_entry(L, entry, tab.reward.multiplier, made);
                 lua_rawseti(L, -2, ++entry_index);
             }
             lua_setfield(L, -2, "entries");
@@ -182,11 +192,12 @@ int RewardSelection(lua_State* L) {
     // Reserve argument slots before pushing the result; omitted cached tokens
     // must not accidentally refer to the table being constructed.
     lua_settop(L, 2);
+    std::string& made = plugin::lua_keep<std::string>(L);
     lua_createtable(L, 0, 3);
     boolean(L, "shown", pending.shown || preview.shown);
-    push_lane(L, pending, 1);
+    push_lane(L, pending, 1, made);
     lua_setfield(L, -2, "pending");
-    push_lane(L, preview, 2);
+    push_lane(L, preview, 2, made);
     lua_setfield(L, -2, "preview");
     return 1;
 }
@@ -196,8 +207,9 @@ int RewardSelectionClaim(lua_State* L) {
     auto& h = host(L);
     if (!h.conn || !h.in_game || !token(L, 1, revision) || !token(L, 2, tab) || !number(L, 3, option))
         return result(L, false, "Invalid or retired reward choice.");
-    std::string why;
-    const bool accepted = h.conn->reward_claim(revision, tab, option, &why);
+    std::string& why = plugin::lua_keep<std::string>(L); // across the push (plugin/lua_keep.h)
+    bool accepted = false;
+    plugin::cxx_guard(L, [&] { accepted = h.conn->reward_claim(revision, tab, option, &why); });
     return result(L, accepted, why);
 }
 int RewardSelectionInspect(lua_State* L) {
@@ -208,8 +220,9 @@ int RewardSelectionInspect(lua_State* L) {
     if (!h.conn || !h.in_game || !lane(L, 1, value) || !token(L, 2, revision) || !token(L, 3, tab) ||
         !number(L, 4, option) || !number(L, 5, entry) || !number(L, 6, item))
         return result(L, false, "Invalid or retired reward item.");
-    std::string why;
-    const bool accepted = h.conn->reward_inspect(value, revision, tab, option, entry, item, &why);
+    std::string& why = plugin::lua_keep<std::string>(L); // across the push (plugin/lua_keep.h)
+    bool accepted = false;
+    plugin::cxx_guard(L, [&] { accepted = h.conn->reward_inspect(value, revision, tab, option, entry, item, &why); });
     return result(L, accepted, why);
 }
 int RestorePendingRewards(lua_State* L) {

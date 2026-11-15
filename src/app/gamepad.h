@@ -75,7 +75,10 @@ public:
     void window_takes_b() { window_takes_b_ = true; }
     bool take_window_takes_b() { return std::exchange(window_takes_b_, false); }
 
-    // Rumble (0..1 strengths, for `ms`), when gamepad.rumble is on: the client gives the window's.
+    // Rumble (0..1 strengths, for `ms`), when gamepad.rumble is on: the client gives the window's. NaN or an infinite
+    // strength is refused (false); strengths are clamped to 0..1 and `ms` to 0..kMaxRumbleMs, so a script cannot
+    // leave the pad shaking.
+    static constexpr int kMaxRumbleMs = 5000;
     void set_rumble(std::function<bool(float, float, int)> fn) { rumble_ = std::move(fn); }
     bool rumble(float low, float high, int ms);
 

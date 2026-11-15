@@ -111,6 +111,15 @@ inline constexpr float kLawnNoiseCell = 48.0f;
 // The lawn's height at a spot (0..1 between lawn_height's min and max): smooth value noise over the world, so the
 // carpet rises and falls gently rather than patch by patch.
 float lawn_height_noise(glm::vec2 p);
+// The lawn under cover (a platform, a bridge, a roof) does not trace the cover's outline: a square asks whether it is
+// covered at a spot moved off its centre by lawn_cover_offset, which wanders smoothly over the world by up to
+// kLawnCoverJitter units, so the bare ground's edge under a straight platform wobbles in and out.
+inline constexpr float kLawnCoverJitter = kLawnCell * 3.0f;
+glm::vec2 lawn_cover_offset(glm::vec2 p);
+// The share of a patch's blades that stand (FloraInstance::cover), by the distance to the nearest bare square's centre
+// in squares (as lawn_edge_factor) and a draw of its own for the square at `p`: between 0.25 and 0.85 beside bare
+// ground, all of them at kLawnEdgeCells + 0.5 squares and past, so the lawn's edge frays rather than ending in rows.
+float lawn_edge_cover(float squares, glm::vec2 p);
 
 // The most plants one tile grows: a bound for a rules file asking too much (a lawn's tile holds 1,600 patches).
 inline constexpr std::size_t kMaxTileFlora = 65536;

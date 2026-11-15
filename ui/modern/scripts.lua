@@ -14,6 +14,13 @@ local wasShown = false
 
 local STATUS = { running = "Running", paused = "Paused", exited = "Ended", error = "Error" }
 
+-- a script's name in lower case, for the search; made once a name
+local lowerNames = setmetatable({}, { __index = function(t, name)
+  local l = name:lower()
+  t[name] = l
+  return l
+end })
+
 local function colored(c, text) ui.TextColored(c[1], c[2], c[3], 1, text) end
 
 local function tooltip(r)
@@ -57,7 +64,7 @@ local function drawWindow(x, y, w, h, s)
     ui.TableHeadersRow()
     local f = filter:lower()
     for _, r in ipairs(list) do
-      if f == "" or r.name:find(f, 1, true) then
+      if f == "" or lowerNames[r.name]:find(f, 1, true) then
         shown = shown + 1
         ui.PushID(r.name)
         ui.TableNextRow()

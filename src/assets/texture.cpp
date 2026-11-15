@@ -364,7 +364,7 @@ Image decode_dds(std::span<const std::byte> data) {
         return mask ? std::size_t(w) * ht * mask->bytes : mip_size(img.format, w, ht);
     };
     std::size_t levels = std::clamp<std::size_t>(h.mip_count, 1, full_chain_length(h.width, h.height));
-    // Cube maps and volumes: only the first face / slice is kept.
+    // Cube maps and volumes: only the first face / slice is kept (a volume's level 0 alone, below).
     std::size_t pos = r.position();
     for (std::size_t level = 0; level < levels; ++level) {
         std::uint32_t w = level_dim(h.width, level), ht = level_dim(h.height, level);
@@ -377,13 +377,16 @@ Image decode_dds(std::span<const std::byte> data) {
         pos += n;
         if (!mask) {
             img.mips.emplace_back(src.begin(), src.end());
-            continue;
+        } else {
+            std::vector<std::byte> out(std::size_t(w) * ht * 4);
+            for (std::size_t i = 0; i < std::size_t(w) * ht; ++i)
+                mask->convert(src.subspan(i * mask->bytes, mask->bytes), out.data() + i * 4);
+            img.mips.push_back(std::move(out));
         }
-        std::vector<std::byte> out(std::size_t(w) * ht * 4);
-        for (std::size_t i = 0; i < std::size_t(w) * ht; ++i)
-            mask->convert(src.subspan(i * mask->bytes, mask->bytes), out.data() + i * 4);
-        img.mips.push_back(std::move(out));
-        if (h.caps2 & DDSCAPS2_VOLUME) break; // later levels would mix slices
+        // A volume stores each level's slices together (level 0's every slice, then level 1's): past level 0 the
+        // next bytes are slice 1, not a smaller level, compressed or not. A cube map stores each face's whole chain
+        // before the next face's, so its first face's levels are read as they are.
+        if (h.caps2 & DDSCAPS2_VOLUME) break;
     }
     return img;
 }
@@ -781,6 +784,9 @@ Image decode_tga(std::span<const std::byte> data, const TgaHeader& h) {
     std::size_t count = std::size_t(h.width) * h.height;
     // An RLE packet of 1 + pixel_bytes bytes yields at most 128 pixels.
     if (count > (r.remaining() / (1 + pixel_bytes) + 1) * 128) fail("TGA pixel data truncated");
+    // Uncompressed: the exact size, before anything is reserved (the RLE bound above lets a short file ask for 128
+    // times its size).
+    if (h.image_type < 9 && r.remaining() / pixel_bytes < count) fail("TGA pixel data truncated");
     std::vector<Rgba> stream;
     stream.reserve(count);
     if (h.image_type >= 9) {
@@ -795,7 +801,6 @@ Image decode_tga(std::span<const std::byte> data, const TgaHeader& h) {
             }
         }
     } else {
-        if (r.remaining() < count * pixel_bytes) fail("TGA pixel data truncated");
         for (std::size_t i = 0; i < count; ++i) stream.push_back(to_rgba(read_value()));
     }
 

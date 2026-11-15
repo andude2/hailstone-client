@@ -42,6 +42,16 @@ local function rosterCounts()
   return total, on
 end
 
+-- (the roster list's options and filter are made once; the filter reads this frame's search)
+local ROSTER = {
+  sortable = true,
+  hide = { [9] = true, [10] = true },
+  columns = { [5] = { "Alt", 30 }, [8] = { "Public Note", 0 } },
+}
+local ROSTER_SEARCHED = { 1, 3, 4, 7, 8 }
+local rosterNeedle = ""
+local function rosterFilter(_, texts) return S.Matches(texts, rosterNeedle, ROSTER_SEARCHED) end
+
 local function roster(s)
   local btnH = S.ButtonHeight(s)
   -- the views: a search and two toggles on one line
@@ -60,16 +70,10 @@ local function roster(s)
     S.Empty(aw, math.max(40 * s, ah - below), "No guild members to show.",
       "Join or create a guild; its roster arrives from the server.")
   else
-    local filtering = needle ~= ""
-    W.List(WINDOW, "MemberList", 0, -below, {
-      sortable = true,
-      hide = { [9] = true, [10] = true },
-      columns = { [5] = { "Alt", 30 }, [8] = { "Public Note", 0 } },
-      filter = filtering and function(_, texts)
-        return S.Matches(texts, needle, { 1, 3, 4, 7, 8 })
-      end or nil,
-      filterKey = needle,
-    })
+    rosterNeedle = needle
+    ROSTER.filter = needle ~= "" and rosterFilter or nil
+    ROSTER.filterKey = needle
+    W.List(WINDOW, "MemberList", 0, -below, ROSTER)
   end
   -- the selected member, then the actions
   local rows, _, sel = eq.ListInfo(WINDOW, "MemberList")

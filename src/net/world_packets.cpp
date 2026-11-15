@@ -58,7 +58,8 @@ AppPacket encode(const LoginInfo& v) {
     login += v.session_key;
     // The last byte stays a NUL, so world never reads the key on into the next field.
     w.fixed_string(std::string_view(login).substr(0, 63), 64);
-    w.fixed_string(v.custom_files_key, 124); // unknown064[124]
+    // unknown064[124], NUL-terminated (world reads it as a C string): at most 123 characters.
+    w.fixed_string(std::string_view(v.custom_files_key).substr(0, 123), 124);
     w.le<std::uint8_t>(v.zoning ? 1 : 0);   // +188
     w.zeros(3);
     w.le<std::uint8_t>(0xcc); // +192, as the original client
