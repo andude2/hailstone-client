@@ -62,7 +62,7 @@ public:
             a.level = b.level;
             a.spell_id = b.empty() ? 0 : static_cast<std::int32_t>(b.spell);
             a.modifier = bits(b.modifier);
-            a.duration = static_cast<std::int32_t>(b.tics);
+            a.duration = b.tics;
             caster_ids_[i] = b.empty() ? 0 : b.caster_id;
         }
     }
@@ -467,7 +467,7 @@ HitLandingResult land_spell(const hit::Hit& h, const HitLandingContext& ctx) {
             PlacedBuff b;
             b.slot = slot;
             b.spell = static_cast<std::uint32_t>(a->spell_id);
-            b.tics = static_cast<std::uint32_t>(a->duration);
+            b.tics = a->duration;
             b.level = a->level;
             b.modifier = as_float(a->modifier);
             b.effect_type = a->type;

@@ -99,7 +99,7 @@ struct Fixture {
         }
         return spells[id] = s;
     }
-    void buff(int slot, std::uint32_t spell, std::uint32_t tics, std::uint32_t caster = 2) {
+    void buff(int slot, std::uint32_t spell, std::int32_t tics, std::uint32_t caster = 2) {
         BuffSlot& b = state.buffs[static_cast<std::size_t>(slot)];
         b.spell = spell;
         b.tics = tics;
@@ -142,25 +142,25 @@ TEST_CASE("Buff tick: one 6 s timer per character; a duration already 0 is remov
     f.spell(102, {{0x7a, 1}});
     f.buff(0, 100, 3);
     f.state.buffs[0].received_ms = 4000; // a packet does not restart the character's timer
-    f.buff(1, 101, 0xfffffffeu);        // permanent: not positive, not 0 or -1
+    f.buff(1, 101, -2);                 // permanent: not positive, not 0 or -1
     f.buff(2, 102, 0);                  // runs out at this tick
     CHECK_FALSE(f.tick(7000)); // 6000 ms is not more than 6000
     CHECK(f.state.buffs[0].tics == 3);
     CHECK(f.tick(7001));
     CHECK(f.state.buffs[0].tics == 2);
     CHECK(f.state.buffs[0].received_ms == 7001);
-    CHECK(f.state.buffs[1].tics == 0xfffffffeu);
+    CHECK(f.state.buffs[1].tics == -2);
     CHECK(f.state.buffs[2].empty()); // CharacterZoneClient_RemoveAffect(effect, 0, 0): no packet
     REQUIRE(f.host.removed.size() == 1);
     CHECK(f.host.removed[0] == std::pair<int, bool>{2, false});
     CHECK(f.state.last_buff_tick_ms == 7001);
     // A duration of -1 goes unless the spell's duration formula is 50 (permanent).
-    f.buff(3, 101, 0xffffffffu);
+    f.buff(3, 101, -1);
     f.spell(103, {{0x7a, 1}}, 50);
-    f.buff(4, 103, 0xffffffffu);
+    f.buff(4, 103, -1);
     CHECK(f.tick(13002));
     CHECK(f.state.buffs[3].empty());
-    CHECK(f.state.buffs[4].tics == 0xffffffffu);
+    CHECK(f.state.buffs[4].tics == -1);
 }
 
 TEST_CASE("Buff tick: held countdowns (Spell_IsBuffCountdownHeld, SPA 0x1b4)") {

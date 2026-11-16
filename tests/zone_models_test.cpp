@@ -114,3 +114,17 @@ TEST_CASE("zone models: a generated tree sways by its branches' heights, or stan
     CHECK(branches.bend == doctest::Approx(3.0f));
     CHECK(branches.flutter == 0.0f);
 }
+
+TEST_CASE("zone texture layouts: one bound for every zone, so the pipeline cache serves the next zone's pipelines") {
+    using hailstone::render::kZoneTextureBound;
+    using hailstone::render::zone_texture_layout_count;
+    // Zones of different sizes share the layout (qeynos2 201 textures, qey2hh1 199).
+    CHECK(zone_texture_layout_count(201, 8388590) == kZoneTextureBound);
+    CHECK(zone_texture_layout_count(199, 8388590) == kZoneTextureBound);
+    CHECK(zone_texture_layout_count(0, 8388590) == kZoneTextureBound);
+    // A device with smaller arrays bounds it.
+    CHECK(zone_texture_layout_count(100, 4096) == 4096u);
+    // A zone past the bound keeps its own count; an unknown limit still gives a usable layout.
+    CHECK(zone_texture_layout_count(70000, 8388590) == 70000u);
+    CHECK(zone_texture_layout_count(0, 0) == 1u);
+}

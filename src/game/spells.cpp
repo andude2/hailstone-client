@@ -570,13 +570,19 @@ std::string report_spell_hit_line(const SpellHitLine& line, std::string_view nor
     return std::string(normal);
 }
 
-bool buff_is_permanent(std::uint32_t tics, const SpellData* spell) {
-    return tics >= 0xfffffffeu || (spell && spell->duration_formula == 50);
+bool buff_is_permanent(std::int32_t tics, const SpellData* spell) {
+    return tics < 0 || (spell && spell->duration_formula == 50);
 }
 
-std::uint64_t buff_ms_left(std::uint32_t tics, std::int64_t received_ms, std::int64_t now_ms) {
+std::uint64_t buff_ms_left(std::int32_t tics, std::int64_t received_ms, std::int64_t now_ms) {
     std::int64_t left = static_cast<std::int64_t>(tics) * kBuffTickMs - (now_ms - received_ms);
     return static_cast<std::uint64_t>(std::max<std::int64_t>(left, 0));
+}
+
+std::int32_t buff_tics_left(std::int32_t tics, std::int64_t received_ms, std::int64_t now_ms) {
+    if (tics < 0) return tics; // permanent: the server's count, as sent
+    const std::int64_t elapsed = now_ms > received_ms ? (now_ms - received_ms) / kBuffTickMs : 0;
+    return static_cast<std::int32_t>(std::max<std::int64_t>(0, tics - elapsed));
 }
 
 bool SpellState::gem_castable(int gem, std::uint32_t now) const {

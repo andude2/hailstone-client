@@ -100,7 +100,7 @@ struct SpellBuff {
     std::uint8_t unknown002 = 0, unknown003 = 0;
     float bard_modifier = 1.0f;
     std::uint32_t spell_id = 0;
-    std::uint32_t duration = 0; // tics
+    std::int32_t duration = 0; // tics; negative for a permanent buff (EQEmu's signed ticsremaining)
     std::uint32_t caster_id = 0;
     std::uint32_t num_hits = 0;
     float y = 0, x = 0, z = 0;
@@ -119,12 +119,12 @@ std::optional<BuffPacket> decode_buff(const AppPacket& p);
 
 // OP_BuffCreate and OP_TargetBuffs, zone → client (rof2.cpp ENCODE(OP_BuffCreate)):
 // u32 entity, u32 tic timer, u8 all buffs (1 = the whole list), u16 count,
-// count × {u32 slot, u32 spell (0xffffffff = removed), u32 tics, u32 num hits,
+// count × {u32 slot, u32 spell (0xffffffff = removed), i32 tics (negative: permanent), u32 num hits,
 // cstr caster}, u8 type (0 own window, 5 PC target, 7 NPC target).
 struct BuffIconEntry {
     std::uint32_t slot = 0;
     std::uint32_t spell_id = 0;
-    std::uint32_t tics = 0;
+    std::int32_t tics = 0; // negative for a permanent buff
     std::uint32_t num_hits = 0;
     std::string caster;
 };

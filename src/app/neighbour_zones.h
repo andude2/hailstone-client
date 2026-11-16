@@ -52,6 +52,10 @@ public:
         // ground is cached (horizon_cache_dir).
         std::shared_ptr<const render::HorizonBuild> horizon;
         std::filesystem::path cache_dir;
+        // The world atlas (app/world_atlas.h): where each neighbour's ground is cut (the zone past it begins), and
+        // the zones whose record is measured once nothing else is loading (app::measure_atlas_zone).
+        std::map<std::string, std::vector<glm::vec4>> cuts;
+        std::vector<std::string> atlas_missing;
     };
     // After zone-in, with the zone points: finds the lines and which of them qualify here (quick, on this thread).
     void enter(const ZoneIn& in);
@@ -137,6 +141,8 @@ private:
     render::HorizonSources sources_; // the land's, then those measured this visit (they shape the parts drawn)
     std::filesystem::path cache_dir_;
     std::map<std::string, std::vector<std::byte>> land_files_; // the land's textures' files, for the neighbours
+    std::map<std::string, std::vector<glm::vec4>> cuts_;      // ZoneIn::cuts
+    std::vector<std::string> atlas_missing_;                  // ZoneIn::atlas_missing, not started yet
     std::shared_ptr<Job> job_;
     std::thread thread_;
     std::optional<Pending> pending_;

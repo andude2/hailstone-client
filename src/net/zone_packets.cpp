@@ -629,7 +629,7 @@ std::optional<PlayerProfile> decode_player_profile(const AppPacket& p) {
             b.caster_id = u32();
             u8();
             b.counters = u32();
-            b.duration = u32();
+            b.duration = r.le<std::int32_t>();
             b.level = u8();
             b.spell_id = u32();
             b.effect_type = u8();

@@ -9,6 +9,7 @@
 #include <limits>
 #include <span>
 
+#include "app/world_atlas.h"
 #include "assets/zone.h"
 #include "core/atomic_file.h"
 #include "core/game_dir.h"
@@ -103,7 +104,7 @@ double ms_since(Clock::time_point t) { return std::chrono::duration<double, std:
 // The neighbour's ground in the current zone's coordinates (render::HorizonSource): its terrain's highest visible
 // ground (`collision` built without its placed objects) on squares over its box (moved by `offset`, within
 // kSourceReach of the current zone's box), past the seam only (before it lies the current zone). A square takes the
-// median of its samples, from two hits at least, and keeps the highest of them (HorizonSource::top).
+// median of its samples, from two hits at least, and keeps the highest of them (HorizonSource::top); and its water.
 render::HorizonSource measure_ground(const std::string& name, const assets::Zone& zone,
                                      const game::CollisionMesh& collision, const glm::vec3& offset,
                                      const game::Seam& seam, const glm::vec3& here_lo, const glm::vec3& here_hi,
@@ -142,7 +143,10 @@ render::HorizonSource measure_ground(const std::string& name, const assets::Zone
             highest[i] = hits.back() + offset.z;
         }
     }
-    return render::horizon_source(name, lo, cell, nx, ny, std::move(ground), std::move(highest));
+    // Its water (app::measure_water), over the squares it has ground on, past the seam.
+    std::vector<float> water = measure_water(zone, lo, cell, nx, ny, ground, offset, &cancelled);
+    if (cancelled) return {};
+    return render::horizon_source(name, lo, cell, nx, ny, std::move(ground), std::move(highest), std::move(water));
 }
 
 // Where the land stands in for the neighbour's ground (game::LandMask), over its measured ground: its terrain is drawn
@@ -280,7 +284,11 @@ struct NeighbourZones::Job {
     std::string zone_name;
     std::filesystem::path cache_path;
     std::uint64_t cache_key = 0;
+    std::vector<glm::vec4> cuts; // where the world atlas cuts its ground (render::cut_horizon_source)
+    bool atlas = false;          // only measure its record for the world atlas (app::measure_atlas_zone)
+    std::uint64_t atlas_key = 0;
     // Out.
+    std::size_t atlas_squares = 0; // the record's squares (atlas)
     std::atomic<bool> done{false};
     std::atomic<bool> cancelled{false};
     render::ZoneRenderer::PreparedPtr prepared;
@@ -318,6 +326,8 @@ void NeighbourZones::clear() {
     horizon_.reset();
     sources_.clear();
     land_files_.clear();
+    cuts_.clear();
+    atlas_missing_.clear();
 }
 
 void NeighbourZones::footprint(std::vector<std::int64_t>& out) const {
@@ -346,6 +356,8 @@ void NeighbourZones::enter(const ZoneIn& in) {
     zone_name_ = in.zone->name;
     horizon_ = in.horizon;
     cache_dir_ = in.cache_dir;
+    cuts_ = in.cuts;
+    atlas_missing_ = in.atlas_missing;
     if (horizon_) {
         sources_ = horizon_->sources;
         // The land's textures, which the neighbours' parts of it borrow (read here: the loader must not touch this
@@ -425,6 +437,22 @@ void NeighbourZones::run(std::shared_ptr<Job> job, const GameDir* game) {
             return;
         }
         if (stop()) return;
+        if (job->atlas) {
+            // The zone's record for the world atlas.
+            auto record = measure_atlas_zone(zone, job->atlas_key, &job->cancelled);
+            if (stop()) return;
+            if (record.valid() && job->atlas_key != 0) {
+                const auto bytes = game::write_atlas_zone(record);
+                write_file_atomic(atlas_zone_path(job->name),
+                                  std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+                job->atlas_squares = static_cast<std::size_t>(record.nx) * static_cast<std::size_t>(record.ny);
+            } else {
+                job->error = "no ground to measure";
+            }
+            job->ms = ms_since(t0);
+            job->done = true;
+            return;
+        }
         const game::CollisionMesh collision = game::CollisionMesh::build(zone);
         if (stop()) return;
         // Its zone lines, for the return line.
@@ -509,6 +537,9 @@ void NeighbourZones::run(std::shared_ptr<Job> job, const GameDir* game) {
                 }
             }
         }
+        // The world atlas cuts it where the zone past it begins.
+        if (job->source && !job->cuts.empty())
+            job->source = std::make_shared<const render::HorizonSource>(render::cut_horizon_source(*job->source, job->cuts));
         if (job->survey || stop()) {
             job->ms = ms_since(t0);
             job->done = true;
@@ -590,6 +621,14 @@ void NeighbourZones::run(std::shared_ptr<Job> job, const GameDir* game) {
 }
 
 void NeighbourZones::finish(Job& job) {
+    if (job.atlas) {
+        if (!job.error.empty())
+            log::info("world atlas: {}: not measured: {}", job.name, job.error);
+        else
+            log::info("world atlas: {} measured ({} squares) in {:.0f} ms; the land takes its shape from the next zone-in",
+                      job.name, job.atlas_squares, job.ms);
+        return;
+    }
     auto it = std::find_if(lines_.begin(), lines_.end(), [&](const Line& l) { return l.name == job.name; });
     if (it == lines_.end()) return;
     Line& l = *it;
@@ -631,9 +670,11 @@ void NeighbourZones::finish(Job& job) {
         l.renderer->set_distant(true); // its part of the land round the zone
         l.renderer->set_debug_tint(debug_tint_);
         l.bytes = job.bytes;
-        log::info("neighbour zone {}: open sky {:.0f}%, prepared in {:.0f} ms on the loader, uploaded in {:.1f} ms: "
+        log::info("neighbour zone {}: open sky {:.0f}%, prepared in {:.0f} ms on the loader, uploaded in {:.1f} ms "
+                  "(uploads {:.1f}, descriptors {:.1f}, pipelines {:.1f}): "
                   "{} triangles, {} textures, {:.1f} MB, {} squares of the land round the zone",
-                  job.name, job.open_there * 100.0f, job.ms, ms_since(t0), l.renderer->stats().triangles,
+                  job.name, job.open_there * 100.0f, job.ms, ms_since(t0), l.renderer->stats().upload_ms,
+                  l.renderer->stats().descriptors_ms, l.renderer->stats().pipelines_ms, l.renderer->stats().triangles,
                   l.renderer->stats().textures, static_cast<double>(job.bytes) / (1024.0 * 1024.0), job.land_squares);
     } catch (const std::exception& e) {
         log::warn("neighbour zone {}: upload failed: {}", job.name, e.what());
@@ -707,8 +748,26 @@ void NeighbourZones::update(const glm::vec3& camera, float far_plane, bool enabl
     }
     if (!next) {
         // Nothing to draw: the next qualifying neighbour whose ground is not known yet is measured, so the land takes
-        // its shape on the next visit (and when it is drawn).
-        if (!horizon_) return;
+        // its shape on the next visit (and when it is drawn); then the world atlas's zones not measured yet.
+        auto atlas = [&] {
+            while (!atlas_missing_.empty()) {
+                const std::string name = atlas_missing_.front();
+                atlas_missing_.erase(atlas_missing_.begin());
+                const std::uint64_t key = atlas_zone_key(game_, name);
+                if (key == 0) continue;
+                job_ = std::make_shared<Job>();
+                job_->name = name;
+                job_->atlas = true;
+                job_->atlas_key = key;
+                log::info("world atlas: measuring {}", name);
+                thread_ = std::thread(&NeighbourZones::run, job_, &game_);
+                return;
+            }
+        };
+        if (!horizon_) {
+            atlas();
+            return;
+        }
         Line* survey = nullptr;
         float nearest = std::numeric_limits<float>::max();
         for (auto& l : lines_) {
@@ -719,7 +778,10 @@ void NeighbourZones::update(const glm::vec3& camera, float far_plane, bool enabl
                 survey = &l;
             }
         }
-        if (!survey) return;
+        if (!survey) {
+            atlas();
+            return;
+        }
         survey->surveyed = true;
         log::info("neighbour zone {}: measuring its ground for the land round the zone", survey->name);
         job_ = make_job(*survey, true);
@@ -779,6 +841,7 @@ std::shared_ptr<NeighbourZones::Job> NeighbourZones::make_job(const Line& l, boo
     job->zone_name = zone_name_;
     if (!cache_dir_.empty()) job->cache_path = cache_dir_ / (l.name + ".bin");
     job->cache_key = l.cache_key;
+    if (auto it = cuts_.find(l.name); it != cuts_.end()) job->cuts = it->second;
     return job;
 }
 

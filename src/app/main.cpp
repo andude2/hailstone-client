@@ -65,6 +65,7 @@
 #include "app/plate_test.h"
 #include "game/collision.h"
 #include "app/neighbour_zones.h"
+#include "app/world_atlas.h"
 #include "game/zone_names.h"
 #include "game/sky_colours.h"
 #include "game/particles.h"
@@ -90,6 +91,9 @@ struct Options {
     // --neighbours "N:zone:x:y:z,...": the zone points OP_SendZonepoints would send (server coordinates, 999999
     // keeps), so the viewer draws the neighbour zones past the zone lines (app/neighbour_zones.h).
     std::optional<std::vector<hailstone::game::ZonePointTarget>> neighbours;
+    // --atlas SERVER: the world atlas the client keeps for that server (app/world_atlas.h) shapes the land round the
+    // zone, with the neighbours' ground its cache holds; without --neighbours, the zone points of its visit.
+    std::string atlas;
     std::optional<glm::vec2> fog; // override fog start/end (viewer only)
     std::optional<hailstone::game::ZoneFogInput> zone_fog; // viewer: OP_NewZone's fog values (--zone-fog)
     int sky = 1;                  // viewer sky index (0 = none, indoor)
@@ -240,6 +244,8 @@ void usage() {
         "  --screenshot FILE  save the last frame as PNG (use with --frames); a relative FILE goes to screenshots/\n"
         "  --neighbours N:ZONE:X:Y:Z,...  the zone points (server coordinates, 999999 keeps) the server would send:\n"
         "                     draws the neighbour zones past the outdoor zone lines (modern lighting)\n"
+        "  --atlas SERVER     viewer: the world atlas the client keeps for SERVER (its folder under servers/) shapes\n"
+        "                     the land round the zone; the zone points of its last visit when --neighbours is not given\n"
         "  --fog START END    override fog distances (default: the client's no-server fallback)\n"
         "  --zone-fog ZTYPE R G B FOGMIN FOGMAX DENSITY MINCLIP MAXCLIP\n"
         "                     viewer: OP_NewZone's fog (ztype 0: fog off; colour bytes; the first fog clips)\n"
@@ -397,6 +403,9 @@ Options parse_args(int argc, char** argv) {
                 at = end + 1;
             }
             o.neighbours = std::move(points);
+        } else if (arg("--atlas")) {
+            need(1);
+            o.atlas = argv[++i];
         } else if (arg("--screenshot")) {
             need(1);
             o.screenshot = hailstone::platform::screenshot_path(argv[++i]).string();
@@ -947,16 +956,30 @@ int main(int argc, char** argv) {
             flora_renderer->set_pushers(std::span<const glm::vec4>(&push, 1));
         }
         std::unique_ptr<render::ZoneRenderer> zone_renderer;
+        app::AtlasLand viewer_atlas; // --atlas
         render::PointShadows point_shadows;
         render::CoverMapState cover_state, water_state; // what the cover and water maps last showed
         render::FlyCamera camera;
         if (zone) {
             const GameDir game = open_game_dir(opts.game_dir, opts.classic_dir);
             auto options = render::zone_render_options(game);
-            // The neighbours' ground an earlier run measured (--neighbours) shapes the land round the zone.
-            if (opts.neighbours && opts.modern)
+            // The neighbours' ground an earlier run measured (--neighbours) shapes the land round the zone; with
+            // --atlas, that server's, and the world atlas's zones past them.
+            if (!opts.atlas.empty() && opts.modern) {
+                if (!opts.neighbours)
+                    if (auto visit = app::load_atlas_visit(opts.atlas, zone->name)) opts.neighbours = visit->points;
+                viewer_atlas = app::atlas_land(
+                    game, opts.atlas, zone->name,
+                    app::horizon_cache_entries(game, app::horizon_cache_dir(opts.atlas, zone->name), zone->name));
+                if (std::find(viewer_atlas.missing.begin(), viewer_atlas.missing.end(), zone->name) ==
+                        viewer_atlas.missing.end() &&
+                    !app::load_atlas_zone(game, zone->name))
+                    viewer_atlas.missing.insert(viewer_atlas.missing.begin(), zone->name);
+                options.horizon_sources = viewer_atlas.sources;
+            } else if (opts.neighbours && opts.modern) {
                 options.horizon_sources =
                     app::cached_horizon_sources(game, app::horizon_cache_dir("viewer", zone->name), zone->name);
+            }
             zone_renderer = std::make_unique<render::ZoneRenderer>(vk, *zone, shader_dir, options);
             zone_renderer->set_hide_flames(opts.modern);
             zone_renderer->set_lod_scale(opts.tree_detail);
@@ -982,7 +1005,9 @@ int main(int argc, char** argv) {
             const int tt = opts.time_type >= 0 ? opts.time_type : (opts.sky > 0 ? 1 : 0);
             in.outdoor = opts.sky > 0 && (tt == 1 || tt == 2 || tt == 5);
             in.horizon = zone_renderer->horizon_build();
-            in.cache_dir = app::horizon_cache_dir("viewer", zone->name);
+            in.cache_dir = app::horizon_cache_dir(opts.atlas.empty() ? std::string("viewer") : opts.atlas, zone->name);
+            in.cuts = viewer_atlas.cuts;
+            in.atlas_missing = viewer_atlas.missing;
             neighbours->enter(in);
         }
         if (opts.yaw_deg) camera.yaw = glm::radians(*opts.yaw_deg);

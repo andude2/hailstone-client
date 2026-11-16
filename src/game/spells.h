@@ -252,9 +252,15 @@ std::string report_spell_hit_line(const SpellHitLine& line, std::string_view nor
 
 // Buff time left: `tics` as of `received_ms` (the packet, or the client's
 // last buff tick, game/passage_of_time.h).
-// Durations of 0xfffffffe and above (and the permanent formula 50) never run out.
-bool buff_is_permanent(std::uint32_t tics, const SpellData* spell);
-std::uint64_t buff_ms_left(std::uint32_t tics, std::int64_t received_ms, std::int64_t now_ms);
+// A negative count (and the permanent formula 50) never runs out: EQEmu sends -1 (duration formula 50), -4
+// (formula 51, an aura's) and -1000 (PERMANENT_BUFF_DURATION, a script's); the original's own -2 is not traced
+// (docs/unknowns.md).
+bool buff_is_permanent(std::int32_t tics, const SpellData* spell);
+// 0 for a negative count: test buff_is_permanent first.
+std::uint64_t buff_ms_left(std::int32_t tics, std::int64_t received_ms, std::int64_t now_ms);
+// Ticks left, as the original's signed count: `tics` less the whole 6 s ticks since `received_ms`, never below 0.
+// A negative count (a permanent buff) is given as it is, never counted down.
+std::int32_t buff_tics_left(std::int32_t tics, std::int64_t received_ms, std::int64_t now_ms);
 // "333d", "1:05:00", "4:59", "12s".
 std::string format_duration(std::uint64_t ms);
 
@@ -269,7 +275,7 @@ struct SpellGem {
 
 struct BuffSlot {
     std::uint32_t spell = kNoSpell;
-    std::uint32_t tics = 0;          // as received
+    std::int32_t tics = 0;           // as received; negative for a permanent buff (buff_is_permanent)
     std::int64_t received_ms = 0;
     std::uint8_t level = 0;
     std::uint32_t caster_id = 0;

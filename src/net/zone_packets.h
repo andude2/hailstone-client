@@ -197,7 +197,7 @@ struct ProfileBuff {
     float instrument_mod = 0;
     std::uint32_t caster_id = 0;
     std::uint32_t counters = 0;
-    std::uint32_t duration = 0;
+    std::int32_t duration = 0; // tics; negative for a permanent buff
     std::uint8_t level = 0;
     std::uint32_t spell_id = 0;
     std::uint8_t effect_type = 0;

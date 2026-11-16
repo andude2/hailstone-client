@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <system_error>
 #include <unordered_map>
+#include <utility>
 
 #include "assets/texture.h"
 #include "assets/texture_overrides.h"
@@ -214,6 +215,19 @@ constexpr std::uint32_t kLandZone = 16384;
 // ZoneRenderer::set_debug_tint: a neighbour's own geometry, and its own ground in its part of the land.
 constexpr std::uint32_t kTintNeighbour = 32768;
 constexpr std::uint32_t kTintLand = 65536;
+// The current zone's land (Draw::distant, no land_fade): its ground texture moved toward the colour in color2 (sRGB),
+// by color2's alpha, where a zone of the world atlas gives the land its ground (render::HorizonMesh::tint).
+constexpr std::uint32_t kLandTint = 1048576;
+// A land vertex's tint (linear rgb, a its amount) as color2: the colour in sRGB, the amount in alpha.
+std::uint32_t pack_tint(const glm::vec4& tint) {
+    std::uint32_t out = static_cast<std::uint32_t>(std::lround(std::clamp(tint.a, 0.0f, 1.0f) * 255.0f)) << 24;
+    for (int k = 0; k < 3; ++k) {
+        const float c = std::clamp(tint[k], 0.0f, 1.0f);
+        const float e = c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
+        out |= static_cast<std::uint32_t>(std::lround(e * 255.0f)) << (8 * k);
+    }
+    return out;
+}
 using zone_surface::kAdditiveGlow; // render/zone_surface.h
 // The depth pre-pass's flags: none of the shading's (bind_draw adds kLodFading, which decides discards, to both).
 constexpr std::uint32_t kDepthOnlyFlags = 0;
@@ -360,8 +374,21 @@ ZoneRenderer::PreparedLand ZoneRenderer::prepared_land(const Prepared& p) {
     PreparedLand out;
     out.build = p.horizon_build;
     out.footprint = p.footprint.size();
-    for (const Draw& d : p.draws)
-        if (d.distant && d.land_fade < out.triangles.size()) out.triangles[d.land_fade] += d.index_count / 3;
+    for (const Draw& d : p.draws) {
+        if (!d.distant) continue;
+        if (d.liquid == Liquid::Water) {
+            out.water_triangles += d.index_count / 3;
+            out.water_two_sided &= d.two_sided;
+            continue;
+        }
+        if (d.land_fade < out.triangles.size()) out.triangles[d.land_fade] += d.index_count / 3;
+        if (d.land_fade != 0) continue;
+        for (std::uint32_t i = d.first_index; i + 2 < d.first_index + d.index_count && i + 2 < p.indices.size(); i += 3) {
+            bool tinted = false;
+            for (std::uint32_t k = 0; k < 3; ++k) tinted |= (p.vertices[p.indices[i + k]].color2 >> 24) != 0;
+            out.tinted_triangles += tinted ? 1 : 0;
+        }
+    }
     return out;
 }
 
@@ -471,6 +498,10 @@ void ZoneRenderer::upload(Prepared& p) {
     stats_.missing_textures = p.missing_textures;
 }
 
+std::uint32_t zone_texture_layout_count(std::uint32_t textures, std::uint32_t max_sampled_images) {
+    return std::max(textures, std::max(1u, std::min(kZoneTextureBound, max_sampled_images)));
+}
+
 ZoneRenderer::ZoneRenderer(VkContext& vk, const assets::Zone& zone, const std::filesystem::path& shader_dir,
                            const ZoneRenderOptions& options)
     : ZoneRenderer(vk, prepare(zone, options, vk.caps().max_sampled_images), shader_dir) {}
@@ -488,8 +519,15 @@ ZoneRenderer::ZoneRenderer(VkContext& vk, PreparedPtr prepared, const std::files
     // A neighbour zone (behind_) keeps its single pass: its ties go by the draw order (GREATER, first drawn wins),
     // which an equal test over the pre-pass's written depth would turn around.
     depth_prepass_ = vk.scene_options().depth_prepass && !behind_;
+    using Ms = std::chrono::duration<float, std::milli>;
+    auto step = std::chrono::steady_clock::now();
+    const auto lap = [&step] {
+        const auto now = std::chrono::steady_clock::now();
+        return Ms(now - std::exchange(step, now)).count();
+    };
     upload(*prepared);
     prepared.reset();
+    stats_.upload_ms = lap();
     create_descriptors();
     // Shared textures moved into this client's own images when sharing stopped: the set takes the new views.
     shared_listener_ = vk_.on_shared_textures_moved([this] {
@@ -498,9 +536,11 @@ ZoneRenderer::ZoneRenderer(VkContext& vk, PreparedPtr prepared, const std::files
             if (refresh_shared_texture(t)) changed = true;
         if (changed) write_texture_set();
     });
+    stats_.descriptors_ms = lap();
     create_pipelines(shader_dir);
     create_shadow_pipeline(shader_dir);
     create_underwater_pipeline(shader_dir);
+    stats_.pipelines_ms = lap();
 }
 
 ZoneRenderer::~ZoneRenderer() {
@@ -1155,6 +1195,8 @@ ZoneRenderer::PreparedPtr ZoneRenderer::prepare(const assets::Zone& zone, const 
                     if (fade != 0 && v < mesh.weight.size())
                         g.color2 = static_cast<std::uint32_t>(std::lround(std::clamp(mesh.weight[v], 0.0f, 1.0f) * 255.0f))
                                    << 24;
+                    else if (fade == 0 && v < mesh.tint.size() && mesh.tint[v].a > 0.0f)
+                        g.color2 = pack_tint(mesh.tint[v]);
                     vertices.push_back(g);
                 }
                 out.push_back(it->second);
@@ -1184,7 +1226,11 @@ ZoneRenderer::PreparedPtr ZoneRenderer::prepare(const assets::Zone& zone, const 
             land_triangles += add_land(*pick.rock, looks.at(*pick.rock), build->rock, land, land.rock, 0);
             if (pick.water) {
                 const HorizonLook water = look_of(*pick.water, median_color(horizon_uses.at(*pick.water).colors));
-                land_triangles += add_land(*pick.water, looks.at(*pick.water), water, land, land.water, 0);
+                // Both faces: a classic water surface is two sheets, one facing up and one down (its facing measures
+                // 0), so the facing the land would take from it is a guess, and the wrong one hid the whole sea.
+                MaterialKey water_key = *pick.water;
+                water_key.two_sided = true;
+                land_triangles += add_land(water_key, looks.at(*pick.water), water, land, land.water, 0);
             }
             build->field = std::move(field);
             build->sources = std::move(sources);
@@ -1756,7 +1802,8 @@ void ZoneRenderer::create_descriptors() {
     VkDescriptorSetLayoutBinding binding{};
     binding.binding = 0;
     binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    binding.descriptorCount = count;
+    // The variable-count binding's upper bound (the set is allocated with the zone's own count below).
+    binding.descriptorCount = zone_texture_layout_count(count, vk_.caps().max_sampled_images);
     binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     VkDescriptorBindingFlags flags =
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT |
@@ -2211,6 +2258,7 @@ void ZoneRenderer::draw(const FrameInfo& frame, const glm::mat4& view_proj, cons
                                   (d.multipass && lighting_ != VertexLighting::None ? kMultiPass : 0u) |
                                   (d.liquid == Liquid::Water ? kWaterSurface | copies : 0u) |
                                   (d.liquid == Liquid::Lava ? kLavaSurface : 0u) |
+                                  (d.distant && d.land_fade == 0 && d.liquid == Liquid::None ? kLandTint : 0u) |
                                   zone_surface::view_surface_flags(d.surface, lighting_ == VertexLighting::None);
             bind_draw(cmd, d, flags, time_ms);
         }, kSceneLod);

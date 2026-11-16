@@ -455,9 +455,9 @@ TEST_CASE("build_sheet: buff ticks left; permanent buffs and held timers do not 
     spells.buffs[0].spell = 300;
     spells.buffs[0].tics = 10;
     spells.buffs[1].spell = 301;
-    spells.buffs[1].tics = 0xffffffffu;
+    spells.buffs[1].tics = -1;
     spells.buffs[2].spell = 302;
-    spells.buffs[2].tics = 0xfffffffeu;
+    spells.buffs[2].tics = -2;
     LiveState live;
     live.level = 60;
     live.now_ms = 3 * kBuffTickMs + 100; // three ticks after they arrived (received_ms 0)

@@ -545,6 +545,19 @@ int ClientApp::run() {
                         in.outdoor = z && z->sky != 0 && outdoor;
                         if (zone_renderer_) in.horizon = zone_renderer_->horizon_build();
                         in.cache_dir = horizon_cache_dir(server_profile_.id, zone_->name);
+                        // The world atlas: this visit, and what it wants measured (app/world_atlas.h).
+                        game::AtlasVisit visit;
+                        visit.zone = zone_->name;
+                        visit.zone_id = in.zone_id;
+                        visit.outdoor = in.outdoor;
+                        visit.points = in.points;
+                        save_atlas_visit(server_profile_.id, visit);
+                        in.cuts = atlas_land_.cuts;
+                        in.atlas_missing = atlas_land_.missing;
+                        if (std::find(in.atlas_missing.begin(), in.atlas_missing.end(), zone_->name) ==
+                                in.atlas_missing.end() &&
+                            !load_atlas_zone(game_, zone_->name))
+                            in.atlas_missing.insert(in.atlas_missing.begin(), zone_->name);
                         neighbours_->enter(in);
                     }
                     neighbours_->update(camera_.position, lit.far_plane, modern && neighbour_zones_ && in_game);

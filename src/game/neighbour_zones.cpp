@@ -39,8 +39,47 @@ LineTarget line_target_from_server(float server_x, float server_y, float server_
     return t;
 }
 
+std::vector<ZoneLineCell> zone_line_cells(const assets::ZoneRegions& regions, const glm::vec3& zone_lo,
+                                          const glm::vec3& zone_hi) {
+    std::map<std::uint32_t, ZoneLineCell> by_region; // the region's target, the cells' template
+    for (std::uint32_t r = 1; r <= regions.region_count(); ++r) {
+        const auto info = regions.info(r);
+        if (!info.is_zone_line()) continue;
+        const auto& z = *info.zone_line;
+        ZoneLineCell c;
+        c.region = r;
+        c.reference = z.reference;
+        c.zone_point = z.zone_point;
+        c.zone_id = z.zone_id;
+        c.server_x = z.server_x;
+        c.server_y = z.server_y;
+        c.server_z = z.server_z;
+        c.tag = info.tag;
+        by_region.emplace(r, std::move(c));
+    }
+    std::vector<ZoneLineCell> out;
+    if (by_region.empty()) return out;
+    const glm::vec3 margin(200.0f, 200.0f, 200.0f);
+    for (const auto& leaf : regions.leaf_cells(zone_lo - margin, zone_hi + margin,
+                                               [&](std::uint32_t r) { return by_region.contains(r); })) {
+        auto it = by_region.find(leaf.region);
+        if (it == by_region.end()) continue;
+        ZoneLineCell c = it->second;
+        c.lo = leaf.lo;
+        c.hi = leaf.hi;
+        out.push_back(std::move(c));
+    }
+    return out;
+}
+
 std::vector<NeighbourLines> collect_neighbour_lines(const assets::ZoneRegions& regions, const glm::vec3& zone_lo,
                                                     const glm::vec3& zone_hi, const std::vector<ZonePointTarget>& points,
+                                                    std::uint32_t current_zone) {
+    return collect_neighbour_lines(zone_line_cells(regions, zone_lo, zone_hi), points, current_zone);
+}
+
+std::vector<NeighbourLines> collect_neighbour_lines(const std::vector<ZoneLineCell>& line_cells,
+                                                    const std::vector<ZonePointTarget>& points,
                                                     std::uint32_t current_zone) {
     // Each zone-line region's destination: (zone, a key for its target so each zone point counts once).
     struct Dest {
@@ -49,10 +88,8 @@ std::vector<NeighbourLines> collect_neighbour_lines(const assets::ZoneRegions& r
         LineTarget target;
     };
     std::map<std::uint32_t, Dest> by_region;
-    for (std::uint32_t r = 1; r <= regions.region_count(); ++r) {
-        const auto info = regions.info(r);
-        if (!info.is_zone_line()) continue;
-        const auto& z = *info.zone_line;
+    for (const auto& z : line_cells) {
+        if (by_region.contains(z.region)) continue;
         Dest d;
         if (z.reference) {
             auto it = std::find_if(points.begin(), points.end(), [&](const ZonePointTarget& p) {
@@ -64,17 +101,14 @@ std::vector<NeighbourLines> collect_neighbour_lines(const assets::ZoneRegions& r
             d.target = line_target_from_server(it->server_x, it->server_y, it->server_z);
         } else {
             d.zone = z.zone_id;
-            d.key = info.tag;
+            d.key = z.tag;
             d.target = line_target_from_server(z.server_x, z.server_y, z.server_z);
         }
         if (d.zone == 0 || d.zone == current_zone) continue;
-        by_region.emplace(r, std::move(d));
+        by_region.emplace(z.region, std::move(d));
     }
     std::vector<NeighbourLines> out;
     if (by_region.empty()) return out;
-    const glm::vec3 margin(200.0f, 200.0f, 200.0f);
-    auto cells = regions.leaf_cells(zone_lo - margin, zone_hi + margin,
-                                    [&](std::uint32_t r) { return by_region.contains(r); });
     std::map<std::uint32_t, std::size_t> group; // zone -> index in out
     std::map<std::uint32_t, std::vector<std::string>> keys;
     for (const auto& [r, d] : by_region) {
@@ -89,7 +123,7 @@ std::vector<NeighbourLines> collect_neighbour_lines(const assets::ZoneRegions& r
             out[it->second].targets.push_back(d.target);
         }
     }
-    for (const auto& c : cells) {
+    for (const auto& c : line_cells) {
         auto it = by_region.find(c.region);
         if (it == by_region.end()) continue;
         out[group.at(it->second.zone)].cells.push_back({c.lo, c.hi});

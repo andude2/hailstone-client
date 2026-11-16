@@ -159,7 +159,7 @@ TEST_CASE("Lua slot reads: eq.HotButtonInfo, eq.GemInfo and eq.BuffSlot's overla
         bp.entity_id = 7;
         bp.buff.effect_type = 2;
         bp.buff.spell_id = 300;
-        bp.buff.duration = 0xfffffffeu;
+        bp.buff.duration = -2;
         bp.buff.num_hits = 2;
         bp.slot = 2;
         conn.receive_zone_packet_for_test(net::encode(bp));
@@ -276,7 +276,7 @@ TEST_CASE("Lua slot reads: both packs' hot bars, spell gems and buff trays draw 
             bp.entity_id = 7;
             bp.buff.effect_type = 2;
             bp.buff.spell_id = 300;
-            bp.buff.duration = 0xfffffffeu;
+            bp.buff.duration = -2;
             bp.buff.num_hits = 2;
             for (std::uint32_t slot : {2u, 5u, 43u}) { // two buffs (a gap between) and a song
                 bp.slot = slot;

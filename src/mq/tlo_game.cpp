@@ -182,7 +182,7 @@ template <typename Pass> V buff_with_effect(const Context& c, const game::Spawn&
 
 // Buff ticks are 6 s; the countdown the client keeps (BuffSlot::tics) is as the server last sent it.
 std::int64_t buff_ms_left(const game::BuffSlot& b) {
-    if (b.tics == 0xffffffffu || b.tics >= 0x7fffffffu) return -1; // permanent
+    if (b.tics < 0) return -1; // permanent
     std::int64_t left = static_cast<std::int64_t>(b.tics) * 6000 - (GameConnection::now_ms() - b.received_ms);
     return std::max<std::int64_t>(0, left);
 }

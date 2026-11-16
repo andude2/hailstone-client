@@ -58,7 +58,7 @@ public:
             a.spell_id = static_cast<std::int32_t>(b.spell);
             // The duration as the server last sent it, counted down by these ticks since (spawn +0x24c is the
             // character's own timer, not the packet's).
-            a.duration = static_cast<std::int32_t>(b.tics);
+            a.duration = b.tics;
         }
     }
 
@@ -67,7 +67,7 @@ public:
         for (int i = 0; i < count_; ++i) {
             BuffSlot& b = spells_.buffs[static_cast<std::size_t>(i)];
             if (b.empty()) continue;
-            b.tics = static_cast<std::uint32_t>(buffs_[static_cast<std::size_t>(i)].duration);
+            b.tics = buffs_[static_cast<std::size_t>(i)].duration;
             b.received_ms = now_ms;
         }
     }

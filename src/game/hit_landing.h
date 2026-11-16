@@ -63,7 +63,8 @@ struct HitLandingContext {
 // A buff HitBySpell wrote into a slot (FindAffectSlot's choice).
 struct PlacedBuff {
     int slot = -1;
-    std::uint32_t spell = 0, tics = 0, caster_id = 0;
+    std::uint32_t spell = 0, caster_id = 0;
+    std::int32_t tics = 0;
     std::uint8_t level = 0, effect_type = 2;
     float modifier = 1.0f;
 };

@@ -179,11 +179,41 @@ typedef struct HS_Bulk_BuffData {
     int32_t counterTotal;
     uint8_t slotType; /* HAILSTONE_BUFF_SLOT_BUFF / _SONG / _DISC*/
 } HS_BulkBuffData;
+/* get_buff_name_data_bulk: HS_Bulk_BuffData with the caster's name in place of its spawn id. One record per buff slot,
+ * HAILSTONE_BUFF_NAME_RECORD_SIZE fixed bytes each, immediately followed by casterNameLength bytes of the caster's
+ * name (no NUL); the next record starts after them. */
+typedef struct HS_Bulk_BuffNameFixedRecord {
+    int32_t ID;               /* spell id; 0 for an empty slot, whose other fields are all 0 */
+    int32_t casterNameLength; /* bytes of the caster's name that follow; 0 for none */
+    int32_t duration;         /* tics left, as get_buff_data_bulk's */
+    int32_t hitcount;
+    int32_t spelltype;
+    int32_t counterType;
+    int32_t counterTotal;
+    uint8_t slotType; /* HAILSTONE_BUFF_SLOT_BUFF / _SONG / _DISC*/
+} HS_Bulk_BuffNameFixedRecord;
 typedef struct HS_Bulk_PetBuffData {
     int32_t id;
     int32_t duration;
     int32_t spellType;
 } HS_BulkPetBuffData;
+/* get_target_buff_data_bulk: one record per buff of the current target, HAILSTONE_TARGET_BUFF_RECORD_SIZE fixed bytes
+ * each, immediately followed by casterNameLength bytes of the caster's name (no NUL); the next record starts after
+ * them. */
+typedef struct HS_Bulk_TargetBuffFixedRecord {
+    int32_t spellID;          /* the buff's spell; entries with no spell are not sent */
+    int32_t duration;         /* tics left (the server's count less the 6 s ticks since); negative: permanent */
+    int32_t spellType;        /* 0 detrimental, 1 beneficial, 2 beneficial group-only (0 for an unknown spell) */
+    int32_t slot;             /* the target's buff slot, as the server sent it (EQEmu: the mob's own slot index) */
+    int32_t casterNameLength; /* bytes of the caster's name that follow; 0 for none */
+} HS_BulkTargetBuffFixedRecord;
+/* get_avail_aa_data_bulk and get_avail_disc_data_bulk: an int32_t count, then `count` records, each an
+ * HAILSTONE_ID_NAME_RECORD (HAILSTONE_ID_NAME_RECORD_SIZE bytes) immediately followed by nameSize bytes of the name (no
+ * NUL); the next record starts after them. */
+typedef struct HAILSTONE_ID_NAME_RECORD {
+    int32_t id;       /* an AA's ability (group) id, or a discipline's spell id */
+    int32_t nameSize; /* bytes of the AA's or the discipline's name that follow; 0 when the client has none */
+} HAILSTONE_ID_NAME_RECORD;
 #pragma pack(pop)
 
 /* An extended target slot's type: HailstoneXTarget.type and HS_BulkXTargetData.targetType. The values are the
@@ -408,7 +438,8 @@ typedef struct HailstoneItem {
 typedef struct HailstoneBuff {
     uint32_t size;
     uint32_t spell_id; /* 0 an empty slot */
-    uint32_t tics, level, caster_id;
+    uint32_t tics; /* as the server last sent it; a permanent buff's negative count as its bits (-1 is 0xffffffff) */
+    uint32_t level, caster_id;
 } HailstoneBuff;
 
 typedef struct HailstoneXTarget {
@@ -718,6 +749,10 @@ typedef struct PluginHostApi {
      * /destroycursor <id> or /stowcursor <id>, which do nothing unless the cursor still holds that id. */
     uint32_t (*cursor_origin)(void* host);
     int32_t (*get_xtarget_data_bulk)(void* host, unsigned char* out, int32_t out_size);
+    int32_t (*get_target_buff_data_bulk)(void* host, unsigned char* out, int32_t out_size);
+    int32_t (*get_avail_aa_data_bulk)(void* host, unsigned char* out, int32_t out_size);
+    int32_t (*get_avail_disc_data_bulk)(void* host, unsigned char* out, int32_t out_size);
+    int32_t (*get_buff_name_data_bulk)(void* host, unsigned char* out, int32_t out_size);
 } PluginHostApi;
 /* Not known: it was on the cursor at zone-in, replaced a cursor item, or came by a path the client does not mark.
  * Treat it as the player's; never destroy it unattended. */
@@ -729,6 +764,7 @@ typedef struct PluginHostApi {
  * cursor as item packets too). So SERVER does not mean the player did not choose it. */
 #define HAILSTONE_CURSOR_ORIGIN_SERVER 2
 #define HAILSTONE_BUFF_RECORD_SIZE 29
+#define HAILSTONE_BUFF_NAME_RECORD_SIZE 29 /* get_buff_name_data_bulk's fixed part, before the name */
 /* get_buff_data_bulk's last byte: the window the slot belongs to (0 also for an empty slot). */
 /* The records run long buffs, then songs, then the one discipline slot (RoF2: 0-41, 42-61, 62); the counts are the
  * client's, so read this byte rather than a record's position. */
@@ -737,6 +773,8 @@ typedef struct PluginHostApi {
 #define HAILSTONE_BUFF_SLOT_DISC 2 /* the discipline slot, the last, sent only with room for one record more */
 #define HAILSTONE_PET_BUFF_RECORD_SIZE 12
 #define HS_BULK_XTARGET_RECORD_SIZE 16
+#define HAILSTONE_TARGET_BUFF_RECORD_SIZE 20
+#define HAILSTONE_ID_NAME_RECORD_SIZE 8
 /* Whether this client's host table has `field` (one added after the plugin's ABI) and it is set. */
 #define HAILSTONE_HOST_HAS(h, field)                                                                                   \
     ((h) && (h)->size >= offsetof(PluginHostApi, field) + sizeof((h)->field) && (h)->field)

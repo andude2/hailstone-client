@@ -822,7 +822,7 @@ void GameConnection::spell_missile_hit(const game::Missile& missile) {
 void GameConnection::handle_spell(Op op, const AppPacket& p) {
     const std::uint32_t me = world_.player_id;
     const auto now = now_ms();
-    auto set_buff = [&](game::BuffSlot& b, std::uint32_t spell, std::uint32_t tics, std::uint32_t num_hits) {
+    auto set_buff = [&](game::BuffSlot& b, std::uint32_t spell, std::int32_t tics, std::uint32_t num_hits) {
         if (b.spell != spell) { // another spell in the slot: its caster level and modifier are not known yet
             b.level = 0;
             b.modifier = 1.0f;

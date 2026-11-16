@@ -366,7 +366,21 @@ TEST_CASE("Target types, multiclass levels, durations, icons") {
     CHECK(game::format_duration(4806735ull * 6000) == "333d");
     CHECK(game::buff_ms_left(10, 1000, 7000) == 54000);
     CHECK(game::buff_ms_left(1, 0, 60000) == 0);
-    CHECK(game::buff_is_permanent(0xfffffffe, nullptr));
+    CHECK(game::buff_tics_left(10, 1000, 6999) == 10); // not a whole tick yet
+    CHECK(game::buff_tics_left(10, 1000, 7000) == 9);
+    CHECK(game::buff_tics_left(10, 1000, 19000) == 7);
+    CHECK(game::buff_tics_left(2, 0, 60000) == 0);         // run out: 0, not wrapped
+    CHECK(game::buff_tics_left(10, 5000, 1000) == 10);     // a clock behind the packet counts nothing
+    CHECK(game::buff_tics_left(-1, 0, 600000) == -1); // permanent: negative as sent, never counted down
+    CHECK(game::buff_tics_left(-2, 0, 600000) == -2);
+    CHECK(game::buff_tics_left(-4, 0, 600000) == -4);       // EQEmu's aura (formula 51)
+    CHECK(game::buff_tics_left(-1000, 0, 600000) == -1000); // EQEmu's PERMANENT_BUFF_DURATION
+    CHECK(game::buff_tics_left(0x7fffffff, 0, 12000) == 0x7ffffffd); // the largest count runs down too
+    CHECK(game::buff_is_permanent(-2, nullptr));
+    CHECK(game::buff_is_permanent(-4, nullptr));    // EQEmu's aura (formula 51)
+    CHECK(game::buff_is_permanent(-1000, nullptr)); // EQEmu's PERMANENT_BUFF_DURATION
+    CHECK_FALSE(game::buff_is_permanent(0x7fffffff, nullptr));
+    CHECK(game::buff_ms_left(-1, 0, 0) == 0); // a negative count: permanent, no time to count
     auto c = ui::spell_icon_cell(99);
     REQUIRE(c);
     CHECK(c->sheet == 3);  // 99 / 36 = 2 → spells03

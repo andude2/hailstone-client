@@ -424,6 +424,7 @@ add_library(hailstone_engine STATIC
   src/nav/path_follower.cpp
   src/game/zone_lines.cpp
   src/game/neighbour_zones.cpp
+  src/game/world_atlas.cpp
   src/game/world_state.cpp
   src/game/useful_npcs.cpp
   src/game/path_trail.cpp
@@ -618,6 +619,7 @@ add_library(hailstone_engine STATIC
   src/render/object_renderer.cpp
   src/app/world_objects.cpp
   src/app/neighbour_zones.cpp
+  src/app/world_atlas.cpp
   src/app/world_objects_ladder.cpp
   src/render/vma_impl.cpp
   src/assets/sound_files.cpp
@@ -1386,6 +1388,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/picking_vectors_test.cpp
     tests/zoning_vectors_test.cpp
     tests/neighbour_zones_test.cpp
+    tests/world_atlas_test.cpp
     tests/zone_liquid_test.cpp
     tests/depth_prepass_test.cpp
     tests/player_placement_test.cpp

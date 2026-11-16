@@ -122,6 +122,7 @@
 #include "app/stats_ui.h"
 #include "app/actions_ui.h"
 #include "app/neighbour_zones.h"
+#include "app/world_atlas.h"
 #include "app/world_objects.h"
 #include "app/zone_move_world.h"
 #include "app/group_ui.h"
@@ -1287,6 +1288,9 @@ private:
     // display.neighbour_zones.
     std::unique_ptr<NeighbourZones> neighbours_;
     bool neighbour_zones_ = true;
+    // The world atlas's part in the land round the zone (app/world_atlas.h), as the zone was loaded: the cuts for the
+    // neighbours' ground measured this visit, and the zones whose record the neighbour zones' loader measures.
+    AtlasLand atlas_land_;
     // The land round an outdoor zone in the modern lighting (render/horizon.h); display.horizon_hills. The drawn
     // neighbours (NeighbourZones::drawn_key) it was last hidden for.
     bool horizon_hills_ = true;

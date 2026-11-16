@@ -210,7 +210,7 @@ TEST_CASE("TLO: Target.Buff and the rest from OP_TargetBuffs, the states by spel
     CHECK(p("${Target.Mezzed}") == "NULL");
 
     auto& sp = net::GameConnectionTestAccess::spells(*world.conn);
-    auto buff = [](std::uint32_t spell, std::uint32_t caster, std::uint32_t tics) {
+    auto buff = [](std::uint32_t spell, std::uint32_t caster, std::int32_t tics) {
         game::BuffSlot b;
         b.spell = spell;
         b.caster_id = caster;

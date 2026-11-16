@@ -563,8 +563,9 @@ same changes as a plugin, with no change to Hailstone itself. With the `extend` 
   game string with its `%1` filled. A spawn also carries its rider, mercenary and GM flags, whether it is one of the
   player's group, its con colour and its body types. Each struct starts with its size; the client fills what both know, so a plugin built
   for an older client keeps working. `get_buff_data_bulk` gives every buff slot of the player in one call,
-  `get_pet_buff_data_bulk` the pet window's buffs and `get_spawns_data_bulk` every spawn in the zone, as packed
-  records (Buff and spawn records below). `server_info` gives the
+  `get_pet_buff_data_bulk` the pet window's buffs, `get_target_buff_data_bulk` the target window's buffs,
+  `get_avail_aa_data_bulk` the owned alternate abilities, `get_avail_disc_data_bulk` the combat abilities and
+  `get_spawns_data_bulk` every spawn in the zone, as packed records (Buff and spawn records below). `server_info` gives the
   server this login is on (the saved server's name, host and port, the world's name and address), so a plugin for
   one server can tell it from another that sends the same packets.
 - **take item clicks** (`item_right_click`, then the client's own with `right_click_item`, which needs `actions`)
@@ -639,10 +640,13 @@ when the cursor no longer holds an item of that id, so an item the player put th
 Both need `actions`, as `/destroy` does. The id is a plain decimal number above 0; anything else does nothing.
 
 Buff and spawn records: `get_buff_data_bulk(host, out, out_size)`, `get_pet_buff_data_bulk(host, out, out_size)`,
-`get_spawns_data_bulk(host, out, out_size)` and `get_xtarget_data_bulk(host, out, out_size)` (with `read`; added later in ABI 3, so test `HAILSTONE_HOST_HAS(host, <field>)` first;
+`get_spawns_data_bulk(host, out, out_size)`, `get_xtarget_data_bulk(host, out, out_size)`,
+`get_target_buff_data_bulk(host, out, out_size)`, `get_avail_aa_data_bulk(host, out, out_size)`,
+`get_avail_disc_data_bulk(host, out, out_size)` and `get_buff_name_data_bulk(host, out, out_size)` (with `read`; added later in ABI 3, so test `HAILSTONE_HOST_HAS(host, <field>)` first;
 `out` is an `unsigned char*` and `out_size` an `int32_t`) write records into `out` and return the bytes written.
 The records are the SDK's packed structs (`HS_Bulk_BuffData`, `HS_Bulk_PetBuffData`, `HS_Bulk_SpawnHeader`,
-`HS_Bulk_SpawnFixedRecord`, `HS_Bulk_XTargetData`, all in `#pragma pack(push, 1)`), in the machine's byte order (little-endian on every
+`HS_Bulk_SpawnFixedRecord`, `HS_Bulk_XTargetData`, `HS_Bulk_TargetBuffFixedRecord`, `HS_Bulk_BuffNameFixedRecord`,
+`HAILSTONE_ID_NAME_RECORD`, all in `#pragma pack(push, 1)`), in the machine's byte order (little-endian on every
 platform Hailstone runs on) and unaligned. For speed, the bulk reads are the one place where a struct may be cast
 onto the buffer, by the client writing it and by a plugin reading it: read each field through the packed struct
 (`rec->level`), which the compiler reads unaligned, and never keep a plain pointer or reference to a field (`&rec->x`),
@@ -661,7 +665,7 @@ and say so in the chat window.
   |---|---|---|
   | 0 | i32 | spell id; 0 an empty slot, whose other fields are all 0 |
   | 4 | i32 | the caster's spawn id |
-  | 8 | i32 | tics left, as the server sent them |
+  | 8 | i32 | tics left: the server's count less the 6 s ticks since it came (none while the buff timers are on hold); a permanent buff is negative, the server's count as sent and never counted down (EQEmu: -1 for duration formula 50, -4 for an aura's buff, formula 51, and -1000 for one a script made permanent) |
   | 12 | i32 | hits left |
   | 16 | i32 | the spell's type: 0 detrimental, 1 beneficial, 2 beneficial group-only (0 for a spell not in spells_us.txt) |
   | 20 | i32 | counter type of the spell's first counter effect: -1 none, 0 disease, 1 poison, 2 curse, 3 corruption. An empty slot also has 0 here, so test the spell id before reading it as disease |
@@ -670,9 +674,30 @@ and say so in the chat window.
 
   The counters left (the slot's data from the server) are not included.
 
+- `get_buff_name_data_bulk`: `get_buff_data_bulk` with the caster's name in place of the caster's spawn id. The
+  records come in the same order with the same fields, but each is a fixed part (`HS_Bulk_BuffNameFixedRecord`,
+  `HAILSTONE_BUFF_NAME_RECORD_SIZE` = 29 bytes) followed at once by the caster's name, `casterNameLength` bytes with
+  no terminating NUL; the next record starts after the name, so walk them one by one. An empty slot is 29 zero bytes
+  with no name after it. `out_size` must hold every buff and song slot with their names (at least 1798 bytes, plus
+  the names), or 0 comes back; the discipline slot comes too when its record and name fit after them. 8192 bytes
+  holds every slot with names of the server's 64-byte limit.
+
+  The name is the one the server last sent for the slot (`OP_BuffCreate`), the caster's name without its trailing
+  digits. EQEmu keeps it while the player stays in the zone, even after the caster dies or leaves; after zoning it
+  keeps it only when the caster is a player already in the new zone, and sends none otherwise (NPC casters
+  included), so an empty name is common.
+
+  | Offset | Type | Field |
+  |---|---|---|
+  | 0 | i32 | spell id; 0 an empty slot, whose other fields are all 0 (and no name follows) |
+  | 4 | i32 | `casterNameLength`: the bytes of the caster's name that follow; 0 when the server sent none |
+  | 8 to 28 | | as `get_buff_data_bulk`'s: tics left, hits left, spell type, counter type, counters, slot's window |
+  | 29 | bytes | the caster's name, `casterNameLength` bytes |
+
 - `get_pet_buff_data_bulk`: one record of `HAILSTONE_PET_BUFF_RECORD_SIZE` (12) bytes per buff in the pet window, in
-  the order the server sent them (0 bytes with no pet), as many as fit in `out_size`: i32 spell id, i32 tics, i32 the
-  spell's type (as above). An entry with spell id 0 is all zeros. The pet window's slot number is not included.
+  the order the server sent them (0 bytes with no pet), as many as fit in `out_size`: i32 spell id, i32 tics left
+  (counted down as above), i32 the spell's type (as above). An entry with spell id 0 is all zeros. The pet window's
+  slot number is not included.
 
 - `get_spawns_data_bulk`: every spawn in the zone, as a 16-byte header followed by one record per spawn. Records are
   added until fewer than 4096 bytes are left in `out`, or until the next record (its fixed part and seven strings)
@@ -735,6 +760,61 @@ and say so in the chat window.
   | 4 | i32 | the slot's spawn id, 0 for none |
   | 8 | i32 | the aggro meter's percent for the slot's spawn, as the server sent it (entries 7 to 26 of the meter, the extended target window's aggro labels; on EQEmu an NPC's is our hate against its current target's, a player's is its hate against our target's top). 0 with no spawn in the zone, without the meter (EQEmu's `Character:EnableAggroMeter`), or for a slot past the 20th |
   | 12 | i32 | the spawn's HP percent, as the extended target window draws it: the player's own from its points (items' HP included), anyone else's as the server last sent it (EQEmu sends it to everyone with the spawn on their list when the percent changes); 0 with no spawn in the zone or for a corpse |
+
+- `get_target_buff_data_bulk`: the current target's buffs, the ones the target window shows (what `OP_TargetBuffs`
+  last gave for that spawn), one record per buff the server sent, in the order the client keeps them, each with its
+  slot. EQEmu sends only the slots that hold a spell, in slot order, and resends the whole list when one fades, so
+  against it the records are packed (no empty ones) and the slot numbers can skip; an entry with no spell is left
+  out in any case. 0 bytes with no target, or while the buffs the client holds are still another spawn's (the server
+  has not yet sent the new target's; EQEmu sends them only where the target window shows buffs, so an NPC target on
+  a server without that shows none). Each record is a fixed part
+  (`HS_Bulk_TargetBuffFixedRecord`, `HAILSTONE_TARGET_BUFF_RECORD_SIZE` = 20 bytes) followed at once by the caster's
+  name, `casterNameLength` bytes with no terminating NUL; the next record starts after the name, so walk them one by
+  one rather than by a fixed stride. Records are written as many as fit in `out_size`, each whole with its name; the
+  return value is the bytes written. A name is as long as the server sent it, so pass room to spare (2048 bytes holds
+  a full target window of ordinary names).
+
+  | Offset | Type | Field |
+  |---|---|---|
+  | 0 | i32 | spell id (never 0: entries with no spell are left out) |
+  | 4 | i32 | tics left: the server's count less the 6 s ticks since it came; a permanent buff negative, as above |
+  | 8 | i32 | the spell's type: 0 detrimental, 1 beneficial, 2 beneficial group-only (0 for a spell not in spells_us.txt) |
+  | 12 | i32 | the target's buff slot, as the server sent it (EQEmu: the mob's own slot index, not mapped to RoF2's) |
+  | 16 | i32 | `casterNameLength`: the bytes of the caster's name that follow; 0 when the server sent none |
+  | 20 | bytes | the caster's name, `casterNameLength` bytes |
+
+- `get_avail_aa_data_bulk` and `get_avail_disc_data_bulk`: a count, then that many records, each an id and its name.
+  The count is a plain i32 at the start of `out` (no struct; read it with `memcpy`). Each record is a fixed part
+  (`HAILSTONE_ID_NAME_RECORD`, `HAILSTONE_ID_NAME_RECORD_SIZE` = 8 bytes) followed at once by the name, `nameSize` bytes
+  with no terminating NUL; the next record starts after the name, so walk them one by one. As many whole records,
+  names included, are written as fit after the count, and the count says how many follow; below 4 bytes nothing is
+  written and 0 comes back. With nothing to list, before the character's profile, or with no game connection, the
+  count alone goes out (0, 4 bytes). RoF2's lists have at most 300 entries each; 16384 bytes holds either with ordinary
+  names.
+
+  | Offset | Type | Field |
+  |---|---|---|
+  | 0 | i32 | the number of records that follow |
+  | 4 | records | the records, one after another |
+
+  Each record:
+
+  | Offset | Type | Field |
+  |---|---|---|
+  | 0 | i32 | the id (below) |
+  | 4 | i32 | `nameSize`: the bytes of the name that follow; 0 when the client has no name for it |
+  | 8 | bytes | the name, `nameSize` bytes |
+
+  - `get_avail_aa_data_bulk`: the alternate abilities the character owns (bought or granted, passive and activated
+    alike), one per owned ability, by its ability (group) id, the id every rank of it shares and `aa_value` takes;
+    not the rank id the server lists. The name is the owned rank's title (dbstr_us.txt type 1, as the AA window shows
+    it), empty when the game folder's file lacks it. In the order of the owned list (the profile's, then
+    `OP_RespondAA`'s). An owned
+    rank the AA table does not hold (the server has not sent it in `OP_SendAATable`) has no known group id and is left
+    out, as `aa_value` gives 0 for it.
+  - `get_avail_disc_data_bulk`: the character's combat abilities (disciplines), by spell id: the profile's
+    discipline list, the one `combat_ability` reads by index, without its empty (0) entries, in list order. The name
+    is the spell's, empty for a spell not in spells_us.txt. Before the profile the count is 0.
 
 ### Connections (ABI 2)
 

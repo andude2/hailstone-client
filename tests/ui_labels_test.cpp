@@ -168,7 +168,7 @@ TEST_CASE("Discipline timer: gauge 26 counts down between ticks with whole secon
     CHECK(app::eq_discipline_gauge(t.host, 100000).value == 1000);
     CHECK(app::eq_discipline_gauge(t.host, 100000).text == "Permanent");
     b.spell = 4498;
-    b.tics = 0xffffffffu;
+    b.tics = -1;
     CHECK(app::eq_discipline_gauge(t.host, 100000).text == "Permanent");
     b.tics = 20;
     CHECK(app::eq_discipline_gauge(t.host, 100000).value == 1000); // A server extension can exceed the base duration.

@@ -75,10 +75,30 @@ struct NeighbourLines {
     glm::vec3 lo{0.0f}, hi{0.0f};     // round all the cells
 };
 
+// One BSP leaf of a zone-line region, with the region's target as its tag gives it: an absolute target (zone id and
+// server coordinates) or a reference to a zone point the server sends. What the world atlas keeps of a zone's lines
+// (game/world_atlas.h), so they are grouped without the zone's files.
+struct ZoneLineCell {
+    std::uint32_t region = 0;
+    glm::vec3 lo{0.0f}, hi{0.0f};
+    bool reference = false;
+    std::int32_t zone_point = -1;
+    std::uint32_t zone_id = 0;
+    float server_x = 0.0f, server_y = 0.0f, server_z = 0.0f;
+    std::string tag;
+};
+// Every zone-line region's leaves within the zone's box (and 200 units round it).
+std::vector<ZoneLineCell> zone_line_cells(const assets::ZoneRegions& regions, const glm::vec3& zone_lo,
+                                          const glm::vec3& zone_hi);
+
 // The zone lines by the zone they lead to: each zone-line region's leaves, its target from its tag (an absolute
 // target) or from the zone point it names. Lines to `current_zone`, to zone 0 and to unknown zone points are left out.
 std::vector<NeighbourLines> collect_neighbour_lines(const assets::ZoneRegions& regions, const glm::vec3& zone_lo,
                                                     const glm::vec3& zone_hi, const std::vector<ZonePointTarget>& points,
+                                                    std::uint32_t current_zone);
+// The same from the cells zone_line_cells found.
+std::vector<NeighbourLines> collect_neighbour_lines(const std::vector<ZoneLineCell>& cells,
+                                                    const std::vector<ZonePointTarget>& points,
                                                     std::uint32_t current_zone);
 
 // The seam: the lines' outward direction (one of +-x, +-y: zones are not rotated; a thin line box faces along its

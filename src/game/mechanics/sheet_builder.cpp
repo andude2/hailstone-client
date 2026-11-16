@@ -131,16 +131,10 @@ void build_sheet_into(CharacterSheet& s, const net::PlayerProfile& p, const Inve
         out.level = b.level ? b.level : static_cast<std::uint8_t>(std::clamp(s.level, 0, 255));
         out.modifier = b.modifier;
         out.spell_id = static_cast<std::int32_t>(b.spell);
-        // Ticks left: the server's count less the 6 s ticks since it arrived. A permanent buff (0xffffffff /
-        // 0xfffffffe) keeps its marker as the original's signed count (-1 / -2) rather than drifting below it, and
-        // nothing counts down while the buff timers are on hold (SPA 436): the server does not tick them then.
-        if (buff_is_permanent(b.tics, nullptr) || spells.buff_timers_on_hold) {
-            out.duration = static_cast<std::int32_t>(b.tics);
-        } else {
-            std::int64_t elapsed = live.now_ms > b.received_ms ? (live.now_ms - b.received_ms) / kBuffTickMs : 0;
-            out.duration =
-                static_cast<std::int32_t>(std::max<std::int64_t>(0, static_cast<std::int64_t>(b.tics) - elapsed));
-        }
+        // Ticks left: the server's count less the 6 s ticks since it arrived. A permanent buff keeps its negative
+        // count rather than drifting below it, and nothing counts down while the buff timers are on hold (SPA 436):
+        // the server does not tick them then.
+        out.duration = spells.buff_timers_on_hold ? b.tics : buff_tics_left(b.tics, b.received_ms, live.now_ms);
         out.caster_id = b.caster_id;
         out.caster_is_self = b.caster_id != 0 && b.caster_id == live.player_id;
         if (world) {

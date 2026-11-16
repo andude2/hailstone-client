@@ -166,7 +166,7 @@ AppPacket encode(const BuffPacket& v) {
     w.le<std::uint8_t>(b.unknown003);
     w.f32(b.bard_modifier);
     w.le<std::uint32_t>(b.spell_id);
-    w.le<std::uint32_t>(b.duration);
+    w.le<std::int32_t>(b.duration);
     w.le<std::uint32_t>(b.caster_id);
     w.le<std::uint32_t>(b.num_hits);
     w.f32(b.y);
@@ -191,7 +191,7 @@ std::optional<BuffPacket> decode_buff(const AppPacket& p) {
         b.unknown003 = r.le<std::uint8_t>();
         b.bard_modifier = r.f32();
         b.spell_id = r.le<std::uint32_t>();
-        b.duration = r.le<std::uint32_t>();
+        b.duration = r.le<std::int32_t>();
         b.caster_id = r.le<std::uint32_t>();
         b.num_hits = r.le<std::uint32_t>();
         b.y = r.f32();
@@ -214,7 +214,7 @@ AppPacket encode(const BuffIcons& v, bool target_window) {
     for (const auto& e : v.entries) {
         w.le<std::uint32_t>(e.slot);
         w.le<std::uint32_t>(e.spell_id);
-        w.le<std::uint32_t>(e.tics);
+        w.le<std::int32_t>(e.tics);
         w.le<std::uint32_t>(e.num_hits);
         detail::write_cstring(w, e.caster);
     }
@@ -233,7 +233,7 @@ std::optional<BuffIcons> decode_buff_icons(const AppPacket& p) {
             BuffIconEntry e;
             e.slot = r.le<std::uint32_t>();
             e.spell_id = r.le<std::uint32_t>();
-            e.tics = r.le<std::uint32_t>();
+            e.tics = r.le<std::int32_t>();
             e.num_hits = r.le<std::uint32_t>();
             e.caster = r.cstring();
             v.entries.push_back(std::move(e));

@@ -88,10 +88,13 @@ void ClientApp::load_zone(const std::string& short_name) {
             if (!fire_renderer_) fire_renderer_ = std::make_unique<render::FireRenderer>(vk_, shader_dir_);
         }
         {
-            // The neighbours' ground measured on earlier visits shapes the land round the zone (app/neighbour_zones.h).
+            // The neighbours' ground measured on earlier visits shapes the land round the zone (app/neighbour_zones.h),
+            // and past them the zones of the world atlas (app/world_atlas.h).
             auto options = render::zone_render_options(game_);
-            options.horizon_sources =
-                cached_horizon_sources(game_, horizon_cache_dir(server_profile_.id, zone_->name), zone_->name);
+            atlas_land_ = atlas_land(game_, server_profile_.id, zone_->name,
+                                     horizon_cache_entries(game_, horizon_cache_dir(server_profile_.id, zone_->name),
+                                                           zone_->name));
+            options.horizon_sources = atlas_land_.sources;
             zone_renderer_ = std::make_unique<render::ZoneRenderer>(vk_, *zone_, shader_dir_, options);
         }
         distant_hidden_key_ = 0;

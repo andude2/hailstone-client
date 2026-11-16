@@ -89,6 +89,7 @@ const uint kTintLand = 65536u;      // its own ground in its part of the land
 const uint kPackedNormal = 131072u; // CBGG1/CBSG1: RG normal, B glow, A gloss
 const uint kGlow = 262144u;         // blue channel of slot 1
 const uint kAdditiveGlow = 524288u; // AddAlpha surfaces emit into modern HDR
+const uint kLandTint = 1048576u;    // render/zone_renderer.cpp: the land's ground moved toward color2 (an atlas zone's)
 
 vec4 tex(uint i, vec2 uv) { return texture(textures[nonuniformEXT(i)], uv); }
 
@@ -709,6 +710,12 @@ void main() {
         alpha = v_color2.a;
     } else {
         vec4 t = tex(pc.tex.x, v_uv);
+        // The land over a zone of the world atlas: the zone's ground texture, its detail kept, carried to that zone's
+        // own ground colour (its texture's average over the colour the atlas measured there).
+        if ((flags & kLandTint) != 0u && v_color2.a > 0.0) {
+            vec3 average = max(textureLod(textures[nonuniformEXT(pc.tex.x)], v_uv, 14.0).rgb, vec3(0.02));
+            t.rgb = mix(t.rgb, clamp(t.rgb / average * v_color2.rgb, 0.0, 1.0), v_color2.a);
+        }
         color = lit(t.rgb);
         alpha = t.a;
         // The sun's or moon's highlight, shadowed, by the sky's share of the light (v_color.a).

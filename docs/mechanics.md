@@ -44,7 +44,7 @@ durations and cast time. They run on plain data (`CharacterSheet`) and are cover
 | `attack_rules.*` | who may attack whom and the same-deity rule (the PvP rules) through `AttackQueries`; the live spawns in `game/attack_check.*`, used by can-I-hit |
 | `spell_gems.*` | memorising, the memorise packet, the linked timers, the usable-slot rule and the gem readiness tests; see "Spell gems and buff stacking" |
 | `find_affect_slot.*` | buff slot choice and its stacking rules over the hit-by-spell structs and an `AffectQueries` interface; the live callees are `game/hit_landing.*` |
-| `sheet_builder.*` | the sheet from the live connection; its callers add the owned AA ranks' effects (`AltAdvState::sheet_abilities`: OP_SendAATable's ranks, OP_RespondAA's owned list). A buff's ticks left are the server's count less the 6 s ticks since it arrived, except for a permanent buff (kept at -1 / -2) and while the buff timers are on hold (the count as received) |
+| `sheet_builder.*` | the sheet from the live connection; its callers add the owned AA ranks' effects (`AltAdvState::sheet_abilities`: OP_SendAATable's ranks, OP_RespondAA's owned list). A buff's ticks left are the server's count less the 6 s ticks since it arrived, except for a permanent buff (kept at its negative count) and while the buff timers are on hold (the count as received) |
 
 Outside this directory, with vectors: `net/reliable_channel.*` (the session layer's reliable channel give-time, ack-one and
 ack-all: the resend timeout min(1.25 rtt + 300, 8000) ms), and the UI rules the windows call (`game/spell_book.h`,

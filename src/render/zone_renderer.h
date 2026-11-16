@@ -143,7 +143,19 @@ struct ZoneRenderStats {
     std::size_t textures = 0;
     std::size_t missing_textures = 0;
     std::size_t chunks = 0; // the boxes the passes cull by
+    // What making the renderer from a prepared zone cost on the calling thread, in milliseconds, by step: the
+    // uploads (textures staged, buffers), the descriptor sets, and the pipelines. A neighbour zone is made on the
+    // frame's thread, so this is the hitch it costs (app/neighbour_zones.cpp logs it).
+    float upload_ms = 0.0f, descriptors_ms = 0.0f, pipelines_ms = 0.0f;
 };
+
+// The zone texture array's size in its descriptor set layout, for a zone of `textures` on a device whose arrays hold
+// `max_sampled_images` (VkCaps): one bound for every zone, kZoneTextureBound or the device's limit, so the pipeline
+// layout, and with it the pipeline cache's key, is the same from one zone to the next. Sized by each zone's own count,
+// every neighbour zone's pipelines were compiled afresh, ~370 ms of its upload on the frame's thread. The binding has
+// a variable count: the set is allocated with the zone's own. A zone with more textures than the bound keeps its count.
+inline constexpr std::uint32_t kZoneTextureBound = 0xffff; // as the actor renderer's
+std::uint32_t zone_texture_layout_count(std::uint32_t textures, std::uint32_t max_sampled_images);
 
 // What the zone's passes drew since the last ZoneRenderer::take_drawn: triangles and draw calls into the scene (draw)
 // and into the shadow map's layers (draw_shadow, draw_point_shadow); the culling's measure.
@@ -192,6 +204,9 @@ public:
         std::shared_ptr<const HorizonBuild> build;
         std::size_t footprint = 0;
         std::array<std::size_t, 3> triangles{};
+        std::size_t water_triangles = 0;  // the land's sea
+        bool water_two_sided = true;      // all of it drawn from both faces
+        std::size_t tinted_triangles = 0; // the land's ground carried to an atlas zone's colour (kLandTint)
     };
     static PreparedLand prepared_land(const Prepared& prepared);
 

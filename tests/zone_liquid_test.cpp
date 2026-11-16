@@ -194,3 +194,33 @@ TEST_CASE("zone renderer: the land round the zone, shaped by a neighbour's groun
     CHECK(part2.triangles[0] == patch_triangles);
     CHECK(part2.triangles[1] + part2.triangles[2] == 0);
 }
+
+TEST_CASE("zone renderer: the land's sea is drawn from both faces; its ground takes an atlas zone's colour") {
+    assets::Zone zone;
+    zone.name = "here";
+    zone.terrain.push_back(flat_terrain(0, 0, 2000, 1500, 100, 50, "grass.bmp"));
+    // A sea along the west: an EQG water surface, which (as a classic one's two sheets) says nothing of which face
+    // is up.
+    assets::Mesh sea = flat_terrain(-1000, 0, 0, 1500, 100, 40, "water.dds");
+    sea.materials[0].eqg_shader = assets::EqgShader::Water;
+    sea.parts[0].solid = false;
+    zone.terrain.push_back(sea);
+    const auto plain = render::ZoneRenderer::prepare(zone, {}, 64);
+    REQUIRE(plain);
+    const auto land = render::ZoneRenderer::prepared_land(*plain);
+    CHECK(land.water_triangles > 0);
+    CHECK(land.water_two_sided);
+    CHECK(land.tinted_triangles == 0);
+
+    // An atlas zone's ground east of it, red.
+    std::vector<float> ground(40 * 30, 150.0f);
+    std::vector<std::uint32_t> color(ground.size(), 0xff0000ffu);
+    render::ZoneRenderOptions shaped;
+    shaped.horizon_sources = {std::make_shared<const render::HorizonSource>(render::horizon_source(
+        "east", {2000.0f, -400.0f}, render::kHorizonCell, 40, 30, ground, {}, {}, color))};
+    const auto with = render::ZoneRenderer::prepare(zone, shaped, 64);
+    REQUIRE(with);
+    const auto land2 = render::ZoneRenderer::prepared_land(*with);
+    CHECK(land2.tinted_triangles > 0);
+    CHECK(land2.tinted_triangles < land2.triangles[0]); // not the land past the zone's other sides
+}

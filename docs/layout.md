@@ -93,7 +93,10 @@ hailstone/
                              the compiled Vulkan pipelines, cache/navmesh/<server>/<zone>.navmesh the zones'
                              navigation meshes (docs/navigation.md), cache/horizon/<server>/<zone>/<neighbour>.bin
                              the neighbour zones' ground the land round a zone takes the shape of (docs/graphics.md
-                             "Neighbour zones"; the viewer's under cache/horizon/viewer/)
+                             "Neighbour zones"; the viewer's under cache/horizon/viewer/), cache/atlas/<server>/
+                             <zone>.visit the world atlas's visits (each zone's id, sky and zone points as that server
+                             sent them) and cache/atlas/zones/<zone>.bin its zones' records, measured from the asset
+                             folder for every server (docs/graphics.md "World atlas")
     assets/v1/pfs/           the shared asset cache, when on ("Shared archive memory" below)
 ```
 

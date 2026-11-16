@@ -697,22 +697,53 @@ TEST_CASE("native plugins: get_buff_data_bulk and get_pet_buff_data_bulk, laid o
     using A = net::GameConnectionTestAccess;
     auto& sp = A::spells(*h.world.conn);
     REQUIRE(sp.buffs.size() == 63);
-    // The world's Holy Armor (slot 0) and Selo's (slot 3); a disease counter and a song.
+    // The world's Holy Armor (slot 0) and Selo's (slot 3); a disease counter and a song. The duration is the ticks
+    // left: the disease counter's 7 came two ticks (12 s) ago, so 5 are left.
+    const std::int64_t now = net::GameConnection::now_ms();
     sp.buffs[5].spell = 3004;
     sp.buffs[5].caster_id = 10;
     sp.buffs[5].tics = 7;
+    sp.buffs[5].received_ms = now - 2 * game::kBuffTickMs;
     sp.buffs[5].num_hits = 2;
     sp.buffs[42].spell = 3373;
     sp.buffs[42].tics = 3;
+    sp.buffs[42].received_ms = now;
     sp.buffs[62].spell = 99999; // the discipline slot; a spell not in the table (type 0, no counter)
     sp.buffs[62].tics = 9;
+    sp.buffs[62].received_ms = now;
     h.run("/probebuffs");
-    CHECK(h.printed_line("[Probe] buff 0: 11 0 10 0 1 -1 0 0"));
-    CHECK(h.printed_line("[Probe] buff 3: 717 0 2 0 1 -1 0 0"));
-    CHECK(h.printed_line("[Probe] buff 5: 3004 10 7 2 0 0 4 0")); // disease, starts at 4
-    CHECK(h.printed_line("[Probe] buff 42: 3373 0 3 0 0 -1 0 1")); // a song
-    CHECK(h.printed_line("[Probe] buff 62: 99999 0 9 0 0 -1 0 2")); // the disc slot, with room for it
+    CHECK(h.printed_line("[Probe] buff slot 0: spell 11, caster 0, tics 10, hits 0, spell type 1, counter type -1, "
+                         "counters 0, slot type 0"));
+    CHECK(h.printed_line("[Probe] buff slot 3: spell 717, caster 0, tics 2, hits 0, spell type 1, counter type -1, "
+                         "counters 0, slot type 0"));
+    // disease, starts at 4
+    CHECK(h.printed_line("[Probe] buff slot 5: spell 3004, caster 10, tics 5, hits 2, spell type 0, counter type 0, "
+                         "counters 4, slot type 0"));
+    // a song
+    CHECK(h.printed_line("[Probe] buff slot 42: spell 3373, caster 0, tics 3, hits 0, spell type 0, counter type -1, "
+                         "counters 0, slot type 1"));
+    // the disc slot, with room for it
+    CHECK(h.printed_line("[Probe] buff slot 62: spell 99999, caster 0, tics 9, hits 0, spell type 0, counter type -1, "
+                         "counters 0, slot type 2"));
     CHECK(h.printed_line("[Probe] buffs 1827 bytes, 58 empty")); // slots 0-62 of 29 bytes
+    // Nothing counts down while the buff timers are on hold (SPA 436): the count as the server sent it.
+    sp.buff_timers_on_hold = true;
+    h.printed.clear();
+    h.run("/probebuffs");
+    CHECK(h.printed_line("[Probe] buff slot 5: spell 3004, caster 10, tics 7, hits 2, spell type 0, counter type 0, "
+                         "counters 4, slot type 0"));
+    sp.buff_timers_on_hold = false;
+    // A permanent buff is the server's negative count as sent, not a long count: -1 (formula 50), -4 (an aura's).
+    sp.buffs[42].tics = -4;
+    sp.buffs[62].tics = -1;
+    h.printed.clear();
+    h.run("/probebuffs");
+    CHECK(h.printed_line("[Probe] buff slot 42: spell 3373, caster 0, tics -4, hits 0, spell type 0, counter type -1, "
+                         "counters 0, slot type 1"));
+    CHECK(h.printed_line("[Probe] buff slot 62: spell 99999, caster 0, tics -1, hits 0, spell type 0, "
+                         "counter type -1, counters 0, slot type 2"));
+    sp.buffs[42].tics = 3;
+    sp.buffs[62].tics = 9;
     // All the slots or nothing: a buffer smaller than 62 records gets none.
     h.printed.clear();
     h.run("/probebuffs 1797");
@@ -721,31 +752,88 @@ TEST_CASE("native plugins: get_buff_data_bulk and get_pet_buff_data_bulk, laid o
     h.run("/probebuffs 1798");
     CHECK(h.printed_line("[Probe] buffs 1798 bytes, 58 empty"));
     h.run("/probebuffs 1826");
-    CHECK_FALSE(h.printed_line("[Probe] buff 62: 99999 0 9 0 0 -1 0 2"));
+    CHECK_FALSE(h.printed_line("[Probe] buff slot 62: spell 99999, caster 0, tics 9, hits 0, spell type 0, "
+                               "counter type -1, counters 0, slot type 2"));
     CHECK_FALSE(h.printed_line("[Probe] buffs 1827 bytes, 58 empty"));
 
     // No pet buffs: nothing. Then the pet window's, in the server's order (the slots are not sent).
     h.run("/probepetbuffs");
     CHECK(h.printed_line("[Probe] pet buffs 0 bytes"));
-    auto pet_buff = [](std::uint32_t spell, std::uint32_t tics) {
+    auto pet_buff = [now](std::uint32_t spell, std::int32_t tics, std::int64_t ticks_ago = 0) {
         game::BuffSlot b;
         b.spell = spell;
         b.tics = tics;
+        b.received_ms = now - ticks_ago * game::kBuffTickMs;
         return b;
     };
-    A::pet_buffs(*h.world.conn) = {{2, pet_buff(3002, 5)}, {0, pet_buff(11, 1)}, {7, pet_buff(99999, 4)}};
+    // The first came a tick ago: 6 sent, 5 left.
+    A::pet_buffs(*h.world.conn) = {{2, pet_buff(3002, 6, 1)}, {0, pet_buff(11, 1)}, {7, pet_buff(99999, 4)}};
     h.run("/probepetbuffs");
-    CHECK(h.printed_line("[Probe] pet buff: 3002 5 0"));
-    CHECK(h.printed_line("[Probe] pet buff: 11 1 1"));
-    CHECK(h.printed_line("[Probe] pet buff: 99999 4 0")); // a spell not known: type 0
+    CHECK(h.printed_line("[Probe] pet buff: spell 3002, tics 5, spell type 0"));
+    CHECK(h.printed_line("[Probe] pet buff: spell 11, tics 1, spell type 1"));
+    CHECK(h.printed_line("[Probe] pet buff: spell 99999, tics 4, spell type 0")); // a spell not known: type 0
     CHECK(h.printed_line("[Probe] pet buffs 36 bytes")); // 3 records of 12 bytes
     // Only whole records go into a buffer too small for all.
     h.printed.clear();
     h.run("/probepetbuffs 35");
-    CHECK(h.printed_line("[Probe] pet buff: 3002 5 0"));
-    CHECK(h.printed_line("[Probe] pet buff: 11 1 1"));
-    CHECK_FALSE(h.printed_line("[Probe] pet buff: 99999 4 0"));
+    CHECK(h.printed_line("[Probe] pet buff: spell 3002, tics 5, spell type 0"));
+    CHECK(h.printed_line("[Probe] pet buff: spell 11, tics 1, spell type 1"));
+    CHECK_FALSE(h.printed_line("[Probe] pet buff: spell 99999, tics 4, spell type 0"));
     CHECK(h.printed_line("[Probe] pet buffs 24 bytes"));
+}
+TEST_CASE("native plugins: get_buff_name_data_bulk, laid out as docs/plugins.md says") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll);
+    REQUIRE(h.plugins->load("HostProbe"));
+    using A = net::GameConnectionTestAccess;
+    auto& sp = A::spells(*h.world.conn);
+    // The world's Holy Armor (slot 0) and Selo's (slot 3), with no caster's name; a disease counter and a song, as
+    // get_buff_data_bulk's test, with the caster's name in place of its id.
+    const std::int64_t now = net::GameConnection::now_ms();
+    sp.buffs[5].spell = 3004;
+    sp.buffs[5].caster_id = 12;
+    sp.buffs[5].caster_name = "Groupie";
+    sp.buffs[5].tics = 7;
+    sp.buffs[5].received_ms = now - 2 * game::kBuffTickMs;
+    sp.buffs[5].num_hits = 2;
+    sp.buffs[42].spell = 3373;
+    sp.buffs[42].tics = -4; // an aura's: permanent, as sent
+    sp.buffs[42].received_ms = now;
+    sp.buffs[62].spell = 99999; // the discipline slot; a spell not in the table (type 0, no counter)
+    sp.buffs[62].caster_name = "Tester";
+    sp.buffs[62].tics = 9;
+    sp.buffs[62].received_ms = now;
+    sp.buffs[20].caster_name = "Nobody"; // an empty slot: all zeros, its name not sent
+    h.run("/probebuffnames");
+    CHECK(h.printed_line("[Probe] buff name slot 0: spell 11, caster -, tics 10, hits 0, spell type 1, "
+                         "counter type -1, counters 0, slot type 0"));
+    CHECK(h.printed_line("[Probe] buff name slot 3: spell 717, caster -, tics 2, hits 0, spell type 1, "
+                         "counter type -1, counters 0, slot type 0"));
+    CHECK(h.printed_line("[Probe] buff name slot 5: spell 3004, caster Groupie, tics 5, hits 2, spell type 0, "
+                         "counter type 0, counters 4, slot type 0"));
+    CHECK(h.printed_line("[Probe] buff name slot 42: spell 3373, caster -, tics -4, hits 0, spell type 0, "
+                         "counter type -1, counters 0, slot type 1"));
+    CHECK(h.printed_line("[Probe] buff name slot 62: spell 99999, caster Tester, tics 9, hits 0, spell type 0, "
+                         "counter type -1, counters 0, slot type 2"));
+    // slots 0-62 of 29 bytes, and the names "Groupie" and "Tester"
+    CHECK(h.printed_line("[Probe] buff names 1840 bytes, 58 empty, 0 bytes left"));
+    // get_buff_data_bulk is unchanged: the caster's id, 29 bytes a slot.
+    h.run("/probebuffs");
+    CHECK(h.printed_line("[Probe] buff slot 5: spell 3004, caster 12, tics 5, hits 2, spell type 0, counter type 0, "
+                         "counters 4, slot type 0"));
+    CHECK(h.printed_line("[Probe] buffs 1827 bytes, 58 empty"));
+    // All the buff and song slots, names included, or nothing: 62 records of 29 bytes and "Groupie" is 1805.
+    h.printed.clear();
+    h.run("/probebuffnames 1804");
+    CHECK(h.printed_line("[Probe] buff names 0 bytes, 0 empty, 0 bytes left"));
+    h.run("/probebuffnames 1805");
+    CHECK(h.printed_line("[Probe] buff names 1805 bytes, 58 empty, 0 bytes left"));
+    // The disc slot only goes out with room for its record and its name.
+    h.printed.clear();
+    h.run("/probebuffnames 1839");
+    CHECK_FALSE(h.printed_line("[Probe] buff name slot 62: spell 99999, caster Tester, tics 9, hits 0, "
+                               "spell type 0, counter type -1, counters 0, slot type 2"));
+    CHECK(h.printed_line("[Probe] buff names 1805 bytes, 58 empty, 0 bytes left"));
 }
 TEST_CASE("native plugins: get_spawns_data_bulk, laid out as docs/plugins.md says") {
     Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
@@ -754,11 +842,11 @@ TEST_CASE("native plugins: get_spawns_data_bulk, laid out as docs/plugins.md say
     // The test world's five spawns (mq_test_world.h), in no set order; the player (1, level 50) at the origin. The
     // con colours are RoF2's table for a level 50: itself white (10), the level 48 blue (4), the low ones grey (6).
     h.run("/probespawns");
-    CHECK(h.printed_line("[Probe] spawn 1: 50 2 1 100 10 Tester"));
-    CHECK(h.printed_line("[Probe] spawn 10: 2 1 1 80 6 a_rat01"));
-    CHECK(h.printed_line("[Probe] spawn 11: 8 1 1 80 6 Fippy_Darkpaw000"));
-    CHECK(h.printed_line("[Probe] spawn 12: 48 2 1 100 4 Groupie"));
-    CHECK(h.printed_line("[Probe] spawn 13: 3 1 1 80 6 a_rat02"));
+    CHECK(h.printed_line("[Probe] spawn 1: level 50, class 2, race 1, hp 100%, con 10, name Tester"));
+    CHECK(h.printed_line("[Probe] spawn 10: level 2, class 1, race 1, hp 80%, con 6, name a_rat01"));
+    CHECK(h.printed_line("[Probe] spawn 11: level 8, class 1, race 1, hp 80%, con 6, name Fippy_Darkpaw000"));
+    CHECK(h.printed_line("[Probe] spawn 12: level 48, class 2, race 1, hp 100%, con 4, name Groupie"));
+    CHECK(h.printed_line("[Probe] spawn 13: level 3, class 1, race 1, hp 80%, con 6, name a_rat02"));
     // Every record's strings framed right: nothing left over.
     CHECK(h.printed_line("[Probe] spawns 5, player 0.00 0.00 0.00, 0 bytes left"));
     // Below 4096 bytes nothing; at 4112 (the header and the 4096 kept free) one record, then it stops.
@@ -816,18 +904,154 @@ TEST_CASE("native plugins: get_xtarget_data_bulk, laid out as docs/plugins.md sa
     aggro[net::kAggroXTarget1 + 4] = 33;   // left from a mob the slot held before: not sent for an empty slot
     A::world(*h.world.conn).spawns.at(11).hp_percent = 55;
     h.run("/probextargets");
-    CHECK(h.printed_line("[Probe] xtarget 0: 1 10 100 80"));
-    CHECK(h.printed_line("[Probe] xtarget 1: 1 11 42 55"));
-    CHECK(h.printed_line("[Probe] xtarget 2: 1 13 60 0"));
-    CHECK(h.printed_line("[Probe] xtarget 3: 3 0 0 0"));
-    CHECK(h.printed_line("[Probe] xtarget 4: 1 0 0 0"));
+    CHECK(h.printed_line("[Probe] xtarget 0: type 1, spawn 10, aggro 100%, hp 80%"));
+    CHECK(h.printed_line("[Probe] xtarget 1: type 1, spawn 11, aggro 42%, hp 55%"));
+    CHECK(h.printed_line("[Probe] xtarget 2: type 1, spawn 13, aggro 60%, hp 0%"));
+    CHECK(h.printed_line("[Probe] xtarget 3: type 3, spawn 0, aggro 0%, hp 0%"));
+    CHECK(h.printed_line("[Probe] xtarget 4: type 1, spawn 0, aggro 0%, hp 0%"));
     CHECK(h.printed_line("[Probe] xtargets 80 bytes")); // 5 records of 16 bytes
     // Only whole records go into a buffer too small for all.
     h.printed.clear();
     h.run("/probextargets 47");
-    CHECK(h.printed_line("[Probe] xtarget 1: 1 11 42 55"));
-    CHECK_FALSE(h.printed_line("[Probe] xtarget 2: 1 13 60 0"));
+    CHECK(h.printed_line("[Probe] xtarget 1: type 1, spawn 11, aggro 42%, hp 55%"));
+    CHECK_FALSE(h.printed_line("[Probe] xtarget 2: type 1, spawn 13, aggro 60%, hp 0%"));
     CHECK(h.printed_line("[Probe] xtargets 32 bytes"));
+}
+TEST_CASE("native plugins: get_target_buff_data_bulk, laid out as docs/plugins.md says") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll);
+    REQUIRE(h.plugins->load("HostProbe"));
+    using A = net::GameConnectionTestAccess;
+    auto& sp = A::spells(*h.world.conn);
+    auto& w = A::world(*h.world.conn);
+    REQUIRE(w.target_id == 10); // the test world targets a_rat01
+    // No OP_TargetBuffs yet: nothing.
+    h.run("/probetargetbuffs");
+    CHECK(h.printed_line("[Probe] target buffs 0 bytes, 0 records, 0 empty, 0 bytes left"));
+    const std::int64_t now = net::GameConnection::now_ms();
+    auto target_buff = [now](std::uint32_t spell, std::int32_t tics, std::string caster, std::int64_t ticks_ago = 0) {
+        game::BuffSlot b;
+        b.spell = spell;
+        b.tics = tics;
+        b.received_ms = now - ticks_ago * game::kBuffTickMs;
+        b.caster_name = std::move(caster);
+        return b;
+    };
+    sp.target_buffs_entity = 10;
+    // An entry with no spell (index 2), with a caster's name, is left out. The duration is the ticks left: the
+    // first came three ticks ago, 8 sent, 5 left.
+    sp.target_buffs = {{3, target_buff(3002, 8, "Tester", 3)}, {0, target_buff(11, 1, "Groupie")},
+                       {5, target_buff(0, 6, "Nobody")}, {7, target_buff(99999, 4, "")}};
+    // In the order the client keeps them (the slots are not sent); a spell not known has type 0, no caster no name.
+    h.run("/probetargetbuffs");
+    CHECK(h.printed_line("[Probe] target buff slot 3: spell 3002, tics 5, spell type 0, caster Tester"));
+    CHECK(h.printed_line("[Probe] target buff slot 0: spell 11, tics 1, spell type 1, caster Groupie"));
+    CHECK(h.printed_line("[Probe] target buff slot 7: spell 99999, tics 4, spell type 0, caster -"));
+    // 20+6, 20+7, 20+0: the entry with no spell is not sent
+    CHECK(h.printed_line("[Probe] target buffs 73 bytes, 3 records, 0 empty, 0 bytes left"));
+    // Only whole records, names included, go into a buffer too small for all, and nothing past its end.
+    h.printed.clear();
+    h.run("/probetargetbuffs 52");
+    CHECK(h.printed_line("[Probe] target buff slot 3: spell 3002, tics 5, spell type 0, caster Tester"));
+    CHECK_FALSE(h.printed_line("[Probe] target buff slot 0: spell 11, tics 1, spell type 1, caster Groupie"));
+    CHECK(h.printed_line("[Probe] target buffs 26 bytes, 1 records, 0 empty, 0 bytes left"));
+    CHECK(h.printed_line("[Probe] target buffs past the end 0"));
+    h.printed.clear();
+    h.run("/probetargetbuffs 53");
+    CHECK(h.printed_line("[Probe] target buffs 53 bytes, 2 records, 0 empty, 0 bytes left"));
+    CHECK(h.printed_line("[Probe] target buffs past the end 0"));
+    // The last record needs its 20 bytes: one byte short, it is left out.
+    h.printed.clear();
+    h.run("/probetargetbuffs 72");
+    CHECK_FALSE(h.printed_line("[Probe] target buff slot 7: spell 99999, tics 4, spell type 0, caster -"));
+    CHECK(h.printed_line("[Probe] target buffs 53 bytes, 2 records, 0 empty, 0 bytes left"));
+    CHECK(h.printed_line("[Probe] target buffs past the end 0"));
+    h.printed.clear();
+    h.run("/probetargetbuffs 19"); // not even one fixed part
+    CHECK(h.printed_line("[Probe] target buffs 0 bytes, 0 records, 0 empty, 0 bytes left"));
+    CHECK(h.printed_line("[Probe] target buffs past the end 0"));
+    // A new target whose buffs have not come yet: the old target's are not given as its.
+    h.printed.clear();
+    w.target_id = 11;
+    h.run("/probetargetbuffs");
+    CHECK(h.printed_line("[Probe] target buffs 0 bytes, 0 records, 0 empty, 0 bytes left"));
+    // No target at all.
+    w.target_id = 0;
+    sp.target_buffs_entity = 0;
+    h.run("/probetargetbuffs");
+    CHECK(h.printed_line("[Probe] target buffs 0 bytes, 0 records, 0 empty, 0 bytes left"));
+}
+TEST_CASE("native plugins: get_avail_aa_data_bulk and get_avail_disc_data_bulk, laid out as docs/plugins.md says") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll);
+    REQUIRE(h.plugins->load("HostProbe"));
+    using A = net::GameConnectionTestAccess;
+    // Nothing owned, no disciplines: the header alone, its count 0.
+    h.run("/probeaas");
+    CHECK(h.printed_line("[Probe] aas count 0, 4 bytes, 0 bytes left"));
+    h.run("/probediscs");
+    CHECK(h.printed_line("[Probe] discs count 0, 4 bytes, 0 bytes left"));
+
+    // Owned ranks by their ability (group) id with the rank's name (dbstr type 1), in the owned list's order: an empty
+    // slot and a rank the AA table does not hold (no group id known) are left out. A title the game folder's
+    // dbstr_us.txt lacks gives an empty name.
+    auto& aa = A::alt_adv(*h.world.conn);
+    auto rank = [](std::uint32_t id, std::int32_t group, std::int32_t number, std::int32_t title) {
+        game::AltAbility a;
+        a.id = id;
+        a.group = group;
+        a.rank = number;
+        a.title_sid = title;
+        return a;
+    };
+    aa.add(rank(1003, 5, 3, 9001)); // the third rank of ability 5, Innate Strength
+    aa.add(rank(2001, 77, 1, -1));  // no title
+    aa.owned = {{1003, 3, 0}, {0, 0, 0}, {9999, 1, 0}, {2001, 1, 0}};
+    h.run("/probeaas");
+    CHECK(h.printed_line("[Probe] aas 0: ability 5, name Innate Strength"));
+    CHECK(h.printed_line("[Probe] aas 1: ability 77, name -"));
+    CHECK(h.printed_line("[Probe] aas count 2, 35 bytes, 0 bytes left")); // 4, 8+15, 8+0
+    // As many whole records, names included, as fit after the count; below the count's 4 bytes nothing, and nothing
+    // past the end.
+    h.printed.clear();
+    h.run("/probeaas 34");
+    CHECK(h.printed_line("[Probe] aas 0: ability 5, name Innate Strength"));
+    CHECK_FALSE(h.printed_line("[Probe] aas 1: ability 77, name -"));
+    CHECK(h.printed_line("[Probe] aas count 1, 27 bytes, 0 bytes left"));
+    CHECK(h.printed_line("[Probe] aas past the end 0"));
+    h.printed.clear();
+    h.run("/probeaas 3");
+    CHECK(h.printed_line("[Probe] aas 0 bytes"));
+    CHECK(h.printed_line("[Probe] aas past the end 0"));
+
+    // The profile's discipline list without its empty entries, in list order, each with its spell's name (none for
+    // a spell not in spells_us.txt).
+    A::profile(*h.world.conn)->disciplines = {4498, 0, 99999, 0, 0};
+    h.run("/probediscs");
+    CHECK(h.printed_line("[Probe] discs 0: spell 4498, name Test Discipline"));
+    CHECK(h.printed_line("[Probe] discs 1: spell 99999, name -"));
+    CHECK(h.printed_line("[Probe] discs count 2, 35 bytes, 0 bytes left")); // 4, 8+15, 8+0
+    h.printed.clear();
+    h.run("/probediscs 34");
+    CHECK(h.printed_line("[Probe] discs 0: spell 4498, name Test Discipline"));
+    CHECK_FALSE(h.printed_line("[Probe] discs 1: spell 99999, name -"));
+    CHECK(h.printed_line("[Probe] discs count 1, 27 bytes, 0 bytes left"));
+    CHECK(h.printed_line("[Probe] discs past the end 0"));
+    // Before the profile: the header, count 0.
+    h.printed.clear();
+    A::profile(*h.world.conn).reset();
+    h.run("/probediscs");
+    CHECK(h.printed_line("[Probe] discs count 0, 4 bytes, 0 bytes left"));
+    h.run("/probeaas"); // the owned list is still there, but goes out only with the profile
+    CHECK(h.printed_line("[Probe] aas count 0, 4 bytes, 0 bytes left"));
+    // No game connection at all (the login screen): the count 0 too.
+    h.printed.clear();
+    auto conn = std::move(h.world.conn);
+    h.run("/probeaas");
+    CHECK(h.printed_line("[Probe] aas count 0, 4 bytes, 0 bytes left"));
+    h.run("/probediscs");
+    CHECK(h.printed_line("[Probe] discs count 0, 4 bytes, 0 bytes left"));
+    h.world.conn = std::move(conn);
 }
 TEST_CASE("native plugins: cursor_origin gives the cursor item's origin, and needs 'read'") {
     using A = net::GameConnectionTestAccess;
@@ -866,10 +1090,18 @@ TEST_CASE("native plugins: the buff bulk reads need 'read'") {
     h.run("/probebuffs 4096");
     CHECK(h.printed_line("[Probe] buffs 0 bytes, 0 empty"));
     CHECK(h.printed_line("[Plugin] HostProbe: get_buff_data_bulk needs the server's 'read' permission"));
+    h.run("/probebuffnames 4096");
+    CHECK(h.printed_line("[Probe] buff names 0 bytes, 0 empty, 0 bytes left"));
     h.run("/probepetbuffs 1024");
     CHECK(h.printed_line("[Probe] pet buffs 0 bytes"));
     h.run("/probespawns 16384");
     CHECK(h.printed_line("[Probe] spawns 0 bytes")); // the denial is said once per plugin, above
     h.run("/probextargets 512");
     CHECK(h.printed_line("[Probe] xtargets 0 bytes"));
+    h.run("/probetargetbuffs 2048");
+    CHECK(h.printed_line("[Probe] target buffs 0 bytes, 0 records, 0 empty, 0 bytes left"));
+    h.run("/probeaas 2048");
+    CHECK(h.printed_line("[Probe] aas 0 bytes"));
+    h.run("/probediscs 2048");
+    CHECK(h.printed_line("[Probe] discs 0 bytes"));
 }

@@ -17,7 +17,7 @@ namespace {
 std::string time_left(const game::BuffSlot& b) {
     // Tics are 6 s; count down from when the packet arrived.
     std::int64_t left_ms = static_cast<std::int64_t>(b.tics) * 6000 - (net::GameConnection::now_ms() - b.received_ms);
-    if (b.tics == 0 || left_ms <= 0) return {};
+    if (b.tics <= 0 || left_ms <= 0) return {}; // none for a permanent buff (a negative count)
     std::int64_t s = left_ms / 1000;
     return s >= 60 ? std::format("{}m{:02}s", s / 60, s % 60) : std::format("{}s", s);
 }
