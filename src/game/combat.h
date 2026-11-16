@@ -108,9 +108,8 @@ std::optional<HitLine> damage_report(const EqStrings& strings, const WorldState&
 // exactly when the player's pet hit (even unreported); an NPC hitting itself never shows; a miss on the player is
 // hidden under filter 16 (@0x530768), the player's own under filter 13 (@0x5305ce), and somebody else's on
 // somebody else under filter 14 (@0x53078b) is shown exactly when the player's pet missed.
-// `by_my_pet`: the attacker is the player's pet (the local player's PetID, ReportSuccessfulHit's by-my-pet flag; its lines
-// are coloured 0x148). The original also counts a temporary pet whose MasterID is the player (bTempPet +0x3dc),
-// which this client does not receive.
+// `by_my_pet`: the attacker is the local player's PetID, or a temporary pet (bTempPet +0x3dc) whose MasterID is
+// the player's SpawnID (ReportSuccessfulHit @0x52efd3). Its lines on others are coloured 0x148.
 bool hit_line_shown(const HitLine& line, bool by_my_pet, const ChatFilters& filters, bool report = true);
 // The display modes per category (CChatWindowManager +0x224..+0x238): 0 the
 // full sentence, 1 the short line, 2 the number alone, else nothing.

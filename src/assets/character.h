@@ -38,6 +38,7 @@
 #include "assets/model_points.h"
 #include "assets/model.h"
 #include "assets/pfs.h"
+#include "assets/spell_effects.h"
 #include "assets/texture.h"
 #include "assets/texture_overrides.h"
 #include "core/game_dir.h"
@@ -236,11 +237,20 @@ struct SkinnedVertex {
 // dressed mesh: the body's own or a held item's, hanging from `bone` (a bone
 // of the model; its frame) through `local` (the model point's matrix, in that
 // frame).
+struct ObjectAnimation;
+
 struct MeshEmitter {
     int bone = -1;
     glm::mat4 local{1.0f};
     ModelEmitter emitter;
     std::string model_code; // the point-owning model's moddat.ini PESFactor
+    // A classic skeleton's 0x34 cloud, converted through wld_particles. Shared by the model and its dressed meshes;
+    // null for an EQG .prt entry, whose emitter index addresses actoremittersnew.edd.
+    std::shared_ptr<const EmitterDefinition> cloud{};
+    // A held WLD skeleton's directly authored default tracks. Its sampled motion precedes the baked rest matrix
+    // in `local`; named character clips are not selected for an attached item.
+    std::shared_ptr<const ObjectAnimation> cloud_animation{};
+    std::uint32_t cloud_animation_node = 0;
 };
 
 // A number no other mesh made in this run has, so a mesh freed and another made at its address are told apart
@@ -287,7 +297,8 @@ struct CharacterMesh {
     // Per material: tint 0xAARRGGBB multiplied into the texture (a zero
     // high byte = none).
     std::vector<std::uint32_t> tints;
-    std::size_t retained_bytes() const; // estimate: object and owned payload sizes, excluding allocator overhead
+    std::size_t retained_bytes(std::unordered_set<const EmitterDefinition*>* shared_clouds = nullptr,
+                              std::unordered_set<const ObjectAnimation*>* shared_animations = nullptr) const;
 };
 
 struct CharacterModel {
@@ -331,6 +342,8 @@ struct CharacterModel {
     std::vector<ModelPoint> points;
     // EQG models: `<code>.prt`'s actor emitters on those points.
     std::vector<ModelEmitter> emitters;
+    // Classic skeleton clouds remain on their authored bones, so animations move their origins and axes too.
+    std::vector<MeshEmitter> clouds;
 
     const AnimationClip* clip(std::string_view code) const;
     // The clip a spawn plays for `code`, `holding` when PlayerClient_UpdateHoldingAnimation gives it a column other
@@ -371,7 +384,9 @@ struct CharacterModel {
     // Animation includes clips, aliases and skeleton arrays; geometry includes materials. Other includes the
     // object, identifying strings, points and emitters. Uses owned payload sizes with no allocator overhead.
     // A shared set counts track payloads once across multiple models in a cache snapshot.
-    MemoryBreakdown memory_breakdown(AnimationTrack::StorageSet* shared_tracks = nullptr) const;
+    MemoryBreakdown memory_breakdown(AnimationTrack::StorageSet* shared_tracks = nullptr,
+                                    std::unordered_set<const EmitterDefinition*>* shared_clouds = nullptr,
+                                    std::unordered_set<const ObjectAnimation*>* shared_animations = nullptr) const;
     std::size_t retained_bytes() const; // estimate: object and owned payload sizes, excluding allocator overhead
 };
 
@@ -379,6 +394,9 @@ struct CharacterModel {
 struct CharacterArchive {
     std::shared_ptr<const PfsArchive> archive;
     std::vector<wld::WldFile> wlds;
+    // Opened as the original opens the Luclin player models and GlobalLoad.txt lines whose fourth FLAGS letter is
+    // 'T' (long_track_archives): a track of more than 15 keys plays at half its interval (EQGraphicsDX9 0x1001b26e).
+    bool halves_long_tracks = false;
 
     // Storage accounting. archive_bytes() is the archive file's size: file-backed bytes live in the page cache and
     // are shared, owned_bytes() of it is in private heap. parsed_bytes() estimates the WLD data itself, which is
@@ -390,7 +408,8 @@ struct CharacterArchive {
 
 // Opens and parses a character archive; nullptr when the file does not exist.
 // Throws std::runtime_error when it is malformed.
-std::shared_ptr<const CharacterArchive> load_character_archive(const GameDir& game, std::string_view file);
+std::shared_ptr<const CharacterArchive> load_character_archive(const GameDir& game, std::string_view file,
+                                                               bool halves_long_tracks = false);
 
 // The classic character archives the original client loads at start-up, in
 // load order: GlobalLoad.txt's _chr entries (phases 1-4), global5/7_chr,
@@ -404,6 +423,12 @@ std::vector<std::string> global_character_archives(const GameDir& game, bool luc
 // with 'T' loads at 0, otherwise at 2 (CDisplay::InitWorld @0x492093); every
 // other global archive (Luclin, global5/7, _amr, GlobalLoad_chr.txt) at 0.
 std::unordered_map<std::string, int> global_archive_levels(const GameDir& game);
+// The global archives whose long tracks play at half their interval (CharacterArchive::halves_long_tracks), by file
+// name as global_character_archives lists them: the load request's byte +0xe, which reaches the archive's loader
+// byte +0x30 (CS3DFile::Open 0x100c0470). CDisplay::InitWorld sets it for a GlobalLoad.txt line whose fourth FLAGS
+// letter is 'T' (@0x492063) and for the Luclin player models' global<code>_chr2 and _chr (@0x492507, @0x492597:
+// 0x1010000); the classic global_chr, the armor, Global NPC Models (global5/7_chr) and zone _chr loads leave it 0.
+std::unordered_set<std::string> long_track_archives(const GameDir& game, bool luclin = false);
 // The Luclin player-model archives eqclient.ini enables
 // (global<code>_chr2.s3d, global<code>_chr.s3d), in the client's race order.
 std::vector<std::string> luclin_character_archives(const GameDir& game);
@@ -456,6 +481,7 @@ namespace detail {
 struct TrackLoc {
     const wld::WldFile* wld = nullptr;
     wld::TrackRef ref{};
+    bool halves_long = false; // its archive's CharacterArchive::halves_long_tracks
 };
 struct FragmentLoc {
     const wld::WldFile* first = nullptr;
@@ -583,9 +609,10 @@ public:
     // Loads the global archives and the zone's (zone may be empty); with
     // `luclin`, the Luclin player models eqclient.ini enables.
     static CharacterLibrary load(const GameDir& game, std::string_view zone, bool luclin = false);
-    // Opens archives by file name; missing ones are skipped, broken ones logged.
-    static std::vector<std::shared_ptr<const CharacterArchive>> open_archives(const GameDir& game,
-                                                                             const std::vector<std::string>& names);
+    // Opens archives by file name; missing ones are skipped, broken ones logged. Those `halving` names
+    // (long_track_archives) halve their long tracks.
+    static std::vector<std::shared_ptr<const CharacterArchive>> open_archives(
+        const GameDir& game, const std::vector<std::string>& names, const std::unordered_set<std::string>& halving = {});
 
     const std::vector<std::shared_ptr<const CharacterArchive>>& archives() const { return archives_; }
     // The shared index of the global archives this library was made on, or null.
@@ -723,6 +750,10 @@ private:
     mutable std::unordered_map<std::string, Cached<std::shared_ptr<const CharacterModel>>> cache_;
     mutable std::unordered_map<std::string, Cached<std::shared_ptr<const CharacterMesh>>> dress_cache_;
     mutable std::unordered_map<std::uint32_t, Cached<std::optional<ItemMesh>>> item_cache_;
+    // The 0x34 clouds' definitions by their WLD and name: a model built again (after its cache entry went) hands out
+    // the same definition, so app::ActorEmitters, which registers each definition once by its address, does not
+    // gather a new copy at every rebuild. Weak: a definition lives as long as a model, mesh or emitter holds it.
+    mutable std::unordered_map<std::string, std::weak_ptr<const EmitterDefinition>> cloud_definitions_;
     std::shared_ptr<SharedCharacterCache> shared_;
     void build_item_mesh(std::uint32_t number, std::optional<ItemMesh>& out) const;
     std::shared_ptr<EqgCharacterStore> eqg_;

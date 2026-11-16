@@ -502,7 +502,8 @@ void append_pieces(const MeshFile& mesh, const std::vector<std::size_t>& pieces,
     // name and diffuse share a slot only when these agree, whichever was
     // appended first, so a plain part never takes an armor part's maps.
     auto same_surface = [](const EffectParams& a, const EffectParams& b) {
-        return a.normal_map == b.normal_map && a.textures == b.textures && a.shininess == b.shininess &&
+        return a.slide == b.slide && a.normal_map == b.normal_map && a.coverage_map == b.coverage_map &&
+               a.coverage_scale == b.coverage_scale && a.textures == b.textures && a.shininess == b.shininess &&
                a.gloss == b.gloss && a.env_strength == b.env_strength && a.specular == b.specular &&
                a.reflective == b.reflective && a.packed_normal == b.packed_normal && a.glow == b.glow;
     };

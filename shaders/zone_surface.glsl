@@ -1,16 +1,24 @@
 #ifndef HAILSTONE_ZONE_SURFACE_GLSL
 #define HAILSTONE_ZONE_SURFACE_GLSL
 
-// EQG CBGG1/CBSG1 surface channels: RG is the tangent direction, B self-illumination, A gloss. Not confirmed
-// against the original's shader (SPL/SModelCBSG1 is the author's reading; docs/unknowns.md "EQG"). The tangent Z of
-// 0.9 is the client's own choice: it keeps the glow channel out of the normal, including a dark rock's B=0.
+// MPL materials modulate the diffuse with a separately scaled coverage texture (SModel_Bump/Full).
+vec3 surface_coverage_color(vec3 diffuse, vec3 coverage) {
+    return clamp(2.0f * diffuse * coverage, 0.0f, 1.0f);
+}
+
+// SModelLava / SkinMeshLava: the scrolling secondary is lit by 1+bump; the primary alpha mixes in its lit colour.
+vec3 surface_lava_color(vec3 primary_lit, vec3 secondary, float primary_alpha, float bump) {
+    return mix(secondary * (1.0f + clamp(bump, 0.0f, 1.0f)), primary_lit, clamp(primary_alpha, 0.0f, 1.0f));
+}
+
+// EQG CBGG1/CBSG1/CBSGE1 channels: RG tangent normal with fixed Z=0.9, B added to ambient, A gloss in place of
+// e_fGloss0 (checked in the player's SkinMeshCBSG1/CBSGE1 compiled shaders).
 // Also compiled by the CPU regression tests with GLM's float operations (tests/lighting_test.cpp).
 vec3 zone_surface_normal(vec4 texel, bool packed_channels) {
     return packed_channels ? vec3(texel.x * 2.0f - 1.0f, texel.y * 2.0f - 1.0f, 0.9f) : vec3(texel) * 2.0f - 1.0f;
 }
 
 // The highlight's strength: the material's e_fGloss0 (`fallback`), or for a packed map its alpha in place of it.
-// Whether the original replaces e_fGloss0 by the map's alpha or scales it is not confirmed (docs/unknowns.md "EQG").
 float zone_surface_gloss(vec4 texel, bool packed_channels, float fallback) {
     return packed_channels ? clamp(texel.w, 0.0f, 1.0f) : fallback;
 }

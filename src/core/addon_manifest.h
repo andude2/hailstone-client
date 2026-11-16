@@ -37,8 +37,10 @@
 namespace hailstone {
 
 // A tool is a program of its own with its files (Hailstone Texture Studio), in tools/<name>/: the client starts it
-// when the player asks, and never loads or runs anything of it itself.
-enum class AddonKind : std::uint8_t { Script, Plugin, Tool };
+// when the player asks, and never loads or runs anything of it itself. An upscaler is an upscaler provider
+// (sdk/hailstone_upscaler.h) with the runtime it needs, in upscalers/<name>/: the client loads it at the start when
+// display.upscaler names it.
+enum class AddonKind : std::uint8_t { Script, Plugin, Tool, Upscaler };
 
 struct AddonPackage {
     std::string platform; // "any" (a script's), or "linux-x64", "windows-x64" ... (a plugin's or a tool's)
@@ -48,7 +50,7 @@ struct AddonPackage {
 };
 
 struct AddonManifest {
-    std::string name;      // addon_name_ok: its folder, scripts/<name>/, plugins/<name>/ or tools/<name>/
+    std::string name;      // addon_name_ok: its folder, scripts/<name>/, plugins/<name>/, tools/<name>/ or upscalers/<name>/
     AddonKind kind = AddonKind::Script;
     Version version;
     std::string version_text;
@@ -57,7 +59,7 @@ struct AddonManifest {
     std::string author;
     std::string description;
     std::vector<std::string> caps; // the words as written, lower case (the caller checks they are capabilities); a
-                                   // tool's are empty
+                                   // tool's and an upscaler's are empty
     std::string notes;             // http(s), "" none
     std::vector<AddonPackage> packages;
     std::optional<Ed25519PublicKey> key; // set only when the signature checked against it

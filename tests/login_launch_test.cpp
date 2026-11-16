@@ -228,6 +228,13 @@ TEST_CASE("launcher login: eqhost.txt only from a game folder named for this run
     CHECK(app::token_login_profile({}, nullptr, game, false, saved, "explicit.example", 5999).host == "explicit.example");
 }
 
+TEST_CASE("launcher login: eqhost.txt counts from --game-dir or the EverQuest folder Hailstone is in, not hailstone.ini") {
+    CHECK(app::eqhost_names_ticket_server(AssetFolderSource::Override));
+    CHECK(app::eqhost_names_ticket_server(AssetFolderSource::Found));
+    CHECK_FALSE(app::eqhost_names_ticket_server(AssetFolderSource::Config));
+    CHECK_FALSE(app::eqhost_names_ticket_server(AssetFolderSource::Picker));
+}
+
 TEST_CASE("launcher login: world selection is exact, unique and includes locked worlds for server admission") {
     std::vector<net::ServerInfo> servers(2);
     servers[0].id = 7;

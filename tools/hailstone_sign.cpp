@@ -25,6 +25,7 @@
 #include <sstream>
 #include <string>
 
+#include "app/addon_install.h"
 #include "app/update_install.h"
 #include "app/updater.h"
 #include "core/addon_index.h"
@@ -177,10 +178,8 @@ int verify(const std::string& key_arg, const fs::path& manifest) {
             std::fprintf(stderr, "%s: %s\n", manifest.string().c_str(), error.c_str());
             return 1;
         }
-        std::printf("add-on %s %s (%s), caps", a->name.c_str(), a->version_text.c_str(),
-                    a->kind == AddonKind::Script   ? "script"
-                    : a->kind == AddonKind::Plugin ? "plugin"
-                                                   : "tool");
+        const std::string kind(app::addon_kind_word(a->kind));
+        std::printf("add-on %s %s (%s), caps", a->name.c_str(), a->version_text.c_str(), kind.c_str());
         for (const auto& c : a->caps) std::printf(" %s", c.c_str());
         if (a->caps.empty()) std::printf(" none");
         std::printf("\n");
@@ -249,6 +248,11 @@ int try_update(const std::string& key_arg, const std::string& feed, const fs::pa
     app::Updater updater(env);
     updater.check();
     updater.wait();
+    // As the login screen's Download: the client downloads only when the player asks (update.download is off).
+    if (updater.status().state == app::UpdateState::Available) {
+        updater.download();
+        updater.wait();
+    }
     const app::UpdateStatus s = updater.status();
     if (s.state != app::UpdateState::Ready) {
         std::fprintf(stderr, "not ready (state %d): %s\n", static_cast<int>(s.state), s.error.c_str());

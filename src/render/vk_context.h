@@ -19,6 +19,7 @@
 
 #include "render/frame_gen.h"
 #include "render/frame_gen_logic.h"
+#include "render/graphics_tier.h"
 #include "render/fsr3_upscaler.h"
 #include "render/pipeline_cache.h"
 #include "render/point_shadows.h"
@@ -26,6 +27,7 @@
 #include "render/shadows.h"
 #include "render/swapchain_size.h"
 #include "render/temporal.h"
+#include "render/upscaler_provider.h"
 
 namespace hailstone::platform { class Window; }
 
@@ -98,6 +100,7 @@ struct SceneOptions {
     // whatever msaa says, jitters the scene's projection each frame (projection_jitter) and resolves it into a
     // history at the view's size; `sharpness` then sharpens that with RCAS (0 none). Fsr3 does the same with AMD
     // FSR 3.1's upscaler in place of the resolve, its own RCAS at `sharpness`; Taa where DeviceCaps::fsr3 is false.
+    // External runs the upscaler provider VkContext was made with in FSR 3.1's place (Fsr3, then Taa, without one).
     Upscaler upscaler = Upscaler::Fsr1;
     // Frame generation (render/frame_gen.h, display.frame_gen): a frame made between each two real ones from the
     // temporal upscaler's motion and depth, presented before the real one, the UI drawn sharp over both. Only with a
@@ -198,7 +201,10 @@ class VkContext {
 public:
     static constexpr std::uint32_t kFramesInFlight = 2;
 
-    VkContext(platform::Window& window, bool validation);
+    // `upscaler`: an upscaler provider (render/upscaler_provider.h) to run when SceneOptions::upscaler is External.
+    // Its instance and device requirements are added here; one the GPU or the loader cannot meet, or that says no,
+    // is dropped (logged), and External then falls back.
+    VkContext(platform::Window& window, bool validation, std::unique_ptr<UpscalerProvider> upscaler = nullptr);
     ~VkContext();
     VkContext(const VkContext&) = delete;
     VkContext& operator=(const VkContext&) = delete;
@@ -238,7 +244,10 @@ public:
     void set_temporal_view(const glm::mat4& view, const glm::mat4& proj) { temporal_view_ = TemporalView{view, proj}; }
     // Drops the history at the next frame: what it holds is no longer on the screen (a new zone).
     void reset_history() { history_valid_ = false; }
-    // The temporal upscaler runs (SceneOptions::upscaler Taa or Fsr3, its targets made).
+    // The upscaler provider that made it through the device's creation (SceneOptions::upscaler External runs it), or
+    // null.
+    const UpscalerProvider* upscaler_provider() const { return provider_.get(); }
+    // The temporal upscaler runs (SceneOptions::upscaler Taa, Fsr3 or External, its targets made).
     bool temporal() const { return lit_.image != VK_NULL_HANDLE; }
     // Frame generation runs (SceneOptions::frame_gen under a temporal upscaler, its images made).
     bool frame_gen_active() const { return frame_gen_ && overlay_.image != VK_NULL_HANDLE; }
@@ -345,6 +354,10 @@ public:
     const std::string& gpu_description() const { return gpu_description_; }
     // The GPU's name alone ("AMD Radeon RX 7900 XTX").
     const std::string& gpu_name() const { return gpu_name_; }
+    // The GPU in use, for the first start's graphics settings (render/graphics_tier.h); cpu_threads left 0.
+    const GpuProfile& gpu_profile() const { return gpu_profile_; }
+    // FSR 3.1's passes' mean GPU times (HAILSTONE_FSR3_TIMING); empty without them.
+    std::string fsr3_timing() const;
     // Each memory heap's use and budget as the allocator sees them (VMA's heap budgets), for the performance window.
     struct HeapUse {
         bool device_local = false; // VRAM, else system memory
@@ -541,10 +554,22 @@ private:
     Image object_motion_;
     Image reactive_;
     std::array<Image, 2> history_{};
-    // Under FSR 3.1 (SceneOptions::upscaler Fsr3): its output at the view's size (RGBA16F, storage), which the post
-    // pass reads (post_fsr3_set_), and the upscaler itself (made when the option first asks for it).
+    // Under FSR 3.1 (SceneOptions::upscaler Fsr3) or a provider (External): its output at the view's size (RGBA16F,
+    // storage; with a provider also a transfer destination), which the post pass reads (post_fsr3_set_), and FSR 3.1
+    // itself (made when the option first asks for it).
     Image fsr3_output_;
     std::unique_ptr<Fsr3Upscaler> fsr3_;
+    // The upscaler provider (External), from the constructor; dropped when it fails (provider_failed_ then has the
+    // next scene targets fall back to Taa).
+    std::unique_ptr<UpscalerProvider> provider_;
+    bool provider_failed_ = false;
+    bool provider_fallback_logged_ = false;
+    std::chrono::steady_clock::time_point provider_last_{}; // the last provider frame's time (its frame time)
+    void drop_provider(std::string_view why);
+    // Records the provider's frame (draw's resolve, in FSR 3.1's place) into fsr3_output_.
+    void run_provider(VkCommandBuffer cmd, const FrameInfo& frame, const Image& depth, bool keep, std::uint32_t phases,
+                      float near_plane, float far_plane, float fov_y, float exposure, float sharpness,
+                      std::chrono::steady_clock::time_point now);
     // Frame generation (frame_gen_active()): the two pictures without the UI (this frame's is pictures_[picture_index_],
     // the last one's the other), the in-between frame, and the UI's image (the window's size, the swapchain's format)
     // that the overlay pass draws into instead of the swapchain; end_frame composites them (finish_frame_gen).
@@ -684,6 +709,7 @@ private:
     bool screenshot_generated_ = false;
     std::string gpu_description_;
     std::string gpu_name_;
+    GpuProfile gpu_profile_;
 };
 
 } // namespace hailstone::render

@@ -64,6 +64,10 @@ public:
     std::optional<std::string> get(std::string_view section, std::string_view key) const {
         return read(section, key, true, true);
     }
+    // The character's file alone (defaults.ini not read).
+    std::optional<std::string> get_own(std::string_view section, std::string_view key) const {
+        return read(section, key, true, false);
+    }
     void put(std::string_view section, std::string_view key, std::string_view value);
     // DeleteUIINIKey: the key out of the character's file.
     void erase(std::string_view section, std::string_view key);

@@ -1,0 +1,197 @@
+#version 450
+
+// The modern sky's volumetric clouds (render/cloud_renderer.h): a layer of cloud 1.5 to 4 km over a round planet,
+// marched along each view ray at half the scene's size, one pixel of every 2x2 block each frame
+// (render::cloud_update_slot), the rest carried over from the last frame turned to this one's view. Out: rgb the light
+// the clouds send along the ray, a how much of the sky behind still shows (shaders/atmosphere.frag blends them).
+//
+// The cloud shape is Schneider's (SIGGRAPH 2015, "The Real-time Volumetric Cloudscapes of Horizon: Zero Dawn"): a
+// weather map says where cloud grows and of what type, a height profile shapes it, Perlin-Worley noise gives it its
+// billows and Worley noise wears its edges. The light is Hillaire's energy-conserving integration (SIGGRAPH 2016,
+// "Physically Based Sky, Atmosphere and Cloud Rendering in Frostbite") with the light scattered more than once
+// approximated by octaves of a dimmer, wider lobe (Wrenninge et al., "Oz: The Great and Volumetric", 2013).
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform sampler3D u_shape;
+layout(binding = 1) uniform sampler3D u_detail;
+layout(binding = 2) uniform sampler2D u_weather;
+layout(binding = 3) uniform sampler2D u_history;
+layout(binding = 4, rgba16f) uniform writeonly image2D u_out;
+layout(binding = 5) uniform Clouds {
+    mat4 inverse_view_proj; // this frame: clip to the sky's directions (the view's rotation only)
+    mat4 last_view_proj;    // last frame's: a direction to its clip space
+    vec4 to_light;          // towards the sun by day, the moon by night (render::Daylight::to_light)
+    vec4 light;             // its light (render::Daylight::light); w: the storm's dark base (CloudCover::darkness)
+    vec4 ambient;           // the open sky's light (render::Daylight::sky); w: coverage
+    vec4 params;            // x: density, y: type, z: seconds, w: the frame (for the start's jitter)
+    vec4 wind;              // xy: the field's offset (km), z: the 2x2 pixel marched (0..3), w: 1 throws the history away
+    ivec4 extent;           // xy: this image's size
+} u;
+
+const float kPlanet = 6360.0; // km, as shaders/atmosphere.frag
+const float kBottom = 1.5;    // km over the ground
+const float kTop = 4.0;
+const float kWeatherTile = 30.0; // km the weather map spans
+const float kShapeTile = 7.0;    // km the shape noise spans
+const float kDetailTile = 0.9;   // km the detail noise spans
+const float kExtinction = 40.0;  // per km at density 1
+const float kMaxPath = 40.0;     // km marched at most along a ray through the layer
+const float kFade = 45.0;        // km: far clouds thin out into the sky (exp(-distance / kFade))
+// The light's strength on the clouds relative to the lighting's units (render::Daylight): the sun's 3.2 at noon
+// makes a lit cloud's face about 1.1, a little brighter than the sky round it.
+const float kCloudSun = 0.5;
+const float kCloudAmbient = 0.9;
+const float kPi = 3.14159265;
+
+float remap(float v, float lo, float hi, float new_lo, float new_hi) {
+    return new_lo + (v - lo) / max(hi - lo, 1e-5) * (new_hi - new_lo);
+}
+
+// Distance along the ray from `o` (inside the sphere) to where it leaves a sphere of radius r about the planet's centre.
+float exit_sphere(vec3 o, vec3 d, float r) {
+    float b = dot(o, d);
+    float c = dot(o, o) - r * r;
+    return -b + sqrt(max(b * b - c, 0.0));
+}
+
+// The cloud's density at `p` (km, the planet's centre at the origin), its height in the layer `hf` (0 bottom .. 1 top);
+// `detail` false skips the erosion (the light's march).
+float density(vec3 p, float hf, bool detail) {
+    if (hf < 0.0 || hf > 1.0) return 0.0;
+    vec2 at = p.xy + u.wind.xy;
+    vec4 weather = textureLod(u_weather, at / kWeatherTile, 0.0);
+    float coverage = u.ambient.w;
+    // Where the map is above the sky's cover cloud grows; a full cover clouds it all over.
+    float local = clamp((weather.r - (1.0 - coverage)) * 3.0 + coverage * coverage, 0.0, 1.0);
+    if (local <= 0.0) return 0.0;
+    // The height profile: flat clouds keep to the layer's bottom third, towering ones fill it; rounded at the
+    // bottom, thinning to the top.
+    float type = clamp(u.params.y + (weather.g - 0.5) * 0.6, 0.0, 1.0);
+    float top = mix(0.35, 1.0, type);
+    float profile = smoothstep(0.0, 0.07, hf) * (1.0 - smoothstep(top * 0.55, top, hf));
+    if (profile <= 0.0) return 0.0;
+    float h = length(p) - kPlanet;
+    vec4 shape = textureLod(u_shape, vec3(at, h) / kShapeTile, 0.0);
+    float worley = dot(shape.gba, vec3(0.625, 0.25, 0.125));
+    float base = remap(shape.r, worley - 1.0, 1.0, 0.0, 1.0) * profile;
+    base = clamp(remap(base, 1.0 - local, 1.0, 0.0, 1.0), 0.0, 1.0) * local;
+    if (base <= 0.0 || !detail) return base * u.params.x;
+    // The edges worn by finer noise: wispy at the bottom, billowing higher up; it turns slowly with time.
+    vec3 dp = vec3(at, h) / kDetailTile + vec3(0.0, 0.0, u.params.z * 0.004);
+    float fine = dot(textureLod(u_detail, dp, 0.0).rgb, vec3(0.625, 0.25, 0.125));
+    float wear = mix(fine, 1.0 - fine, clamp(hf * 5.0, 0.0, 1.0));
+    base = clamp(remap(base, wear * 0.45, 1.0, 0.0, 1.0), 0.0, 1.0);
+    return base * u.params.x;
+}
+
+float henyey_greenstein(float mu, float g) {
+    float g2 = g * g;
+    return (1.0 - g2) / (4.0 * kPi * pow(1.0 + g2 - 2.0 * g * mu, 1.5));
+}
+
+// The optical depth from `p` towards the light: six steps, each longer than the last (about 3 km in all).
+float light_depth(vec3 p) {
+    vec3 l = normalize(u.to_light.xyz);
+    float depth = 0.0, step_len = 0.08, t = 0.0;
+    for (int i = 0; i < 6; ++i) {
+        t += step_len * 0.5;
+        vec3 q = p + l * t;
+        float hf = (length(q) - kPlanet - kBottom) / (kTop - kBottom);
+        depth += density(q, hf, i < 2) * step_len;
+        t += step_len * 0.5;
+        step_len *= 1.8;
+    }
+    return depth;
+}
+
+// Interleaved gradient noise (Jimenez, "Next Generation Post Processing in Call of Duty: Advanced Warfare", 2014).
+float ign(vec2 px) {
+    return fract(52.9829189 * fract(dot(px, vec2(0.06711056, 0.00583715))));
+}
+
+vec4 march(vec3 dir, ivec2 px) {
+    if (dir.z < -0.03) return vec4(0.0, 0.0, 0.0, 1.0);
+    vec3 o = vec3(0.0, 0.0, kPlanet);
+    float t0 = exit_sphere(o, dir, kPlanet + kBottom);
+    float t1 = min(exit_sphere(o, dir, kPlanet + kTop), t0 + kMaxPath);
+    float fade = exp(-t0 / kFade);
+    if (fade < 0.02) return vec4(0.0, 0.0, 0.0, 1.0);
+    // More steps where the ray crosses more of the layer (low in the sky).
+    int steps = int(mix(64.0, 40.0, clamp(dir.z * 2.0, 0.0, 1.0)));
+    float dt = (t1 - t0) / float(steps);
+    float t = t0 + dt * ign(vec2(px) + u.params.w * 5.588238);
+
+    vec3 l = normalize(u.to_light.xyz);
+    float mu = dot(dir, l);
+    vec3 sun = u.light.rgb * kCloudSun;
+    float darkness = u.light.w;
+    vec3 scatter = vec3(0.0);
+    float transmit = 1.0;
+    for (int i = 0; i < steps; ++i, t += dt) {
+        vec3 p = o + dir * t;
+        float hf = (length(p) - kPlanet - kBottom) / (kTop - kBottom);
+        float d = density(p, hf, true);
+        if (d <= 0.0) continue;
+        float sigma = d * kExtinction;
+        float depth = light_depth(p) * kExtinction;
+        // The light reaching here: single scattering and three octaves of the light scattered again, each
+        // dimmer, reaching deeper and spread wider.
+        float lit = 0.0, a = 1.0, b = 1.0, c = 1.0;
+        for (int k = 0; k < 4; ++k) {
+            float phase = mix(henyey_greenstein(mu, 0.8 * c), henyey_greenstein(mu, -0.3 * c), 0.35) * 4.0 * kPi;
+            lit += a * exp(-depth * b) * phase;
+            a *= 0.5;
+            b *= 0.35;
+            c *= 0.5;
+        }
+        float base_shade = 1.0 - darkness * (1.0 - hf);
+        vec3 ambient = u.ambient.rgb * kCloudAmbient * mix(0.45, 1.0, hf) * base_shade;
+        vec3 light_in = sun * lit * base_shade + ambient;
+        float step_transmit = exp(-sigma * dt);
+        scatter += transmit * light_in * (1.0 - step_transmit);
+        transmit *= step_transmit;
+        if (transmit < 0.01) {
+            transmit = 0.0;
+            break;
+        }
+    }
+    return vec4(scatter * fade, 1.0 - (1.0 - transmit) * fade);
+}
+
+vec3 direction(vec2 ndc) {
+    vec4 far = u.inverse_view_proj * vec4(ndc, 0.0, 1.0);
+    vec4 near = u.inverse_view_proj * vec4(ndc, 1.0, 1.0);
+    return normalize(far.xyz / far.w - near.xyz / near.w);
+}
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(px, u.extent.xy))) return;
+    vec2 uv = (vec2(px) + 0.5) / vec2(u.extent.xy);
+    vec3 dir = direction(uv * 2.0 - 1.0);
+
+    bool fresh = ((px.x & 1) + 2 * (px.y & 1)) == int(u.wind.z);
+    vec4 history = vec4(0.0, 0.0, 0.0, 1.0);
+    bool have = false;
+    if (u.wind.w < 0.5) {
+        vec4 clip = u.last_view_proj * vec4(dir, 0.0);
+        if (clip.w > 1e-6) {
+            vec2 last_uv = clip.xy / clip.w * 0.5 + 0.5;
+            if (all(greaterThanEqual(last_uv, vec2(0.0))) && all(lessThanEqual(last_uv, vec2(1.0)))) {
+                history = textureLod(u_history, last_uv, 0.0);
+                have = true;
+            }
+        }
+    }
+    vec4 result;
+    if (have && !fresh) {
+        result = history;
+    } else {
+        vec4 now = march(dir, px);
+        // A fresh march is blended with what was there (a fifth of it new): its start's jitter averages out over
+        // the frames, about a second of them at 60 a second, each pixel marched every fourth.
+        result = have ? mix(history, now, 0.2) : now;
+    }
+    imageStore(u_out, px, result);
+}

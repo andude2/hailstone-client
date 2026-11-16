@@ -1,8 +1,9 @@
 -- Login: the client's login screen in this UI's look (eq.LoginScreen, app/lua_eq_pregame.cpp; a Hailstone screen, not
 -- the original's). Built around what a player does most: pick a saved server, type or pick an account, Log in. The
 -- server's details (name, address, port, its files) fold away under Edit once it is saved; the interface is picked in
--- the card's footer, always in sight; the game files sit under More options; the characters seen on the server's
--- accounts are a card of their own beside the login card (below it on a narrow screen), each played with one click.
+-- the card's footer, always in sight; the game files and the texture pack sit under More options; the characters seen
+-- on the server's accounts are a card of their own beside the login card (below it on a narrow screen), each played
+-- with one click.
 -- Add-ons (docs/addons.md) open as a card of their own beside the characters card, with the store (every add-on of
 -- the add-on index) first; the box set opens as a card of its own on the login card's other side. The build, the
 -- updater's word on it, What's new and Hailstone's page sit in a small card in the screen's top left corner.
@@ -18,6 +19,7 @@ local editingFor = nil  -- the server they were unfolded for (picking another fo
 local port = { active = false, text = "" } -- the Port field's own text while it is typed in (it may be empty then)
 local forgetName = nil  -- the account the Forget question is about
 local more = false      -- More options unfolded
+local packAtStart = nil -- the texture pack as the screen first showed it (a change is read at the next start)
 local boxOpen = false   -- the box set card open
 local removeName = nil   -- the add-on the Remove question is about
 local removeAsk = false  -- a row's Remove was pressed: the question opens at the window's level
@@ -38,6 +40,9 @@ local PLUGIN_WARNING = "A plugin is a program: these permissions limit what it d
   .. "can do on your computer. Install only plugins you trust."
 local TOOL_WARNING = "A tool is a program of its own: it runs on your computer with your rights, outside Hailstone, "
   .. "which starts it when you ask. Install only tools you trust."
+local UPSCALER_WARNING = "An upscaler runs inside Hailstone with your rights: it sees only the frames it upscales "
+  .. "through Hailstone, but it is a program and can do anything on your computer. Install only upscalers you trust. "
+  .. "Pick it under Options, Graphics, Upscaler; it starts the next time the game does."
 local UI_TIP_SAVED = "The look and layout of the game's windows on this server, kept with it. The screen changes to it now."
 local UI_TIP_NEW = "The look and layout of the game's windows on this server, kept with it once it is saved. The "
   .. "screen changes to it now."
@@ -232,13 +237,40 @@ local function accountSection(view, s, appearing)
 end
 
 -- ---------------------------------------------------------------- more options
+-- The texture pack (eq.Option "texture_pack", display.texture_folder; the Options window's Textures row too): Off,
+-- then each folder of Hailstone's textures/, such as a pack Hailstone Texture Studio built. Read at the next start:
+-- textures already loaded stay as they are.
+local function texturePack(s)
+  local pack = eq.Option("texture_pack")
+  if pack == nil then return end
+  packAtStart = packAtStart or pack
+  detail("Textures", s, function()
+    local choices = eq.OptionChoices("texture_pack")
+    if ui.BeginCombo("##texture_pack", choices[pack + 1] or "A folder of its own") then
+      for i, name in ipairs(choices) do
+        if ui.Selectable(name, i == pack + 1) and i ~= pack + 1 then eq.SetOption("texture_pack", i - 1) end
+      end
+      ui.EndCombo()
+    end
+    P.Tip(pack ~= packAtStart and "Hailstone uses it from its next start."
+      or "Replacement textures from a folder of Hailstone's textures folder, such as a pack Texture Studio built. "
+        .. "Off: the game's own. A change is used from the next start.")
+  end)
+  if pack ~= packAtStart then
+    ui.TableNextRow()
+    ui.TableNextColumn()
+    ui.TableNextColumn()
+    P.Muted("From the next start")
+  end
+end
+
 local function gameFiles(view, s)
-  if #view.gameFolders == 0 then return end
+  if #view.gameFolders == 0 and eq.Option("texture_pack") == nil then return end
   local current = view.gameFolders[1]
   if not ui.BeginTable("##gamefiles", 2, ui.TableFlags.SizingFixedFit) then return end
   ui.TableSetupColumn("label", ui.TableColumnFlags.WidthFixed, 74 * s)
   ui.TableSetupColumn("value", ui.TableColumnFlags.WidthStretch, 0)
-  detail("Game files", s, function()
+  if current then detail("Game files", s, function()
     if view.gameFolderFixed then
       label(current.label, s)
       P.Tip(current.path .. "\nSet by --game-dir or EQ_GAME_DIR.")
@@ -258,7 +290,8 @@ local function gameFiles(view, s)
       ui.EndCombo()
     end
     P.Tip("The EverQuest files to play with, RoF2 or live: " .. current.path .. "\nA server's own files go over them.")
-  end)
+  end) end
+  texturePack(s)
   ui.EndTable()
 end
 
@@ -426,14 +459,15 @@ local function offerCard(o, s, bh)
   ui.PushTextWrapPos(0)
   if o.description ~= "" then ui.TextWrapped(o.description) end
   if o.installedVersion ~= "" then P.Faint("Installed now: " .. o.installedVersion) end
-  if o.kind ~= "tool" then
+  if o.kind ~= "tool" and o.kind ~= "upscaler" then
     ui.Text("It asks to:")
     bullets(o.caps, s)
   end
   P.Faint(o.key ~= "" and ("Signed with key " .. o.key .. ": later versions must carry the same key.")
     or "Not signed: later versions come from whoever controls the repository.")
-  if o.kind == "plugin" or o.kind == "tool" then
-    ui.TextColored(C.gold[1], C.gold[2], C.gold[3], 1, o.kind == "tool" and TOOL_WARNING or PLUGIN_WARNING)
+  if o.kind == "plugin" or o.kind == "tool" or o.kind == "upscaler" then
+    ui.TextColored(C.gold[1], C.gold[2], C.gold[3], 1, o.kind == "tool" and TOOL_WARNING
+      or o.kind == "upscaler" and UPSCALER_WARNING or PLUGIN_WARNING)
   end
   if o.older then
     ui.TextColored(C.gold[1], C.gold[2], C.gold[3], 1, string.format(
@@ -555,7 +589,8 @@ local function storeItem(a, it, s, lh)
   ui.PushFont(T.font.large)
   ui.TextColored(C.text[1], C.text[2], C.text[3], 1, it.name)
   ui.PopFont()
-  local kind = (it.kind == "plugin" or it.kind == "script" or it.kind == "tool") and it.kind or nil
+  local kind = (it.kind == "plugin" or it.kind == "script" or it.kind == "tool" or it.kind == "upscaler") and it.kind
+    or nil
   if kind or it.worlds ~= "" then
     ui.SameLine()
     local px, py = ui.GetCursorScreenPos()
@@ -855,9 +890,9 @@ local function loginCard(view, s, bh)
   end
   ui.Dummy(0, 2 * s)
   -- (toggles of their own: ImGui's collapsing header reaches past the card's padding)
-  if #view.gameFolders > 0 then
+  if #view.gameFolders > 0 or eq.Option("texture_pack") ~= nil then
     if ui.Selectable(more and "-  Fewer options" or "+  More options", false) then more = not more end
-    P.Tip(more and "" or "The game files")
+    P.Tip(more and "" or "The game files and the texture pack")
     if more then gameFiles(view, s) end
   end
   if canBox(view) then
@@ -910,13 +945,14 @@ ui.window("Login", function()
   local view = eq.LoginScreen(held and held.revision)
   if view == true then view = held else held = view end
   if not view then return end
-  -- testing: test.login = addons (or boxset) in ui/settings/modern.txt opens the add-ons (or box set) card as the
-  -- screen first appears, for screenshots (as the gamepad pack's test.login)
+  -- testing: test.login = addons (or boxset, more) in ui/settings/modern.txt opens the add-ons (or box set) card (or
+  -- More options) as the screen first appears, for screenshots (as the gamepad pack's test.login)
   if not tested then
     tested = true
     local test = ui.GetSetting("test.login")
     if test == "addons" then eq.LoginSet("addonsOpen", true) end
     if test == "boxset" then boxOpen = true end
+    if test == "more" then more = true end
   end
   local s = P.Scale()
   local io = ui.GetIO()

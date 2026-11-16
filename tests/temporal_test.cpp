@@ -37,7 +37,6 @@ TEST_CASE("temporal: upscaler names") {
     CHECK(parse_upscaler("fsr3") == Upscaler::Fsr3);
     CHECK(parse_upscaler(upscaler_name(Upscaler::Fsr3)) == Upscaler::Fsr3);
     CHECK(upscaler_name(Upscaler::Fsr3) == "fsr3");
-    // The Options window's choices are the enum's values (client_app_zone.cpp display_option "upscaler").
     CHECK(static_cast<int>(Upscaler::Fsr1) == 0);
     CHECK(static_cast<int>(Upscaler::Taa) == 1);
     CHECK(static_cast<int>(Upscaler::Fsr3) == 2);
@@ -46,6 +45,24 @@ TEST_CASE("temporal: upscaler names") {
     CHECK(parse_upscaler("dlss") == Upscaler::Fsr1); // unknown: the spatial default
     CHECK(parse_upscaler(upscaler_name(Upscaler::Taa)) == Upscaler::Taa);
     CHECK(parse_upscaler(upscaler_name(Upscaler::Fsr1)) == Upscaler::Fsr1);
+}
+
+TEST_CASE("temporal: the Options window's upscaler choices, Off first") {
+    CHECK(upscaling_off("off"));
+    CHECK_FALSE(upscaling_off("fsr1"));
+    CHECK_FALSE(upscaling_off(""));
+    CHECK(parse_upscaler("off") == Upscaler::Fsr1); // drawn as FSR 1 at full size
+    CHECK(upscaler_choice("off") == 0);
+    CHECK(upscaler_choice("fsr1") == 1);
+    CHECK(upscaler_choice("taa") == 2);
+    CHECK(upscaler_choice("fsr3") == 3);
+    CHECK(upscaler_choice("") == 1); // unset: the FSR 1 default
+    CHECK(upscaler_choice_name(0) == "off");
+    CHECK(upscaler_choice_name(1) == "fsr1");
+    CHECK(upscaler_choice_name(2) == "taa");
+    CHECK(upscaler_choice_name(3) == "fsr3");
+    CHECK(upscaler_choice_name(9) == "fsr1");
+    for (int c = 0; c < 4; ++c) CHECK(upscaler_choice(upscaler_choice_name(c)) == c);
 }
 
 TEST_CASE("temporal: Halton sequence") {

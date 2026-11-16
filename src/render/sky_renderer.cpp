@@ -15,6 +15,7 @@
 #include "assets/texture_overrides.h"
 #include "core/game_dir.h"
 #include "core/log.h"
+#include "render/cloud_renderer.h"
 #include "render/vk_util.h"
 
 namespace hailstone::render {
@@ -67,7 +68,7 @@ float outdoor_brightness(float hour) {
 
 SkyRenderer::SkyRenderer(VkContext& vk, const assets::Sky& sky, const std::filesystem::path& shader_dir,
                          const GameDir* game, std::string_view zone)
-    : vk_(vk), index_(sky.index) {
+    : vk_(vk), index_(sky.index), shader_dir_(shader_dir) {
     std::vector<GpuVertex> vertices;
     std::vector<std::uint32_t> indices;
 
@@ -77,6 +78,11 @@ SkyRenderer::SkyRenderer(VkContext& vk, const assets::Sky& sky, const std::files
         white.width = white.height = 1;
         white.mips.push_back(std::vector<std::byte>(4, std::byte{0xff}));
         textures_.push_back(upload.texture(white));
+        // No volumetric clouds: nothing of their light, all of the sky behind (shaders/atmosphere.frag).
+        assets::Image clear;
+        clear.width = clear.height = 1;
+        clear.mips.push_back({std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0xff}});
+        clear_clouds_ = upload.texture(clear);
     }
     std::unordered_map<std::string, std::uint32_t> slots;
     auto slot_for = [&](const assets::Material& m) -> std::uint32_t {
@@ -230,7 +236,9 @@ SkyRenderer::~SkyRenderer() {
     if (pool_) vkDestroyDescriptorPool(d, pool_, nullptr);
     if (set_layout_) vkDestroyDescriptorSetLayout(d, set_layout_, nullptr);
     if (sampler_) vkDestroySampler(d, sampler_, nullptr);
+    volumetric_.reset();
     for (auto& t : textures_) t.destroy(d, vk_.allocator());
+    clear_clouds_.destroy(d, vk_.allocator());
     for (auto& b : colors_) b.destroy(vk_.allocator());
     for (auto& b : cloud_vertices_) b.destroy(vk_.allocator());
     vertex_buffer_.destroy(vk_.allocator());
@@ -247,7 +255,7 @@ void SkyRenderer::create_descriptors() {
     si.maxLod = VK_LOD_CLAMP_NONE;
     vk_check(vkCreateSampler(d, &si, nullptr, &sampler_), "vkCreateSampler");
 
-    VkDescriptorSetLayoutBinding bindings[2]{};
+    VkDescriptorSetLayoutBinding bindings[3]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[0].descriptorCount = kMaxTextures;
@@ -256,13 +264,18 @@ void SkyRenderer::create_descriptors() {
     bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[1].descriptorCount = 1;
     bindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    // The volumetric clouds (shaders/atmosphere.frag), written each frame (draw).
+    bindings[2].binding = 2;
+    bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[2].descriptorCount = 1;
+    bindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 2;
+    li.bindingCount = 3;
     li.pBindings = bindings;
     vk_check(vkCreateDescriptorSetLayout(d, &li, nullptr, &set_layout_), "vkCreateDescriptorSetLayout");
 
     constexpr auto kSets = static_cast<std::uint32_t>(VkContext::kFramesInFlight);
-    VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxTextures * kSets},
+    VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, (kMaxTextures + 1) * kSets},
                                      {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kSets}};
     VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pi.maxSets = kSets;
@@ -285,7 +298,8 @@ void SkyRenderer::create_descriptors() {
     }
     for (std::uint32_t s = 0; s < kSets; ++s) {
         VkDescriptorBufferInfo buffer{colors_[s].buffer, 0, sizeof(ColorBlock)};
-        VkWriteDescriptorSet w[2]{};
+        VkDescriptorImageInfo clear{sampler_, clear_clouds_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet w[3]{};
         w[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         w[0].dstSet = sets_[s];
         w[0].dstBinding = 0;
@@ -298,7 +312,13 @@ void SkyRenderer::create_descriptors() {
         w[1].descriptorCount = 1;
         w[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         w[1].pBufferInfo = &buffer;
-        vkUpdateDescriptorSets(d, 2, w, 0, nullptr);
+        w[2] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w[2].dstSet = sets_[s];
+        w[2].dstBinding = 2;
+        w[2].descriptorCount = 1;
+        w[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[2].pImageInfo = &clear;
+        vkUpdateDescriptorSets(d, 3, w, 0, nullptr);
     }
 }
 
@@ -348,8 +368,12 @@ void SkyRenderer::create_pipelines(const std::filesystem::path& shader_dir) {
     ds.dynamicStateCount = 2;
     ds.pDynamicStates = dyn;
     VkPipelineRenderingCreateInfo ri = vk_.scene_rendering();
-    // No depth test or write: the sky is drawn first and everything else covers it.
+    // Reverse Z: every sky vertex is pinned to the clear depth (0). Test each sample,
+    // without writing it, so the whole sky stack can follow opaque geometry.
     VkPipelineDepthStencilStateCreateInfo dss{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    dss.depthTestEnable = VK_TRUE;
+    dss.depthWriteEnable = VK_FALSE;
+    dss.depthCompareOp = VK_COMPARE_OP_EQUAL;
 
     for (int pass = 0; pass < 4; ++pass) {
         if (pass == 3) {
@@ -398,9 +422,50 @@ void SkyRenderer::create_pipelines(const std::filesystem::path& shader_dir) {
     for (VkShaderModule m : {vs, fs, avs, afs}) vkDestroyShaderModule(d, m, nullptr);
 }
 
+void SkyRenderer::prepare(const FrameInfo& frame, const glm::mat4& projection, const glm::mat4& view,
+                          const SkyFrame& sky) {
+    volumetric_ready_ = false;
+    if (!(sky.atmosphere && sky.volumetric_clouds && has_atmosphere()) || volumetric_failed_) return;
+    if (!volumetric_) {
+        try {
+            volumetric_ = std::make_unique<CloudRenderer>(vk_, shader_dir_);
+        } catch (const std::exception& e) {
+            // A device that cannot make them (a missing shader, an allocation): the painted clouds, as before.
+            log::warn("volumetric clouds: {}", e.what());
+            volumetric_failed_ = true;
+            return;
+        }
+    }
+    CloudFrame c;
+    c.sky_view_proj = projection * glm::mat4(glm::mat3(view));
+    c.cover = cloud_cover(index_, sky.storm);
+    c.to_light = sky.to_light;
+    c.light = sky.light;
+    c.ambient = sky.sky_light;
+    c.storm = sky.storm;
+    c.seconds = sky.real_seconds;
+    volumetric_->record(frame, c);
+    volumetric_ready_ = true;
+}
+
 void SkyRenderer::draw(const FrameInfo& frame, const glm::mat4& projection, const glm::mat4& view,
                        const SkyFrame& sky) {
     if (draws_.empty()) return;
+    // The volumetric clouds this frame, or none (the clear image): the frame slot's set is not in use now.
+    const bool volumetric = volumetric_ready_ && sky.atmosphere && has_atmosphere();
+    {
+        VkDescriptorImageInfo image = volumetric
+            ? VkDescriptorImageInfo{volumetric_->sampler(), volumetric_->view(), VK_IMAGE_LAYOUT_GENERAL}
+            : VkDescriptorImageInfo{sampler_, clear_clouds_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w.dstSet = sets_[frame.frame_slot];
+        w.dstBinding = 2;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.pImageInfo = &image;
+        vkUpdateDescriptorSets(vk_.device(), 1, &w, 0, nullptr);
+    }
+    volumetric_ready_ = false;
     float level = assets::sky_level(sky.hour);
     ColorBlock block{};
     for (int e = 0; e < assets::kSkyColors; ++e) block.colors[e] = glm::vec4(assets::sky_color(level, e), 1.0f);
@@ -444,6 +509,8 @@ void SkyRenderer::draw(const FrameInfo& frame, const glm::mat4& projection, cons
     for (const auto& d : draws_) {
         // The atmosphere has its own sun and moon (shaders/atmosphere.frag) in place of the dome and the sprites.
         if (atmosphere && (d.kind == Kind::Dome || d.kind == Kind::Bodies)) continue;
+        // The volumetric clouds stand in for the painted layer.
+        if (volumetric && d.kind == Kind::Clouds) continue;
         // Over the atmosphere the cloud layer blends, its clouds keyed out of its painted sky.
         int pipeline = atmosphere && d.kind == Kind::Clouds ? 1 : d.pipeline;
         if (pipeline != bound) {
@@ -468,11 +535,12 @@ void SkyRenderer::draw(const FrameInfo& frame, const glm::mat4& projection, cons
         vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
         vkCmdDrawIndexed(cmd, d.index_count, 1, d.first_index, 0, 0);
     }
-    draw_clouds(cmd, frame.frame_slot, sky_vp, sky, atmosphere);
+    // ...and for the weather.ini patches; their motion is still kept up, so they are in place if the option goes off.
+    draw_clouds(cmd, frame.frame_slot, sky_vp, sky, atmosphere, volumetric);
 }
 
 void SkyRenderer::draw_clouds(VkCommandBuffer cmd, std::uint32_t slot, const glm::mat4& sky_vp, const SkyFrame& sky,
-                              bool atmosphere) {
+                              bool atmosphere, bool hidden) {
     if (clouds_.empty()) return;
     // dt_ms = the tick delta x TimeScale 1.0; 1 on the first frame and when 0.
     double dt = last_seconds_ < 0.0 ? 0.001 : sky.real_seconds - last_seconds_;
@@ -480,6 +548,7 @@ void SkyRenderer::draw_clouds(VkCommandBuffer cmd, std::uint32_t slot, const glm
     float dt_ms = static_cast<float>(dt * 1000.0) * time_scale_;
     if (dt_ms <= 0.0f) dt_ms = 1.0f;
     for (auto& c : clouds_) c.layer.update(dt_ms);
+    if (hidden) return;
 
     // Geometry (not traced; docs/unknowns.md): a patch is a grid of
     // SubdivisionX x SubdivisionY quads on the unit sky sphere, centred where

@@ -14,6 +14,7 @@ layout(push_constant) uniform Push {
     uint texture_index;
     uint instance;
     uint maps; // a texture pack's normal map slot | roughness map slot << 16 (0 = none)
+    uint flags; // bit 0 unlit, bit 1 no fog
 } pc;
 
 layout(set = 0, binding = 2) uniform sampler2D textures[];
@@ -51,7 +52,14 @@ void main() {
     float out_alpha;
     if (!alpha_test(tex.a, pc.fog.z, pc.fog.w, out_alpha)) discard;
     vec3 color;
-    if (lighting.params.x > 0.5) {
+    if ((pc.flags & 1u) != 0u) {
+        color = to_linear(tex.rgb);
+        if ((pc.flags & 2u) == 0u)
+            color = lighting.params.x > 0.5
+                ? apply_haze(color, v_world, lighting.camera, lighting.haze, lighting.haze_color,
+                             lighting.to_light, lighting.light)
+                : to_linear(mix(pc.fog_color.rgb, tex.rgb, v_fog));
+    } else if (lighting.params.x > 0.5) {
         // Modern (render/scene_lighting.h): lit like the zone around it, per pixel, with the nearby point lights;
         // alpha-tested plants let the light through.
         float len = length(v_normal);
@@ -92,8 +100,9 @@ void main() {
                                           horizon, lighting.sky.rgb, 1.0);
             }
         }
-        color = apply_haze(surface, v_world, lighting.camera,
-                           lighting.haze, lighting.haze_color, lighting.to_light, lighting.light);
+        color = (pc.flags & 2u) == 0u
+            ? apply_haze(surface, v_world, lighting.camera,
+                         lighting.haze, lighting.haze_color, lighting.to_light, lighting.light) : surface;
         color += underwater_shafts(water_map, lighting.cover, lighting.cover_params, lighting.camera.xyz, v_world,
                                    lighting.to_light, lighting.light, lighting.haze_color.rgb, lighting.time.x,
                                    caustic_hash(gl_FragCoord.xy));

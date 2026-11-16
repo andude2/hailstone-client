@@ -150,7 +150,7 @@ std::vector<std::size_t> select_pieces(const MeshFile& mesh, std::string_view co
 std::optional<std::vector<std::int32_t>> part_bone_parents(const MeshFile& mesh);
 // Appends pieces as parts grouped by material. `surface_maps`: the materials
 // carry their authored normal / environment maps and highlights (Hero's Forge
-// armor, ArmorPart); ordinary EQG bodies and held parts keep the plain path.
+// armor and held item models); ordinary EQG bodies keep the plain path.
 void append_pieces(const MeshFile& mesh, const std::vector<std::size_t>& pieces, CharacterMesh& out,
                    bool surface_maps = false);
 

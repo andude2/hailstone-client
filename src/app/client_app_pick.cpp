@@ -30,6 +30,7 @@ bool ClientApp::click_world(const PickTarget& hit) {
 
 void ClientApp::climb_ladder(const game::mechanics::LadderSwitch& ladder) {
     ZoneMoveWorld world(collision_ ? &*collision_ : nullptr, world_objects_.get(), zone_ ? &zone_->regions : nullptr);
+    world.set_animated(animated_objects_ ? &*animated_objects_ : nullptr);
     bool too_far = false;
     if (movement_.mount_ladder(ladder, &world, floor_offset_, too_far)) {
         yaw_ = game::heading_to_yaw(movement_.controller().body.heading);

@@ -108,4 +108,29 @@ Placement: each placed actor's particle node owns one emitter. Its origin is the
 
 Drawing: additive (SRCALPHA, ONE), no depth writes, alpha test 1, no culling, no fog . The quad corners carry v = 1 at the top and 0 at the bottom, so the texture's last row is at the top (`ParticleRenderer::set_rows_bottom_up`): GENG00's teardrop then has its tail up, like a flame. Textures come from the zone's archives first (`set_texture_reader`).
 
-Not modelled: the node-scale suppression below about 0.05 (no shipped particle node is scaled); radial motion only for visible emitters and the object-preview context; several-bitmap sprites as flipbooks (only the first bitmap is drawn); the gequip/character clouds. EQG zones' environment emitters (`<zone>_EnvironmentEmitters.txt` over `environmentemittersnew.edd`) are drawn as fixtures too (`assets::parse_environment_emitters`, `assets/zone_fires.h`; docs/graphics.md).
+WLD sprites retain every bitmap reference, including repeats, and select a whole texture for the particle's current
+frame; EDD sprites retain their atlas cells. A broken later bitmap reference rejects the sprite rather than changing
+its sequence.
+
+Character and equipment clouds: the WLD builder retains converted definitions on their skeleton bones. Dressing
+remaps held-item nodes onto the holding bone, retaining their local rest transform. `ActorEmitters` owns a separate
+WLD simulation and bottom-up renderer alongside its EDD actor list, with textures read from the character library's
+archives. Each instance keeps its own particle state; an equipment or model change replaces its effects, and a
+removed instance stops emitting. The same route serves character selection, the model viewer, item previews,
+missiles and equipment-backed server objects. Preview particles use the preview's colour/depth targets, without the world's
+soft-depth texture or two-unit camera cutoff, and retain alpha coverage outside the item mesh.
+
+The native WLD actor constructor (`0x100523b0`) and standalone creator (`0x1006adc0`) pass descriptor `+0x170` as
+opacity and manager `+0xa8` as density. This is independent of EDD `ActorParticleDensity` (`+0xac`). Actor clouds use
+the descriptor opacity and density 1, verified in the native manager constructor (`0x10070230`); external density
+configuration overrides remain untraced. Owner alpha
+and node scale are sampled each frame, without the EQG point's PESFactor.
+
+An item's directly referenced multikey default tracks retain their `ObjectAnimation` sampler (including moving
+ancestors): its node motion multiplies the baked rest transform inside the host bone's matrix. Animation data is
+shared, particle state is per instance, and equipment replacement starts a new instance clock. No named P01 or
+other clip is selected for these default tracks. The native held-item controller's sharing/epoch remains untraced.
+
+Not modelled: the node-scale suppression below about 0.05; radial motion only for visible emitters. EQG zones'
+environment emitters (`<zone>_EnvironmentEmitters.txt` over `environmentemittersnew.edd`) are drawn as fixtures too
+(`assets::parse_environment_emitters`, `assets/zone_fires.h`; docs/graphics.md).

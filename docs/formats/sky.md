@@ -41,7 +41,7 @@ Order: the dome, the sun/moon skeleton, then the cloud layer only when the "doub
 
 **RoF2 does not load sky.s3d at all**: it draws a procedural sky from `Resources/Sky/sky.ini` and `weather.ini` (dome, rings, cloud patches, sun/moon satellites, stars, colour maps). Its geometry is not decoded, so this client keeps the classic layers.
 
-This client draws all three, first in the frame, around the camera (view rotation only), with depth test and write off and `gl_Position.z = 0` (the far plane in reverse Z), no culling and no fog (fog off, culling off). Materials follow the legacy render-method table: 0x8000000d opaque, 0x8000000f translucent at alpha 0x80, so sky 1's clouds (0xd) cover its dome (0xf). The sun and moon (0x80000010) add. Colour bytes convert with x 1/255. The sky is drawn whenever OP_NewZone's sky byte is set, whatever the time type. The layers do not scroll: RoF2's sky layers have no UV scroll.
+This client draws all three around the camera (view rotation only), with the depth test equal, depth writes off and `gl_Position.z = 0` (the clear depth in reverse Z), no culling and no fog (fog off, culling off). In modern lighting the stack follows opaque zone geometry where its blend order permits; classic lighting and zones with WLD detail blends keep it first (see [Graphics: Sky](../graphics.md#sky) for the client/viewer ordering). Materials follow the legacy render-method table: 0x8000000d opaque, 0x8000000f translucent at alpha 0x80, so sky 1's clouds (0xd) cover its dome (0xf). The sun and moon (0x80000010) add. Colour bytes convert with x 1/255. The sky is drawn whenever OP_NewZone's sky byte is set, whatever the time type. The layers do not scroll: RoF2's sky layers have no UV scroll.
 
 ## Cloud patches
 

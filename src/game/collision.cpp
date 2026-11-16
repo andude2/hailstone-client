@@ -5,6 +5,7 @@
 #include <cmath>
 
 #include "assets/zone.h"
+#include "game/animated_objects.h"
 #include "game/mechanics/fpu.h"
 #include "game/zone_ladders.h"
 
@@ -99,7 +100,9 @@ private:
 
 CollisionMesh CollisionMesh::build(const assets::Zone& zone) {
     CollisionMesh m;
-    auto add_mesh = [&](const assets::Mesh& mesh, const glm::mat4& transform, bool terrain, bool ladder) {
+    // `moving`: an animated object's vertex nodes; its moving triangles are game::AnimatedObjects', not ours.
+    auto add_mesh = [&](const assets::Mesh& mesh, const glm::mat4& transform, bool terrain, bool ladder,
+                        const std::vector<std::uint16_t>* moving = nullptr) {
         std::vector<glm::vec3> world(mesh.vertices.size());
         for (std::size_t i = 0; i < mesh.vertices.size(); ++i)
             world[i] = glm::vec3(transform * glm::vec4(mesh.vertices[i].position, 1.0f));
@@ -118,6 +121,7 @@ CollisionMesh CollisionMesh::build(const assets::Zone& zone) {
                 auto ia = mesh.indices[part.first_index + i], ib = mesh.indices[part.first_index + i + 1],
                      ic = mesh.indices[part.first_index + i + 2];
                 if (ia >= world.size() || ib >= world.size() || ic >= world.size()) continue;
+                if (moving && moving_triangle_node(*moving, ia, ib, ic) != assets::kStillVertex) continue;
                 if (!finite(world[ia]) || !finite(world[ib]) || !finite(world[ic])) continue;
                 if (mesh.front_ccw) std::swap(ib, ic);
                 m.triangles_.push_back(CollisionTriangle::make(world[ia], world[ib], world[ic], flags));
@@ -139,7 +143,9 @@ CollisionMesh CollisionMesh::build(const assets::Zone& zone) {
         auto it = zone.objects.find(p.actor);
         if (it == zone.objects.end()) continue;
         const bool ladder = is_ladder_actor(p.actor);
-        add_mesh(it->second, p.transform, false, ladder);
+        const auto anim = zone.object_animations.find(p.actor);
+        add_mesh(it->second, p.transform, false, ladder,
+                 anim != zone.object_animations.end() ? &anim->second.vertex_node : nullptr);
         if (!ladder) continue;
         for (const CollisionTriangle& t : ladder_slab(it->second, p.transform)) {
             m.triangles_.push_back(t);

@@ -239,7 +239,10 @@ fs::path addons_dir(const fs::path& data_dir) { return data_dir / "addons"; }
 
 namespace {
 std::string_view kind_folder(AddonKind kind) {
-    return kind == AddonKind::Script ? "scripts" : kind == AddonKind::Plugin ? "plugins" : "tools";
+    return kind == AddonKind::Script   ? "scripts"
+           : kind == AddonKind::Plugin ? "plugins"
+           : kind == AddonKind::Tool   ? "tools"
+                                       : "upscalers";
 }
 } // namespace
 
@@ -248,7 +251,10 @@ fs::path addon_folder(const fs::path& data_dir, AddonKind kind, std::string_view
 }
 
 std::string_view addon_kind_word(AddonKind kind) {
-    return kind == AddonKind::Script ? "script" : kind == AddonKind::Plugin ? "plugin" : "tool";
+    return kind == AddonKind::Script   ? "script"
+           : kind == AddonKind::Plugin ? "plugin"
+           : kind == AddonKind::Tool   ? "tool"
+                                       : "upscaler";
 }
 
 std::string addon_tool_program(std::string_view name, std::string_view platform) {
@@ -278,6 +284,7 @@ std::optional<AddonKind> kind_of_word(std::string_view w) {
     if (w == "script") return AddonKind::Script;
     if (w == "plugin") return AddonKind::Plugin;
     if (w == "tool") return AddonKind::Tool;
+    if (w == "upscaler") return AddonKind::Upscaler;
     return std::nullopt;
 }
 
@@ -488,7 +495,9 @@ std::string taken_on_disk(const fs::path& data_dir, AddonKind kind, std::string_
     std::error_code ec;
     const fs::path folder = addon_folder(data_dir, kind, name);
     const std::string where = std::string(kind_folder(kind)) + "/";
-    if (kind == AddonKind::Tool) // nothing but add-ons is put in tools/: any folder or file of the name is in the way
+    // Nothing but add-ons is put in tools/ or upscalers/ (but the example provider a build from source puts there):
+    // any folder or file of the name is in the way.
+    if (kind == AddonKind::Tool || kind == AddonKind::Upscaler)
         return fs::exists(folder, ec) ? where + std::string(name) + " is there already" : std::string();
     // A plugin's folder that holds no library is only the settings a plugin left beside it (host->config_dir), as
     // after an update took out a plugin an older release shipped: the install keeps them, as an update does.
@@ -525,7 +534,7 @@ std::string addon_name_taken(const fs::path& data_dir, const std::vector<Install
     if (const InstalledAddon* a = find_addon(addons, name))
         return "the add-on \"" + a->name + "\" is installed already";
     if (std::string why = taken_on_disk(data_dir, kind, name); !why.empty()) return why;
-    if (kind == AddonKind::Tool) return {};
+    if (kind == AddonKind::Tool || kind == AddonKind::Upscaler) return {};
     // Nor a script and a compiled plugin of one name: their windows are told apart by kind
     // (plugin::UiBridge::owner_tag), but the player would not tell them apart.
     const AddonKind other = kind == AddonKind::Script ? AddonKind::Plugin : AddonKind::Script;
@@ -542,7 +551,7 @@ bool addon_owns_folder(const fs::path& data_dir, std::string_view folder) {
     }
     // One whose record does not read is still taken for an add-on's: the updater leaves it alone.
     for (const auto& u : reg.unreadable)
-        for (AddonKind k : {AddonKind::Script, AddonKind::Plugin, AddonKind::Tool})
+        for (AddonKind k : {AddonKind::Script, AddonKind::Plugin, AddonKind::Tool, AddonKind::Upscaler})
             if ((!u.kind || *u.kind == k) && iequal(std::string(kind_folder(k)) + "/" + u.name, folder)) return true;
     return false;
 }
@@ -711,6 +720,58 @@ std::optional<std::vector<AddonFile>> unpack_tool(const fs::path& data_dir, cons
     return write_unpacked(data_dir, m.name, zip, files, {program}, error);
 }
 
+// An upscaler's package (docs/addons.md "Upscalers"): at its top its provider, a library for this platform named after
+// it, and the libraries it loads (the vendor's runtime) beside it; data anywhere (licences, a vendor's notices).
+// Nothing that runs on its own, and no library in a folder or for another platform.
+std::optional<std::vector<AddonFile>> unpack_upscaler(const fs::path& data_dir, const AddonManifest& m, ZipReader& zip,
+                                                      std::string_view platform, std::string* error) {
+    auto fail = [&](std::string why) -> std::optional<std::vector<AddonFile>> {
+        if (error) *error = std::move(why);
+        return std::nullopt;
+    };
+    const std::string provider_name = m.name + std::string(plugin_extension(platform));
+    std::vector<const ZipEntry*> files, libraries;
+    std::map<std::string, std::string> seen;
+    std::uint64_t total = 0;
+    const ZipEntry* provider = nullptr;
+    for (const auto& e : zip.entries()) {
+        if (e.is_directory()) continue;
+        if (files.size() >= kMaxFiles) return fail("the package holds too many files");
+        total += e.size;
+        if (total > kMaxPluginBytes) return fail("the package is too large");
+        if (!net::is_safe_file_path_shape(e.name)) return fail(e.name + " is not a name an upscaler may hold");
+        if (!seen.emplace(lower(e.name), e.name).second) return fail(e.name + " is in the package twice");
+        const bool top = e.name.find('/') == std::string::npos;
+        const std::string name = lower(file_of(e.name));
+        if (library_name(name, platform)) {
+            if (!top) return fail(e.name + ": an upscaler's libraries go at the top of its package");
+            if (name == lower(provider_name)) {
+                if (e.name != provider_name) return fail(e.name + ": the provider is named " + provider_name);
+                provider = &e;
+            }
+            libraries.push_back(&e);
+        } else if (library_name(name, "linux-x64") || library_name(name, "windows-x64") ||
+                   library_name(name, "macos-x64")) {
+            return fail(e.name + " is a library for another platform");
+        } else {
+            for (std::string_view ext : kToolRefused)
+                if (name.size() > ext.size() && name.ends_with(ext))
+                    return fail(e.name + " is not something an upscaler may hold (its provider, named after it, and "
+                                         "the libraries it loads, for " + std::string(platform) + ")");
+        }
+        files.push_back(&e);
+    }
+    if (!provider) return fail("the package has no provider for " + std::string(platform) + " (" + provider_name + ")");
+    // Each library must be one this platform loads.
+    for (const ZipEntry* e : libraries) {
+        auto bytes = read_entry(zip, *e, kMaxLibrary, error);
+        if (!bytes) return std::nullopt;
+        const BinaryHeader h = read_binary_header(std::as_bytes(std::span(bytes->data(), bytes->size())));
+        if (!binary_fits_platform(h, platform)) return fail(e->name + " is not a library for " + std::string(platform));
+    }
+    return write_unpacked(data_dir, m.name, zip, files, libraries, error);
+}
+
 } // namespace
 
 std::optional<std::vector<AddonFile>> unpack_addon(const fs::path& data_dir, const AddonManifest& m,
@@ -723,6 +784,7 @@ std::optional<std::vector<AddonFile>> unpack_addon(const fs::path& data_dir, con
     ZipReader zip;
     if (!zip.open(zip_path)) return fail("the package is not a zip this reads: " + zip.error());
     if (m.kind == AddonKind::Tool) return unpack_tool(data_dir, m, zip, platform, error);
+    if (m.kind == AddonKind::Upscaler) return unpack_upscaler(data_dir, m, zip, platform, error);
     const bool script = m.kind == AddonKind::Script;
     const std::string top = std::string(script ? "scripts/" : "plugins/") + m.name + "/";
     const std::string_view lib_ext = plugin_extension(platform);

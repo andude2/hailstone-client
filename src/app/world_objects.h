@@ -71,6 +71,11 @@ public:
     };
     const std::vector<MissileActor>& missile_actors() const { return missile_actors_; }
     bool missile_transform(std::uint32_t id, glm::mat4& world) const;
+    // Doors, dropped/placed items and the placement ghost, with their own actor identities. Like missiles, their
+    // emitter meshes use bone 0 for the complete object transform; removal drops the identity from this list.
+    static constexpr std::uint32_t kObjectActorBit = 0x40000000u;
+    const std::vector<MissileActor>& object_actors() const { return object_actors_; }
+    bool object_transform(std::uint32_t id, glm::mat4& world) const;
 
     // This frame's instances to the renderer (render::ObjectRenderer::prepare), before the shadows: the doors and
     // objects then cast into the cascades (draw_shadow) and the lights' cubes (renderer(), for
@@ -157,7 +162,7 @@ private:
     struct Model {
         int gpu = -1;              // ObjectRenderer handle
         game::ObjectShape shape;   // solid triangles in model space
-        // An EQG model's always-on actor emitters on its points (bone 0 = the model's own space); null without.
+        // Model emitters (EQG point records or WLD node clouds), bone 0 = the model's own space; null without.
         std::unique_ptr<assets::CharacterMesh> emitters;
     };
     struct Placed {
@@ -174,9 +179,11 @@ private:
         std::uint32_t pick_mask = 2;  // the actor's collision restriction mask
         std::uint32_t seen = 0;       // the update that last found it in the connection's lists
         bool inverted = false;        // `inverse` is transform's (computed again only when the transform changes)
+        std::uint32_t emitter_actor = 0; // allocated once for this placement; independent of server object IDs
     };
 
     const Model* model_for(const std::string& name);
+    void add_object_emitters(Placed& placed);
     // Resources/OnDemandResources.txt EQGM/EQGS entries: "<NAME>_ACTORDEF" ->
     // (archive, member), e.g. IT10804 -> tradeskill_objects.eqg it10804.mod.
     void load_on_demand_index();
@@ -211,6 +218,9 @@ private:
     std::vector<render::ObjectRenderer::Instance> instances_;
     std::vector<MissileActor> missile_actors_;
     std::unordered_map<std::uint32_t, glm::mat4> missile_transforms_;
+    std::vector<MissileActor> object_actors_;
+    std::unordered_map<std::uint32_t, glm::mat4> object_transforms_;
+    std::uint32_t next_object_actor_ = kObjectActorBit;
     bool prepared_ = false; // prepare ran this frame (draw clears it)
 };
 

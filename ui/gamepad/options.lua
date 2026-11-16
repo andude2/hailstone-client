@@ -45,6 +45,14 @@ local function optionRow(label, name, choices, values)
   end
 end
 
+-- The Upscaler row's choices: the client's four, then the upscaler add-ons installed (render/temporal.h
+-- upscaler_choice: 4 on).
+local function upscalerChoices()
+  local choices = { "Off", "FSR 1", "Temporal", "FSR 3.1" }
+  for _, name in ipairs(eq.OptionChoices("upscaler_providers") or {}) do choices[#choices + 1] = name end
+  return choices
+end
+
 -- The upscale quality presets (render/temporal.h UpscaleQuality: 0 Native AA .. 4 Ultra Performance), each a render
 -- scale; 5 Custom (another render scale) shows but is stepped past.
 local function upscaleQualityRow()
@@ -55,6 +63,15 @@ local function upscaleQualityRow()
     local n = v >= 5 and (dir > 0 and 0 or 4) or (v + dir) % 5
     eq.SetOption("upscale_quality", n)
   end }
+end
+
+-- The graphics this computer suits (render/graphics_tier.h: 0 Low, 1 Medium, 2 High); A applies them again, as the
+-- first start did.
+local function detectGraphicsRow()
+  local tier = eq.Option("gpu_tier")
+  if tier == nil then return nil end
+  local name = ({ [0] = "Low", [1] = "Medium", [2] = "High" })[tier] or "High"
+  return { "Graphics for this computer", "Use " .. name, function() eq.SetOption("detect_graphics", 1) end }
 end
 
 -- What a binding can be (docs/gamepad.md section 4), with friendly names.
@@ -256,11 +273,12 @@ local PAGES = {
     local list = table.pack(
       optionRow("Display mode", "window_mode", { "Windowed", "Borderless", "Fullscreen" }),
       optionRow("Vertical sync", "vsync", { "Off", "On", "Adaptive" }),
+      detectGraphicsRow(),
       optionRow("Shadows", "shadows", { "Off", "Low", "Medium", "High" }),
       optionRow("Anti-aliasing", "msaa", { "Off", "2x", "4x" }),
       upscaleQualityRow(),
       optionRow("Render scale", "render_scale", { 33, 100, 1, " %" }),
-      optionRow("Upscaler (next start)", "upscaler", { "FSR 1", "Temporal", "FSR 3.1" }),
+      optionRow("Upscaler (next start)", "upscaler", upscalerChoices()),
       optionRow("Frame generation (Temporal, FSR 3.1)", "frame_gen", "bool"),
       optionRow("Ambient occlusion", "ao", "bool"),
       optionRow("Grass", "grass", "bool"),

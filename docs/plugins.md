@@ -947,6 +947,67 @@ player allowed them ("The server's compiled plugins ask first" above). Ship only
 through the client, so their capabilities hold. All of this is enforced by the client: a modified client can ignore
 `hailstone.cfg`, so the server's own checks stay the real line.
 
+## Upscaler providers
+
+An upscaler provider is a temporal upscaler from outside the client (Intel XeSS, AMD FSR 4 ...),
+built against `sdk/hailstone_upscaler.h`. It is not a game plugin: it has no host table, no capabilities and no
+callbacks, sees nothing of the game, and no server sends one or rules on one. The player installs it with the add-on
+manager (an add-on of the kind `upscaler`, docs/addons.md "Upscalers") and picks it under Options, Graphics,
+Upscaler (`display.upscaler = <name>`); it loads at the next start. docs/graphics.md "Upscaler providers" says what the
+client does around it.
+
+**Licence.** `sdk/hailstone_upscaler.h` is MIT, and NOTICE.md's plugin and add-on exception covers a provider that
+talks to Hailstone only through it, whatever its licence, and whatever closed runtime it loads (a vendor's SDK
+library beside it). Meeting that runtime's own terms (its notices, what it says about redistribution) is the
+provider's business.
+
+**Files.** `upscalers/<name>/<name>.dll` (`.so`, `.dylib`), and beside it whatever it loads. The client loads it from
+a copy of that folder in `cache/upscalers/` (the header's `folder`; load a runtime from there, by its full path) and
+gives the folder itself as `config_dir` for its settings and logs.
+
+**The calls**, all on the render thread:
+
+| | |
+|---|---|
+| `hailstone_upscaler(host)` | the one export: its table (`HailstoneUpscaler`), or NULL to stay out. `host` has the client's ABI, the two folders, a log function and a `vkGetInstanceProcAddr` (callable from `instance_requirements` on) |
+| `instance_requirements` | before `vkCreateInstance` (Vulkan 1.3): the instance extensions it needs and the lowest Vulkan version |
+| `device_requirements` | for the picked GPU, before `vkCreateDevice`: device extensions, and features set to `VK_TRUE` in a `VkPhysicalDeviceFeatures2` chained to the Vulkan 1.1, 1.2 and 1.3 feature structs. A feature core Vulkan has goes in through its core field; one of an extension that has none (`VkPhysicalDeviceMutableDescriptorTypeFeaturesEXT`, which XeSS needs) as a struct of the provider's own added to the chain, valid until `create`, whose support the provider checks itself. Say no for a GPU it cannot run on |
+| `create` | the device made: the instance, physical device, device, the one queue and its family, both `Get*ProcAddr`, and `HAILSTONE_UPSCALER_DEVICE_REACTIVE` when every frame will carry a reactive mask |
+| `resize` | the render and view sizes, before the first frame and when they change; the device is idle |
+| `evaluate` | each frame: record the upscale into the command buffer given (outside rendering) |
+| `destroy` | before the device goes, when `create` succeeded |
+
+A 0 or NULL from any of them, or an exception out of one, drops the provider: the client falls back to FSR 3.1, or
+its own temporal upscaler where the GPU cannot run FSR 3.1, and logs why. A failed `evaluate` drops it from the next
+frame.
+
+**A frame** (`HailstoneUpscalerFrame`). Images cross as integers (`VkImage` and `VkImageView` as `uint64_t`, formats,
+layouts and usage as `uint32_t`), each with its size, usage, aspect and the layout it is in:
+
+| | |
+|---|---|
+| `color` | RGBA16F at the render size: the scene in linear HDR before the exposure and the tonemap (`SAMPLED`, `TRANSFER_SRC`) |
+| `depth` | reverse Z (1 near, 0 far), the depth aspect (`SAMPLED`) |
+| `motion` | RGBA16F, red and green: `previous_uv - uv`, in UV of the render size (x right, y down), without the jitter; `motion_scale` (the render size) turns it into pixels |
+| `reactive` | R8, 0..1: how much this frame's colour should replace the history (particles, spells, other blended draws); none (image 0) without `independentBlend` |
+| `output` | RGBA16F at the view's size (`STORAGE`, `SAMPLED`, `TRANSFER_DST`), in `GENERAL`, old contents undefined: write all of it and leave it in `GENERAL` |
+
+The inputs are in `SHADER_READ_ONLY_OPTIMAL`, written by draws and made visible to every stage before the call. The
+jitter is in render pixels in AMD FSR's convention (the point pixel `t` samples is `t + 0.5 - jitter`), with the
+length of its cycle. Also given: the camera's near and far planes and vertical field of view, the client's exposure,
+the frame time, `display.sharpness`, the frame slot, and `HAILSTONE_UPSCALER_FRAME_RESET` on a cut, a teleport, a new
+zone or new targets. A provider may bind pipelines, sets and push constants of its own and move an image to another
+layout within the call, as long as each image is back in its layout when it returns. With
+`HAILSTONE_UPSCALER_SHARPENS` it sharpens by `sharpness` itself; without it the client sharpens its output.
+
+**Compatibility.** Every table carries its size and only grows at its end (`HAILSTONE_UPSCALER_ABI` is 1). The client
+refuses a provider built for a newer ABI.
+
+**The example.** `plugins/example/upscaler/example.c` is a whole provider in plain C: it checks that the GPU can blit
+RGBA16F, then stretches the colour to the output with a linear blit (no accumulation). The client's build puts it in
+`build/hailstone/upscalers/example/`; `--upscaler example` in the zone viewer, or `display.upscaler = example`, runs it.
+It is built a few more ways as test fixtures (`tests/upscaler_provider_test.cpp`).
+
 ## Web pages
 
 Scripts and plugins with the `web` permission open tabs of their own in the in-game browser (docs/browser.md):

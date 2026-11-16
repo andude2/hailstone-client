@@ -73,6 +73,7 @@ TEST_CASE("EDD 110: header, 0x1a0-byte records, fields at their offsets") {
     CHECK(defs[1].color_start == glm::uvec3(255, 128, 0));
     CHECK(defs[1].color_end == glm::uvec3(0, 0, 255));
     CHECK(defs[1].frames == 16u);
+    CHECK(defs[1].texture_frames.empty()); // EDD files retain their atlas flipbooks
     // Other versions, the legacy headerless format and bad sizes are refused.
     auto bad = data;
     bad[6] = std::byte{'1'};

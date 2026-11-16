@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <numbers>
 #include <tuple>
@@ -14,8 +15,10 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "assets/character.h"
+#include "assets/eqg.h"
 #include "assets/eqg_character.h"
 #include "assets/pfs.h"
+#include "assets/spell_effects.h"
 #include "core/game_dir.h"
 #include "game/appearance.h"
 #include "game/appearance_data.h"
@@ -372,6 +375,27 @@ TEST_CASE("a Luclin erudite plays the human's clips" * doctest::skip(!hailstone:
           doctest::Approx(m->clips.at("").tracks[static_cast<std::size_t>(jaw)].front().translation.y).epsilon(0.01));
 }
 
+TEST_CASE("Luclin clips of more than 15 keys play at 50 ms, classic ones at 100" *
+          doctest::skip(!hailstone::test::game_dir())) {
+    // The Luclin dark elf female's C01 has 16 keys (the classic one 8): at 100 ms her swing took twice as long.
+    auto luclin = CharacterLibrary::load(*hailstone::test::game_dir(), "", true);
+    auto daf = luclin.model("DAF");
+    REQUIRE(daf);
+    if (daf->luclin) { // eqclient.ini may turn the Luclin dark elf female off
+        REQUIRE(daf->clip("C01"));
+        CHECK(daf->clip("C01")->frame_count > 15);
+        CHECK(daf->clip("C01")->frame_ms == 50u);
+    }
+    // global_chr (TFFFC) is not a halving archive: the classic idle of 31 keys stays at 100 ms.
+    auto classic = CharacterLibrary::load(*hailstone::test::game_dir(), "", false);
+    auto old = classic.model("DAF");
+    REQUIRE(old);
+    REQUIRE_FALSE(old->luclin);
+    REQUIRE(old->clip("O01"));
+    CHECK(old->clip("O01")->frame_count > 15);
+    CHECK(old->clip("O01")->frame_ms == 100u);
+}
+
 TEST_CASE("a Luclin model borrows nothing from the classic donor's skeleton" * doctest::skip(!hailstone::test::game_dir())) {
     // global_chr's classic ELF has C10, C11 and T07..T09, the Luclin ELF has not; the few bone names the two share
     // lent a Luclin human those clips with every other bone in the rest pose: a T-pose.
@@ -491,7 +515,8 @@ TEST_CASE("hero's forge layered parts: a long chain of distinct names stops at k
 namespace {
 
 // Authored fixtures contain only a triangle and invented material names.
-std::vector<std::byte> armor_fixture_mesh(float marker, bool parameters = true) {
+std::vector<std::byte> armor_fixture_mesh(float marker, bool parameters = true,
+                                         std::string_view shader = "Opaque_MaxCBSGE1.fx", bool coverage = false) {
     ByteWriter strings, materials;
     auto str = [&](std::string_view value) {
         auto offset = static_cast<std::uint32_t>(strings.size());
@@ -501,8 +526,8 @@ std::vector<std::byte> armor_fixture_mesh(float marker, bool parameters = true) 
     for (std::uint32_t i = 0; i < 2; ++i) {
         materials.le(i);
         materials.le(str("M" + std::to_string(i)));
-        materials.le(str("Opaque_MaxCBSGE1.fx"));
-        materials.le<std::uint32_t>(parameters ? 6u : 1u);
+        materials.le(str(shader));
+        materials.le<std::uint32_t>((parameters ? 6u : 1u) + (coverage ? 2u : 0u));
         for (const auto& [key, value] : std::array{
                  std::pair{"e_TextureDiffuse0", "BASE_C.DDS"}, std::pair{"e_TextureNormal0", "BASE_N.DDS"},
                  std::pair{"e_TextureEnvironment0", "BASE_E.DDS"}}) {
@@ -518,6 +543,14 @@ std::vector<std::byte> armor_fixture_mesh(float marker, bool parameters = true) 
             materials.le(str(key));
             materials.le<std::uint32_t>(0);
             materials.f32(value);
+        }
+        if (coverage) {
+            materials.le(str("e_TextureCoverage0"));
+            materials.le<std::uint32_t>(2);
+            materials.le(str("COVERAGE.DDS"));
+            materials.le(str("e_fCoverageScale0"));
+            materials.le<std::uint32_t>(0);
+            materials.f32(2.5f);
         }
     }
     ByteWriter out;
@@ -589,6 +622,138 @@ void armor_fixture_folder(const std::filesystem::path& dir, bool maps = true, bo
 }
 
 } // namespace
+
+TEST_CASE("a held item with a 0x2d mesh keeps it when its skeleton cannot be built") {
+    using namespace test::wld_fixtures;
+    WldBuilder b;
+    auto bitmap = b.add(0x03, b.str("A_SPRITE"), bitmap_name("fixture.bmp"));
+    ByteWriter info;
+    info.le<std::uint32_t>(0);
+    info.le<std::uint32_t>(1);
+    info.le(bitmap);
+    auto sprite_info = b.add(0x04, 0, info);
+    ByteWriter ref;
+    ref.le(sprite_info);
+    ref.le<std::uint32_t>(0);
+    auto sprite = b.add(0x05, 0, ref);
+    auto mat = b.add(0x30, b.str("A_MDF"), material(0x80000001, sprite));
+    auto materials = b.add(0x31, 0, refs({mat, mat, mat}));
+    auto geometry = b.add(0x36, b.str("IT9_DMSPRITEDEF"), mesh(materials, false));
+    ref = {};
+    ref.le(geometry);
+    ref.le<std::uint32_t>(0);
+    auto mesh_ref = b.add(0x2d, 0, ref);
+    ByteWriter track;
+    track.le<std::int32_t>(0);
+    track.le<std::uint32_t>(0);
+    auto root_track = b.add(0x13, b.str("IT9_ROOT_TRACK"), track);
+    // A skeleton of one node with no mesh and no cloud: building it fails ("no visible mesh").
+    ByteWriter skeleton;
+    skeleton.le<std::uint32_t>(0);
+    skeleton.le<std::uint32_t>(1);
+    skeleton.le<std::int32_t>(0);
+    skeleton.le(b.str("IT9_ROOT_DAG"));
+    skeleton.le<std::uint32_t>(0);
+    skeleton.le(root_track);
+    skeleton.le<std::int32_t>(0);
+    skeleton.le<std::uint32_t>(0);
+    auto skeleton_def = b.add(0x10, b.str("IT9_HS_DEF"), skeleton);
+    ref = {};
+    ref.le(skeleton_def);
+    ref.le<std::uint32_t>(0);
+    auto skeleton_ref = b.add(0x11, 0, ref);
+    ByteWriter actor;
+    for (std::uint32_t v : {0u, 0u, 0u, 2u, 0u}) actor.le(v);
+    actor.le(mesh_ref);
+    actor.le(skeleton_ref);
+    b.add(0x14, b.str("IT9_ACTORDEF"), actor);
+    auto archive = std::make_shared<CharacterArchive>();
+    archive->archive = std::make_shared<PfsArchive>(PfsArchive::from_memory(
+        test::pfs_fixtures::make_pfs({{"fixture.wld", b.build()}}), "held_fixture.s3d"));
+    archive->wlds.push_back(wld::WldFile::parse(*archive->archive->read("fixture.wld"), "fixture.wld"));
+    CharacterLibrary library({archive});
+    CHECK_THROWS(library.build("IT9"));
+    auto item = library.actor_mesh("IT9");
+    REQUIRE(item);
+    CHECK_FALSE(item->mesh.indices.empty());
+    CHECK(item->mesh.emitters.empty());
+}
+
+TEST_CASE("held EQG items keep native surface maps without taking armor aliases") {
+    test::ScratchDir dir("held_surface");
+    armor_fixture_folder(dir.path());
+    auto lib = CharacterLibrary::load(GameDir(dir.path()), "");
+    auto item = lib.item_mesh(1);
+    REQUIRE(item);
+    REQUIRE(item->mesh.materials.size() == 2);
+    CHECK(item->mesh.vertices[0].position.x == 10.0f); // direct held item, not the IT2 armor alias
+    CHECK(item->mesh.materials[0].effect.normal_map == "base_n.dds");
+    CHECK(item->mesh.materials[0].effect.textures == std::vector<std::string>{"base_e.dds"});
+    CHECK(item->mesh.materials[0].effect.shininess == 24.0f);
+    // EQG effect_params uses twice the authored environment strength, matching its native surface formula.
+    CHECK(item->mesh.materials[0].effect.env_strength == doctest::Approx(0.5f));
+}
+
+TEST_CASE("MPL item coverage survives material parsing and surface attachment without changing ordinary bodies") {
+    for (std::string_view shader : {"Opaque_MPLBasic.fx", "Opaque_MPLBump.fx", "Chroma_MPLBumpAT.fx",
+                                    "Alpha_MPLBumpA.fx"}) {
+        CAPTURE(shader);
+        const auto source = eqg_character::parse_mesh(armor_fixture_mesh(0.0f, true, shader, true), "fixture");
+        REQUIRE(source.materials.size() == 2);
+        CHECK(source.materials[0].effect.coverage_map == "coverage.dds");
+        CHECK(source.materials[0].effect.coverage_scale == doctest::Approx(2.5f));
+        CHECK_FALSE(source.materials[0].effect.packed_normal);
+        CharacterMesh attachment, body;
+        eqg_character::append_pieces(source, {0}, attachment, true);
+        eqg_character::append_pieces(source, {0}, body);
+        REQUIRE(attachment.materials.size() == 2);
+        CHECK(attachment.materials[0].effect.coverage_map == "coverage.dds");
+        CHECK(attachment.materials[0].effect.coverage_scale == doctest::Approx(2.5f));
+        CHECK(body.materials[0].effect.coverage_map.empty());
+        CHECK(body.materials[0].effect.coverage_scale == 1.0f);
+    }
+    const auto non_mpl = eqg_character::parse_mesh(
+        armor_fixture_mesh(0.0f, true, "Opaque_MaxCB1.fx", true), "fixture");
+    CHECK(non_mpl.materials[0].effect.coverage_map.empty());
+    CHECK(non_mpl.materials[0].effect.coverage_scale == 1.0f);
+    eqg::MaterialDef missing;
+    missing.shader = "Opaque_MPLBasic.fx";
+    CHECK(eqg::effect_params(missing, EqgShader::None).coverage_map.empty());
+    CHECK(eqg::effect_params(missing, EqgShader::None).coverage_scale == 1.0f);
+    missing.properties.push_back({"e_fCoverageScale0", 0, std::numeric_limits<float>::quiet_NaN(), 0, {}});
+    CHECK(eqg::effect_params(missing, EqgShader::None).coverage_scale == 1.0f);
+}
+
+TEST_CASE("MPL coverage identity distinguishes attachment maps and their UV scale") {
+    const auto original = eqg_character::parse_mesh(
+        armor_fixture_mesh(0.0f, true, "Opaque_MPLBump.fx", true), "fixture");
+    for (bool change_scale : {false, true}) {
+        auto source = original;
+        source.materials[0].name = source.materials[1].name = "SHARED";
+        if (change_scale) source.materials[1].effect.coverage_scale = 4.0f;
+        else source.materials[1].effect.coverage_map = "other_coverage.dds";
+        CharacterMesh attachment;
+        eqg_character::append_pieces(source, {0}, attachment, true);
+        REQUIRE(attachment.materials.size() == 2);
+        CHECK(attachment.parts[0].material != attachment.parts[1].material);
+    }
+}
+
+TEST_CASE("Scrolling held surfaces keep distinct authored UV velocities when their names and textures match") {
+    auto source = eqg_character::parse_mesh(armor_fixture_mesh(0.0f, true, "Opaque_MaxWaterFall.fx"), "fixture");
+    REQUIRE(source.materials.size() == 2);
+    source.materials[0].name = source.materials[1].name = "SHARED";
+    source.materials[0].effect.slide = {0.0f, 0.5f, 0.25f, 0.0f};
+    source.materials[1].effect.slide = {0.0f, -0.5f, -0.25f, 0.0f};
+    CharacterMesh mesh;
+    eqg_character::append_pieces(source, {0}, mesh, true);
+    REQUIRE(mesh.materials.size() == 2);
+    CHECK(mesh.materials[0].eqg_shader == EqgShader::WaterFall);
+    CHECK(mesh.materials[1].eqg_shader == EqgShader::WaterFall);
+    CHECK(mesh.materials[0].effect.slide == source.materials[0].effect.slide);
+    CHECK(mesh.materials[1].effect.slide == source.materials[1].effect.slide);
+    CHECK(mesh.parts[0].material != mesh.parts[1].material);
+}
 
 TEST_CASE("hero's forge armor aliases precede colliding generic parts without sharing their cache") {
     test::ScratchDir dir("armor_alias");
@@ -1061,6 +1226,28 @@ TEST_CASE("GlobalLoad.txt: a phase past int32 wraps as the original's atoi, the 
     CHECK(out[1] == "first_chr.s3d");
 }
 
+TEST_CASE("long_track_archives: GlobalLoad.txt's fourth FLAGS letter and the Luclin player models") {
+    test::ScratchDir dir("long_track_archives");
+    std::filesystem::create_directories(dir.path() / "Resources");
+    std::ofstream(dir.path() / "Resources" / "GlobalLoad.txt", std::ios::binary)
+        << "1,1,TFFTC,GlobalPCFroglok_chr,x\r\n1,1,TFFFC,GlobalDRK_chr,x\r\n3,1,TFFFC,Global_chr,x\r\n"
+           "1,1,TFFtC,lower_chr.s3d,x\r\n1,1,TFT,short_chr,x\r\n";
+    for (const char* f : {"globaldaf_chr.s3d", "globaldaf_chr2.s3d", "lgequip.s3d"}) std::ofstream(dir.path() / f) << "x";
+    const GameDir game(dir.path());
+    auto classic = long_track_archives(game);
+    CHECK(classic.contains("globalpcfroglok_chr.s3d"));
+    CHECK(classic.contains("lower_chr.s3d"));
+    CHECK_FALSE(classic.contains("globaldrk_chr.s3d"));
+    CHECK_FALSE(classic.contains("global_chr.s3d"));
+    CHECK_FALSE(classic.contains("short_chr.s3d"));
+    CHECK_FALSE(classic.contains("globaldaf_chr.s3d"));
+    auto luclin = long_track_archives(game, true);
+    CHECK(luclin.contains("globaldaf_chr.s3d"));
+    CHECK(luclin.contains("globaldaf_chr2.s3d"));
+    CHECK_FALSE(luclin.contains("lgequip.s3d"));
+    CHECK_FALSE(luclin.contains("global_chr.s3d"));
+}
+
 TEST_CASE("CharacterMesh serial: every mesh has its own, a copy a new one, a move keeps it") {
     CharacterMesh a, b;
     CHECK(a.serial.value() != 0);
@@ -1143,4 +1330,105 @@ TEST_CASE("EQGA: a bone name past 256 bytes is refused, not copied for every tra
     };
     CHECK(eqg_character::parse_animation(clip(256)).tracks.at(0).bone.size() == 256);
     CHECK_THROWS_WITH(eqg_character::parse_animation(clip(257)), doctest::Contains("too long"));
+}
+
+TEST_CASE("RoF2 cleric epic held models keep their authored pearl environment surface" *
+          doctest::skip(!hailstone::test::game_dir())) {
+    auto lib = CharacterLibrary::load(*hailstone::test::game_dir(), "");
+    auto item = lib.item_mesh(10738);
+    REQUIRE(item);
+    CHECK(item->eqg);
+    CHECK(item->emitters.size() == 3);
+    CHECK(std::any_of(item->mesh.materials.begin(), item->mesh.materials.end(), [](const Material& m) {
+        return m.effect.env_strength > 0.6f && !m.effect.normal_map.empty() && !m.effect.textures.empty();
+    }));
+}
+
+TEST_CASE("RoF2 held models retain the native packed environment material aliases" *
+          doctest::skip(!hailstone::test::game_dir())) {
+    auto lib = CharacterLibrary::load(*hailstone::test::game_dir(), "");
+    // CBGGE1 (enchanter/paladin epics), CBSE1 and CBE1 all select the native CBSGE1 render class.
+    for (std::uint32_t number : {10740u, 10744u, 10776u, 11453u}) {
+        CAPTURE(number);
+        auto item = lib.item_mesh(number);
+        REQUIRE(item);
+        CHECK(item->eqg);
+        CHECK(std::any_of(item->mesh.materials.begin(), item->mesh.materials.end(), [](const Material& m) {
+            return m.effect.packed_normal && m.effect.glow && m.effect.reflective &&
+                   !m.effect.normal_map.empty() && !m.effect.textures.empty() && m.effect.env_strength > 0.0f;
+        }));
+    }
+}
+
+TEST_CASE("RoF2 evil-tree held items retain packed glow surfaces and valid always-on sparkle attachments" *
+          doctest::skip(!hailstone::test::game_dir())) {
+    GameDir dir(*hailstone::test::game_dir());
+    if (!dir.exists("rofequip.eqg")) return;
+    auto lib = CharacterLibrary::load(dir, "");
+    auto edd = dir.read("actoremittersnew.edd");
+    REQUIRE(edd);
+    const auto definitions = parse_edd(*edd);
+    struct Item { std::uint32_t number, emitter; glm::vec3 point; };
+    for (const Item item : std::array{Item{12459, 846, {2.886f, 0, 0}}, Item{12461, 849, {0, 0.439f, 0}}}) {
+        CAPTURE(item.number);
+        auto held = lib.item_mesh(item.number);
+        REQUIRE(held);
+        CHECK(held->eqg);
+        REQUIRE(held->mesh.materials.size() == 2);
+        const auto& surface = held->mesh.materials[0];
+        CHECK(surface.blend == BlendMode::Opaque);
+        CHECK(surface.effect.packed_normal);
+        CHECK(surface.effect.glow);
+        CHECK(surface.effect.specular);
+        CHECK(surface.effect.shininess == doctest::Approx(128.0f));
+        CHECK(surface.effect.normal_map == "eviltree_weapons01_n.dds");
+        CHECK_FALSE(surface.effect.reflective);
+        CHECK(surface.effect.textures.empty()); // this pair has authored glow/gloss, no environment-map property
+        const auto& cutout = held->mesh.materials[1];
+        CHECK(cutout.blend == BlendMode::Masked);
+        CHECK(cutout.effect.normal_map == surface.effect.normal_map);
+        CHECK_FALSE(cutout.effect.glow);
+        CHECK_FALSE(cutout.effect.specular);
+        REQUIRE(surface.frames.size() == 1);
+        CHECK(surface.frames[0] == "eviltree_weapons01_c.dds");
+        auto normal = lib.texture(surface.effect.normal_map, false);
+        REQUIRE(normal);
+        CHECK(normal->width == 256);
+        CHECK(normal->height == 256);
+        REQUIRE(held->emitters.size() == 1);
+        const auto& emitter = held->emitters.front();
+        CHECK(emitter.emitter == item.emitter);
+        CHECK(emitter.trigger == 0);
+        CHECK(emitter.variant == -1);
+        const auto* point = find_point(held->points, emitter.point);
+        REQUIRE(point);
+        CHECK(point->bone == "ATTACH_TO_ORIGIN");
+        CHECK(glm::length(point->offset - item.point) < 0.001f);
+        REQUIRE(emitter.emitter < definitions.size());
+        const auto& definition = definitions[emitter.emitter];
+        CHECK(definition.additive == 1);
+        CHECK_FALSE(definition.texture.empty());
+        CHECK((dir.exists("SpellEffects/" + definition.texture) || dir.exists("ActorEffects/" + definition.texture) ||
+               dir.exists("EnvEmitterEffects/" + definition.texture)));
+    }
+}
+
+TEST_CASE("RoF2 MPL held items retain their authored coverage texture and UV scale" *
+          doctest::skip(!hailstone::test::game_dir())) {
+    GameDir dir(*hailstone::test::game_dir());
+    if (!dir.exists("hotequip.eqg")) return;
+    auto lib = CharacterLibrary::load(dir, "");
+    auto held = lib.item_mesh(11707);
+    REQUIRE(held);
+    // The source also contains unused "01" materials; this is the authored surface referenced by its triangles.
+    const auto material = std::find_if(held->mesh.materials.begin(), held->mesh.materials.end(), [](const Material& m) {
+        return m.name == "nightmare02";
+    });
+    REQUIRE(material != held->mesh.materials.end());
+    CHECK(material->effect.coverage_map == "grey_coverage.dds");
+    CHECK(material->effect.coverage_scale == doctest::Approx(0.05f));
+    CHECK(material->effect.normal_map == "nightmare_magic_weapons_normal02.dds");
+    CHECK_FALSE(material->effect.packed_normal);
+    CHECK_FALSE(material->effect.glow);
+    CHECK(lib.texture(material->effect.coverage_map, false));
 }

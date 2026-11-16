@@ -249,7 +249,8 @@ std::vector<ParticleAttachment> skeleton_particles(const WldFile& wld, const Ske
     return out;
 }
 
-std::optional<Mesh> build_skeleton_pose(const WldFile& wld, const Skeleton& sk, std::string name) {
+std::optional<Mesh> build_skeleton_pose(const WldFile& wld, const Skeleton& sk, std::string name,
+                                        std::vector<std::uint16_t>* vertex_node) {
     auto pose = skeleton_rest_pose(wld, sk);
     if (!pose) return std::nullopt;
     const std::size_t n = sk.nodes.size();
@@ -268,11 +269,14 @@ std::optional<Mesh> build_skeleton_pose(const WldFile& wld, const Skeleton& sk, 
         const auto* md = mesh_frag ? mesh_frag->get<MeshDef>() : nullptr;
         if (!md || !seen.insert(sprite).second) continue; // particle sprites and repeats
         Mesh m = build_mesh(wld, *md, mesh_frag->name);
+        // The node each vertex follows (kStillVertex for a vertex past the last run, which stays where it is).
+        std::vector<std::uint16_t> nodes(m.vertices.size(), kStillVertex);
         if (!md->vertex_pieces.empty()) {
             std::size_t cursor = 0;
             for (const auto& [count, bone] : md->vertex_pieces) {
                 if (bone >= n || cursor + count > m.vertices.size()) return std::nullopt;
                 transform_vertices(m, cursor, count, world[bone]);
+                std::fill_n(nodes.begin() + static_cast<std::ptrdiff_t>(cursor), count, static_cast<std::uint16_t>(bone));
                 cursor += count;
             }
         } else {
@@ -281,11 +285,64 @@ std::optional<Mesh> build_skeleton_pose(const WldFile& wld, const Skeleton& sk, 
                 if (sk.nodes[i].sprite && wld.resolve(sk.nodes[i].sprite) == sprite) owner = i;
             if (owner == n) return std::nullopt;
             transform_vertices(m, 0, m.vertices.size(), world[owner]);
+            std::fill(nodes.begin(), nodes.end(), static_cast<std::uint16_t>(owner));
         }
+        if (vertex_node) vertex_node->insert(vertex_node->end(), nodes.begin(), nodes.end());
         if (!out) out = std::move(m);
         else append_mesh(*out, m);
     }
     if (out) out->name = std::move(name);
+    return out;
+}
+
+std::optional<ObjectAnimation> build_object_animation(const WldFile& wld, const Skeleton& sk) {
+    const auto rest = skeleton_rest_pose(wld, sk);
+    if (!rest) return std::nullopt;
+    const std::size_t n = sk.nodes.size();
+    ObjectAnimation out;
+    out.nodes.resize(n);
+    out.rest_inverse.resize(n);
+    for (std::size_t i = 0; i < n; ++i)
+        for (auto c : sk.nodes[i].children) out.nodes[static_cast<std::size_t>(c)].parent = static_cast<std::int32_t>(i);
+    bool any = false;
+    for (std::size_t i = 0; i < n; ++i) {
+        ObjectAnimationNode& node = out.nodes[i];
+        // A node that cannot be undone (a zero scale, a damaged key): the object stays in its first pose.
+        const float det = glm::determinant((*rest)[i]);
+        if (!std::isfinite(det) || std::abs(det) < 1e-12f) return std::nullopt;
+        out.rest_inverse[i] = glm::inverse((*rest)[i]);
+        const auto* ref = wld.get<TrackRef>(sk.nodes[i].track);
+        const auto* def = ref ? wld.get<TrackDef>(ref->track) : nullptr;
+        if (!def || def->frames.empty()) {
+            node.keys.push_back({});
+            continue;
+        }
+        // The 0x13 timing word when its flag 1 is set, else 100 ms (RoF2 0x1001b0bc..0x1001b11f).
+        node.interval_ms = (ref->flags & 1) ? ref->frame_ms : 100;
+        for (const auto& f : def->frames) node.keys.push_back({f.rotation, f.translation, f.scale});
+        if (node.keys.size() < 2) continue;
+        if (node.interval_ms == 0) return std::nullopt; // no time between keys: left in the first pose
+        // Signs chosen for continuity between keys and across the closing key (OpenEQ's reading of 0x1003c3c2).
+        for (std::size_t k = 1; k < node.keys.size(); ++k)
+            if (glm::dot(node.keys[k].rotation, node.keys[k - 1].rotation) < 0.0f)
+                node.keys[k].rotation = -node.keys[k].rotation;
+        ObjectTrackKey closing = node.keys.front();
+        if (glm::dot(closing.rotation, node.keys.back().rotation) < 0.0f) closing.rotation = -closing.rotation;
+        // The set's period is its first animated track's (the D3DX set is sized by it).
+        if (!any) out.period_ms = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+                      std::uint64_t{node.interval_ms} * node.keys.size(), 0xffffffffu));
+        node.keys.push_back(closing);
+        any = true;
+    }
+    if (!any || out.period_ms == 0) return std::nullopt;
+    // A node moves when it or any node above it has more than one key.
+    for (std::size_t i = 0; i < n; ++i)
+        for (std::int32_t k = static_cast<std::int32_t>(i), guard = 0; k >= 0 && guard <= static_cast<std::int32_t>(n);
+             k = out.nodes[static_cast<std::size_t>(k)].parent, ++guard)
+            if (out.nodes[static_cast<std::size_t>(k)].keys.size() > 1) {
+                out.nodes[i].moves = true;
+                break;
+            }
     return out;
 }
 
@@ -399,9 +456,13 @@ std::unordered_set<const wld::Fragment*> add_actor_defs(Zone& zone, const wld::W
         std::optional<Mesh> mesh;
         const std::string key = upper(f.name);
         const bool first = !zone.objects.contains(key) && !particles.by_actor.contains(key);
+        // The skeleton's own animation (assets/object_animation.h), with the node each vertex of `mesh` follows.
+        std::optional<ObjectAnimation> animation;
+        std::vector<std::uint16_t> vertex_node;
         for (wld::Ref s : def->sprites) {
             const auto* sprite = w.resolve(s);
             std::optional<Mesh> built;
+            std::vector<std::uint16_t> built_nodes;
             if (const auto* ref = sprite ? sprite->get<wld::MeshRef>() : nullptr) {
                 const auto* mesh_frag = w.resolve(ref->mesh);
                 if (const auto* md = mesh_frag ? mesh_frag->get<wld::MeshDef>() : nullptr) {
@@ -410,8 +471,15 @@ std::unordered_set<const wld::Fragment*> add_actor_defs(Zone& zone, const wld::W
                 }
             } else if (const auto* sref = sprite ? sprite->get<wld::SkeletonRef>() : nullptr) {
                 if (const auto* sk = w.get<wld::Skeleton>(sref->skeleton)) {
-                    built = wld::build_skeleton_pose(w, *sk, f.name);
+                    built = wld::build_skeleton_pose(w, *sk, f.name, &built_nodes);
                     if (!built) ++failed;
+                    // One animated skeleton per actor: a second one's vertices stay where they are.
+                    if (built && first && !animation) {
+                        animation = wld::build_object_animation(w, *sk);
+                        if (!animation) built_nodes.assign(built_nodes.size(), kStillVertex);
+                    } else {
+                        built_nodes.assign(built_nodes.size(), kStillVertex);
+                    }
                     if (first)
                         for (const auto& a : wld::skeleton_particles(w, *sk))
                             if (auto index = particle_definition(zone, particles, w, *a.cloud))
@@ -419,12 +487,22 @@ std::unordered_set<const wld::Fragment*> add_actor_defs(Zone& zone, const wld::W
                 }
             }
             if (!built) continue;
+            built_nodes.resize(built->vertices.size(), kStillVertex);
+            vertex_node.insert(vertex_node.end(), built_nodes.begin(), built_nodes.end());
             if (!mesh) mesh = std::move(built);
             else wld::append_mesh(*mesh, *built);
         }
         if (!mesh) continue;
         mesh->name = f.name;
         if (own && same && first) use_own_textures(zone, *own, *mesh, *same);
+        if (animation) {
+            // Only the vertices of nodes that move; the animation is kept when there are any.
+            for (std::uint16_t& v : vertex_node)
+                if (v != kStillVertex && (v >= animation->nodes.size() || !animation->nodes[v].moves)) v = kStillVertex;
+            animation->vertex_node = std::move(vertex_node);
+            if (animation->vertex_node.size() == mesh->vertices.size() && animation->any_moving_vertex())
+                zone.object_animations.try_emplace(key, std::move(*animation));
+        }
         zone.objects.try_emplace(upper(f.name), std::move(*mesh));
     }
     if (failed) log::debug("{}: {} skeletal actors could not be posed", w.label(), failed);

@@ -8,6 +8,7 @@
 // the eye, and into the haze: smoke and dust towards the haze's colour, light by what reaches the eye.
 
 #include "lighting.glsl"
+#include "preview_alpha.glsl"
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 layout(set = 1, binding = 2) uniform sampler2D scene_depth; // render/vk_context.h shadow_set: the depth copy
@@ -15,7 +16,7 @@ layout(set = 1, binding = 2) uniform sampler2D scene_depth; // render/vk_context
 layout(push_constant) uniform Push {
     mat4 view_proj;
     vec4 screen; // SceneLighting::screen (modern)
-    vec4 params; // x: 1 modern
+    vec4 params; // x: 1 modern, y: 1 transparent preview
 } pc;
 
 layout(location = 0) in vec2 v_uv;
@@ -34,6 +35,8 @@ void main() {
     vec3 light = to_linear(c.rgb) * v_shade.rgb; // the scene target is linear
     if (pc.params.x < 0.5) {
         o_color = vec4(light, c.a);
+        if (pc.params.y > 0.5 && (v_texture & 0x80000000u) != 0u)
+            o_color = preview_additive_particle(light * c.a);
         o_reactive = reactive_of(o_color);
         return;
     }

@@ -33,6 +33,19 @@
 
 using namespace hailstone;
 
+TEST_CASE("actor packed surface channels require a loaded map and retain authored gloss and glow") {
+    assets::EffectParams effect;
+    effect.packed_normal = effect.glow = true;
+    const auto missing = render::actor_surface(effect, 0, 0);
+    CHECK(missing.slots.z == 0);
+    const auto loaded = render::actor_surface(effect, 7, 0);
+    CHECK(loaded.slots.x == 7);
+    CHECK(loaded.slots.z == (render::kActorSurfacePackedNormal | render::kActorSurfaceGlow |
+                             render::kActorSurfaceSpecular));
+    effect.packed_normal = effect.glow = false;
+    CHECK(render::actor_surface(effect, 7, 0).slots.z == 0);
+}
+
 TEST_CASE("actor armor surfaces: defaults keep the old path; optional maps and material highlights stay distinct") {
     assets::EffectParams effect;
     CHECK_FALSE(render::has_actor_surface(effect));
@@ -97,6 +110,7 @@ namespace zone_surface_test {
 using glm::vec3;
 using glm::vec4;
 using glm::clamp;
+using glm::mix;
 #include "../shaders/zone_surface.glsl"
 }
 
@@ -113,11 +127,28 @@ TEST_CASE("EQG packed surfaces: glow and gloss channels never reverse the tangen
     // Ordinary RGB normal maps retain their full three-channel interpretation.
     CHECK(zone_surface_normal(glm::vec4(0.5f, 0.5f, 1, 0), false) == glm::vec3(0, 0, 1));
     CHECK(zone_surface_normal(dark, false).z < 0.0f);
-    // The map's alpha replaces the material's gloss (docs/unknowns.md "EQG"), clamped to 1.
+    // The native packed shader takes its gloss directly from the map's alpha, clamped here to 1.
     CHECK(zone_surface_gloss(dark, true, 0.2f) == dark.a);
     CHECK(zone_surface_gloss(bright, true, 0.2f) == 1.0f);
     CHECK(zone_surface_gloss(glm::vec4(0.5f, 0.5f, 0.0f, 2.0f), true, 0.2f) == 1.0f);
     CHECK(zone_surface_gloss(bright, false, 0.2f) == 0.2f);
+}
+
+TEST_CASE("Actor MPL coverage modulates each diffuse channel without replacing material opacity") {
+    using namespace zone_surface_test;
+    CHECK(glm::length(surface_coverage_color({0.2f, 0.8f, 0.5f}, {0.8f, 1.0f, 0.0f}) -
+                      glm::vec3(0.32f, 1.0f, 0.0f)) < 1e-6f);
+    CHECK(surface_coverage_color({0.2f, 0.8f, 0.5f}, glm::vec3(0.5f)) == glm::vec3(0.2f, 0.8f, 0.5f));
+}
+
+TEST_CASE("Actor lava retains its primary-alpha blend and bump-lit secondary") {
+    using namespace zone_surface_test;
+    const glm::vec3 primary(0.2f, 0.3f, 0.4f), secondary(0.1f, 0.5f, 0.8f);
+    CHECK(surface_lava_color(primary, secondary, 1.0f, 1.0f) == primary);
+    CHECK(surface_lava_color(primary, secondary, 0.0f, 0.0f) == secondary);
+    CHECK(surface_lava_color(primary, secondary, 0.0f, 1.0f) == secondary * 2.0f);
+    CHECK(glm::length(surface_lava_color(primary, secondary, 0.5f, 0.5f) -
+                      (primary + secondary * 1.5f) * 0.5f) < 1e-6f);
 }
 
 TEST_CASE("EQG glow: an authored mask emits in darkness, with HDR headroom only in modern lighting") {
@@ -1017,4 +1048,23 @@ TEST_CASE("ao visibility: open, shaded and closed stay within [0, 1]") {
     float part = ao_kernel_test::ao_visibility(1.5f, 4.0f, 12.0f);
     CHECK(part == doctest::Approx(0.5f));
     CHECK(ao_kernel_test::ao_visibility(12.0f, 4.0f, 12.0f) == 0.0f);
+}
+
+TEST_CASE("actor surfaces: Lava2 draws as Lava, and lava keeps its second layer over a coverage map") {
+    using assets::EqgShader;
+    CHECK(render::actor_lava_surface(EqgShader::Lava));
+    CHECK(render::actor_lava_surface(EqgShader::Lava2));
+    CHECK_FALSE(render::actor_lava_surface(EqgShader::WaterFall));
+    CHECK_FALSE(render::actor_lava_surface(EqgShader::None));
+    assets::Material m;
+    m.effect.coverage_map = "coverage.dds";
+    m.eqg_shader = EqgShader::None;
+    CHECK(render::actor_takes_coverage(m));
+    for (const auto lava : {EqgShader::Lava, EqgShader::Lava2}) {
+        m.eqg_shader = lava; // an MPL lava material: slots.w holds the second layer
+        CHECK_FALSE(render::actor_takes_coverage(m));
+    }
+    m.eqg_shader = EqgShader::None;
+    m.effect.coverage_map.clear();
+    CHECK_FALSE(render::actor_takes_coverage(m));
 }

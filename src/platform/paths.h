@@ -64,6 +64,7 @@ std::filesystem::path imgui_ini();                       // hailstone-windows.in
 std::filesystem::path ui_settings_dir();                 // ui/settings/ (ui-settings/ before 2026-11)
 std::filesystem::path ui_settings_file(std::string_view pack); // ui/settings/<pack>.txt, a UI pack's script settings
 std::filesystem::path plugins_dir();                     // plugins/, one folder per native plugin
+std::filesystem::path upscalers_dir();                   // upscalers/, one folder per upscaler provider (render/upscaler_provider.h)
 std::filesystem::path scripts_dir();                     // scripts/, the Lua scripts
 std::filesystem::path scripts_config_dir();              // scripts/config/, the scripts' saved settings (mq.configDir)
 std::filesystem::path textures_dir();                    // textures/, one folder per texture pack

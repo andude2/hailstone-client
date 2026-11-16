@@ -437,7 +437,7 @@ void emit_login(Out& o, const ui::LoginView& v) {
 //     server (the picked server's name), suggestions {name ("" a server's suggestion), source, text, fromServer} (the
 //     picked server's suggested add-ons the player does not have: docs/addons.md "Suggested add-ons"), offer {name, kind, version, author, description, source, page, notes, key
 //     (the signing key's start, "" unsigned), installedVersion, blocked (why not, "" it can), caps (in words)},
-//     rows {name, kind ("script"/"plugin"/"tool"), group ("installed", "manual", "server"), version, source, page, author,
+//     rows {name, kind ("script"/"plugin"/"tool"/"upscaler"), group ("installed", "manual", "server"), version, source, page, author,
 //     description, state, stateText, newVersion, caps, newCaps, modified, note, autoUpdate, signed, canUpdate,
 //     canRemove, canStart (an installed tool: eq.LoginDo "addonStart"), folder, consent (the server's compiled plugins: "allowed", "denied", "unasked"; else "")}.
 int LoginScreen(lua_State* L) {

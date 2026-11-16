@@ -20,6 +20,7 @@
 #include "game/anim_layers.h"
 #include "game/appearance.h"
 #include "game/coords.h"
+#include "game/light_list.h"
 #include "game/particles.h"
 #include "game/race_models.h"
 #include "game/scene_light.h"
@@ -302,6 +303,7 @@ int run_model_viewer(const ModelViewerOptions& opts) {
     double next_effect = 0.0;
     // The models' and held items' own emitters (app/actor_emitters.h).
     ActorEmitters actor_emitters(vk, game, shader_dir);
+    actor_emitters.set_texture_reader([library](const std::string& name) { return library->read_file(name); }, true);
     std::vector<ActorEmitters::Actor> emitter_actors;
 
     auto start = std::chrono::steady_clock::now();
@@ -326,6 +328,7 @@ int run_model_viewer(const ModelViewerOptions& opts) {
             dt = opts.frame_dt;
             t = frame * static_cast<double>(opts.frame_dt);
         }
+        actors.set_time(t);
 
         const auto& in = window.input();
         // A timed run (--frames: a test, a screenshot) takes no input: whatever the person at the computer types or
@@ -411,7 +414,17 @@ int run_model_viewer(const ModelViewerOptions& opts) {
         int width = static_cast<int>(f->extent.width), height = static_cast<int>(f->extent.height);
         if (opts.modern) {
             // The models and the zone in the modern lighting, with the sun's shadows.
-            auto lighting = render::make_scene_lighting(game::SceneLight{}, {}, 0, render::LightingMode::Modern, sky);
+            std::vector<game::LightSource> effect_lights;
+            auto add_actor_lights = [&](const game::ParticleSystem& sim, bool cloud) {
+                auto lights = game::particle_lights(sim, [&](const std::string& texture) {
+                    return actor_emitters.texture_color(texture, cloud);
+                }, 4);
+                effect_lights.insert(effect_lights.end(), lights.begin(), lights.end());
+            };
+            add_actor_lights(actor_emitters.simulation(), false);
+            add_actor_lights(actor_emitters.cloud_simulation(), true);
+            auto lighting = render::make_scene_lighting(game::SceneLight{}, effect_lights, effect_lights.size(),
+                                                        render::LightingMode::Modern, sky);
             lighting.params.w = 0.04f;
             lighting.probe = probe;
             bool shadows = vk.shadows_enabled() && sky.light != glm::vec3(0.0f);

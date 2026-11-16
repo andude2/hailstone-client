@@ -1454,7 +1454,7 @@ private:
     std::uint32_t described_ = net::kTributeNone, guild_described_ = net::kTributeNone;
 };
 
-// The leadership window (TOGGLE_LEADERSHIPWIN). CLeadershipWnd is not decoded; this follows its XML over EQEmu's
+// The leadership window (TOGGLE_LEADERSHIPWIN), using CLeadershipWnd's controls over EQEmu's
 // leadership (game/leadership.h): the group and raid abilities (LEList1 / LEList2: name, rank / ranks, the next
 // rank's cost), the points to spend (LEW_CurrentGroupCount / LEW_CurrentRaidCount), the experience toward the next
 // point (the gauges), earning leadership experience on or off, Purchase for the selected ability, its three hotkey
@@ -1524,7 +1524,16 @@ public:
             std::uint32_t cost = game::leadership_next_cost(a, rank);
             d.rows.push_back(ListRow{{std::string(ab.name), std::format("{} / {}", rank, game::leadership_max_rank(a)),
                                       cost ? std::to_string(cost) : std::string("-")}});
-            if (rank == 0) d.rows.back().color = argb_to_rgb(0xffa0a0a0);
+            // CLeadershipWnd's refresh @0x6b77f0 checks Leadership_HasAbilityRank @0x55eb10, not activation's
+            // population, expansion or role checks. Shared leader ranks are green, personal purchases gold
+            // (gold's check @0x55fb60 is unnamed in the analysis; read as the personal rank, docs/mechanics.md).
+            const auto points = raid ? l.raid_points : l.group_points;
+            const bool prerequisite = (a != 4 || static_cast<std::int32_t>(l.ranks[0]) >= 1) &&
+                                      (a != 20 || static_cast<std::int32_t>(l.ranks[16]) >= 1);
+            const bool shared_rank = static_cast<std::int32_t>(l.active_ranks[static_cast<std::size_t>(a)]) >= 1;
+            const auto color = shared_rank ? 0xff00ff00u : static_cast<std::int32_t>(rank) >= 1 ? 0xffd6b228u :
+                cost > 0 && points >= cost && prerequisite ? 0xffffffffu : 0xffc0c0c0u;
+            d.rows.back().color = argb_to_rgb(color);
             if (a == selected_) d.selected = static_cast<int>(ids.size());
             ids.push_back(a);
         }

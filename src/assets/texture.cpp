@@ -497,6 +497,55 @@ std::optional<Image> decode_cube_as_octahedral(std::span<const std::byte> data, 
     return out;
 }
 
+glm::vec2 sphere_environment_uv(glm::vec3 reflection) {
+    const float length2 = glm::dot(reflection, reflection);
+    if (!(length2 > 0.0f) || !std::isfinite(length2)) return glm::vec2(0.5f);
+    const glm::vec3 d = reflection / std::sqrt(length2);
+    // SkinMeshCBSGE1.fxo's vertex shader: reflected surface-to-eye X/Z divided by
+    // 2.828 * sqrt(1 + Y), plus 0.5. Our shader reflects the incident direction, its negative.
+    const float denominator = 2.82800007f * std::sqrt(std::max(1.0f - d.y, 1e-8f));
+    return glm::clamp(glm::vec2(0.5f) - glm::vec2(d.x, d.z) / denominator, glm::vec2(0.0f), glm::vec2(1.0f));
+}
+
+std::optional<Image> decode_environment_as_octahedral(std::span<const std::byte> data, std::uint32_t size) {
+    if (data.size() < 128 || size == 0 || size > 4096 || data[0] != std::byte{'D'} || data[1] != std::byte{'D'} ||
+        data[2] != std::byte{'S'} || data[3] != std::byte{' '}) return std::nullopt;
+    if (auto cube = decode_cube_as_octahedral(data, size)) return cube;
+    Image source;
+    try {
+        ByteReader reader(data);
+        if (read_dds_header(reader).caps2 & DDSCAPS2_CUBEMAP) return std::nullopt;
+        source = to_rgba8(decode_dds(data));
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+    const auto width = source.width, height = source.height;
+    auto at = [&](std::uint32_t x, std::uint32_t y) {
+        const auto* pixel = &source.mips[0][(std::size_t(y) * width + x) * 4];
+        return glm::vec4(std::to_integer<int>(pixel[0]), std::to_integer<int>(pixel[1]),
+                         std::to_integer<int>(pixel[2]), std::to_integer<int>(pixel[3]));
+    };
+    Image out;
+    out.width = out.height = size;
+    out.mips.emplace_back(std::size_t(size) * size * 4);
+    for (std::uint32_t y = 0; y < size; ++y)
+        for (std::uint32_t x = 0; x < size; ++x) {
+            const glm::vec3 d = octahedral_direction((glm::vec2(x, y) + 0.5f) / static_cast<float>(size));
+            const glm::vec2 uv = sphere_environment_uv(d);
+            const float sx = std::clamp(uv.x * static_cast<float>(width) - 0.5f, 0.0f, static_cast<float>(width - 1));
+            const float sy = std::clamp(uv.y * static_cast<float>(height) - 0.5f, 0.0f, static_cast<float>(height - 1));
+            const auto x0 = static_cast<std::uint32_t>(sx), y0 = static_cast<std::uint32_t>(sy);
+            const auto x1 = std::min(x0 + 1, width - 1), y1 = std::min(y0 + 1, height - 1);
+            const float ax = sx - static_cast<float>(x0), ay = sy - static_cast<float>(y0);
+            const glm::vec4 color = glm::mix(glm::mix(at(x0, y0), at(x1, y0), ax),
+                                            glm::mix(at(x0, y1), at(x1, y1), ax), ay);
+            auto* pixel = &out.mips[0][(std::size_t(y) * size + x) * 4];
+            for (int channel = 0; channel < 4; ++channel)
+                pixel[channel] = static_cast<std::byte>(std::clamp(static_cast<int>(std::lround(color[channel])), 0, 255));
+        }
+    return out;
+}
+
 namespace {
 
 // ---- BMP ---------------------------------------------------------------

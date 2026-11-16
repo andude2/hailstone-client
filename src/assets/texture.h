@@ -99,6 +99,12 @@ bool is_opaque(const Image& image);
 // and each texel the faces' bilinear colour there, as Direct3D's texCUBE picks a face. The game's cube maps stand
 // with +Y up, so the world's direction (x, y, z up) is looked up as (x, z, y). nullopt when the data is no cube map.
 std::optional<Image> decode_cube_as_octahedral(std::span<const std::byte> data, std::uint32_t size = 64);
+// EQG equipment also uses ordinary 2D sphere maps (CBSGE1/CE1). Convert either representation to the renderer's
+// same octahedral lookup. A malformed cube is rejected rather than read as a single 2D face.
+std::optional<Image> decode_environment_as_octahedral(std::span<const std::byte> data, std::uint32_t size = 64);
+// Native CBSGE1's sphere coordinates for the renderer's reflected incident direction. The shader reflects the
+// opposite (surface-to-eye) direction, then projects its X/Z with a +Y pole; the singular pole takes the centre.
+glm::vec2 sphere_environment_uv(glm::vec3 reflection);
 // The direction (unit) an octahedral map's texel at uv (0..1) stands for: the upper hemisphere (z >= 0) is the
 // diamond in the middle, the lower one folded into the corners (shaders/zone.frag octahedral_uv is the inverse).
 glm::vec3 octahedral_direction(glm::vec2 uv);

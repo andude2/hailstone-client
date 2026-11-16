@@ -177,8 +177,9 @@ the history through `post_taa_sets_` under `taa`); `display.sharpness` drives FS
   passes' own `FSR3UPSCALER_BIND_*` numbers; descriptor sets are written each frame, one set per pass per frame in
   flight.
 - **Shaders**: `cmake/Shaders.cmake` (`hailstone_add_fsr3_shaders`) compiles each pass once as compute with glslc or
-  glslangValidator, no AMD tool: HDR colour, reverse depth, motion vectors at the render size without jitter, the
-  reference Lanczos, 32-bit maths; accumulate twice, with and without sharpening (`fsr3_*.spv`).
+  glslangValidator, no AMD tool: HDR colour, reverse depth, motion vectors at the render size without jitter, 32-bit maths,
+  the history reprojected with FSR's Lanczos table (the permutation AMD's runtime picks on its own GPUs; the reference
+  Lanczos, which it keeps elsewhere, computes a sin() per tap and doubled the accumulate pass on an Intel Iris Xe); accumulate twice, with and without sharpening (`fsr3_*.spv`).
 - **Inputs as FSR wants them**: our jitter (`jitter_px_`) is FSR's `jitterOffset` as it is (a texel's unjittered
   place is `t + 0.5 - jitter` in both), and its cycle length is ours (FSR's count rounded up: 15 against its 14 at a
   render scale of 75, the same at 50 and 100); our motion (UV to last frame's place) goes in with a scale of 1; near,
@@ -187,9 +188,50 @@ the history through `post_taa_sets_` under `taa`); `display.sharpness` drives FS
 - **Device**: storage images in FSR's formats (R8, R16F, RG16F: `shaderStorageImageExtendedFormats`, enabled when
   present) and quad subgroup operations in compute (`render::Fsr3Upscaler::supported`, `DeviceCaps::fsr3`). Without
   them `fsr3` falls back to `taa` with a log line.
+- **Why 32-bit**: AMD's runtime picks a 16-bit permutation (`FFX_HALF=1`) where the device has 16-bit floats, but
+  in the vendored 3.1.4 it has nothing to give. The accumulate pass, most of the cost, has no 16-bit code (compiled
+  with `FFX_HALF=1` it holds no 16-bit float), and the luma and shading change pyramids' 16-bit SPD callbacks are
+  stubs (`SpdLoadSourceImageH` and `SpdLoadH` return 0, `SpdStoreH` stores nothing). Tried on an Intel Iris Xe, the
+  pyramids looked 13 times faster because they did nothing: the picture came out about 9 % darker (the exposure from
+  an empty pyramid) and softer. Writing those callbacks would save at most about 0.3 ms there.
+- **Timing**: with `HAILSTONE_FSR3_TIMING` set, GPU timestamps round the clears and each pass
+  (`Fsr3Upscaler::timing_summary`); the viewer's `--frames` logs their means ("FSR 3.1 GPU time"). On an Intel Iris
+  Xe (1280x720 from 858x482) FSR 3.1 takes 3.9 ms, the accumulate pass 2.0 of them; on an RX 9060 XT 0.26 ms.
 - **Motion and reactive mask**: the same as the resolve's (Temporal upscaling 6): the draws' own motion in
   `motion_`, and the scene's reactive mask as FSR's (`Fsr3Upscaler::Inputs::reactive`; none, FSR's default of 0,
   without `independentBlend`).
+
+### Upscaler providers
+
+`display.upscaler = <name>` (the viewer's `--upscaler <name>`), where `<name>` is an upscaler add-on in
+`upscalers/<name>/` (docs/addons.md "Upscalers"), runs that add-on's temporal upscaler in FSR 3.1's place
+(`render::Upscaler::External`). This is how upscalers the client cannot ship come in: Intel XeSS and AMD FSR 4 are
+closed binaries, so each is an add-on of its own repository, built against `sdk/hailstone_upscaler.h` (MIT;
+docs/plugins.md "Upscaler providers" has the interface) and NOTICE.md's add-on exception. The client never names,
+links or ships any of them.
+
+- **Loading** (`render/upscaler_provider.*`): at the start, before the Vulkan instance, from a copy of its folder in
+  `cache/upscalers/<name>-<key>/` (the key from its files' names, sizes and times; a box set's windows share one), so
+  the add-on manager can replace the folder while the copy is loaded. No server sends one or decides about one.
+- **The device**: the provider names the instance and device extensions and the Vulkan 1.0 to 1.3 features it needs,
+  and may chain feature structs of extensions of its own (`gather_extra_features`); `VkContext` turns them on beside
+  its own when the loader and the GPU have the extensions and the core features (`missing_names`,
+  `missing_features`, `add_features`), and otherwise goes on without the provider. The provider checks its extension
+  structs' features itself, and says no for another vendor's GPU.
+- **The frame**: the same inputs as FSR 3.1 (`temporal_prep.frag`'s colour with the AO, the depth, the motion and the
+  reactive mask, at the scene's size, `SHADER_READ_ONLY_OPTIMAL`), the jitter in FSR's convention, the camera's planes
+  and field of view, the exposure, the frame time and a reset on a cut; it writes `fsr3_output_` (RGBA16F at the
+  view's size, in `GENERAL`), which the post pass reads as under FSR 3.1. A memory barrier before the call makes the
+  inputs readable by any stage, and one after makes the output readable by the post pass. The colour carries
+  `TRANSFER_SRC` and the output `TRANSFER_DST` as well, for a provider that copies. Frame generation follows the same
+  motion as under the other temporal upscalers. A provider that sharpens (`HAILSTONE_UPSCALER_SHARPENS`) gets
+  `display.sharpness`; for any other the client's RCAS runs after it, as under `taa`.
+- **Falling back**: a provider that is not installed, does not load, says no at any step, or lacks something on this
+  GPU is dropped with a line in the log; the client then runs FSR 3.1, or `taa` where the GPU cannot run FSR 3.1. One
+  that fails a frame is dropped at the next frame (the scene targets are made again, the device idle), and `taa` runs
+  from then on.
+- **The example** (`plugins/example/upscaler/example.c`, built into `build/hailstone/upscalers/example/`) stretches the
+  colour with a linear blit: no accumulation, only the plumbing. `--upscaler example` runs it.
 
 ### Frame generation
 
@@ -385,10 +427,11 @@ again. The game's file drawn by an opaque material keeps its colour.
 Animated textures (a classic SIMPLESPRITEDEF with more than one frame and a delay, `docs/formats/wld.md` 0x04) show
 frame `(t / delay) mod count`, `render::texture_frame`, on the one clock the zone renderer's effects use (seconds since
 the client started). Every frame is uploaded, in the zone (`ZoneRenderer`) and on the doors and ground objects
-(`ObjectRenderer::set_time`, from `WorldObjects`). The classic flames are this: `FIRE1_SPRITE` is fire1..fire4 at
+(`ObjectRenderer::set_time`, from `WorldObjects`) and on characters and their equipment (`ActorRenderer::set_time`).
+Every frame remains referenced through texture eviction and zone handoff, and shadow alpha tests select the same
+frame as the colour pass. The classic flames are this: `FIRE1_SPRITE` is fire1..fire4 at
 200 ms in every campfire, torch and brazier, whether the zone places it (ecommons' CAMPFIRE) or the server does as a
-door (ecommons' GRATE beside Gaddius, the bazaar's IT78 campfire from gequip.s3d). The characters' items (a torch in
-a hand) still draw their first frame.
+door (ecommons' GRATE beside Gaddius, the bazaar's IT78 campfire from gequip.s3d).
 
 ## Fire
 
@@ -434,8 +477,9 @@ of its own, in its hue (EQG zones such as argath and commonlands have flames and
 place or size, or one more than 1000 units wide or tall (a placement scaled absurdly in a broken zone file), is dropped
 before the merge: its neighbour search would walk billions of grid cells.
 
-Not yet: a torch held in a hand (its flame is a gequip particle cloud, which is not loaded) and particle clouds on
-server doors (never spawned) still show no flame.
+Held torches and equipment-backed server objects keep their authored animated materials or WLD particle clouds.
+These moving clouds are drawn by `ActorEmitters`, rather than replaced by the zone's procedural flame geometry.
+Server doors resolved only from the zone's flattened object meshes still lack per-actor cloud metadata.
 
 ## Particles
 
@@ -800,6 +844,19 @@ how many zone triangles and draw calls the last frame made.
 
 ## Sky
 
+The sky stack (including its blended clouds and additive bodies) and the underwater/haze backdrop test
+equal against the scene's reverse-Z clear depth, 0, without writing depth. This tests the original
+multisampled depth attachment, so a cut-out or geometry edge keeps the sky in every uncovered sample.
+The modern zone viewer draws the stack after the opaque zone, neighbours and flora, before
+the water colour/depth copy and all translucent draws. The client moves it after the opaque zone
+(including the distant land) and neighbours, but still before the objects: their single call includes
+blended parts. Its object/actor/silhouette order and the grass-after-copy rule stay unchanged, so those
+later opaque draws do not yet save sky shading. Classic lighting keeps the background first because
+the zone draws its opaque and blended parts together. A zone or active neighbour with WLD detail
+layers also keeps the background first: these blend in the opaque group, potentially over a base
+that leaves depth clear. Painted skies keep their internal layer order;
+the model viewer has no sky/backdrop call and is unchanged.
+
 In the modern lighting the plain skies (sky 1 normal, 2 desert, 4 cottony; `SkyRenderer::has_atmosphere`) draw an
 atmosphere instead of their painted dome. `shaders/atmosphere.frag` draws a full-screen triangle at the far plane:
 single Rayleigh and Mie scattering, 16 steps along the view ray and 6 towards the sun, the sun along the lighting's
@@ -861,6 +918,53 @@ The cloud layer is drawn over it blended. Its clouds are keyed out of its painte
 `render::cloud_light` (the sky's ambient and the sun): white by day, warm at sunrise and sunset, dark by night. The
 procedural cloud patches take the same light, and the sun and moon sprites stay. The other skies (the planes',
 Luclin's, red, grey) keep their painted layers.
+
+### Volumetric clouds
+
+Over the atmosphere (the plain skies in the modern lighting) the clouds are a layer of air 1.5 to 4 km up over a
+round planet, marched along each view ray (`render/cloud_renderer.h`, `shaders/clouds.comp`), in place of the painted
+cloud layer and the `weather.ini` cloud patches. This is Hailstone's own look; the original has only the painted
+clouds. `display.volumetric_clouds` (Options, Volumetric Clouds; off on the Low tier) turns it off, and the viewer
+takes `--no-clouds`. The patches keep moving while they are hidden, so turning the option off shows them in place.
+
+- **Shape** (after Schneider, "The Real-time Volumetric Cloudscapes of Horizon: Zero Dawn", SIGGRAPH 2015): a weather
+  map (30 km across) says where cloud grows and of what type. A height profile keeps flat clouds to the layer's
+  bottom third and lets towering ones fill it. Perlin-Worley noise (7 km across) gives the billows, and finer Worley
+  noise (0.9 km) wears the edges, wispy at the bottom and billowing higher up. The noise is drawn on the GPU when
+  the clouds are first shown (`shaders/cloud_noise.comp`: a 128³ shape, a 32³ detail and a 512² weather map, every
+  one tiling). No noise file ships.
+- **Cover** (`render::cloud_cover`): fair-weather cumulus over the normal sky (0.36 of the map), a few over the desert
+  (0.18), heaped ones over the cottony sky (0.55). A storm (`WeatherLook::storm`) eases every sky to overcast, thicker
+  (2.2 times), flatter and dark at its base, as it gathers and clears (about 36 s in, 75 s out).
+- **Wind** (`render::cloud_wind_step`): the field drifts from the west-south-west at 12 m/s, twice that in a full
+  storm, added up frame by frame (so a storm speeds the clouds up without a jump) and wrapped every 600 km, a whole
+  number of every texture's tiles (a wrap throws the history away once).
+- **Light** (after Hillaire, "Physically Based Sky, Atmosphere and Cloud Rendering in Frostbite", SIGGRAPH 2016):
+  the sun by day and the moon by night (`Daylight::to_light`, `light`, after `apply_storm`), marched six steps
+  towards the light from each sample. The light scattered more than once is approximated by three octaves of a
+  dimmer, deeper-reaching and wider lobe (Wrenninge et al. 2013), so a cloud's shadowed side is not black and its
+  edge towards the sun glows. Ambient comes from the open sky (`Daylight::sky`), less at the cloud's base. Each step
+  adds its light in Hillaire's energy-conserving form, and the march stops once less than 1 % of the sky shows.
+- **Cost:** the clouds are marched at half the scene's size on each side (`render::cloud_extent`). Each frame marches
+  one pixel of every 2x2 block (`render::cloud_update_slot`, in a Bayer order) at 40 steps overhead to 64 near the
+  horizon, each start jittered (interleaved gradient noise). The other three are carried over from the last frame
+  turned to this one's view: the clouds are far enough away that the camera's turn alone moves them on the screen.
+  A freshly marched pixel is blended in at a fifth over what was there, so the jitter averages out over about a
+  second. A pixel whose last place was off the screen is marched at once. The atmosphere reads the image through a
+  3x3 tent filter (four bilinear taps), so the 2x2 blocks do not show at the clouds' edges as the view turns. The history is thrown away (`render::cloud_history_stale`) when
+  the sun or moon jumps more than 0.02 radians, the storm by more than 0.1, or the wind by more than 0.5 km.
+- **Into the sky:** the compute pass runs before the scene begins (`SkyRenderer::prepare`). `shaders/atmosphere.frag`
+  reads its image (binding 2: rgb the clouds' light, a the sky still showing) and puts the clouds in front of the sky,
+  the stars, the sun and the moon. This happens after the storm greys the sky and before the haze at the horizon.
+  Far clouds thin out (exp(-distance / 45 km)), so the atmosphere's own horizon shows under them. The lightning lights
+  the clouds twice as much as the clear air. Without the clouds the atmosphere reads a clear 1x1 image, and the sky is
+  as it was.
+- Measured on an RX 9060 XT (RADV) at 1280x720, in the viewer over Qeynos Hills: about 0.5 ms a frame over the
+  painted clouds (10.6 against 10.1 ms). The viewer's `--pan D` turns the camera D degrees a second, to watch the
+  history carried over as the view turns.
+- Not yet: the clouds cast no shadows on the ground, and the god rays do not see them (a storm already turns the god
+  rays off). With the isometric camera's orthographic view there is no history to carry over, so every pixel is
+  marched each frame.
 
 ## Weather
 
@@ -966,7 +1070,27 @@ placed object as a plant when it has a masked material and its name, or a materi
 bends, as the square of its height above the plant's foot, up to 4 % of the plant's height, and how much its leaves
 (the masked parts) flutter. `wind_offset` in `shaders/lighting.glsl` leans the plant with the wind, rocks it as gusts
 roll across the zone in the wind's direction, and shivers the leaves. The zone and shadow vertex shaders both apply
-it, so the shadows move with the leaves.
+it, so the shadows move with the leaves. An object that plays its own animation (below) is not given this sway: its
+animation is how it moves.
+
+## Animated zone objects
+
+A placed object whose skeleton plays its own animation (docs/formats/wld.md, "Placed-object animation") is drawn
+where the animation has it. `ZoneRenderer::build` draws its still triangles with every placement as any object's,
+and keeps its moving triangles as one instanced model per definition (the instancing of "Model overrides"): each
+vertex names its node in `GpuVertex::point_light.x` (its index among the definition's moving nodes + 1; 0 still;
+point lights reach only regions, so a placed object has no other use for it), and each placement's instance names
+the definition's first motion in `GpuInstance::normal_row[1].w`. A motion is one moving node's matrix: every frame
+`animate_instances` poses each definition once on the zone's animation clock (`set_animation_time`, milliseconds
+since the zone loaded, the clock the collision uses) and writes every motion's rows, now and a frame ago, into the
+frame slot's motion buffer (set 1, binding 4). `zone.vert` and `zone_shadow.vert` put a vertex through its motion
+before its placement, and the motion pass's previous place uses the rows a frame ago, so the temporal upscaler and
+frame generation see the parts move. The upload is a few matrices whatever the number of placements: Emerald Jungle's
+22,174 animated trees draw in fewer calls than their per-placement copies did (0.43 ms against 0.58 ms a frame
+classic, 2.36 against 2.60 modern, `--frames` at the same view). The instances' boxes reach as far as the animation
+takes the parts. The model's vertices carry the first placement's baked light; another placement's instance tints
+them by its own over that one's, channel by channel, so its gradient is the first one's. The point lights' shadow
+cubes (drawn once and kept) and the cover map keep the parts in their first pose.
 
 ## Zone lights
 
@@ -1115,6 +1239,11 @@ hole there.
 
 ## EQG surface maps
 
+Held EQG equipment retains its authored normal, specular and environment maps in modern lighting, through the same
+actor surface path as armour. For example, the cleric epic shield's pearl environment map and strength travel with
+its mesh instead of being discarded when the item is loaded. `AddAlpha` actor and object materials retain their
+authored unlit, unfogged state in both lighting modes.
+
 EQG zone materials of the opaque, Alpha and Chroma classes name a tangent-space normal map (`e_TextureNormal0`,
 uncompressed A8R8G8B8 `_n.dds` files) and, by their shader, a specular or reflective term. The classic renderer binds the
 normal map only with bump mapping on, and its multi-pass lights are what it bumps; the
@@ -1130,20 +1259,33 @@ modern lighting always uses them (`shaders/zone.frag` `mapped_normal`, `surface_
 - **Reflection** (`CE1`, `CBSGE1` with `e_fEnvMapStrength0` > 0, read doubled): the sky
   (`sky_reflection`) in place of the material's environment map, weighted by Fresnel.
 
-The `CBGG1` / `CBSG1` classes use a packed surface map. That both names select one class is confirmed:
-`CMaterial::InitFromShaderName` (`EQGraphicsDX9.dll` 0x10014660) gives both class 0xc, render class 0xd (eqlib's
-`RenderMaterial_OpaqueCBSG1`). The channel layout is not confirmed against the original's shader (the author read it
-from `SPL/SModelCBSG1`; [unknowns](unknowns.md#world-rendering), EQG): the client takes RG as the tangent normal's
-direction with a Z of 0.9 before normalization (its own choice, which keeps a dark glow mask from turning the normal
-inward), B as self-illumination and A as gloss. The glow mask is multiplied by the diffuse colour and added after the
-weather (snow or rain does not put a glowing crystal out), independent of baked light, sky share and shadows. The
-modern zone renderer gives it HDR headroom, the additive particles' `render::kParticleGlow` (2.5); the classic
-lighting adds it at intensity 1 (not confirmed). The modern highlight's strength is the map's alpha in place of
-`e_fGloss0` (a white alpha gives 1.0 against the ordinary classes' 0.2); whether the original replaces `e_fGloss0`
-by the alpha or scales it is not confirmed. A packed material whose map does not load is drawn as a plain one: no
-packed normal, glow or highlight from the packing, and a texture pack's maps may still apply. Other classes keep
-their RGB normal path. Treating packed B as normal Z had turned dark regions' normals inward and lost the luminous
-parts entirely.
+The `CBGG1` / `CBSG1` classes use a packed surface map, with environment reflection added by `CBSGE1`.
+The player's compiled `SkinMeshCBSG1` and `SkinMeshCBSGE1` shaders confirm RG as the tangent normal's direction,
+with Z fixed at 0.9 before normalization, B added to ambient illumination, and A replacing `e_fGloss0` for the
+specular term. The actor and zone renderers use those channels separately. The diffuse colour times the glow mask
+is added after the weather, independent of baked light, sky share and shadows; modern lighting gives it the same
+HDR headroom as additive particles (`render::kParticleGlow`, 2.5), while classic uses intensity 1. A missing surface
+map supplies no packed normal, glow or gloss. The native `CB1` and `CBS1` shaders retain full RGB normals, even when
+an item shares one map across packed and ordinary materials.
+
+The legacy `CBGGE1`, `CBE1` and `CBSE1` names select the same native render class as `CBSGE1`, so they retain the
+same packed illumination and environment path. The original name is preserved in the material metadata.
+
+Equipment environment maps may be cubemaps or ordinary 2D sphere maps. Both become octahedral textures for the
+actor renderer. Sphere-map coordinates follow the native `SkinMeshCBSGE1` vertex shader: reflect the surface-to-eye
+direction, project its X/Z axes around the +Y pole, then scale into texture coordinates. The cleric epic shield's
+pearl map is a 2D sphere map. A malformed cubemap is rejected without treating its first face as a sphere map.
+
+Held MPL materials retain their separately scaled coverage texture and modulate diffuse RGB component by component
+(`saturate(2 * diffuse * coverage)`), while their material's alpha remains separate. WaterFall materials scroll
+colour and alpha independently. Lava materials retain both scrolling diffuse layers and the shared normal map
+sampled at both coordinates; the primary alpha blends its lit colour against the bump-lit secondary. Lava2 is drawn
+as Lava, as the zone draws it (its own formula is not settled, docs/unknowns.md), and a lava material keeps its
+second layer over an MPL coverage map, the two sharing one slot (`render::actor_lava_surface`,
+`actor_takes_coverage`). In the classic lighting the native surface map is read only for a glowing part. These actor
+effects use the display clock, wrapped at 100 seconds as the native preshader does. Hailstone's world light,
+shadows and colour space still determine the final lighting. A missing optional coverage texture keeps the
+material's diffuse colour.
 
 The crystal's beam and radial rays in Forgotten Halls are additive model triangles. In modern lighting every EQG
 `AddAlpha` zone surface, in every EQG zone, is multiplied by the same 2.5 for bloom; classic keeps their texture-direct
@@ -1154,14 +1296,15 @@ not the rays.
 
 Apart from that packed glow mask, classic lighting keeps its diffuse-by-lit-colour surface path.
 
-Hero's Forge attachments carry their own EQG surface properties into the actor renderer, including supplied layer
-overrides. Their native normal maps use the full RGB tangent vector and the same +v convention as EQG zones;
+Hero's Forge and held attachments carry their own EQG surface properties into the actor renderer, including supplied layer
+overrides. Native maps use the RGB or packed tangent interpretation selected by their material class, with the same +v convention as EQG zones;
 texture-pack normals keep their separate BC5 RG interpretation and remain the fallback when a native map is absent.
-Armor reflection uses the material's environment DDS cube, converted with the existing cube-to-octahedral loader;
-an absent or invalid cube supplies no reflection. The base shader's known specular/reflective classes select the
+Reflection uses the material's environment DDS, converted from its cube or sphere representation;
+an absent or invalid map supplies no reflection. The base shader's known specular/reflective classes select the
 effect, and a layer's parameters do not invent a new shader class. Native surface records share the actor's lighting
 buffer, with one bounded table per frame shared by instances of a mesh. Push constants remain 128 bytes and no
-descriptor bindings are added. Ordinary WLD, Luclin, held-item and EQG NPC materials retain their existing path.
+descriptor bindings are added. Ordinary WLD and Luclin surfaces keep their diffuse path, animated texture frames
+and attached WLD clouds.
 
 Alpha-tested materials (trees, grass, fences, Chroma/Masked) draw in the opaque pass with alpha-to-coverage when the
 scene is multisampled: the pipelines set `shaders/coverage.glsl`'s `kAlphaToCoverage`, and the alpha test becomes a
@@ -1172,7 +1315,9 @@ The zone colour and depth shaders turn that ramp into a sample mask and intersec
 Their pipelines leave fixed-function alpha-to-coverage off: combining it with shader sample-mask output and
 fragment discard made terrain and buildings disappear on Radeon RX 9070 XT. Both passes use the same pixel noise
 and coverage helper, so cut-out edges keep the same samples when the depth pre-pass is enabled. Actor and object
-pipelines continue to use hardware alpha-to-coverage.
+world pipelines continue to use hardware alpha-to-coverage. Item previews compile a separate actor shader using
+the shared explicit coverage mask and alpha 1 on accepted samples; this avoids squaring coverage when the
+transparent preview is resolved and unpremultiplied for ImGui. The world shader contains no sample-mask output.
 
 ## Modern lighting
 
@@ -1242,6 +1387,8 @@ pipelines continue to use hardware alpha-to-coverage.
   and size, so sparks under 3 units count less than a sheet of flame. Its colour is their tint times its texture's
   average colour (`ParticleRenderer::texture_color`). Its strength follows how much of the effect is alive, and it
   reaches 40 to 100 units as the particles spread. Emitters within 12 units merge.
+  Actor effects use the same modern light calculation, with up to four EDD lights and four WLD cloud lights before
+  the shared scene budget is selected. These lights follow the posed model or item and obey `/dynamiclights`.
 
 - **Shadows** (`render/shadows.h`, `render/vk_context.h`): four cascades out to 1200 units (mostly logarithmic
   splits), each an orthographic view of its slice's bounding sphere snapped to whole texels; a depth array image
@@ -1848,6 +1995,59 @@ Names that overlap each other are drawn from the farthest to the nearest, so the
 
 The target's highlight (the dark plate, the edge in its colour and the bobbing marker) is the option `target_plate_highlight` (Options > Display "Highlight Target Name", `display.target_plate_highlight`, default on); off, the target's name is plain in its colour. If the pipeline cannot be made (a missing shader) the log says so and the names are drawn over the scene. Offline check (the zone viewer, no server; needs a GPU, a display and the game folder, so not in `hailstone_tests`): `tools/probe_test.py --hailstone build/hailstone/hailstone --game-dir DIR` runs the viewer twice in the Bazaar. `--plate-test` draws test names (magenta) through the same `NameplateLayer` as the client, each placed from the CPU's rays into the zone (`app/plate_test.h`) so that it is known what the scene should do to it: in front of everything it covers, behind it all, or in between. `--plate-test-no-depth` draws the same names with no depth test. The script counts the magenta pixels of each name in both screenshots: a front name must keep 95 % of them, a behind name lose all but 2 %, a partial one lose some. The CPU side is in `tests/plate_test_test.cpp`.
 
+## Detected settings
+
+The first start fits the graphics to the computer (`render/graphics_tier.h`), so a weak machine does not start with
+everything at its highest. Before the settings are first read, the GPU in use and the CPU are sorted into a tier:
+
+| | Tier |
+|---|---|
+| Discrete GPU, 6 GiB of its own memory or more (its largest device-local heap) | High |
+| Discrete GPU, 3 to 6 GiB | Medium |
+| Discrete GPU under 3 GiB | Low |
+| Integrated GPU: Apple's | Medium |
+| Integrated GPU: any other (Intel, AMD); a software renderer or a virtual GPU | Low |
+| Then the CPU: under 4 threads | Low at most |
+| Under 6 threads | Medium at most |
+
+Low and Medium are the Options window's quality presets of the same names (Graphics > Preset: shadows,
+anti-aliasing, ambient occlusion, distance blur, view distance), with a few more of the costlier settings; High
+leaves every one at its default, so it never picks Ultra. Low also turns upscaling and frame generation off, as they are by default, so Detect turns off an FSR 3.1 the player picked (each
+costs a fixed share of the frame at the output's size, whatever the render scale; on an Intel Iris Xe tablet FSR 3.1
+was far slower than FSR 1) and draws with the classic lighting and no radial flora; Medium and High keep what the player chose for
+those four (kept), and Options > Graphics notes on a Low computer that FSR 3.1 and frame generation are slow there:
+
+| Key | Low | Medium |
+|---|---|---|
+| `display.shadows` | 0 | 1024 |
+| `display.msaa` | 1 | 2 |
+| `display.ao` | 0 | 0 |
+| `display.distance_blur` | 0 | (default) |
+| `display.view_distance` | 1.5 | 2.0 |
+| `display.light_shadows` | 0 | 4 |
+| `display.render_scale` | (default) | (default) |
+| `display.neighbour_zones` | 0 | (default) |
+| `display.horizon_hills` | 0 | (default) |
+| `display.volumetric_clouds` | 0 | (default) |
+| `display.grass_density` | 50 | 75 |
+| `display.tree_detail` | 50 | (default) |
+| `display.upscaler` | off | (kept) |
+| `display.frame_gen` | 0 | (kept) |
+| `display.lighting` | classic | (kept) |
+| `display.grass` | 0 (Radial Flora off) | (kept) |
+
+The tier is written only to a new install's `hailstone.ini` (one with no `display.` key yet; the asset folder the
+picker saves first does not count). An existing install keeps its settings. Either way the tier found is saved as
+`display.gpu_tier`, and the detection does not run again while that key is there; the log names the GPU, its
+memory, the CPU's threads and the tier. A character's settings file starts as a copy of `hailstone.ini`'s keys, so
+characters made later start at the tier too.
+
+Options > Graphics > Detect (gamepad: Display > Graphics for this computer) detects again and applies the tier over
+the settings there, each key a tier leaves at its default erased; anti-aliasing and the upscaler change at the next
+start, as always. The thresholds are a guess at what each class of hardware runs well, not a measurement: a GPU's memory
+stands in for its speed, and an integrated GPU's heap (the system's memory) says nothing, so every integrated GPU
+but Apple's is Low.
+
 ## Settings
 
 In `hailstone.ini`, and in the Options window (`ui/modern/options.lua`, this client's own window: its Display and
@@ -1859,7 +2059,7 @@ viewer (`--zone`, `--model`) takes `--msaa`, `--tonemap`, `--exposure`, `--rende
 |---|---|---|---|
 | `display.msaa` | 1, 2, 4 | 4 | samples per pixel, at most 4 (`render::kMaxMsaa`; 8 and up are drawn at 4), cut to what the GPU supports; off under `display.upscaler = taa`; read at start-up |
 | `display.render_scale` | 33 .. 100 | 100 | percent of the 3D view's size the scene is drawn at; below 100 the upscaler (`display.upscaler`) brings it up (The frame); the UI stays sharp. Options > Upscale Quality's presets set it (`render::UpscaleQuality`): Native AA 100, Quality 67, Balanced 59, Performance 50, Ultra Performance 33 (FSR's ratios, 1.5x .. 3x); any other value shows as Custom |
-| `display.upscaler` | fsr1, taa, fsr3 | fsr1 | fsr1: FSR 1 below a render scale of 100; taa: temporal anti-aliasing and upscaling at every render scale, MSAA off (Temporal upscaling); fsr3: the same with AMD FSR 3.1's upscaler (AMD FSR 3.1; taa where the GPU lacks what it needs); read at start-up |
+| `display.upscaler` | off, fsr1, taa, fsr3 | off | off (the default on every computer): no upscaling and no frame generation, the view drawn at full size whatever `display.render_scale` and `display.frame_gen` say (both kept for later; applied at once, a temporal upscaler already running stays as anti-aliasing until the next start); fsr1: FSR 1 below a render scale of 100; taa: temporal anti-aliasing and upscaling at every render scale, MSAA off (Temporal upscaling); fsr3: the same with AMD FSR 3.1's upscaler (AMD FSR 3.1; taa where the GPU lacks what it needs); read at start-up |
 | `display.frame_gen` | true, false | false | present a frame made between each two real ones (Frame generation); only with `display.upscaler` taa or fsr3; forces vertical sync and holds the game to half the refresh; applied at once |
 | `display.sharpness` | 0 .. 1 | 0.5 | RCAS sharpening: FSR 1's below a render scale of 100, the temporal upscaler's or FSR 3.1's own at every scale; 0 none |
 | `display.tonemap` | auto, none, agx, aces | auto | auto: AgX (with a little extra saturation) for modern, none for classic |
@@ -1873,6 +2073,7 @@ viewer (`--zone`, `--model`) takes `--msaa`, `--tonemap`, `--exposure`, `--rende
 | `display.distance_blur` | 0, 1 | 1 | the far distance's slight blur; modern only |
 | `display.neighbour_zones` | 0, 1 | 1 | the zone past an outdoor zone line drawn in the distance (Neighbour zones); modern only; `/neighbourzones [on \| off]` |
 | `display.horizon_hills` | 0, 1 | 1 | land round an outdoor zone past its edges (Horizon hills); modern only; viewer `--no-horizon` |
+| `display.volumetric_clouds` | 0, 1 | 1 | clouds marched through the air over the plain skies, in place of the painted cloud layer and patches (Volumetric Clouds); modern only; viewer `--no-clouds` |
 | `display.smooth_ground` | 0, 1 | 1 | a classic zone's ground drawn smooth and curved (Smoothed ground); read as each zone loads; viewer `--no-smooth-ground` |
 | `display.tree_detail` | 50 to 200 | 100 | how far a texture pack's replacement models (generated trees) keep their nearer levels of detail, in percent of their own distances (Tree Detail Distance); viewer `--tree-detail` |
 | `display.target_ring_cues` | 0, 1 | 1 | the target ring's sweep on a new target and pulse while attacking (Target Ring Cues; The target ring) |
@@ -1897,8 +2098,9 @@ viewer (`--zone`, `--model`) takes `--msaa`, `--tonemap`, `--exposure`, `--rende
 | `display.grass_density` | percent, 25 .. 200 | 100 | how thick Hailstone's lawn grows (`render::lawn_lod_blades`) |
 | `display.zone_flora` | on, off | on | Hailstone's flora for zones with a rules file (Zone flora), read as each zone loads |
 | `display.extra_shields` | on, off | on | a deliberate difference: shields RoF2 does not list (`game::is_shield_model`, docs/formats/characters.md "Held items") go on the shield point, not in the hand; read at start-up |
-| `display.texture_folder` | pack name, absolute folder, off | `textures/default` | replacement textures (Texture overrides): the folder indexed at start, its files read as each zone loads; the Options window's Textures section (from the next start) and Hailstone Texture Studio set it |
+| `display.texture_folder` | pack name, absolute folder, off | `textures/default` | replacement textures (Texture overrides): the folder indexed at start, its files read as each zone loads; the Options window's Textures section and the login screen's More options (both packs; from the next start) and Hailstone Texture Studio set it |
 | `display.fov` | fov units | none | the camera's field of view in 512ths of a circle (none: the classic 90, 63.3 degrees across below an aspect of 2); the Options window shows degrees, 45 .. 120 |
+| `display.gpu_tier` | low, medium, high | (detected) | the tier the first start found for this computer (Detected settings); present, the detection does not run again; kept in `hailstone.ini` with a character's settings |
 | `ui.scale` | percent, 0 | 0 | the UI's scale (0: the display's); read at start-up; `--ui-scale` takes precedence |
 
 ## Roadmap
@@ -1930,5 +2132,5 @@ viewer (`--zone`, `--model`) takes `--msaa`, `--tonemap`, `--exposure`, `--rende
    texture LOD bias. MSAA is off while a temporal upscaler runs, so cut-outs lose alpha-to-coverage;
    particles, spells, water and lava need a reactive mask rather than motion vectors; (done) frame generation of our
    own on the engine's motion and depth (`display.frame_gen`, Frame generation); next maybe a choice of more than one
-   in-between frame for very high refresh rates, or AMD FSR 3.1's frame generation should ours fall short. DLSS and
-   XeSS are not planned.
+   in-between frame for very high refresh rates, or AMD FSR 3.1's frame generation should ours fall short. XeSS and
+   FSR 4 are add-ons ("Upscaler providers"); DLSS is not planned.

@@ -14,6 +14,7 @@
 #include "app/player_movement.h"
 #include "app/world_objects.h"
 #include "assets/regions.h"
+#include "game/animated_objects.h"
 #include "game/boats.h"
 #include "game/collision.h"
 #include "game/doors.h"
@@ -57,6 +58,8 @@ public:
                 out.door_hit = objects_->sweep_sphere(s, &hits, pass_doors_.empty() ? nullptr : &pass_doors_);
                 for (const auto& h : hits) out.door_hits.push_back({h.id, h.type});
             }
+            // The zone objects' moving parts where their animation has them (game/animated_objects.h).
+            if (animated_) animated_->sweep_sphere(s);
             // A boat's hull and rails are walls too (game/boats.h), not only its deck a floor.
             sweep_vehicles(s, radius);
             // Hailstone: live NPCs are walls to the player (game/npc_collision.h), never floors or ceilings.
@@ -86,6 +89,10 @@ public:
             // Doors, lifts and platforms are floors too.
             auto door_floor = objects_->floor_below(p, step_up);
             if (door_floor && (!floor || *door_floor > *floor)) floor = door_floor;
+        }
+        if (animated_) {
+            auto moving_floor = animated_->floor_below(p, step_up);
+            if (moving_floor && (!floor || *moving_floor > *floor)) floor = moving_floor;
         }
         return floor;
     }
@@ -123,6 +130,8 @@ public:
         for (const auto& h : hits) out.push_back(h.id);
         return out;
     }
+    // The zone objects that play their own animation, as posed for this step (game/animated_objects.h); null: none.
+    void set_animated(const game::AnimatedObjects* animated) { animated_ = animated; }
     // The NPC bodies the movement sweep stops at (ClientApp::update_npc_bodies); null: none.
     void set_npcs(const std::vector<game::NpcBody>* bodies) { npcs_ = bodies; }
     // Hailstone: walking into a ladder whose polygons are all passable climbs it (hailstone.cfg [movement]
@@ -169,6 +178,7 @@ public:
         if (!mesh_ || !s.valid()) return false;
         mesh_->sweep_sphere(s);
         if (objects_) objects_->sweep_sphere(s, nullptr);
+        if (animated_) animated_->sweep_sphere(s);
         if (vehicles_) game::sweep_hulls(s, *vehicles_, radius, 0, boat);
         return s.collided && s.t > 0.0f;
     }
@@ -183,6 +193,7 @@ private:
     const std::vector<Vehicle>* vehicles_ = nullptr;
     std::uint32_t standing_on_ = 0;
     const std::vector<game::NpcBody>* npcs_ = nullptr;
+    const game::AnimatedObjects* animated_ = nullptr;
     bool passable_ladders_ = false;
     std::vector<std::uint8_t> pass_doors_;
     std::vector<WorldObjects::DoorHit>* contact_doors_ = nullptr;

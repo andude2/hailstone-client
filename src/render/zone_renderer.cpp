@@ -88,8 +88,9 @@ struct GpuVertex {
 
 // Where an instanced replacement model stands (zone.vert's per-instance inputs, lighting.glsl instance_point): its
 // placement's transform, model to world, as the rows of a 3 x 4 matrix; the normal matrix's rows, the first's w how
-// much the sway's distances scale; and what its vertex colours are multiplied by (the placement's baked light). The
-// buffer's first is the identity, for the zone's own geometry.
+// much the sway's distances scale, the second's w an animated object's motion (ZoneRenderer::motions_, 0: none); and
+// what its vertex colours are multiplied by (the placement's baked light). The buffer's first is the identity, for the
+// zone's own geometry.
 struct GpuInstance {
     glm::vec4 row[3]{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}};
     glm::vec4 normal_row[3]{{1, 0, 0, 1}, {0, 1, 0, 0}, {0, 0, 1, 0}};
@@ -322,6 +323,9 @@ struct ZoneRenderer::Prepared {
     std::vector<std::uint32_t> indices;
     std::vector<Draw> draws;
     std::vector<GpuInstance> instances; // the identity, then the instanced models' placements
+    std::vector<Motion> motions;                     // ZoneRenderer::motions_
+    std::vector<assets::ObjectAnimation> animations; // ZoneRenderer::animations_
+    std::size_t animated_instances = 0;
     std::vector<Chunk> chunks; // the draws', then solid's
     std::size_t draw_chunks = 0;
     std::size_t triangles = 0; // as drawn, each instance's counted
@@ -346,6 +350,10 @@ void ZoneRenderer::PreparedDeleter::operator()(Prepared* p) const { delete p; }
 ZoneRenderer::PreparedCounts ZoneRenderer::prepared_counts(const Prepared& p) {
     return {p.vertices.size(), p.indices.size(), p.instances.empty() ? 0 : p.instances.size() - 1, p.triangles,
             p.draw_chunks};
+}
+
+bool ZoneRenderer::prepared_blends_background(const Prepared& p) {
+    return std::any_of(p.draws.begin(), p.draws.end(), blends_background);
 }
 
 ZoneRenderer::PreparedLand ZoneRenderer::prepared_land(const Prepared& p) {
@@ -399,7 +407,35 @@ void ZoneRenderer::upload(Prepared& p) {
     index_buffer_ = upload.buffer_pieces(std::as_bytes(std::span(p.indices)), VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                                          kStagingBudget);
     if (p.instances.empty()) p.instances.emplace_back();
+    motions_ = std::move(p.motions);
+    animations_ = std::move(p.animations);
+    animated_instances_ = p.animated_instances;
+    animation_poses_.assign(animations_.size(), {});
+    motion_rows_.clear();
+    animated_frame_ = 0;
     instance_buffer_ = upload.buffer(std::as_bytes(std::span(p.instances)), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    {
+        // The motions' rows now and a frame ago (6 per motion; motion 0 the identity), one buffer per frame in flight:
+        // the identity until animate_instances writes them.
+        const std::array<glm::vec4, 3> identity{glm::vec4(1, 0, 0, 0), glm::vec4(0, 1, 0, 0), glm::vec4(0, 0, 1, 0)};
+        std::vector<std::array<glm::vec4, 3>> rows((motions_.size() + 1) * 2, identity);
+        for (std::size_t i = 0; i < motion_slots_.size(); ++i) {
+            VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            bi.size = rows.size() * sizeof(rows[0]);
+            bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+            VmaAllocationCreateInfo ai{};
+            ai.usage = VMA_MEMORY_USAGE_AUTO;
+            ai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+            VmaAllocationInfo info{};
+            vk_check(vmaCreateBuffer(vk_.allocator(), &bi, &ai, &motion_slots_[i].buffer, &motion_slots_[i].allocation,
+                                     &info),
+                     "create the zone's motion buffer");
+            motion_slots_[i].size = bi.size;
+            motion_mapped_[i] = info.pMappedData;
+            std::memcpy(motion_mapped_[i], rows.data(), bi.size);
+            vmaFlushAllocation(vk_.allocator(), motion_slots_[i].allocation, 0, bi.size);
+        }
+    }
     upload.submit();
     mark("submitted", p.started);
     if (!distant_indices_.empty())
@@ -423,6 +459,7 @@ void ZoneRenderer::upload(Prepared& p) {
               p.vertices.size() * sizeof(GpuVertex) / (1024 * 1024), p.indices.size(),
               p.indices.size() * sizeof(std::uint32_t) / (1024 * 1024), p.instances.size() - 1);
     draws_ = std::move(p.draws);
+    opaque_blends_background_ = std::any_of(draws_.begin(), draws_.end(), blends_background);
     chunks_ = std::move(p.chunks);
     instance_origins_.clear();
     for (const GpuInstance& i : p.instances) instance_origins_.emplace_back(i.row[0].w, i.row[1].w, i.row[2].w);
@@ -491,6 +528,7 @@ ZoneRenderer::~ZoneRenderer() {
     for (const auto& b : light_grid_buffers_) o.buffers.push_back(b);
     o.buffers.push_back(vertex_buffer_);
     o.buffers.push_back(instance_buffer_);
+    for (const auto& b : motion_slots_) o.buffers.push_back(b);
     o.buffers.push_back(index_buffer_);
     for (const auto& b : distant_buffers_) o.buffers.push_back(b);
     vk_.retire([d = vk_.device(), allocator = vk_.allocator(), o]() mutable {
@@ -706,11 +744,30 @@ ZoneRenderer::PreparedPtr ZoneRenderer::prepare(const assets::Zone& zone, const 
         std::vector<GpuInstance> instances;
         std::vector<glm::mat4> transforms; // the instances' own, for their boxes
         std::uint32_t first_instance = 0;  // in Prepared::instances
+        // An animated object's moving triangles: how far they get from the object's origin over the animation (the
+        // instances' boxes are that far round their placement); 0 for a replacement model.
+        float reach = 0.0f;
     };
     std::vector<InstancedModel> models;
     std::unordered_map<const assets::Mesh*, std::uint32_t> model_numbers; // mesh -> its number in models + 1
     std::vector<GpuVertex> model_vertices;
     std::map<MaterialKey, std::vector<std::uint32_t>> model_by_material;
+    // The objects that play their own animation (assets/object_animation.h): each definition's still triangles are
+    // drawn with every placement as any object's; its moving triangles are one instanced model with an instance per
+    // placement, each vertex put through its node's motion every frame (ZoneRenderer::animate_instances). The model's
+    // vertices take the first placement's baked light; another placement's instance tints them by its own over that
+    // one's.
+    struct AnimatedDefinition {
+        std::uint32_t animation = 0;            // in prep.animations
+        assets::Mesh still;                     // the mesh with the moving triangles left out
+        std::vector<std::uint16_t> nodes;       // the moving nodes with triangles
+        std::uint32_t number = 0;               // the moving triangles' instanced model (number in models + 1; 0: none)
+        std::uint32_t first_motion = 0;         // nodes[k]'s motion is first_motion + k (ZoneRenderer::motions_)
+        std::vector<std::uint32_t> vertices;    // the moving triangles' vertices
+        std::vector<std::uint32_t> base_colors; // the colours its model was built with
+    };
+    std::unordered_map<std::string, AnimatedDefinition> animated_defs;
+    std::size_t animated_placements = 0;
     // `instanced`: an instanced model's number + 1, its mesh appended to model_vertices untransformed.
     auto append = [&](const assets::Mesh& mesh, const glm::mat4& transform, const std::vector<std::uint32_t>& colors,
                       bool region, bool plant, const std::vector<std::uint8_t>* liquid = nullptr,
@@ -887,6 +944,122 @@ ZoneRenderer::PreparedPtr ZoneRenderer::prepare(const assets::Zone& zone, const 
             ++replaced_objects;
             continue;
         }
+        if (auto a = zone.object_animations.find(p.actor); a != zone.object_animations.end()) {
+            const assets::Mesh& mesh = it->second;
+            const assets::ObjectAnimation& anim = a->second;
+            auto [found, fresh] = animated_defs.try_emplace(p.actor);
+            AnimatedDefinition& def = found->second;
+            if (fresh) {
+                def.animation = static_cast<std::uint32_t>(prep.animations.size());
+                prep.animations.push_back(anim);
+                def.base_colors = p.vertex_colors.size() == mesh.vertices.size() ? p.vertex_colors
+                                                                                  : std::vector<std::uint32_t>{};
+                // The mesh with only the triangles that go with `node` (kStillVertex: those that stay still).
+                auto filtered = [&](std::uint16_t node) {
+                    assets::Mesh out;
+                    out.name = mesh.name;
+                    out.vertices = mesh.vertices;
+                    out.materials = mesh.materials;
+                    out.front_ccw = mesh.front_ccw;
+                    for (const auto& part : mesh.parts) {
+                        assets::MeshPart kept = part;
+                        kept.first_index = static_cast<std::uint32_t>(out.indices.size());
+                        for (std::uint32_t i = 0; i + 2 < part.index_count; i += 3) {
+                            if (std::size_t{part.first_index} + i + 2 >= mesh.indices.size()) break;
+                            const std::uint32_t t[3] = {mesh.indices[part.first_index + i],
+                                                        mesh.indices[part.first_index + i + 1],
+                                                        mesh.indices[part.first_index + i + 2]};
+                            if (assets::moving_triangle_node(anim.vertex_node, t[0], t[1], t[2]) != node) continue;
+                            out.indices.insert(out.indices.end(), {t[0], t[1], t[2]});
+                        }
+                        kept.index_count = static_cast<std::uint32_t>(out.indices.size()) - kept.first_index;
+                        if (kept.index_count) out.parts.push_back(kept);
+                    }
+                    return out;
+                };
+                def.still = filtered(assets::kStillVertex);
+                for (std::uint32_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+                    const std::uint16_t n =
+                        assets::moving_triangle_node(anim.vertex_node, mesh.indices[i], mesh.indices[i + 1], mesh.indices[i + 2]);
+                    if (n != assets::kStillVertex && std::find(def.nodes.begin(), def.nodes.end(), n) == def.nodes.end())
+                        def.nodes.push_back(n);
+                }
+                // One instanced model of all the moving triangles; each vertex names its node in point_light.x (its
+                // offset among def.nodes + 1; 0: still), which no placed object uses otherwise (point lights reach
+                // only regions), and the instance names the definition's first motion (zone.vert adds them).
+                assets::Mesh moving;
+                moving.name = mesh.name;
+                moving.vertices = mesh.vertices;
+                moving.materials = mesh.materials;
+                moving.front_ccw = mesh.front_ccw;
+                for (const auto& part : mesh.parts) {
+                    assets::MeshPart kept = part;
+                    kept.first_index = static_cast<std::uint32_t>(moving.indices.size());
+                    for (std::uint32_t i = 0; i + 2 < part.index_count; i += 3) {
+                        if (std::size_t{part.first_index} + i + 2 >= mesh.indices.size()) break;
+                        const std::uint32_t t[3] = {mesh.indices[part.first_index + i], mesh.indices[part.first_index + i + 1],
+                                                    mesh.indices[part.first_index + i + 2]};
+                        if (assets::moving_triangle_node(anim.vertex_node, t[0], t[1], t[2]) == assets::kStillVertex)
+                            continue;
+                        moving.indices.insert(moving.indices.end(), {t[0], t[1], t[2]});
+                        def.vertices.insert(def.vertices.end(), {t[0], t[1], t[2]});
+                    }
+                    kept.index_count = static_cast<std::uint32_t>(moving.indices.size()) - kept.first_index;
+                    if (kept.index_count) moving.parts.push_back(kept);
+                }
+                std::sort(def.vertices.begin(), def.vertices.end());
+                def.vertices.erase(std::unique(def.vertices.begin(), def.vertices.end()), def.vertices.end());
+                def.first_motion = static_cast<std::uint32_t>(prep.motions.size()) + 1;
+                for (std::uint16_t n : def.nodes) prep.motions.push_back({def.animation, n});
+                // How far its vertices get from the object's origin, at every key and between keys.
+                float reach = 0.0f;
+                std::vector<glm::mat4> pose;
+                const std::uint32_t samples = std::clamp<std::uint32_t>(anim.period_ms / 8, 8, 512);
+                for (std::uint32_t k = 0; k <= samples; ++k) {
+                    anim.pose(std::uint64_t{anim.period_ms} * k / samples, pose);
+                    for (std::uint32_t v : def.vertices) {
+                        const std::uint16_t n = v < anim.vertex_node.size() ? anim.vertex_node[v] : assets::kStillVertex;
+                        const glm::mat4 m = n < pose.size() ? pose[n] : glm::mat4(1.0f);
+                        reach = std::max(reach, glm::length(glm::vec3(m * glm::vec4(mesh.vertices[v].position, 1.0f))));
+                    }
+                }
+                models.emplace_back();
+                models.back().reach = reach * 1.01f + 0.5f;
+                def.number = static_cast<std::uint32_t>(models.size());
+                const std::size_t base = model_vertices.size();
+                append(moving, glm::mat4(1.0f), def.base_colors, false, false, nullptr, def.number);
+                for (std::size_t i = 0; i < mesh.vertices.size() && base + i < model_vertices.size(); ++i) {
+                    const std::uint16_t n = i < anim.vertex_node.size() ? anim.vertex_node[i] : assets::kStillVertex;
+                    const auto at = std::find(def.nodes.begin(), def.nodes.end(), n);
+                    model_vertices[base + i].point_light =
+                        glm::vec3(at == def.nodes.end() ? 0.0f : static_cast<float>(at - def.nodes.begin() + 1), 0.0f, 0.0f);
+                }
+            }
+            append(def.still, p.transform, p.vertex_colors, false, false);
+            if (def.number != 0) {
+                // This placement's baked light over the one the model was built with, channel by channel.
+                glm::vec4 tint(1.0f);
+                if (p.vertex_colors.size() == mesh.vertices.size()) {
+                    glm::vec4 mine(0.0f), base(0.0f);
+                    for (std::uint32_t v : def.vertices) {
+                        const std::uint32_t b = v < def.base_colors.size() ? def.base_colors[v] : mesh.vertices[v].color;
+                        for (int c = 0; c < 4; ++c) {
+                            mine[c] += static_cast<float>((p.vertex_colors[v] >> (8 * c)) & 0xff);
+                            base[c] += static_cast<float>((b >> (8 * c)) & 0xff);
+                        }
+                    }
+                    for (int c = 0; c < 4; ++c) tint[c] = base[c] > 0.0f ? std::clamp(mine[c] / base[c], 0.0f, 8.0f) : 1.0f;
+                }
+                InstancedModel& model = models[def.number - 1];
+                GpuInstance instance = make_instance(p.transform, tint);
+                instance.normal_row[1].w = static_cast<float>(def.first_motion); // zone.vert: its motions first
+                model.instances.push_back(instance);
+                model.transforms.push_back(p.transform);
+                ++prep.animated_instances;
+            }
+            ++animated_placements;
+            continue;
+        }
         append(it->second, p.transform, p.vertex_colors, false, is_plant(p.actor, it->second));
     }
     if (plants) log::info("zone renderer: {} plants sway in the wind", plants);
@@ -894,6 +1067,9 @@ ZoneRenderer::PreparedPtr ZoneRenderer::prepare(const assets::Zone& zone, const 
     if (replaced_objects)
         log::info("zone renderer: {} placements drawn from model overrides, {} models instanced", replaced_objects,
                   models.size());
+    if (animated_placements)
+        log::info("zone renderer: {} placements of {} animated objects, {} moving parts", animated_placements,
+                  animated_defs.size(), prep.animated_instances);
     if (options.multipass_lighting)
         log::info("multi-pass lighting: {} lights reach {} zone vertices", zone.lights.size(), lit_vertices);
     if (liquid_triangles) log::info("zone renderer: {} water and lava surface triangles", liquid_triangles);
@@ -1364,6 +1540,11 @@ ZoneRenderer::PreparedPtr ZoneRenderer::prepare(const assets::Zone& zone, const 
                 hi = glm::max(hi, v.position + r);
             }
             const InstancedModel& model = models[d.instanced - 1];
+            // An animated part: anywhere its animation takes it (a cube round its object's origin).
+            if (model.reach > 0.0f) {
+                lo = glm::vec3(-model.reach);
+                hi = glm::vec3(model.reach);
+            }
             d.first_chunk = static_cast<std::uint32_t>(prep.chunks.size());
             for (std::size_t i = 0; i < model.instances.size() && d.index_count > 0; ++i) {
                 const glm::mat4& m = model.transforms[i];
@@ -1591,12 +1772,14 @@ void ZoneRenderer::create_descriptors() {
     vk_check(vkCreateDescriptorSetLayout(d, &li, nullptr, &set_layout_), "vkCreateDescriptorSetLayout");
 
     // Set 1: the scene lighting constants, one uniform buffer per frame in flight; the light grid's three buffers.
-    VkDescriptorSetLayoutBinding ub[4]{};
+    // Binding 4: the animated objects' motions now and a frame ago (zone.vert, the shadow shaders; animate_instances).
+    VkDescriptorSetLayoutBinding ub[5]{};
     ub[0] = {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
     for (std::uint32_t i = 1; i < 4; ++i)
         ub[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    ub[4] = {4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr};
     VkDescriptorSetLayoutCreateInfo sli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    sli.bindingCount = 4;
+    sli.bindingCount = 5;
     sli.pBindings = ub;
     vk_check(vkCreateDescriptorSetLayout(d, &sli, nullptr, &scene_layout_), "vkCreateDescriptorSetLayout (scene)");
     for (std::size_t i = 0; i < scene_buffers_.size(); ++i) {
@@ -1616,7 +1799,7 @@ void ZoneRenderer::create_descriptors() {
 
     VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, count},
                                      {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VkContext::kFramesInFlight},
-                                     {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 * VkContext::kFramesInFlight}};
+                                     {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 * VkContext::kFramesInFlight}};
     VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     // The texture set's flags; the scene sets (set 1) come from it too, as a plain layout may.
     pi.flags = vk_.texture_array_pool_flags();
@@ -1644,10 +1827,11 @@ void ZoneRenderer::create_descriptors() {
         sai.descriptorSetCount = 1;
         sai.pSetLayouts = &scene_layout_;
         vk_check(vkAllocateDescriptorSets(d, &sai, &scene_sets_[i]), "vkAllocateDescriptorSets (scene)");
-        VkDescriptorBufferInfo bi[4] = {{scene_buffers_[i].buffer, 0, sizeof(SceneUniforms)}};
+        VkDescriptorBufferInfo bi[5] = {{scene_buffers_[i].buffer, 0, sizeof(SceneUniforms)}};
         for (std::uint32_t b = 0; b < 3; ++b) bi[b + 1] = {light_grid_buffers_[b].buffer, 0, VK_WHOLE_SIZE};
-        VkWriteDescriptorSet sw[4]{};
-        for (std::uint32_t b = 0; b < 4; ++b) {
+        bi[4] = {motion_slots_[i].buffer, 0, VK_WHOLE_SIZE};
+        VkWriteDescriptorSet sw[5]{};
+        for (std::uint32_t b = 0; b < 5; ++b) {
             sw[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             sw[b].dstSet = scene_sets_[i];
             sw[b].dstBinding = b;
@@ -1655,7 +1839,7 @@ void ZoneRenderer::create_descriptors() {
             sw[b].descriptorType = b == 0 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             sw[b].pBufferInfo = &bi[b];
         }
-        vkUpdateDescriptorSets(d, 4, sw, 0, nullptr);
+        vkUpdateDescriptorSets(d, 5, sw, 0, nullptr);
     }
 }
 
@@ -1915,6 +2099,10 @@ void ZoneRenderer::bind_geometry(VkCommandBuffer cmd) const {
 
 bool ZoneRenderer::modern_lighting() const { return scene_.lighting.params.x > 0.5f; }
 
+bool ZoneRenderer::blends_background(const Draw& d) {
+    return d.mode == kWldDetail && d.pass != Pass::Opaque;
+}
+
 std::uint64_t ZoneRenderer::begin_draw(const FrameInfo& frame, const glm::mat4& view_proj,
                                        const glm::vec3& camera_pos, const game::ViewDistance& view,
                                        double time_seconds) {
@@ -2059,6 +2247,28 @@ void ZoneRenderer::draw_depth(const FrameInfo& frame, const glm::mat4& view_proj
 void ZoneRenderer::upload_scene(std::uint32_t frame_slot) {
     std::memcpy(scene_mapped_[frame_slot], &scene_, sizeof(scene_));
     vmaFlushAllocation(vk_.allocator(), scene_buffers_[frame_slot].allocation, 0, sizeof(scene_));
+    animate_instances(frame_slot);
+}
+
+void ZoneRenderer::animate_instances(std::uint32_t frame_slot) {
+    if (motions_.empty() || animated_frame_ == vk_.frames_begun()) return;
+    // A frame ago: the rows written then, if this zone was drawn in the frame before; else these (no motion).
+    const bool continuous = animated_frame_ != 0 && animated_frame_ + 1 == vk_.frames_begun() &&
+                            motion_rows_.size() == motions_.size();
+    animated_frame_ = vk_.frames_begun();
+    for (std::size_t a = 0; a < animations_.size(); ++a) animations_[a].pose(animation_ms_, animation_poses_[a]);
+    auto* out = static_cast<std::array<glm::vec4, 3>*>(motion_mapped_[frame_slot]);
+    motion_rows_.resize(motions_.size());
+    for (std::size_t k = 0; k < motions_.size(); ++k) {
+        const std::vector<glm::mat4>& pose = animation_poses_[motions_[k].animation];
+        const glm::mat4 m = motions_[k].node < pose.size() ? pose[motions_[k].node] : glm::mat4(1.0f);
+        std::array<glm::vec4, 3> rows;
+        for (int r = 0; r < 3; ++r) rows[static_cast<std::size_t>(r)] = glm::vec4(m[0][r], m[1][r], m[2][r], m[3][r]);
+        out[(k + 1) * 2] = rows;
+        out[(k + 1) * 2 + 1] = continuous ? motion_rows_[k] : rows;
+        motion_rows_[k] = rows;
+    }
+    vmaFlushAllocation(vk_.allocator(), motion_slots_[frame_slot].allocation, 0, VK_WHOLE_SIZE);
 }
 
 void ZoneRenderer::draw_backdrop(const FrameInfo& frame, const glm::mat4& view_proj) {
@@ -2091,8 +2301,12 @@ void ZoneRenderer::create_underwater_pipeline(const std::filesystem::path& shade
     rs.lineWidth = 1.0f;
     VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
     ms.rasterizationSamples = vk_.scene_samples();
-    // Behind everything: drawn first, no depth test or write.
+    // Reverse Z: underwater.vert emits the clear depth (0). Only uncovered samples
+    // receive the background; keep their depth clear for the sky and later effects.
     VkPipelineDepthStencilStateCreateInfo dss{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    dss.depthTestEnable = VK_TRUE;
+    dss.depthWriteEnable = VK_FALSE;
+    dss.depthCompareOp = VK_COMPARE_OP_EQUAL;
     VkPipelineColorBlendAttachmentState ba{};
     ba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
                         VK_COLOR_COMPONENT_A_BIT;
@@ -2306,11 +2520,14 @@ void ZoneRenderer::create_shadow_pipeline(const std::filesystem::path& shader_di
         {10, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(GpuInstance, row) + 2 * sizeof(glm::vec4)},
         {7, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(GpuVertex, sway)},
         {11, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(GpuInstance, normal_row)},
+        // w: an animated part's first motion, and its vertex's node (zone_shadow.vert; the cubes keep the first pose).
+        {12, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(GpuInstance, normal_row) + sizeof(glm::vec4)},
+        {6, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(GpuVertex, point_light)},
     };
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     vi.vertexBindingDescriptionCount = 2;
     vi.pVertexBindingDescriptions = vb;
-    vi.vertexAttributeDescriptionCount = point ? 5 : 7;
+    vi.vertexAttributeDescriptionCount = point ? 5 : 9;
     vi.pVertexAttributeDescriptions = attrs;
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
     ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;

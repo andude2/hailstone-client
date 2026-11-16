@@ -1,7 +1,7 @@
 # Add-ons: scripts, plugins and tools from GitHub
 
-The add-on manager lets a player install a MacroQuest Lua script, a compiled plugin (docs/plugins.md) or a tool (a
-program of its own, below) by pasting a GitHub link on the login screen, without opening the Hailstone folder, and
+The add-on manager lets a player install a MacroQuest Lua script, a compiled plugin (docs/plugins.md), a tool (a
+program of its own, below) or an upscaler (a temporal upscaler from outside the client, below) by pasting a GitHub link on the login screen, without opening the Hailstone folder, and
 keeps it up to date. It is a Hailstone
 feature with no counterpart in the original client. It is built on the updater's parts (docs/updater.md): the HTTPS
 download (`platform/http_get`), the zip reader (`core/zip_read`), SHA-256 and Ed25519 (`core/ed25519`).
@@ -25,7 +25,7 @@ link. A pasted link (below the store in the Modern pack) still works for any add
 
 The client fetches the add-on's manifest and shows a card before it writes anything. The card holds:
 
-- the name, version, kind (script or plugin), author, description and repository;
+- the name, version, kind (script, plugin, tool or upscaler), author, description and repository;
 - what the add-on asks to do, in plain words ("read the game state", "cast spells, use abilities, items and AAs, attack, loot, order your pet");
 - whether it is signed, and the start of its key;
 - for a plugin, a warning: it is a program, so its permissions limit what it does through Hailstone, not what it can
@@ -43,7 +43,7 @@ The client fetches the add-on's manifest and shows a card before it writes anyth
 | Group | What it shows | The player can |
 |---|---|---|
 | **Installed** (by the manager) | version, source, what it may do, its state | update, approve, switch auto-update, open its repository or folder, remove |
-| **In your folders** (in `scripts/` or `plugins/` by hand, or shipped with Hailstone) | name, kind | open its folder |
+| **In your folders** (in `scripts/`, `plugins/` or `upscalers/` by hand, or shipped with Hailstone) | name, kind | open its folder |
 | **From <server>** (the picked server's own, `servers/<profile>/scripts/` and `plugins/`) | name, kind; a script: "Provided by <server>: it always runs there, and cannot be removed or turned off"; a compiled plugin: whether you allowed it | open its folder; a plugin: **Don't allow it any more** (allowed) or **Ask me again** (refused) |
 
 The server's own are the files the picked server sent at its last login (its `server_files.txt`). They are listed so
@@ -119,6 +119,27 @@ loads or runs anything of it itself:
 
 An older Hailstone refuses a tool's manifest ("the kind is script or plugin"). A tool needs a release of Hailstone
 that has this section.
+
+## Upscalers
+
+An upscaler is an upscaler provider (docs/plugins.md "Upscaler providers", `sdk/hailstone_upscaler.h`): a temporal
+upscaler the client cannot ship itself, such as Intel XeSS or AMD FSR 4, with the vendor's runtime it
+loads. It installs, updates and is removed as any add-on, into `upscalers/<name>/`, and appears in Options, Graphics,
+Upscaler after the client's own (both packs; `option_choices("upscaler_providers")`). Picked there, it loads at the
+next start (docs/graphics.md "Upscaler providers"):
+
+- **Its card** asks for no permissions (an upscaler sees only the frames it upscales, so its manifest says
+  `caps none` and one that asks for any is refused), and warns that it is still a program running inside Hailstone
+  with the player's rights. No server sends one, rules on one or is told of one.
+- **What its package holds** (`unpack_upscaler`): at its top its provider, a library for this platform named after it
+  (`xess.dll`, `xess.so`), and the libraries it loads beside it (`libxess.dll`, `libnvidia-ngx-dlss.so.310.9.16`);
+  data anywhere (the vendor's licence and notices). No library in a folder or for another platform, and nothing that
+  runs on its own (the names a tool may not hold). Every library's header is checked for this platform; none is
+  loaded at the install.
+- **While it runs** the client has a copy of its folder loaded (`cache/upscalers/`), so an update or a removal at the
+  login screen goes through as for any add-on and takes effect at the next start.
+
+An older Hailstone refuses an upscaler's manifest ("the kind is script, plugin or tool").
 
 ## Finding add-ons
 
@@ -217,12 +238,12 @@ signature <128 hex digits>
 |---|---|
 | `hailstone-addon 1` | the first line; another version needs a newer Hailstone |
 | `name` | 1 to 32 letters, digits, `-` and `_`, starting with a letter or digit: its folder, `scripts/<name>/` or `plugins/<name>/`; a plugin's library is named after it |
-| `kind` | `script`, `plugin` or `tool` |
+| `kind` | `script`, `plugin`, `tool` or `upscaler` |
 | `version`, `min_client` | SemVer (`core/version.h`); `min_client` is optional |
 | `author`, `description` | optional, one line each of at most 200 bytes |
-| `caps` | what it needs (docs/plugins.md "Capabilities"); required, and the ceiling below; a tool's is `none` |
+| `caps` | what it needs (docs/plugins.md "Capabilities"); required, and the ceiling below; a tool's and an upscaler's are `none` |
 | `notes` | optional: its release notes |
-| `package <platform> <size> <sha256> <file>` | a script has one, for `any`; a plugin or a tool one for each platform it is built for (`linux-x64`, `windows-x64`, `macos-arm64` ...). The file is a name beside the manifest's address (the same release's asset, or the same branch's file) or an https address on GitHub |
+| `package <platform> <size> <sha256> <file>` | a script has one, for `any`; a plugin, a tool or an upscaler one for each platform it is built for (`linux-x64`, `windows-x64`, `macos-arm64` ...). The file is a name beside the manifest's address (the same release's asset, or the same branch's file) or an https address on GitHub |
 | `key`, `signature` | optional, together: Ed25519 over every byte before the `signature` line, which ends the file |
 
 Unknown records are skipped, for later versions. A known record that does not parse refuses the whole manifest.
@@ -319,13 +340,13 @@ Everything is checked before anything is written; any failure refuses the whole 
 | Check | |
 |---|---|
 | The manifest | a strict parse within 64 KiB; the parser is in the libFuzzer zip target and the random-input tests |
-| The capabilities | each word one this Hailstone knows, and at least one (`plugin::parse_caps_strict`); a tool none |
+| The capabilities | each word one this Hailstone knows, and at least one (`plugin::parse_caps_strict`); a tool or an upscaler none |
 | The name | not another add-on's (any case), not a folder or file already in `scripts/` or `plugins/` (installed by hand or with Hailstone), whichever kind the add-on is: a script never takes a compiled plugin's name, nor a plugin a script's (their windows run as different owners, docs/plugins.md "Plugin windows", but the player would not tell them apart), not `config` for a script. A `plugins/<name>/` that holds no library (only the settings a plugin left there, as after an update took out a plugin an older release shipped) is not taken: the install goes in beside those files |
-| The client | `min_client` against `release_version()`; a plugin or a tool needs a package for `update_platform()` |
+| The client | `min_client` against `release_version()`; a plugin, a tool or an upscaler needs a package for `update_platform()` |
 | The signature | unsigned add-ons are refused when `addons.allow_unsigned` is off |
 | The package | its size and SHA-256 against the manifest (a larger download is cut off at once) |
-| The zip | `core/zip_read`: names that stay in the folder, the zip-bomb cut-off, CRC-32; at most 4096 files and 64 MiB (a script) or 512 MiB (a plugin or a tool) unpacked; no two names that differ only in case |
-| What it holds | what a server may send into the same folder (`net::server_file_destination`): no programs but a plugin's library, Lua only in a script or in a plugin's `ui/`, no hidden or device names. A script has `init.lua` at its top. A plugin has exactly one library at its top, named after it (`<name>.so`, `lib<name>.so` ...). A tool: see Tools (its own rules, `unpack_tool`; the names' shape as the server's files, `net::is_safe_file_path_shape`) |
+| The zip | `core/zip_read`: names that stay in the folder, the zip-bomb cut-off, CRC-32; at most 4096 files and 64 MiB (a script) or 512 MiB (a plugin, a tool or an upscaler) unpacked; no two names that differ only in case |
+| What it holds | what a server may send into the same folder (`net::server_file_destination`): no programs but a plugin's library, Lua only in a script or in a plugin's `ui/`, no hidden or device names. A script has `init.lua` at its top. A plugin has exactly one library at its top, named after it (`<name>.so`, `lib<name>.so` ...). A tool: see Tools (its own rules, `unpack_tool`; the names' shape as the server's files, `net::is_safe_file_path_shape`). An upscaler: see Upscalers (`unpack_upscaler`, the same shape) |
 | The Lua | every `.lua` compiles as text (`luaL_loadbufferx(..., "t")`, not run): syntax errors and precompiled chunks are refused at the install, not at the first run |
 | The library | its header (ELF, PE or Mach-O, a universal file too; `core/binary_header.h`) is a shared library for this platform's system and architecture. It is never loaded at the install; its ABI is checked at load, as for any plugin |
 | A tool's program | its header is a program for this platform (`program_fits_platform`: ELF `ET_EXEC` or `ET_DYN`, as a position-independent program is; a PE executable image that is not a DLL; a Mach-O `MH_EXECUTE`). It is never run at the install |
@@ -358,6 +379,7 @@ addons/
 scripts/<name>/   an installed script
 plugins/<name>/   an installed plugin
 tools/<name>/     an installed tool (its program, its libraries, its data)
+upscalers/<name>/ an installed upscaler (its provider, the libraries it loads, their notices)
 ```
 
 - **An update replaces only the files the add-on shipped.** A file the older version shipped and the newer one does
@@ -431,6 +453,8 @@ cannot install another.
   suggestions the player sees, `[addons] suggest`, the manager fetching and caching the index, a suggestion's card
   held to the index's name and key, and the store's list (each add-on's manifest held to the index's name and key,
   what keeps one from being installed, once a run unless refreshed, no index).
+- `tests/addon_upscaler_test.cpp`: an upscaler's manifest, what its package may hold, its install, the hand-put list,
+  the manager installing one, and the copy the client loads.
 - `tests/plugin_policy_test.cpp` (the ceiling), `tests/lua_eq_pregame_test.cpp` (the Lua view and actions),
   `tests/ui_pack_windows_test.cpp` (both packs draw the panel and the store in each state), `tests/dev_ui_test.cpp`
   (the client's own window and store).

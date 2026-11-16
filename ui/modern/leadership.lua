@@ -37,8 +37,7 @@ local function drawRow(_, texts, x0, y0, x1, y1, s, st)
   local pad = 10 * s
   local midY = (y0 + y1) / 2
   local _, th = T.TextSize("Ag", T.font.small)
-  local owned = cur > 0
-  T.Text(x0 + pad, midY - th / 2, T.Fit(texts[1] or "", x1 - x0 - 190 * s, T.font.small), owned and C.text or C.muted,
+  T.Text(x0 + pad, midY - th / 2, T.Fit(texts[1] or "", x1 - x0 - 190 * s, T.font.small), st.color,
     T.font.small)
   -- rank pips
   local px = x1 - 150 * s
@@ -54,7 +53,6 @@ local function drawRow(_, texts, x0, y0, x1, y1, s, st)
     T.Text(x1 - pad, midY - 5 * s, "pt", C.faint, T.font.tiny, "right")
     T.Text(x1 - pad - T.TextSize("pt", T.font.tiny) - 3 * s, midY - th / 2, cost, C.gold, T.font.small, "right")
   end
-  local _ = st
 end
 
 local WINDOW_OPTS = {

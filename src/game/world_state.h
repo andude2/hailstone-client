@@ -1184,6 +1184,7 @@ namespace hailstone::game {
 		// The spawn record's properties (PlayerBase +0x128, PlayerBase::HasProperty's list; [0] is body_type).
 		std::vector<std::uint32_t> properties;
 		bool summoned = false;          // bSummoned (+0x2e0): the spawn bitfield's bit 2 (EQEmu is_pet)
+		bool temp_pet = false;          // bTempPet (+0x3dc): the spawn record's temporary-pet byte
 		std::uint32_t pet_owner_id = 0; // MasterID: the spawn record's petOwnerId, SpawnAppearance 25 (pet)
 		// Social flags: the spawn record, then SpawnAppearance 21 (anonymous: 1
 		// anonymous, 2 roleplaying), 22 / 23 (guild id / rank), 24 (AFK), 18 (linkdead).

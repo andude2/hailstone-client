@@ -73,6 +73,7 @@ public:
     // set_distant_hidden; and a number that changes when which are drawn does.
     void footprint(std::vector<std::int64_t>& out) const;
     std::uint64_t drawn_key() const;
+    bool opaque_blends_background() const;
 
     bool entered() const { return entered_; }
     // A load is under way (update starts and finishes them), its ground being sampled included.

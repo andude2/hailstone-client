@@ -196,6 +196,16 @@ inline float ui_scale_setting(const ClientOptions& o) {
     return percent > 0 ? static_cast<float>(std::clamp(percent, 50, 300)) / 100.0f : 0.0f;
 }
 
+// The upscaler provider hailstone.ini's display.upscaler names (render/upscaler_provider.h), loaded before the
+// Vulkan instance is made, which takes its requirements; nullptr for the client's own upscalers. Read at the start
+// only, as display.upscaler always is.
+inline std::unique_ptr<render::UpscalerProvider> start_upscaler_provider() {
+    Config c;
+    if (!c.load(default_config_path())) return nullptr;
+    return render::load_upscaler_setting(c.get_string("display.upscaler", "off"), platform::upscalers_dir(),
+                                         platform::cache_dir() / "upscalers");
+}
+
 inline ui::ChatChannel chat_channel(net::ChatEvent::Kind k) {
     using K = net::ChatEvent::Kind;
     using C = ui::ChatChannel;
@@ -246,7 +256,8 @@ public:
     ClientApp(const ClientApp&) = delete;
     ClientApp& operator=(const ClientApp&) = delete;
     explicit ClientApp(ClientOptions& options)
-        : opts_(options), window_(window_desc(options)), vk_(window_, options.validation),
+        : opts_(options), window_(window_desc(options)),
+          vk_(window_, options.validation, start_upscaler_provider()),
           ui_(window_, vk_,
               ui::ImGuiLayerDesc{.scale_override = ui_scale_setting(options),
                                  .ini_path = platform::imgui_ini()}) {
@@ -271,6 +282,8 @@ public:
             log::info("shared asset cache: on, {} MiB disk budget", shared->budget_bytes >> 20);
             game_.set_shared_file_cache(std::make_shared<SharedFileCache>(std::move(*shared)));
         }
+        // A new install's graphics settings for this computer (render/graphics_tier.h), before they are first read.
+        detect_graphics_at_first_start();
         // The settings (hailstone.ini's until a character enters, then the character's: apply_settings), before the
         // renderers: their pipelines take the sample count.
         apply_settings();
@@ -833,6 +846,10 @@ private:
     // Sets game_'s base folder (core/asset_folder_choice.h), running the asset-folder picker when nothing usable is
     // known; false when the player quit it (app/client_app_options.cpp).
     bool choose_asset_folder();
+    // The GPU in use and the CPU's threads (render/graphics_tier.h GpuProfile).
+    render::GpuProfile graphics_profile() const;
+    // render::first_start_graphics on hailstone.ini, saved and logged.
+    void detect_graphics_at_first_start();
     // The Options window's "Change Asset Folder" (assets.pick) once the login screen is idle: the picker again, its
     // folder made game_'s base and the game files read again (reload_server_files); Cancel keeps the folder. Not
     // with --game-dir or EQ_GAME_DIR, which the picker does not change.
@@ -909,7 +926,7 @@ private:
     // display.distance_blur, display.depth_prepass (the zone's depth pre-pass, the modern lighting only),
     // display.bloom (0 off .. 1), display.brightness / contrast / gamma (the grade after the
     // tonemap), display.render_scale (percent, 33..100: below 100 the upscaler upscales), display.sharpness (0..1) and
-    // display.upscaler (fsr1 | taa, read at start-up: render/temporal.h). The Options window's Display page sets them
+    // display.upscaler (off, the default | fsr1 | taa | fsr3, read at start-up: render/temporal.h). The Options window's Display page sets them
     // (display_option / set_display_option).
     void apply_scene_options() {
         render::SceneOptions scene;
@@ -921,7 +938,7 @@ private:
         scene.msaa = msaa_at_start_;
         // Taken at start-up too: the temporal upscaler draws with one sample, so it changes the pipelines' count.
         if (!upscaler_at_start_)
-            upscaler_at_start_ = render::parse_upscaler(config_.get_string("display.upscaler", "fsr1"));
+            upscaler_at_start_ = render::upscaler_from_setting(config_.get_string("display.upscaler", "off"));
         scene.upscaler = *upscaler_at_start_;
         // Frame generation (render/frame_gen.h): applied at once (the swapchain is made again); only with a temporal
         // upscaler, which VkContext checks.
@@ -946,10 +963,24 @@ private:
         scene.gamma = config_float("display.gamma", 1.0f);
         scene.render_scale = static_cast<float>(std::clamp(config_.get_int("display.render_scale", 100), render::kMinRenderScalePercent, 100)) / 100.0f;
         scene.sharpness = std::clamp(config_float("display.sharpness", 0.5f), 0.0f, 1.0f);
+        // Upscaling off (render/temporal.h upscaling_off): full size and no frame generation, at once; a temporal
+        // upscaler the client started with stays on as anti-aliasing until the next start.
+        if (render::upscaling_off(config_.get_string("display.upscaler", "off"))) {
+            scene.render_scale = 1.0f;
+            scene.frame_gen = false;
+        }
         vk_.set_scene_options(scene, shader_dir_);
     }
     std::uint32_t msaa_at_start_ = 0; // apply_scene_options: display.msaa as the client started, 0 before
     std::optional<render::Upscaler> upscaler_at_start_; // and display.upscaler
+    // The upscaler providers installed (render/upscaler_provider.h installed_upscaler_providers): the Options window
+    // asks every frame it is open, so the folder is listed once and again only after the add-on manager changed
+    // something (update_addons).
+    const std::vector<std::string>& upscaler_providers() const {
+        if (!upscaler_providers_) upscaler_providers_ = render::installed_upscaler_providers(platform::upscalers_dir());
+        return *upscaler_providers_;
+    }
+    mutable std::optional<std::vector<std::string>> upscaler_providers_;
     // /face: MQ's heading, degrees clockwise from north.
     void face_degrees(double degrees);
     // /keypress: a key command by name, tapped (0), held (1) or let go (2); false for an unknown name.
@@ -1245,6 +1276,8 @@ private:
     // (render::ActorRenderer::release_kept): a zone change does not build and upload them again.
     std::unique_ptr<render::ActorRenderer::Kept> actor_kept_;
     std::shared_ptr<const assets::CharacterLibrary> actor_library_; // the zone's, for the item preview
+    // The library actor_emitters_'s texture reader holds (it is set again when actor_library_ changes).
+    std::shared_ptr<const assets::CharacterLibrary> emitter_reader_library_;
     std::array<PreviewSlot, 2> previews_; // 0 the object preview window, 1 the marketplace's (EqHost's view index)
     bool browser_tried_ = false;
     bool web_text_input_ = false;                    // a page has the keyboard this frame
@@ -1258,6 +1291,8 @@ private:
     // neighbours (NeighbourZones::drawn_key) it was last hidden for.
     bool horizon_hills_ = true;
     std::uint64_t distant_hidden_key_ = 0;
+    // The modern sky's volumetric clouds (render/cloud_renderer.h); display.volumetric_clouds.
+    bool volumetric_clouds_ = true;
     // display.neighbour_tint: the neighbour zones' debugging view (render::ZoneRenderer::set_debug_tint).
     bool neighbour_tint_ = false;
     // How far the replacement models' (a texture pack's generated trees') levels of detail reach, in percent of their
@@ -1391,6 +1426,15 @@ private:
     std::set<std::uint32_t> auto_drop_seen_;  // --auto-door 4: ground objects before the drop
     Clock::time_point auto_door_at_{};
     std::optional<game::CollisionMesh> collision_;
+    // The zone objects that play their own animation (game/animated_objects.h): their moving parts, out of
+    // collision_, posed each movement step on the zone's animation clock (zone_animation_ms).
+    std::optional<game::AnimatedObjects> animated_objects_;
+    // When the zone was loaded, on the steps' clock (Clock::now() - start_time_, ms): the animation clock's origin.
+    std::uint64_t zone_animation_origin_ms_ = 0;
+    // The zone's animation clock at `ms` on the steps' clock: every placed object's controller started with the zone.
+    std::uint64_t zone_animation_ms(std::uint64_t ms) const {
+        return ms > zone_animation_origin_ms_ ? ms - zone_animation_origin_ms_ : 0;
+    }
     std::vector<game::ZoneLadder> zone_ladders_; // the zone's own ladders (game/zone_ladders.h), clickable
     // Navigation (app/navigator.h): /nav, /moveto and the Navigation TLO; after collision_, which it reads.
     std::unique_ptr<Navigator> nav_;

@@ -1,10 +1,12 @@
 #include "app/actor_emitters.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <optional>
 
 #include "assets/character.h"
+#include "assets/object_animation.h"
 #include "core/game_dir.h"
 #include "core/ini_file.h"
 #include "core/log.h"
@@ -27,7 +29,9 @@ std::string_view triggered_clip(std::int32_t animation) {
 ActorEmitters::ActorEmitters(std::vector<assets::EmitterDefinition> definitions, game::HeightTables heights)
     : particles_(std::move(definitions)), heights_(std::move(heights)) {}
 
-ActorEmitters::ActorEmitters(render::VkContext& vk, const GameDir& game, const std::filesystem::path& shader_dir) {
+ActorEmitters::ActorEmitters(render::VkContext& vk, const GameDir& game, const std::filesystem::path& shader_dir,
+                             bool scene)
+    : vk_(&vk), game_(&game), shader_dir_(shader_dir), scene_(scene) {
     try {
         if (auto data = game.read("actoremittersnew.edd")) particles_ = game::ParticleSystem(assets::parse_edd(*data));
     } catch (const std::exception& e) {
@@ -44,14 +48,39 @@ ActorEmitters::ActorEmitters(render::VkContext& vk, const GameDir& game, const s
     eqclient_density_ = settings_.density;
     if (auto moddat = game.read("Resources/moddat.ini"))
         heights_ = game::parse_height_tables({}, std::string_view(reinterpret_cast<const char*>(moddat->data()), moddat->size()));
-    if (!particles_.empty()) renderer_ = std::make_unique<render::ParticleRenderer>(vk, game, shader_dir);
+    // The scene's renderer is made now, so the first emitter in the world costs no hitch; an item preview's only when
+    // its item has an emitter (update): each renderer maps its own vertex ring (about 17 MB), and most items have none.
+    if (!particles_.empty() && scene) renderer_ = std::make_unique<render::ParticleRenderer>(vk, game, shader_dir, scene);
 }
 
+void ActorEmitters::set_texture_reader(render::ParticleRenderer::TextureReader reader, bool any_thread) {
+    texture_reader_ = std::move(reader);
+    texture_reader_any_thread_ = any_thread;
+    if (cloud_renderer_) cloud_renderer_->set_texture_reader(texture_reader_, texture_reader_any_thread_);
+}
+
+glm::vec3 ActorEmitters::texture_color(const std::string& name, bool cloud) const {
+    const auto* renderer = cloud ? cloud_renderer_.get() : renderer_.get();
+    return renderer ? renderer->texture_color(name) : glm::vec3(1.0f);
+}
 
 void ActorEmitters::update(float dt, std::span<const Actor> actors, const BoneWorld& bone_world,
                            const glm::vec3& viewer, const Playing& playing) {
-    if (particles_.empty()) return;
     for (auto& [id, live] : live_) live.seen = false;
+    auto local_matrix = [](Live& live, const assets::MeshEmitter& me) {
+        if (!me.cloud_animation) return me.local;
+        const auto& animation = *me.cloud_animation;
+        auto& posed = live.cloud_poses[&animation];
+        const auto ms = animation.period_ms > 0
+                            ? static_cast<std::uint64_t>(std::fmod(live.elapsed * 1000.0, animation.period_ms))
+                            : std::uint64_t{0};
+        if (posed.ms != ms) {
+            animation.pose(ms, posed.motion);
+            posed.ms = ms;
+        }
+        return me.cloud_animation_node < posed.motion.size() ? posed.motion[me.cloud_animation_node] * me.local
+                                                             : me.local;
+    };
     // One persistent emitter for a mesh's entry `i` on the actor.
     auto start = [&](const Actor& a, std::size_t i, std::int32_t duration_ms = -1) -> std::optional<std::uint32_t> {
         const auto& me = a.mesh->emitters[i];
@@ -66,11 +95,27 @@ void ActorEmitters::update(float dt, std::span<const Actor> actors, const BoneWo
         r.duration_ms = duration_ms >= 0 ? duration_ms : game::kActorEmitterDurationMs;
         r.density = settings_.density;
         r.opacity = settings_.opacity;
-        r.position = glm::vec3((bone * me.local)[3]);
+        r.position = glm::vec3((bone * local_matrix(live_.at(a.id), me))[3]);
         r.actor = a.id;
         r.bone_point = static_cast<std::int32_t>(i);
         r.point_only = true;
         r.persistent = duration_ms < 0;
+        if (me.cloud) {
+            auto [index, added] = cloud_indexes_.try_emplace(me.cloud.get(), 0);
+            if (added) {
+                index->second = clouds_.add_definition(*me.cloud);
+                cloud_definitions_.push_back(me.cloud);
+            }
+            r.emitter = static_cast<std::int32_t>(index->second);
+            // WLD actor creation (0x100523b0 / 0x1006adc0) takes opacity from descriptor +0x170 and a separate
+            // manager density (+0xa8), not ActorParticleDensity (+0xac). The constructor (0x10070230) sets 1;
+            // external configuration overrides remain untraced.
+            r.duration_ms = game::kFixtureDurationMs;
+            r.density = 1.0f;
+            r.opacity = me.cloud->scale2;
+            clouds_.create(r);
+            return r.key;
+        }
         particles_.create(r);
         return r.key;
     };
@@ -80,20 +125,36 @@ void ActorEmitters::update(float dt, std::span<const Actor> actors, const BoneWo
         live.seen = true;
         live.alpha = a.alpha;
         live.mesh = a.mesh; // (the same mesh, or one at the same address: the attachments below read this one)
-        if (live.mesh_serial != a.mesh->serial.value()) {
+        const bool changed = live.mesh_serial != a.mesh->serial.value();
+        if (changed) {
+            live.elapsed = 0.0;
+            live.cloud_poses.clear();
+        } else if (std::isfinite(dt) && dt > 0.0f) {
+            live.elapsed += dt;
+        }
+        if (changed || live.restart_edd) {
             // A new mesh (dressed again, another weapon): its emitters replace the old ones.
             for (std::uint32_t key : live.keys) particles_.stop(key);
+            if (changed)
+                for (std::uint32_t key : live.cloud_keys) clouds_.stop(key);
             for (std::uint32_t key : live.standing_keys) particles_.stop(key);
             for (auto& [i, t] : live.triggered)
                 if (t.key) particles_.stop(t.key);
             live.keys.clear();
+            if (changed) live.cloud_keys.clear();
             live.standing_keys.clear();
             live.triggered.clear();
             live.mesh_serial = a.mesh->serial.value();
+            live.restart_edd = false;
             // Tried once per mesh: an entry that makes nothing (an index past the file's end, density 0) is not
             // tried again each frame; a new mesh (another look or weapon) tries its entries afresh.
             for (std::size_t i = 0; i < a.mesh->emitters.size(); ++i) {
                 const auto& e = a.mesh->emitters[i].emitter;
+                if (a.mesh->emitters[i].cloud) {
+                    if (changed)
+                        if (auto key = start(a, i)) live.cloud_keys.push_back(*key);
+                    continue;
+                }
                 if (e.trigger != 0 || e.variant >= 1) continue;
                 if (auto key = start(a, i)) live.keys.push_back(*key);
             }
@@ -102,6 +163,7 @@ void ActorEmitters::update(float dt, std::span<const Actor> actors, const BoneWo
         if (a.standing && live.standing_keys.empty()) {
             for (std::size_t i = 0; i < a.mesh->emitters.size(); ++i) {
                 const auto& e = a.mesh->emitters[i].emitter;
+                if (a.mesh->emitters[i].cloud) continue;
                 if (e.trigger != 1 || e.variant >= 1 || (e.animation != kStnd && e.animation != kIdle)) continue;
                 if (auto key = start(a, i)) live.standing_keys.push_back(*key);
             }
@@ -113,6 +175,7 @@ void ActorEmitters::update(float dt, std::span<const Actor> actors, const BoneWo
         if (playing)
             for (std::size_t i = 0; i < a.mesh->emitters.size(); ++i) {
                 const auto& e = a.mesh->emitters[i].emitter;
+                if (a.mesh->emitters[i].cloud) continue;
                 if (e.trigger != 1 || e.variant >= 1 || e.animation == kStnd || e.animation == kIdle) continue;
                 const std::string_view code = triggered_clip(e.animation);
                 if (code.empty()) continue;
@@ -144,13 +207,15 @@ void ActorEmitters::update(float dt, std::span<const Actor> actors, const BoneWo
             continue;
         }
         for (std::uint32_t key : it->second.keys) particles_.stop(key);
+        for (std::uint32_t key : it->second.cloud_keys) clouds_.stop(key);
         for (std::uint32_t key : it->second.standing_keys) particles_.stop(key);
         for (auto& [i, t] : it->second.triggered)
             if (t.key) particles_.stop(t.key);
         it = live_.erase(it);
     }
     particles_.set_viewer(viewer);
-    particles_.update(dt, [&](std::uint32_t id, std::int32_t i) -> std::optional<game::EmitterAttachment> {
+    clouds_.set_viewer(viewer);
+    auto attachment = [&](std::uint32_t id, std::int32_t i) -> std::optional<game::EmitterAttachment> {
         auto it = live_.find(id);
         if (it == live_.end() || !it->second.mesh || i < 0 ||
             static_cast<std::size_t>(i) >= it->second.mesh->emitters.size())
@@ -158,31 +223,45 @@ void ActorEmitters::update(float dt, std::span<const Actor> actors, const BoneWo
         const auto& me = it->second.mesh->emitters[static_cast<std::size_t>(i)];
         glm::mat4 bone;
         if (!bone_world(id, me.bone, bone)) return std::nullopt;
-        glm::mat4 m = bone * me.local;
+        glm::mat4 m = bone * local_matrix(it->second, me);
         game::EmitterAttachment at;
         at.position = glm::vec3(m[3]);
         at.axes = glm::mat3(m);
         at.alpha = it->second.alpha;
-        at.particle_scale = heights_.pes_factor(me.model_code);
+        at.particle_scale = me.cloud ? 1.0f : heights_.pes_factor(me.model_code);
         return at;
-    });
+    };
+    particles_.update(dt, attachment);
+    clouds_.update(dt, attachment);
+    if (!particles_.emitters().empty() && !renderer_ && vk_ && game_)
+        renderer_ = std::make_unique<render::ParticleRenderer>(*vk_, *game_, shader_dir_, scene_);
     if (renderer_) renderer_->prepare(particles_);
+    if (!clouds_.emitters().empty() && !cloud_renderer_ && vk_ && game_) {
+        cloud_renderer_ = std::make_unique<render::ParticleRenderer>(*vk_, *game_, shader_dir_, scene_);
+        cloud_renderer_->set_rows_bottom_up(true);
+        cloud_renderer_->set_texture_reader(texture_reader_, texture_reader_any_thread_);
+    }
+    if (cloud_renderer_) cloud_renderer_->prepare(clouds_);
 }
 
 void ActorEmitters::draw(const render::FrameInfo& frame, const glm::mat4& view_proj, const glm::mat4& view,
                          float glow, const render::SceneLighting* modern) {
     if (renderer_) renderer_->draw(frame, view_proj, view, particles_, glow, {}, modern);
+    if (cloud_renderer_) cloud_renderer_->draw(frame, view_proj, view, clouds_, glow, {}, modern);
 }
 
 void ActorEmitters::set_density(float density) {
     density = std::clamp(density, 0.0f, 1.0f);
     if (density == settings_.density) return;
     settings_.density = density;
-    clear(); // made again at the next update (one at density 0 was never made)
+    for (auto& [id, live] : live_) live.restart_edd = true; // the EDD entries are made again at the next update
 }
 
 void ActorEmitters::clear() {
     particles_.clear();
+    clouds_ = game::ParticleSystem({assets::EmitterDefinition{}});
+    cloud_indexes_.clear();
+    cloud_definitions_.clear();
     live_.clear();
 }
 

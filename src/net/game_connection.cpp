@@ -930,6 +930,7 @@ void GameConnection::apply_spawn(const Spawn& s) {
     out.body_type = s.body_type;
     out.properties = s.properties;
     out.summoned = s.is_pet;
+    out.temp_pet = s.temp_pet != 0;
     out.pet_owner_id = s.pet_owner_id;
     out.guild_id = s.guild_id;
     out.guild_rank = s.guild_rank;
@@ -2589,8 +2590,11 @@ void GameConnection::consider() {
 }
 
 void GameConnection::report_hit(const game::HitLine& line, std::uint32_t source, bool report) {
-    // ReportSuccessfulHit's pet flag: the attacker is the player's pet (PetID).
-    const bool by_my_pet = source != 0 && source == pets_.focused;
+    // ReportSuccessfulHit @0x52efd3: PetID, or bTempPet with MasterID equal to the player's SpawnID.
+    const auto attacker = world_.spawns.find(source);
+    const bool by_my_pet = source != 0 && (source == pets_.focused ||
+        (attacker != world_.spawns.end() && attacker->second.temp_pet && world_.player_id != 0 &&
+         attacker->second.pet_owner_id == world_.player_id));
     if (!game::hit_line_shown(line, by_my_pet, chat_filters_, report)) return;
     // ReportHit_* @0x4f7d70..0x4f8270: choose the display form but log the original full input independently.
     auto mode = hit_modes_[static_cast<std::size_t>(line.kind)];

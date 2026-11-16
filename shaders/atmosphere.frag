@@ -3,7 +3,8 @@
 // The modern sky (render/sky_renderer.h SkyFrame::atmosphere): single scattering in an Earth-like atmosphere,
 // Rayleigh and Mie, marched along the view ray with the sunlight marched in to each step (after Nishita et al. 1993;
 // the constants are Bruneton and Neyret's). By night a dark sky and stars turning with the sun's path. Near and
-// below the horizon it goes into the haze, as the classic layers do (shaders/sky.frag).
+// below the horizon it goes into the haze, as the classic layers do (shaders/sky.frag). The volumetric clouds
+// (shaders/clouds.comp, marched before the scene) are blended over it; without them their image is clear.
 
 layout(push_constant) uniform Push {
     mat4 inverse_view_proj; // clip to the sky's directions (view rotation only)
@@ -12,6 +13,9 @@ layout(push_constant) uniform Push {
     vec4 haze;              // the horizon haze: linear rgb, a: 0 off, else 1 + the northern lights (0..1)
     vec4 to_moon;           // render::moon_direction, w: the blood moon (0..1)
 } pc;
+
+// The volumetric clouds at half the scene's size: rgb their light, a how much of the sky behind shows (1 clear).
+layout(set = 0, binding = 2) uniform sampler2D u_clouds;
 
 layout(location = 0) in vec2 v_ndc;
 layout(location = 0) out vec4 o_color;
@@ -298,7 +302,17 @@ void main() {
     // A storm greys the sky over; the lightning lights it.
     float storm = pc.params.z;
     color = mix(color, vec3(min(dot(color, vec3(0.2126, 0.7152, 0.0722)), 2.0)) * 0.6, storm * 0.8);
-    color += vec3(0.8, 0.85, 1.0) * pc.params.w * 1.5;
+    // The clouds in front of it all; the lightning lights them more than the clear air. Four bilinear taps half a
+    // cloud pixel off make a 3x3 tent over their image, so the 2x2 blocks they are marched in (one pixel a frame)
+    // do not show at their edges as the view turns.
+    vec2 uv = v_ndc * 0.5 + 0.5;
+    vec2 half_texel = 0.5 / vec2(textureSize(u_clouds, 0));
+    vec4 clouds = 0.25 * (textureLod(u_clouds, uv + vec2(-half_texel.x, -half_texel.y), 0.0) +
+                          textureLod(u_clouds, uv + vec2(half_texel.x, -half_texel.y), 0.0) +
+                          textureLod(u_clouds, uv + vec2(-half_texel.x, half_texel.y), 0.0) +
+                          textureLod(u_clouds, uv + vec2(half_texel.x, half_texel.y), 0.0));
+    color = color * clouds.a + clouds.rgb;
+    color += vec3(0.8, 0.85, 1.0) * pc.params.w * (1.5 + 1.5 * (1.0 - clouds.a));
 
     if (pc.haze.a > 0.0) {
         // Into the haze at and below the horizon, clear a few degrees up (as shaders/sky.frag).

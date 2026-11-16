@@ -55,8 +55,11 @@ template <class States> auto worn_meshes(const States& states) {
 template <class Part, class Fn> void for_each_part_texture_slot(const Part& part, Fn&& fn) {
     for (const std::uint32_t slot : {part.texture, part.texture2, part.normal_map, part.rough_map})
         if (slot != 0xffffffffu) fn(slot);
+    if constexpr (requires { part.frames; })
+        for (const std::uint32_t slot : part.frames)
+            if (slot != 0xffffffffu) fn(slot);
     if constexpr (requires { part.surface.slots.x; part.surface.slots.y; })
-        for (const std::uint32_t slot : {part.surface.slots.x, part.surface.slots.y})
+        for (const std::uint32_t slot : {part.surface.slots.x, part.surface.slots.y, part.surface.slots.w})
             if (slot != 0xffffffffu) fn(slot);
 }
 

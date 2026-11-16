@@ -21,6 +21,7 @@ set(HAILSTONE_SHADER_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/shaders/lighting.glsl
                           ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sample_coverage.glsl
                           ${CMAKE_CURRENT_SOURCE_DIR}/shaders/weather.glsl
                           ${CMAKE_CURRENT_SOURCE_DIR}/shaders/puddle_cover.glsl
+                          ${CMAKE_CURRENT_SOURCE_DIR}/shaders/preview_alpha.glsl
                           ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fsr1/ffx_a.h
                           ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fsr1/ffx_fsr1.h)
 # AMD's FSR 1 headers (fsr_easu.frag, fsr_rcas.frag).
@@ -49,9 +50,31 @@ function(hailstone_add_shaders target)
   add_custom_target(${target} DEPENDS ${outputs})
 endfunction()
 
+# A shared shader body compiled with a different policy. Preview fragments may write SampleMask; the world
+# variant must not declare it while fixed-function alpha-to-coverage is enabled on affected drivers.
+function(hailstone_add_shader_variant target name src)
+  set(out ${HAILSTONE_SHADER_OUT}/${name}.spv)
+  if(HAILSTONE_GLSLC)
+    set(cmd ${HAILSTONE_GLSLC} --target-env=vulkan1.3 -O -I ${HAILSTONE_SHADER_INCLUDE_DIR} ${ARGN} -o ${out} ${CMAKE_CURRENT_SOURCE_DIR}/${src})
+  else()
+    set(cmd ${HAILSTONE_GLSLANG} -V --target-env vulkan1.3 -I${HAILSTONE_SHADER_INCLUDE_DIR} ${ARGN} -o ${out} ${CMAKE_CURRENT_SOURCE_DIR}/${src})
+  endif()
+  add_custom_command(OUTPUT ${out}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${HAILSTONE_SHADER_OUT} ${HAILSTONE_SHADER_RUN}
+    COMMAND ${cmd}
+    COMMAND ${CMAKE_COMMAND} -E copy ${out} ${HAILSTONE_SHADER_RUN}/${name}.spv
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${src} ${HAILSTONE_SHADER_INCLUDES}
+    COMMENT "Compiling shader variant ${name}"
+    VERBATIM)
+  add_custom_target(${target} DEPENDS ${out})
+endfunction()
+
 # AMD FSR 3.1's upscaler passes (third_party/fidelityfx, compute): each pass compiled once in the permutation
 # Hailstone uses (render/fsr3_upscaler.cpp): HDR colour, reverse depth, motion vectors at the render size and
-# without jitter, the reference Lanczos, 32-bit maths; the accumulate pass twice, with and without sharpening.
+# without jitter, 32-bit maths; the accumulate pass twice, with and without sharpening. The history is reprojected
+# with the Lanczos table (REPROJECT_USE_LANCZOS_TYPE=1, the r_lanczos_lut image), the permutation AMD's runtime picks
+# on its own GPUs (ffx_fsr3upscaler.cpp useLut; the reference elsewhere): the reference's sin() per tap made the
+# accumulate pass take 3.7 ms of a 6.4 ms frame on an Intel Iris Xe (1280x720 from 67 %), the table 2.0 ms.
 # Output as build/hailstone/shaders/fsr3_<pass>.spv.
 set(HAILSTONE_FSR3_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fidelityfx)
 file(GLOB HAILSTONE_FSR3_HEADERS ${HAILSTONE_FSR3_DIR}/gpu/*.h ${HAILSTONE_FSR3_DIR}/gpu/*/*.h)
@@ -62,7 +85,7 @@ function(hailstone_add_fsr3_shaders target)
               -DFFX_FSR3UPSCALER_OPTION_REPROJECT_SAMPLERS_USE_DATA_HALF=0
               -DFFX_FSR3UPSCALER_OPTION_POSTPROCESSLOCKSTATUS_SAMPLERS_USE_DATA_HALF=0
               -DFFX_FSR3UPSCALER_OPTION_UPSAMPLE_USE_LANCZOS_TYPE=2
-              -DFFX_FSR3UPSCALER_OPTION_REPROJECT_USE_LANCZOS_TYPE=0
+              -DFFX_FSR3UPSCALER_OPTION_REPROJECT_USE_LANCZOS_TYPE=1
               -DFFX_FSR3UPSCALER_OPTION_HDR_COLOR_INPUT=1
               -DFFX_FSR3UPSCALER_OPTION_LOW_RESOLUTION_MOTION_VECTORS=1
               -DFFX_FSR3UPSCALER_OPTION_JITTERED_MOTION_VECTORS=0

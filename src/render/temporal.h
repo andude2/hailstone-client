@@ -5,7 +5,9 @@
 // and when the history is thrown away. No Vulkan here: render/vk_context.cpp runs the passes.
 
 #include <cstdint>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include <glm/glm.hpp>
 
@@ -15,8 +17,9 @@ namespace hailstone::render {
 // scale of 100, nothing at 100, MSAA as display.msaa says. Taa: temporal, the scene jittered each frame and
 // accumulated into a history at the view's size (shaders/taa_resolve.frag), at every render scale; MSAA is off.
 // Fsr3: the same jittered frames and motion, resolved by AMD FSR 3.1's upscaler (render/fsr3_upscaler.h); Taa where
-// the device lacks what it needs.
-enum class Upscaler : std::uint8_t { Fsr1, Taa, Fsr3 };
+// the device lacks what it needs. External: an upscaler provider's (render/upscaler_provider.h, an add-on in
+// upscalers/<name>/ that display.upscaler names) on the same frames, in FSR 3.1's place; Fsr3, then Taa, without it.
+enum class Upscaler : std::uint8_t { Fsr1, Taa, Fsr3, External };
 
 // The render scale's range (display.render_scale, percent): down to a third of the view on each side (Ultra
 // Performance, 3x).
@@ -33,9 +36,25 @@ UpscaleQuality upscale_quality_for(int percent);
 // A preset's render scale in percent; Custom has none (nullopt-like: 0).
 int upscale_quality_percent(UpscaleQuality q);
 
-// display.upscaler's values: "fsr1", "taa", "fsr3"; anything else is Fsr1.
+// display.upscaler's values: "fsr1", "taa", "fsr3"; anything else is Fsr1 ("off" too, below), but for the name of
+// an installed upscaler provider, which the client loads at the start (External).
 Upscaler parse_upscaler(std::string_view name);
 std::string_view upscaler_name(Upscaler u);
+
+// display.upscaler = "off": no upscaling and no frame generation at all. The view is drawn at its full size whatever
+// display.render_scale says (Fsr1 at 100 draws as it is, MSAA as display.msaa says), and display.frame_gen is
+// ignored; both settings are kept for when an upscaler is chosen again.
+inline constexpr std::string_view kUpscalerOff = "off";
+bool upscaling_off(std::string_view name);
+
+// The Options window's Upscaler choices (display_option "upscaler"): 0 Off, then 1 FSR 1, 2 Temporal, 3 FSR 3.1
+// (each built-in Upscaler's value + 1), then 4 on the installed upscaler providers in `providers`' order (their
+// names; render/upscaler_provider.h installed_upscaler_providers). upscaler_choice gives the choice display.upscaler's
+// value is (a provider's name that is not installed is FSR 1, as any unknown value); upscaler_choice_name the value a
+// choice saves (out of range is FSR 1).
+int upscaler_choice(std::string_view name, const std::vector<std::string>& providers = {});
+std::string upscaler_choice_name(int choice, const std::vector<std::string>& providers = {});
+inline constexpr int kFirstProviderChoice = 4;
 
 // The radical inverse of `index` in `base` (the Halton sequence): 1 -> 1/2, 2 -> 1/4, 3 -> 3/4 in base 2.
 float halton(std::uint32_t index, std::uint32_t base);

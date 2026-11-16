@@ -107,6 +107,8 @@ void WorldObjects::set_zone(const assets::Zone* zone, std::shared_ptr<const asse
     // The missiles' emitter meshes were the old models' (Model::emitters, freed above).
     missile_actors_.clear();
     missile_transforms_.clear();
+    object_actors_.clear();
+    object_transforms_.clear();
     prepared_ = false;
 }
 
@@ -124,6 +126,7 @@ const WorldObjects::Model* WorldObjects::model_for(const std::string& raw) {
     render::ObjectRenderer::FileReader read;
     std::vector<assets::ModelPoint> points;
     std::vector<assets::ModelEmitter> prt_emitters;
+    std::vector<assets::MeshEmitter> node_emitters;
     std::string base = name.ends_with("_ACTORDEF") ? name.substr(0, name.size() - 9) : name;
     if (zone_) {
         // EQSwitch::PostInit creates "<name>_ACTORDEF" (classic object
@@ -192,6 +195,7 @@ const WorldObjects::Model* WorldObjects::model_for(const std::string& raw) {
             mesh = &*owned;
             points = item->points; // an EQG item's .pts and .prt (CharacterLibrary::item_mesh)
             prt_emitters = item->emitters;
+            node_emitters = item->mesh.emitters;
             auto lib = items_;
             read = [lib](std::string_view file) { return lib->read_file(file); };
         }
@@ -230,11 +234,15 @@ const WorldObjects::Model* WorldObjects::model_for(const std::string& raw) {
     auto model = std::make_unique<Model>();
     model->gpu = renderer_->add_model(*mesh, read);
     model->shape = game::ObjectShape::from_mesh(*mesh);
+    if (!node_emitters.empty()) {
+        model->emitters = std::make_unique<assets::CharacterMesh>();
+        model->emitters->emitters = std::move(node_emitters);
+    }
     for (const auto& e : prt_emitters) {
         const assets::ModelPoint* p = assets::find_point(points, e.point);
         if (!p) continue;
         if (!model->emitters) model->emitters = std::make_unique<assets::CharacterMesh>();
-        model->emitters->emitters.push_back({0, assets::point_matrix(*p), e});
+        model->emitters->emitters.push_back({0, assets::point_matrix(*p), e, base});
     }
     log::debug("object model {}: {} points, {} of {} emitters placed, radius {:.1f}, solid ({:.1f}, {:.1f}, {:.1f})..({:.1f}, {:.1f}, {:.1f})", name,
                points.size(), model->emitters ? model->emitters->emitters.size() : 0, prt_emitters.size(),
@@ -426,16 +434,48 @@ void WorldObjects::update(const net::GameConnection& conn) {
     floor_changed_ = false;
 
     instances_.clear();
+    object_actors_.clear();
+    object_transforms_.clear();
     // Each keyed for its motion under the temporal upscaler (a door swinging, the placement ghost following the cursor).
     using Objects = render::ObjectRenderer;
-    for (const auto& [id, p] : doors_)
-        if (p.model && p.visible) instances_.push_back({p.model->gpu, p.transform, Objects::make_motion_key(1, id)});
-    for (const auto& [id, p] : objects_)
-        if (p.model) instances_.push_back({p.model->gpu, p.transform, Objects::make_motion_key(2, id)});
-    for (const auto& [id, p] : placed_)
-        if (p.model) instances_.push_back({p.model->gpu, p.transform, Objects::make_motion_key(3, id)});
-    if (ghost_ && ghost_->model)
+    for (auto& [id, p] : doors_)
+        if (p.model && p.visible) {
+            instances_.push_back({p.model->gpu, p.transform, Objects::make_motion_key(1, id)});
+            add_object_emitters(p);
+        }
+    for (auto& [id, p] : objects_)
+        if (p.model) {
+            instances_.push_back({p.model->gpu, p.transform, Objects::make_motion_key(2, id)});
+            add_object_emitters(p);
+        }
+    for (auto& [id, p] : placed_)
+        if (p.model) {
+            instances_.push_back({p.model->gpu, p.transform, Objects::make_motion_key(3, id)});
+            add_object_emitters(p);
+        }
+    if (ghost_ && ghost_->model) {
         instances_.push_back({ghost_->model->gpu, ghost_->transform, Objects::make_motion_key(4, 0)});
+        add_object_emitters(*ghost_);
+    }
+}
+
+void WorldObjects::add_object_emitters(Placed& placed) {
+    if (!placed.model || !placed.model->emitters) return;
+    if (!placed.emitter_actor) {
+        // Keep identities distinct from spawns and missiles. Exhausting this process's object namespace omits an
+        // effect instead of reusing another still-live owner's key.
+        if (next_object_actor_ == kMissileActorBit - 1) return;
+        placed.emitter_actor = ++next_object_actor_;
+    }
+    object_actors_.push_back({placed.emitter_actor, placed.model->emitters.get()});
+    object_transforms_[placed.emitter_actor] = placed.transform;
+}
+
+bool WorldObjects::object_transform(std::uint32_t id, glm::mat4& world) const {
+    auto it = object_transforms_.find(id);
+    if (it == object_transforms_.end()) return false;
+    world = it->second;
+    return true;
 }
 
 const WorldObjects::Model* WorldObjects::placed_model(const std::string& tag) {

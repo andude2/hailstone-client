@@ -819,6 +819,67 @@ TEST_CASE("a DDS cube map becomes an octahedral map, each direction from its fac
     CHECK(at({-1, 0.1f, 0.1f}) == colors[1]);
     CHECK(at({0.1f, 1, 0.1f}) == colors[4]);
     CHECK(at({0.1f, -1, -0.1f}) == colors[5]);
+    const auto environment = decode_environment_as_octahedral(data, 16);
+    REQUIRE(environment);
+    CHECK(environment->mips == oct->mips);
+}
+
+TEST_CASE("EQG sphere environment maps project the native surface-to-eye reflection") {
+    CHECK(sphere_environment_uv({0, -1, 0}) == glm::vec2(0.5f));
+    CHECK(sphere_environment_uv({1, 0, 0}).x == doctest::Approx(0.5f - 1.0f / 2.82800007f));
+    CHECK(sphere_environment_uv({-1, 0, 0}).x == doctest::Approx(0.5f + 1.0f / 2.82800007f));
+    CHECK(sphere_environment_uv({0, 0, 1}).y == doctest::Approx(0.5f - 1.0f / 2.82800007f));
+    CHECK(sphere_environment_uv({0, 0, -1}).y == doctest::Approx(0.5f + 1.0f / 2.82800007f));
+    CHECK(sphere_environment_uv({0, 1, 0}) == glm::vec2(0.5f)); // undefined native pole stays finite
+    CHECK(sphere_environment_uv({0, 0, 0}) == glm::vec2(0.5f));
+    CHECK(sphere_environment_uv({std::numeric_limits<float>::infinity(), 0, 0}) == glm::vec2(0.5f));
+    auto w = dds_header({.r = 0xff, .g = 0xff00, .b = 0xff0000, .a = 0xff000000u});
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) {
+            w.le<std::uint8_t>(static_cast<std::uint8_t>(32 + x * 64));
+            w.le<std::uint8_t>(static_cast<std::uint8_t>(32 + y * 64));
+            w.le<std::uint8_t>(64);
+            w.le<std::uint8_t>(255);
+        }
+    auto data = w.take();
+    CHECK_FALSE(decode_cube_as_octahedral(data));
+    auto environment = decode_environment_as_octahedral(data, 32);
+    REQUIRE(environment);
+    auto at = [&](glm::vec3 d) {
+        const auto uv = octahedral_uv(d);
+        return pixel(*environment, 0, std::min(31u, static_cast<std::uint32_t>(uv.x * 32.0f)),
+                     std::min(31u, static_cast<std::uint32_t>(uv.y * 32.0f)));
+    };
+    CHECK(at({1, 0, 0})[0] < 64);
+    CHECK(at({-1, 0, 0})[0] > 192);
+    CHECK(at({0, 0, 1})[1] < 64);
+    CHECK(at({0, 0, -1})[1] > 192);
+    CHECK(at({1, 0, 0})[2] == 64);
+    CHECK(at({1, 0, 0})[3] == 255);
+    CHECK_FALSE(decode_environment_as_octahedral({}));
+    CHECK_FALSE(decode_environment_as_octahedral(data, 0));
+    CHECK_FALSE(decode_environment_as_octahedral(data, 4097));
+    auto invalid_magic = data;
+    invalid_magic[0] = std::byte{'X'};
+    CHECK_FALSE(decode_environment_as_octahedral(invalid_magic));
+    data[113] = std::byte{0xfe}; // a malformed cube must not silently become its first face
+    CHECK_FALSE(decode_environment_as_octahedral(data));
+}
+
+TEST_CASE("Cleric epic pearl sphere map becomes a usable environment texture" *
+          doctest::skip(!hailstone::test::game_dir())) {
+    auto path = hailstone::test::game_dir()->find("donequip.eqg");
+    REQUIRE(path);
+    auto archive = PfsArchive::open(*path);
+    auto data = archive.read("i_pearl01_e.dds");
+    REQUIRE(data);
+    CHECK_FALSE(decode_cube_as_octahedral(*data));
+    auto environment = decode_environment_as_octahedral(*data);
+    REQUIRE(environment);
+    CHECK(environment->width == 64);
+    CHECK(environment->height == 64);
+    CHECK(environment->format == PixelFormat::RGBA8);
+    CHECK(environment->mips.front().size() == 64 * 64 * 4);
 }
 
 TEST_CASE("is_opaque tells a texture that needs no coverage-aware chain from one that does") {
@@ -866,6 +927,26 @@ TEST_CASE("An opaque texture goes up with the GPU building its mips; a cut-out o
     Image with_mips = opaque;
     with_mips.mips.push_back(std::vector<std::byte>(2 * 2 * 4, std::byte{0xff}));
     CHECK_FALSE(prepare_texture_image(with_mips, TextureUse::Color).has_value());
+}
+
+TEST_CASE("RGB-only surface auxiliaries keep colours under zero alpha when building mip levels") {
+    // Lava's second diffuse and MPL coverage read RGB alone: alpha-zero red is still authored colour, not a key
+    // or a transparent texel whose colour may be discarded while filtering the green neighbour.
+    Image source;
+    source.width = source.height = 2;
+    source.mips.push_back({std::byte{255}, std::byte{0}, std::byte{0}, std::byte{0},
+                           std::byte{0}, std::byte{255}, std::byte{0}, std::byte{255},
+                           std::byte{255}, std::byte{0}, std::byte{0}, std::byte{0},
+                           std::byte{0}, std::byte{255}, std::byte{0}, std::byte{255}});
+    const auto prepared = prepare_texture_image(source, TextureUse::OpaqueColor, false);
+    REQUIRE(prepared);
+    REQUIRE(prepared->mips.size() == 2);
+    CHECK(pixel(*prepared, 0, 0, 0) == Px{255, 0, 0, 255});
+    const auto mip = pixel(*prepared, 1, 0, 0);
+    CHECK(mip[0] > 180); // both RGB colours contribute in linear light, regardless of their former alpha
+    CHECK(mip[1] > 180);
+    CHECK(mip[2] == 0);
+    CHECK(mip[3] == 255);
 }
 
 namespace {

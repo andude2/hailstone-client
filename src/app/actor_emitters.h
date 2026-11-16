@@ -1,7 +1,8 @@
 #pragma once
 
 // The actors' own particle emitters (assets/model_points.h ModelEmitter): an
-// EQG model's `<model>.prt` and a held EQG item's, e.g. a glowing weapon or a
+// EQG model's `<model>.prt`, a held EQG item's, and WLD skeleton particle
+// clouds, e.g. a glowing weapon or a
 // creature's flames. 0x1006b130 / 0x1006b290 make one through
 // CParticleSystem vtable +0x20 (0x10070640, ActorEmittersNew.edd) for each
 // always-on entry (trigger 0, variant below 1) whose model point exists, when
@@ -36,14 +37,21 @@
 
 namespace hailstone { class GameDir; }
 namespace hailstone::assets { struct CharacterMesh; }
+namespace hailstone::assets { struct ObjectAnimation; }
 
 namespace hailstone::app {
 
 class ActorEmitters {
 public:
-    ActorEmitters(render::VkContext& vk, const GameDir& game, const std::filesystem::path& shader_dir);
+    ActorEmitters(render::VkContext& vk, const GameDir& game, const std::filesystem::path& shader_dir,
+                  bool scene = true);
     explicit ActorEmitters(std::vector<assets::EmitterDefinition> definitions, game::HeightTables heights = {});
     const game::ParticleSystem& simulation() const { return particles_; }
+    const game::ParticleSystem& cloud_simulation() const { return clouds_; }
+    // The loaded character/equipment archives supply WLD cloud sprites (outside the EDD effect folders).
+    // `any_thread`: render::ParticleRenderer::set_texture_reader.
+    void set_texture_reader(render::ParticleRenderer::TextureReader reader, bool any_thread = false);
+    glm::vec3 texture_color(const std::string& name, bool cloud = false) const;
 
     // An actor drawn this frame and the mesh it was drawn with.
     struct Actor {
@@ -65,7 +73,7 @@ public:
     void draw(const render::FrameInfo& frame, const glm::mat4& view_proj, const glm::mat4& view, float glow = 1.0f,
               const render::SceneLighting* modern = nullptr);
     void clear();
-    std::size_t emitters() const { return particles_.emitters().size(); }
+    std::size_t emitters() const { return particles_.emitters().size() + clouds_.emitters().size(); }
     // ActorParticleDensity (the Options window's combo; the effect manager's +0xac): the actors' emitters are made
     // again with it. eqclient_density() is the ini's, read at the start.
     void set_density(float density);
@@ -79,6 +87,14 @@ private:
         const assets::CharacterMesh* mesh = nullptr;
         std::uint64_t mesh_serial = 0;
         std::vector<std::uint32_t> keys;
+        std::vector<std::uint32_t> cloud_keys;
+        double elapsed = 0.0; // the attached item's own animation controller starts with this instance/mesh
+        struct CloudPose {
+            std::uint64_t ms = ~std::uint64_t{0};
+            std::vector<glm::mat4> motion;
+        };
+        std::unordered_map<const assets::ObjectAnimation*, CloudPose> cloud_poses;
+        bool restart_edd = false; // ActorParticleDensity changes leave the separate WLD list running
         float alpha = 1.0f;
         std::vector<std::uint32_t> standing_keys; // the STND / IDLE entries', while it stands
         // The other animation-started entries, by entry: the time into their animation last frame (negative: not
@@ -91,10 +107,21 @@ private:
         bool seen = false;
     };
     game::ParticleSystem particles_;
+    game::ParticleSystem clouds_{std::vector<assets::EmitterDefinition>{assets::EmitterDefinition{}}};
+    // Own the definitions as long as their registered indexes can be used. Cleared with the zone/preview subject.
+    std::unordered_map<const assets::EmitterDefinition*, std::size_t> cloud_indexes_;
+    std::vector<std::shared_ptr<const assets::EmitterDefinition>> cloud_definitions_;
     game::HeightTables heights_;
     game::SpellParticleSettings settings_;
     float eqclient_density_ = 1.0f;
     std::unique_ptr<render::ParticleRenderer> renderer_;
+    std::unique_ptr<render::ParticleRenderer> cloud_renderer_;
+    render::ParticleRenderer::TextureReader texture_reader_;
+    bool texture_reader_any_thread_ = false;
+    render::VkContext* vk_ = nullptr;
+    const GameDir* game_ = nullptr;
+    std::filesystem::path shader_dir_;
+    bool scene_ = true;
     std::unordered_map<std::uint32_t, Live> live_;
     std::uint32_t next_key_ = 1;
 };

@@ -24,6 +24,7 @@
 #include <unordered_set>
 
 #include "assets/eqg_character.h"
+#include "assets/wld_particles.h"
 #include "core/game_dir.h"
 #include "core/ini_file.h"
 #include "core/msvc_atoi.h"
@@ -235,6 +236,7 @@ bool CharacterMesh::append_skin_bones(std::vector<glm::mat4>& bones) const {
 
 CharacterMesh CharacterModel::default_mesh() const {
     CharacterMesh m;
+    m.emitters = clouds;
     m.vertices = vertices;
     m.indices = indices;
     m.parts = parts;
@@ -314,11 +316,13 @@ std::size_t CharacterArchive::parsed_bytes() const {
     return total;
 }
 
-std::shared_ptr<const CharacterArchive> load_character_archive(const GameDir& game, std::string_view file) {
+std::shared_ptr<const CharacterArchive> load_character_archive(const GameDir& game, std::string_view file,
+                                                               bool halves_long_tracks) {
     auto path = game.find(file);
     if (!path) return nullptr;
     auto cache = game.shared_file_cache();
     auto out = std::make_shared<CharacterArchive>();
+    out->halves_long_tracks = halves_long_tracks;
     out->archive = std::make_shared<const PfsArchive>(PfsArchive::open(*path, PfsArchive::storage_for(game, *path), cache));
     for (const auto& member : out->archive->names()) {
         if (!member.ends_with(".wld")) continue;
@@ -622,7 +626,7 @@ void CharacterTables::add(const CharacterArchive& ca, std::size_t ai, int level,
                 if (is_clip_code(name) && name.size() > 3) zone_name('c', name.substr(3));
                 if (is_clip_code(name) && name.size() > 4) zone_name('c', name.substr(4));
                 if (!add_resource(tracks, track_levels, base ? &base->track_levels : nullptr, name, level,
-                                  TrackLoc{&w, *t}))
+                                  TrackLoc{&w, *t, ca.halves_long_tracks}))
                     return;
                 if (is_clip_code(name) && name.size() > 3) {
                     auto& clips = clip_list(name.substr(3));
@@ -694,11 +698,11 @@ CharacterLibrary::CharacterLibrary(std::shared_ptr<const CharacterArchiveIndex> 
 }
 
 std::vector<std::shared_ptr<const CharacterArchive>> CharacterLibrary::open_archives(
-    const GameDir& game, const std::vector<std::string>& names) {
+    const GameDir& game, const std::vector<std::string>& names, const std::unordered_set<std::string>& halving) {
     std::vector<std::shared_ptr<const CharacterArchive>> list;
     for (const auto& n : names) {
         try {
-            if (auto a = load_character_archive(game, n)) list.push_back(std::move(a));
+            if (auto a = load_character_archive(game, n, halving.contains(n))) list.push_back(std::move(a));
         } catch (const std::exception& e) {
             log::warn("character archive {}: {}", n, e.what());
         }
@@ -717,6 +721,23 @@ std::unordered_map<std::string, int> global_archive_levels(const GameDir& game) 
             bool t = !f[2].empty() && (f[2][0] == 'T' || f[2][0] == 't');
             out.try_emplace(file, t ? kGlobalResourceLevel : kZoneResourceLevel);
         }
+    return out;
+}
+
+std::unordered_set<std::string> long_track_archives(const GameDir& game, bool luclin) {
+    std::unordered_set<std::string> out;
+    if (auto data = game.read("Resources/GlobalLoad.txt"))
+        for (const auto& line : text_lines(*data)) {
+            auto f = split(line, ',');
+            if (f.size() < 4 || f[3].empty() || f[2].size() < 4 || (f[2][3] != 'T' && f[2][3] != 't')) continue;
+            std::string file = lower(f[3]);
+            if (file.find('.') == std::string::npos) file += ".s3d";
+            out.insert(std::move(file));
+        }
+    // ConfigureLuclinModels' global<code>_chr2 / _chr, not the equipment archives listed after them.
+    if (luclin)
+        for (auto& file : luclin_character_archives(game))
+            if (file.starts_with("global")) out.insert(std::move(file));
     return out;
 }
 
@@ -769,7 +790,7 @@ std::shared_ptr<const game::AppearanceData> load_appearance_data(const GameDir& 
 }
 
 CharacterLibrary CharacterLibrary::load(const GameDir& game, std::string_view zone, bool luclin) {
-    auto list = open_archives(game, global_character_archives(game, luclin));
+    auto list = open_archives(game, global_character_archives(game, luclin), long_track_archives(game, luclin));
     auto zone_list = open_archives(game, zone_character_archives(game, zone));
     std::vector<int> levels = levels_of(list, global_archive_levels(game));
     levels.resize(list.size() + zone_list.size(), kZoneResourceLevel);
@@ -806,7 +827,8 @@ std::shared_ptr<const CharacterLibrary> CharacterArchiveCache::library_for_zone(
     };
     if (!loaded_) {
         auto t0 = std::chrono::steady_clock::now();
-        auto list = CharacterLibrary::open_archives(game, global_character_archives(game, luclin_));
+        auto list = CharacterLibrary::open_archives(game, global_character_archives(game, luclin_),
+                                                    long_track_archives(game, luclin_));
         memory("global", list);
         auto levels = levels_of(list, global_archive_levels(game));
         globals_ = std::make_shared<const CharacterArchiveIndex>(std::move(list), std::move(levels));
@@ -1020,6 +1042,30 @@ CharacterModel CharacterLibrary::build_actor(const std::string& code, const wld:
         const auto* def = ref ? w.get<wld::TrackDef>(ref->track) : nullptr;
         rest.tracks[i].push_back(def && !def->frames.empty() ? to_pose(def->frames.front()) : BonePose{});
     }
+    std::unordered_map<const wld::Fragment*, std::shared_ptr<const EmitterDefinition>> clouds;
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto* f = w.resolve(sk->nodes[i].sprite);
+        if (!f || !f->holds<wld::ParticleCloud>()) continue;
+        // Duplicate named clouds use the first definition, just as the zone's WLD cloud registry does.
+        if (const auto* first = w.find(f->name); first && first->holds<wld::ParticleCloud>()) f = first;
+        auto& definition = clouds[f];
+        if (!definition) {
+            Lock lock(*mutex_);
+            // The WLD by its object (which stays put while its archive is open) and its label: two WLDs open at once
+            // are told apart even unlabelled, and one made later at a freed one's address under its label is the same file.
+            auto& known = cloud_definitions_[std::to_string(reinterpret_cast<std::uintptr_t>(&w)) + '\n' + w.label() +
+                                             '\n' + f->name];
+            definition = known.lock();
+            if (!definition) {
+                const auto& cloud = f->as<wld::ParticleCloud>();
+                auto texture = particle_texture(w, cloud.sprite);
+                if (!texture) continue;
+                definition = std::make_shared<const EmitterDefinition>(particle_cloud_definition(cloud, *texture, f->name));
+                known = definition;
+            }
+        }
+        m.clouds.push_back({static_cast<int>(i), glm::mat4(1.0f), {}, code, definition});
+    }
     const auto* race_model = game::find_model_code(code);
     const std::array<std::string, 3> name_dags{code + "HEAD_POINT_DAG", code + "HE_DAG",
         race_model && race_model->gender == 1 ? "HUFHEAD_POINT_DAG" : "HUMHEAD_POINT_DAG"};
@@ -1048,7 +1094,7 @@ CharacterModel CharacterLibrary::build_actor(const std::string& code, const wld:
     m.indices = std::move(geometry.indices);
     m.parts = std::move(geometry.parts);
     m.materials = std::move(geometry.materials);
-    if (m.indices.empty()) throw std::runtime_error("no visible mesh");
+    if (m.indices.empty() && m.clouds.empty()) throw std::runtime_error("no visible mesh");
 
     // Clips. Codes come from tracks named <code><bone track>, for the model's
     // own bones and for the donor's equivalent bones (donor code + the same
@@ -1133,6 +1179,9 @@ CharacterModel CharacterLibrary::build_actor(const std::string& code, const wld:
         a.borrowed = !own;
         a.tracks.resize(n);
         bool timed = false, found = false, lent = own;
+        // The track the clip's interval comes from (its first timed multi-key track, else its first multi-key one).
+        std::size_t timing_keys = 0;
+        bool timing_halves = false;
         for (std::size_t i = 0; i < n; ++i) {
             const std::string& name = own ? m.bone_names[i] : donor_names[i];
             const TrackLoc* loc = name.empty() ? nullptr : track(clip_code + name);
@@ -1159,12 +1208,23 @@ CharacterModel CharacterLibrary::build_actor(const std::string& code, const wld:
             }
             if (def->frames.size() > 1) {
                 a.frame_count = std::max<std::uint32_t>(a.frame_count, static_cast<std::uint32_t>(def->frames.size()));
-                if ((loc->ref.flags & 1) && loc->ref.frame_ms > 0 && !timed) {
+                const bool flagged = (loc->ref.flags & 1) && loc->ref.frame_ms > 0;
+                if (!timed && (flagged || timing_keys == 0)) {
+                    timing_keys = def->frames.size();
+                    timing_halves = loc->halves_long;
+                }
+                if (flagged && !timed) {
                     a.frame_ms = loc->ref.frame_ms;
                     timed = true;
                 }
             }
         }
+        // EQGraphicsDX9 0x1001b26e: a track of more than 15 keys from an archive opened with the loader byte +0x30
+        // (long_track_archives: the Luclin player models) plays at half its interval, so their clips, keyed about
+        // twice as densely as the classic ones, run as fast. The original halves per track; the clip has one
+        // interval, so a shorter track in a halved clip plays at the halved one too. Floored at 1 ms, where the
+        // original's shift would leave 0.
+        if (timing_halves && timing_keys > 15) a.frame_ms = std::max<std::uint32_t>(a.frame_ms >> 1, 1);
         if (found && lent) m.clips.emplace(clip_code, std::move(a));
     }
     // Luclin takes: "C01A" (else "C01B") also plays as "C01" when the model
@@ -1196,8 +1256,8 @@ CharacterModel CharacterLibrary::build_actor(const std::string& code, const wld:
         lo = glm::min(lo, p);
         hi = glm::max(hi, p);
     }
-    m.bounds_min = lo;
-    m.bounds_max = hi;
+    m.bounds_min = m.vertices.empty() ? glm::vec3(0.0f) : lo;
+    m.bounds_max = m.vertices.empty() ? glm::vec3(0.0f) : hi;
     return m;
 }
 

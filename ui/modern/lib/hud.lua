@@ -405,6 +405,8 @@ end
 --   opts.hideWhen() -> true      not drawn this frame unless in layout mode (an empty target frame)
 --   opts.resizable = { minW, minH }   its right and bottom edges and its bottom-right corner change its size
 --                                (hud.size.<window>); a frame without it has no grip (its scale is the menu's)
+--   opts.grow(dw, dh, s) -> dw, dh   with resizable: the size this frame is drawn at, from the size it has (its own or
+--                                opts.size's); the extended targets' Auto expand grows it to its filled rows
 --   opts.onResize(nw, nh)        with resizable: the drag changes the frame's own layout instead of hud.size (the hot
 --                                bars' buttons per row); opts.size must then give the frame its size from that layout.
 --                                Such a drag is not snapped to the grid (the frame rounds the size its own way)
@@ -448,6 +450,7 @@ function hud.Window(screen, title, opts, body)
       local r = hud.Layout()[key]
       if r then dw, dh = r.w / s, r.h / s end
     end
+    if opts.grow then dw, dh = opts.grow(dw, dh, s) end
   end
   if rolled then dh = opts.titleHeight or 26 end -- (the title bar only)
   local w, h = math.floor(dw * s + 0.5), math.floor(dh * s + 0.5)

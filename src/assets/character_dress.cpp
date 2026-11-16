@@ -20,6 +20,7 @@
 
 #include "assets/character.h"
 #include "assets/eqg_character.h"
+#include "assets/object_animation.h"
 #include "assets/texture_overrides.h"
 #include "core/log.h"
 #include "game/actor_look.h"
@@ -119,7 +120,9 @@ std::optional<CharacterLibrary::ItemMesh> CharacterLibrary::actor_mesh(const std
                 if (mf && mf->holds<wld::MeshDef>())
                     detail::append_wld_mesh(w, *mf, 1, 0, mesh);
             }
-            if (mesh.indices.empty()) {
+            const bool skeletal = std::any_of(actor.sprites.begin(), actor.sprites.end(),
+                [&](wld::Ref sprite) { return w.get<wld::SkeletonRef>(sprite) != nullptr; });
+            if (skeletal) try {
                 // Skeletal items (bows, some shields): bake the rest pose.
                 CharacterModel m = build(code);
                 std::vector<glm::mat4> world;
@@ -130,9 +133,35 @@ std::optional<CharacterLibrary::ItemMesh> CharacterLibrary::actor_mesh(const std
                     v.normal = glm::normalize(glm::mat3(b) * v.normal);
                     v.bones[0] = 0;
                 }
-                mesh = m.default_mesh();
+                CharacterMesh posed = m.default_mesh();
+                std::shared_ptr<const ObjectAnimation> animation;
+                for (const auto sprite : actor.sprites)
+                    if (const auto* ref = w.get<wld::SkeletonRef>(sprite))
+                        if (const auto* skeleton = w.get<wld::Skeleton>(ref->skeleton)) {
+                            // These are the skeleton's own tracks, which play automatically. A P01 or other
+                            // named character clip is a separate policy and is not invented for held items.
+                            if (auto motion = wld::build_object_animation(w, *skeleton))
+                                animation = std::make_shared<const ObjectAnimation>(std::move(*motion));
+                            break;
+                        }
+                for (auto& e : posed.emitters) {
+                    if (animation && static_cast<std::size_t>(e.bone) < animation->nodes.size() &&
+                        animation->nodes[static_cast<std::size_t>(e.bone)].moves) {
+                        e.cloud_animation = animation;
+                        e.cloud_animation_node = static_cast<std::uint32_t>(e.bone);
+                    }
+                    e.local = world[static_cast<std::size_t>(e.bone)] * e.local;
+                    e.bone = 0;
+                }
+                if (mesh.indices.empty()) mesh = std::move(posed);
+                else mesh.emitters = std::move(posed.emitters);
+            } catch (const std::exception& e) {
+                // The skeleton is now read beside a 0x2d mesh too, for its clouds: when it cannot be built, the
+                // static mesh still draws, as it did before (an item with no mesh of its own has nothing to keep).
+                if (mesh.indices.empty()) throw;
+                log::debug("actor model {}: skeleton not used: {}", code, e.what());
             }
-            if (!mesh.indices.empty()) out = ItemMesh{std::move(mesh), false, {}, {}};
+            if (!mesh.indices.empty() || !mesh.emitters.empty()) out = ItemMesh{std::move(mesh), false, {}, {}};
         } catch (const std::exception& e) {
             log::debug("actor model {}: {}", code, e.what());
         }
@@ -180,7 +209,7 @@ void CharacterLibrary::build_item_mesh(std::uint32_t number, std::optional<ItemM
             item.eqg = true;
             std::vector<std::size_t> all(file->pieces.size());
             for (std::size_t i = 0; i < all.size(); ++i) all[i] = i;
-            eqg_character::append_pieces(*file, all, item.mesh);
+            eqg_character::append_pieces(*file, all, item.mesh, true);
             for (auto& v : item.mesh.vertices) {
                 v.bones = {0, 0, 0, 0};
                 v.weights = {1.0f, 0.0f, 0.0f, 0.0f};
@@ -222,6 +251,7 @@ std::shared_ptr<const CharacterMesh> CharacterLibrary::dress(const CharacterMode
     std::shared_ptr<const CharacterMesh> result;
     try {
         CharacterMesh mesh = model.eqg ? dress_eqg(model, a) : dress_wld(model, a);
+        mesh.emitters = model.clouds;
         // The EQG model's own actor emitters, on its points' bones.
         for (const auto& e : model.emitters) {
             const ModelPoint* p = find_point(model.points, e.point);
@@ -692,6 +722,10 @@ void CharacterLibrary::attach_items(const CharacterModel& model, const game::App
         for (const auto& e : held->emitters)
             if (const ModelPoint* p = find_point(held->points, e.point))
                 mesh.emitters.push_back({bone, point_matrix(*p), e, "IT" + std::to_string(number)});
+        for (auto e : item->emitters) {
+            e.bone = bone;
+            mesh.emitters.push_back(std::move(e));
+        }
     }
 }
 

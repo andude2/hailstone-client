@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <memory>
 #include <string_view>
+#include <utility>
 
 #include <glm/glm.hpp>
 
@@ -22,9 +23,11 @@ namespace hailstone::render { class ActorRenderer; }
 
 namespace hailstone::app {
 
+class ActorEmitters;
+
 class ItemPreviewView {
 public:
-    ItemPreviewView(render::VkContext& vk, std::shared_ptr<const assets::CharacterLibrary> library,
+    ItemPreviewView(render::VkContext& vk, const GameDir& game, std::shared_ptr<const assets::CharacterLibrary> library,
                     const std::filesystem::path& shader_dir);
     ~ItemPreviewView();
     ItemPreviewView(const ItemPreviewView&) = delete;
@@ -49,7 +52,9 @@ public:
 
     // Records this frame's image when one was asked for since the last frame (between VkContext::begin_frame_commands
     // and begin_scene).
-    void record(const render::FrameInfo& frame, float dt);
+    // Advance and upload particle textures outside a frame, before record().
+    void prepare(float dt);
+    void record(const render::FrameInfo& frame);
 
 private:
     struct Target {
@@ -58,18 +63,27 @@ private:
         VmaAllocation msaa_alloc = VK_NULL_HANDLE, resolve_alloc = VK_NULL_HANDLE, depth_alloc = VK_NULL_HANDLE,
                       out_alloc = VK_NULL_HANDLE;
         VkImageView msaa_view = VK_NULL_HANDLE, resolve_view = VK_NULL_HANDLE, depth_view = VK_NULL_HANDLE,
-                    out_view = VK_NULL_HANDLE;
+                    out_view = VK_NULL_HANDLE, out_attachment_view = VK_NULL_HANDLE;
         VkDescriptorSet set = VK_NULL_HANDLE; // ImGui's
+        VkDescriptorSet resolve_set = VK_NULL_HANDLE;
         bool drawn = false; // the out image has been through a frame (shader-read layout)
     };
     void make_target(Target& t, int width, int height);
     void destroy_images(Target& t);
+    void create_resolve(const std::filesystem::path& shader_dir);
+    void destroy_resolve();
     void reset_camera();
+    std::pair<glm::vec3, glm::vec3> camera() const; // eye, target
 
     render::VkContext& vk_;
     std::shared_ptr<const assets::CharacterLibrary> library_;
     std::unique_ptr<render::ActorRenderer> actors_;
+    std::unique_ptr<ActorEmitters> emitters_;
     VkSampler sampler_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout resolve_set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool resolve_pool_ = VK_NULL_HANDLE;
+    VkPipelineLayout resolve_layout_ = VK_NULL_HANDLE;
+    VkPipeline resolve_pipeline_ = VK_NULL_HANDLE;
     std::array<Target, render::VkContext::kFramesInFlight> targets_{};
     int want_width_ = 0, want_height_ = 0; // asked for this frame (0: not asked)
     std::uint32_t want_slot_ = 0;

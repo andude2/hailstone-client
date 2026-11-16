@@ -11,6 +11,7 @@
 
 #include "assets/flora.h"
 #include "assets/model.h"
+#include "assets/object_animation.h"
 #include "assets/pfs.h"
 #include "assets/regions.h"
 #include "assets/spell_effects.h"
@@ -34,6 +35,9 @@ struct Zone {
     std::vector<Mesh> terrain;                       // zone geometry, usually one mesh per region
     std::unordered_map<std::string, Mesh> objects;   // actor name (upper case, as in the WLD) -> mesh
     std::vector<Placement> placements;               // where the objects stand
+    // The objects that play their own animation (assets/object_animation.h), by the same names as `objects`: their
+    // meshes there are in the first key's pose, and the vertices the animation moves are listed here.
+    std::unordered_map<std::string, ObjectAnimation> object_animations;
     // Replacement models (assets/model_overrides.h) drawn in place of the objects of the same name; the look only:
     // collision, picking and the rest keep `objects`.
     std::unordered_map<std::string, Mesh> draw_objects;

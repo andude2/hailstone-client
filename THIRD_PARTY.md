@@ -55,6 +55,13 @@ original game.
 - **Housing and marketplace research headers** (`Housing.h`, `HousingNpc.h`, `Market.h` of NMS-Release-Extras, MacroQuest-derived, GPL-2.0): the real estate opcodes and layouts, used as a spec and checked against the original client (`docs/protocol/rof2-packets.md` "Real estate"). No code is copied.
 - **libeq** (github.com/cjab/libeq, MIT) and **LanternExtractor** (github.com/LanternEQ/LanternExtractor, MIT): WLD fragment layouts and the render-method table, used as a spec (`docs/formats/wld.md`). No code is copied.
 - **LanternExtractor** data: `tools/data/lantern_animationsources.txt` is an unchanged copy of `LanternExtractor/ClientData/animationsources.txt` (MIT, © 2024 LanternEQ), the table of which character models borrow animations; `tools/gen_race_models.py` turns it into `src/game/race_models.inc`.
+- **Placed-object animation**: the playback rules of `src/assets/object_animation.cpp` (key times, the closing key, the shared period, the blend and the shared controller) follow OpenEQ `docs/WLD_OBJECT_ANIMATION.md`, used as a spec, with the interval rules checked again in RoF2's EQGraphicsDX9.dll; no OpenEQ animation code was studied or ported. See `docs/formats/wld.md`.
+- **Volumetric clouds** (`shaders/clouds.comp`, `cloud_noise.comp`): techniques from published papers, used as a spec.
+  These are Schneider's cloud shape and noise (SIGGRAPH 2015, Horizon Zero Dawn), Hillaire's energy-conserving
+  integration (SIGGRAPH 2016, Frostbite), Wrenninge et al.'s multiple-scattering octaves (2013), Jarzynski and Olano's
+  pcg3d hash (JCGT 2020) and Jimenez's interleaved gradient noise (2014). MMqd's godot-nishita-sky-with-volumetric-clouds
+  (github.com/MMqd/godot-nishita-sky-with-volumetric-clouds, MIT) was read as an example of the same model. No code
+  from it is ported, and nothing from its noise textures or its Shadertoy-derived hash is used.
 - **Sky**: the sky draw state (no fog, no culling, no depth write) follows OpenEQ `docs/SKY_DOME_DRAW_STATE.md`, used as a spec only; no OpenEQ sky code is ported. See `docs/formats/sky.md`.
 - **OpenEQ audio notes** (`docs/AUDIO_PLAN.md`, `AUDIO_RUNTIME.md`, `CLASSIC_AMBIENT_LEVELS.md`, `CLASSIC_AMBIENT_COOLDOWNS.md`, `CLASSIC_AMBIENT_CLOCK_LIFECYCLE.md`, `XMI_NATIVE_SELECTION.md`): read as a second source for the EFF/EMT layouts, the classic emitter levels and cooldowns and the Miles XMI sequencer (note slots, loop controllers). The audio code was written independently (`docs/formats/audio.md`); no OpenEQ audio code was studied or ported.
 

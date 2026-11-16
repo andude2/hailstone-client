@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 # The oldest macOS a build runs on (set before project()). 13.3 is the first whose libc++ formats floating-point
 # numbers (std::format of a float, std::to_chars), which the client uses; the bundled MoltenVK needs 12.0.
 set(CMAKE_OSX_DEPLOYMENT_TARGET "13.3" CACHE STRING "The oldest macOS the build runs on")
-project(hailstone VERSION 0.7.0 LANGUAGES C CXX)
+project(hailstone VERSION 0.7.1 LANGUAGES C CXX)
 # The release's pre-release label (SemVer: "0.1.0-alpha"); empty for a final release. With the version it is what the
 # updater compares against a release's manifest (core/version.h, docs/updater.md), so change both with each release.
 set(HAILSTONE_VERSION_LABEL "beta")
@@ -151,6 +151,7 @@ add_library(hailstone_engine STATIC
   src/game/light_list.cpp
   src/render/scene_lighting.cpp
   src/render/atmosphere.cpp
+  src/render/clouds.cpp
   src/render/horizon.cpp
   src/render/ambient_probe.cpp
   src/render/shadows.cpp
@@ -300,6 +301,7 @@ add_library(hailstone_engine STATIC
   src/platform/private_file.cpp
   src/platform/durable_file.cpp
   src/platform/shared_file.cpp
+  src/platform/shared_library.cpp
   src/platform/gpu_ipc.cpp
   src/platform/gpu_external_memory.cpp
   src/platform/process.cpp
@@ -366,6 +368,7 @@ add_library(hailstone_engine STATIC
   src/assets/gltf_mesh.cpp
   src/assets/ground_refine.cpp
   src/assets/model_overrides.cpp
+  src/assets/object_animation.cpp
   src/assets/sky.cpp
   src/assets/sky_weather.cpp
   src/assets/spell_effects.cpp
@@ -384,6 +387,7 @@ add_library(hailstone_engine STATIC
   src/app/plate_test.cpp
   src/app/nameplate_layer.cpp
   src/render/gpu_requirements.cpp
+  src/render/graphics_tier.cpp
   src/render/gpu_cache_protocol.cpp
   src/render/gpu_share_link.cpp
   src/render/gpu_shared_cache.cpp
@@ -391,7 +395,9 @@ add_library(hailstone_engine STATIC
   src/render/gpu.cpp
   src/render/zone_renderer.cpp
   src/render/sky_renderer.cpp
+  src/render/cloud_renderer.cpp
   src/render/temporal.cpp
+  src/render/upscaler_provider.cpp
   src/render/frame_gen.cpp
   src/render/fsr3_upscaler.cpp
   src/render/particle_renderer.cpp
@@ -458,6 +464,7 @@ add_library(hailstone_engine STATIC
   src/game/hotbuttons.cpp
   src/game/lua_social.cpp
   src/game/doors.cpp
+  src/game/animated_objects.cpp
   src/game/object_collision.cpp
   src/game/zone_ladders.cpp
   src/game/swept_sphere.cpp
@@ -783,6 +790,7 @@ hailstone_add_shaders(hailstone_shaders
   shaders/object_point_shadow.frag
   shaders/post.vert
   shaders/post.frag
+  shaders/item_preview.frag
   shaders/ao.frag
   shaders/plate_depth.vert
   shaders/plate_depth.frag
@@ -794,10 +802,14 @@ hailstone_add_shaders(hailstone_shaders
   shaders/taa_resolve.frag
   shaders/fg_scatter.comp
   shaders/fg_fill.comp
+  shaders/cloud_noise.comp
+  shaders/clouds.comp
   shaders/fg_synth.frag
   shaders/fg_composite.frag
 )
 add_dependencies(hailstone_engine hailstone_shaders)
+hailstone_add_shader_variant(hailstone_actor_preview_shader actor_preview.frag shaders/actor.frag -DHAILSTONE_PREVIEW=1)
+add_dependencies(hailstone_engine hailstone_actor_preview_shader)
 hailstone_add_fsr3_shaders(hailstone_fsr3_shaders)
 add_dependencies(hailstone_engine hailstone_fsr3_shaders)
 
@@ -815,6 +827,17 @@ add_library(MQ2Example MODULE plugins/example/MQ2Example.c)
 target_include_directories(MQ2Example PRIVATE sdk)
 set_target_properties(MQ2Example PROPERTIES PREFIX "" LIBRARY_OUTPUT_DIRECTORY ${HAILSTONE_TREE_DIR}/plugins$<0:>
                                             RUNTIME_OUTPUT_DIRECTORY ${HAILSTONE_TREE_DIR}/plugins$<0:>)
+
+# The example upscaler provider (plugins/example/upscaler): plain C against sdk/hailstone_upscaler.h, in
+# build/hailstone/upscalers/example/example.<so|dll|dylib> (render/upscaler_provider.h finds it by its folder's name).
+add_library(ExampleUpscaler MODULE plugins/example/upscaler/example.c)
+target_include_directories(ExampleUpscaler PRIVATE sdk)
+target_link_libraries(ExampleUpscaler PRIVATE Vulkan::Headers)
+# (MSVC's import library and .exp go to a folder of the target's own: the test fixture below has the same name.)
+set_target_properties(ExampleUpscaler PROPERTIES PREFIX "" OUTPUT_NAME example
+                      LIBRARY_OUTPUT_DIRECTORY ${HAILSTONE_TREE_DIR}/upscalers/example$<0:>
+                      RUNTIME_OUTPUT_DIRECTORY ${HAILSTONE_TREE_DIR}/upscalers/example$<0:>
+                      ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/upscaler-libs/ExampleUpscaler)
 
 # The server plugins are kept in repositories of their own and reach players as add-ons (docs/addons.md): the NMS
 # server's (projecthailstone/hailstone-nms) and the Project Triune server's (projecthailstone/hailstone-projecttriune,
@@ -908,6 +931,7 @@ elseif(TARGET SDL3-shared)
   endif()
 endif()
 install(TARGETS MQ2Example LIBRARY DESTINATION plugins COMPONENT examples EXCLUDE_FROM_ALL) # a MODULE is a LIBRARY
+install(TARGETS ExampleUpscaler LIBRARY DESTINATION upscalers/example COMPONENT examples EXCLUDE_FROM_ALL)
 
 # The browser helper's messages and the address rules, built with the client's flags (exceptions on): the helper
 # (tools/hailstone-web, CEF's flags: no exceptions, no RTTI) links them from here.
@@ -1030,6 +1054,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/login_launch_test.cpp
     tests/login_token_session_test.cpp
     tests/gpu_requirements_test.cpp
+    tests/graphics_tier_test.cpp
     tests/gpu_ipc_test.cpp
     tests/gpu_cache_protocol_test.cpp
     tests/gpu_shared_texture_owner_test.cpp
@@ -1220,6 +1245,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/equipment_illusions_test.cpp
     tests/appearance_vectors_test.cpp
     tests/combat_test.cpp
+    tests/pet_combat_chat_test.cpp
     tests/plate_test_test.cpp
     tests/nameplate_overlap_test.cpp
     tests/nameplate_style_test.cpp
@@ -1263,6 +1289,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/placement_test.cpp
     tests/mock_placement_test.cpp
     tests/sky_test.cpp
+    tests/clouds_test.cpp
     tests/particles_test.cpp
     tests/spell_effect_timers_test.cpp
     tests/wld_particles_test.cpp
@@ -1322,6 +1349,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/cameras_test.cpp
     tests/iso_camera_test.cpp
     tests/temporal_test.cpp
+    tests/upscaler_provider_test.cpp
     tests/frame_gen_test.cpp
     tests/click_intent_test.cpp
     tests/iso_occlusion_test.cpp
@@ -1366,6 +1394,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/stop_moving_test.cpp
     tests/fly_mode_test.cpp
     tests/zone_ladders_test.cpp
+    tests/object_animation_test.cpp
     tests/chat_trade_vectors_test.cpp
     tests/hotbutton_tracking_vectors_test.cpp
     tests/compass_test.cpp
@@ -1397,6 +1426,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/lod_bands_test.cpp
     tests/zone_models_test.cpp
     tests/addon_tool_test.cpp
+    tests/addon_upscaler_test.cpp
   )
   target_include_directories(hailstone_tests PRIVATE tests sdk)
   add_dependencies(hailstone_tests hailstone_shared_cache_probe)
@@ -1424,11 +1454,30 @@ if(HAILSTONE_BUILD_TESTS)
   target_compile_options(hailstone_mock_web_helper PRIVATE ${HAILSTONE_WARNINGS})
   target_link_libraries(hailstone_mock_web_helper PRIVATE hailstone_web_protocol)
   set_target_properties(hailstone_mock_web_helper PROPERTIES RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:hailstone_tests>)
+  # The example upscaler provider built as the tests' fixtures (tests/upscaler_provider_test.cpp), each in a folder of
+  # its name under test_upscalers/ beside the tests: as it is, one that says no, one for a newer ABI, one that refuses
+  # every GPU, one that fails a frame (the last two for running the client with by hand).
+  set(HAILSTONE_TEST_UPSCALERS_DIR $<TARGET_FILE_DIR:hailstone_tests>/test_upscalers)
+  foreach(u example refuse newer nodevice failing)
+    add_library(TestUpscaler_${u} MODULE plugins/example/upscaler/example.c)
+    target_include_directories(TestUpscaler_${u} PRIVATE sdk)
+    target_link_libraries(TestUpscaler_${u} PRIVATE Vulkan::Headers)
+    set_target_properties(TestUpscaler_${u} PROPERTIES PREFIX "" OUTPUT_NAME ${u}
+                          LIBRARY_OUTPUT_DIRECTORY ${HAILSTONE_TEST_UPSCALERS_DIR}/${u}
+                          RUNTIME_OUTPUT_DIRECTORY ${HAILSTONE_TEST_UPSCALERS_DIR}/${u}
+                          ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/upscaler-libs/TestUpscaler_${u})
+    add_dependencies(hailstone_tests TestUpscaler_${u})
+  endforeach()
+  target_compile_definitions(TestUpscaler_refuse PRIVATE EXAMPLE_REFUSE)
+  target_compile_definitions(TestUpscaler_newer PRIVATE EXAMPLE_ABI=99)
+  target_compile_definitions(TestUpscaler_nodevice PRIVATE EXAMPLE_REFUSE_DEVICE)
+  target_compile_definitions(TestUpscaler_failing PRIVATE EXAMPLE_FAIL_EVALUATE)
   add_dependencies(hailstone_tests MQ2Example ExtendTest ExtendTestV1 ExtendTestNew HostProbe HostProbeThrow hailstone_mock_web_helper)
   target_compile_definitions(hailstone_tests PRIVATE HAILSTONE_EXAMPLE_PLUGIN="$<TARGET_FILE:MQ2Example>"
     HAILSTONE_PROBE_PLUGIN="$<TARGET_FILE:HostProbe>" HAILSTONE_PROBE_THROW_PLUGIN="$<TARGET_FILE:HostProbeThrow>"
     HAILSTONE_EXTEND_PLUGIN="$<TARGET_FILE:ExtendTest>" HAILSTONE_EXTEND_PLUGIN_V1="$<TARGET_FILE:ExtendTestV1>"
     HAILSTONE_EXTEND_PLUGIN_NEW="$<TARGET_FILE:ExtendTestNew>"
+    HAILSTONE_TEST_UPSCALERS_DIR="${HAILSTONE_TEST_UPSCALERS_DIR}"
     HAILSTONE_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data" HAILSTONE_CLIENT_UI_DIR="${CMAKE_CURRENT_SOURCE_DIR}/ui"
     # The recorded vectors are looked for beside the source tree (tests/vector_files.h), whatever the run's directory.
     HAILSTONE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"

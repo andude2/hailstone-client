@@ -267,6 +267,58 @@ TEST_CASE("Chat windows: lines go to the window of their colour's channel (Chann
     fs::remove_all(dir);
 }
 
+// Hailstone: a character with no chat windows of its own takes defaults.ini's as tabs of the main window (the game's
+// defaults.ini makes "Other Chat", ChatWindow1, a window of its own). After that its own are read alone: through
+// defaults.ini, a window the player closed came back at the next start.
+TEST_CASE("Chat windows: defaults.ini's extra windows are tabs of the main window; a closed one stays closed") {
+    ImGuiContext* ctx = ImGui::CreateContext();
+    hailstone::test::ScratchDir dir_scratch("chat_windows_defaults_test");
+    fs::path dir = dir_scratch.path();
+    fs::create_directories(dir / "game");
+    write_strings(dir / "game");
+    std::ofstream(dir / "defaults.ini") << "[ChatManager]\nNumWindows=2\nChatWindow0_LanguageId=0\n"
+                                        << "ChatWindow0_Name=Main Chat\nChatWindow1_LanguageId=0\n"
+                                        << "ChatWindow1_ChatChannel=-1\nChatWindow1_Name=Other Chat\nChannelMap10=1\n";
+    GameDir game(dir / "game");
+    fs::path layout = dir / "UI_Test_Server.ini";
+    {
+        net::GameConnection conn(game);
+        ui::ChatView view;
+        app::EqHost host;
+        host.in_game = host.ui_ready = true;
+        host.game = &game;
+        host.conn = &conn;
+        host.chat = &view;
+        app::EqApi api(host);
+        Lua lua(api);
+        const std::string tabs = "local t = {} for _, w in ipairs(eq.ChatWindows()) do local n = {} "
+                                 "for _, x in ipairs(w.tabs) do n[#n + 1] = x.title end "
+                                 "t[#t + 1] = table.concat(n, '+') end return table.concat(t, '|')";
+        // A new character: one window, Other Chat a tab of it; again so at the next start.
+        api.load_layout(dir / "defaults.ini", layout, {});
+        CHECK(lua.run(tabs) == "Main Chat+Other Chat");
+        api.save_layout();
+        api.load_layout(dir / "defaults.ini", layout, {});
+        CHECK(lua.run(tabs) == "Main Chat+Other Chat");
+        // The tab closed: it stays closed.
+        lua.run("eq.ChatCloseTab(1, 2)");
+        CHECK(lua.run(tabs) == "Main Chat");
+        api.save_layout();
+        api.load_layout(dir / "defaults.ini", layout, {});
+        CHECK(lua.run(tabs) == "Main Chat");
+        // A window of the player's own is kept, and closed stays closed.
+        CHECK(lua.run("return eq.ChatNewWindow()") == "2");
+        api.save_layout();
+        api.load_layout(dir / "defaults.ini", layout, {});
+        CHECK(lua.run("return #eq.ChatWindows()") == "2");
+        lua.run("eq.ChatCloseWindow(2)");
+        api.save_layout();
+        api.load_layout(dir / "defaults.ini", layout, {});
+        CHECK(lua.run(tabs) == "Main Chat");
+    }
+    ImGui::DestroyContext(ctx);
+}
+
 TEST_CASE("Chat hit modes: spell categories persist independently, ALL keeps index 7 and menus put it last") {
     ImGuiContext* ctx = ImGui::CreateContext();
     test::ScratchDir scratch("chat_spell_hit_modes");

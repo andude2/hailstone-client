@@ -335,10 +335,9 @@ void GameConnection::update_pet_presence() {
 }
 
 void GameConnection::note_pet_spawn(const game::Spawn& s) {
-    // A spawn arriving with the player as its owner becomes the pet the
-    // window shows (the original sets the player's PetID from the spawn's
-    // MasterID); NMS re-sends the focused pet's spawn when the focus changes.
-    if (world_.player_id == 0 || s.pet_owner_id != world_.player_id || s.is_corpse || s.id == world_.player_id) return;
+    // A non-temporary owned spawn becomes the window's pet (PetID from MasterID; @0x59687a skips bTempPet).
+    // NMS re-sends the focused pet's spawn when the focus changes.
+    if (world_.player_id == 0 || s.pet_owner_id != world_.player_id || s.temp_pet || s.is_corpse || s.id == world_.player_id) return;
     if (pets_.focused != s.id) {
         pets_.focused = s.id;
         pets_.pet_target = 0;
@@ -361,7 +360,8 @@ void GameConnection::forget_pet_spawn(std::uint32_t spawn_id) {
     pets_.pet_target = 0;
     pet_buffs_.clear();
     for (const auto& [id, s] : world_.spawns)
-        if (s.pet_owner_id == world_.player_id && world_.player_id && !s.is_corpse && id != world_.player_id) {
+        // As PlayerClient_LinkPetToOwner @0x4b9b10 (run when an owner spawn is added) does, skip temporary pets.
+        if (s.pet_owner_id == world_.player_id && world_.player_id && !s.temp_pet && !s.is_corpse && id != world_.player_id) {
             pets_.focused = id;
             break;
         }

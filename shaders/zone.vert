@@ -14,6 +14,29 @@ layout(set = 1, binding = 0) uniform Scene {
     SCENE_LIGHTING_FIELDS
 } scene;
 
+// The animated objects' motions (render/zone_renderer.cpp animate_instances): motion m's rows now at m * 6, a frame ago
+// at m * 6 + 3. An animated object's instance names its first motion in normal_row[1].w, and each vertex its node in
+// point_light.x (1 for the first motion, 0 for a vertex that stays still); the vertex goes through that motion before
+// its placement.
+int vertex_motion(float first, float node) {
+    const int m = int(first + 0.5), n = int(node + 0.5);
+    return m > 0 && n > 0 ? m + n - 1 : 0;
+}
+layout(set = 1, binding = 4) readonly buffer Motions {
+    vec4 motion_rows[];
+};
+
+vec3 motion_point(vec3 p, int motion, int then) {
+    if (motion <= 0) return p;
+    const int at = motion * 6 + then * 3;
+    return instance_point(p, motion_rows[at], motion_rows[at + 1], motion_rows[at + 2]);
+}
+vec3 motion_normal(vec3 n, int motion) {
+    if (motion <= 0) return n;
+    const int at = motion * 6;
+    return instance_normal(n, motion_rows[at], motion_rows[at + 1], motion_rows[at + 2]);
+}
+
 layout(push_constant) uniform Push {
     uvec4 tex;    // texture slots 0..3
     uvec4 tex2;   // slot 4, mode, flags, unused
@@ -78,8 +101,9 @@ const uint kFlagMultiPass = 4u; // add the lights.wld point lights (MPL path)
 const uint kModeWldDetail = 6u;  // a classic region's detail pass (zone.frag)
 
 void main() {
-    vec3 position = instance_point(in_position, in_row0, in_row1, in_row2);
-    vec3 n = instance_normal(in_normal, in_normal_row0, in_normal_row1, in_normal_row2);
+    const int motion = vertex_motion(in_normal_row1.w, in_point_light.x);
+    vec3 position = instance_point(motion_point(in_position, motion, 0), in_row0, in_row1, in_row2);
+    vec3 n = instance_normal(motion_normal(in_normal, motion), in_normal_row0, in_normal_row1, in_normal_row2);
     vec4 color = in_color * in_tint;
     v_uv = in_uv;
     v_uv2 = in_uv2;
@@ -120,8 +144,11 @@ void main() {
     v_lod_distance = distance(scene.camera_pos.xyz, vec3(in_row0.w, in_row1.w, in_row2.w));
     v_fog = fog_factor(p);
     gl_Position = scene.view_proj * vec4(p, 1.0);
-    if (temporal.info.x > 0.0)
-        motion_clips(p, position + wind_offset(position, sway, scene.wind, scene.time.y), v_now, v_then);
-    else
+    if (temporal.info.x > 0.0) {
+        // An animated part was where its motion had it a frame ago (render/zone_renderer.cpp animate_instances).
+        vec3 before = motion > 0 ? instance_point(motion_point(in_position, motion, 1), in_row0, in_row1, in_row2) : position;
+        motion_clips(p, before + wind_offset(before, sway, scene.wind, scene.time.y), v_now, v_then);
+    } else {
         v_now = v_then = vec4(0.0, 0.0, 0.0, 1.0);
+    }
 }

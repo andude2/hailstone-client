@@ -105,6 +105,12 @@ void ClientApp::load_zone(const std::string& short_name) {
         if (spell_bolts_) spell_bolts_->clear();
         if (actor_emitters_) actor_emitters_->clear();
         collision_ = tested_collision ? std::move(*tested_collision) : game::CollisionMesh::build(*zone_);
+        animated_objects_ = game::AnimatedObjects::build(*zone_);
+        zone_animation_origin_ms_ = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start_time_).count());
+        if (!animated_objects_->empty())
+            log::info("zone objects: {} animated, {} moving parts", animated_objects_->definition_count(),
+                      animated_objects_->part_count());
         mark("collision");
         if (conn_) conn_->reground(); // ground_npcs measured the spawns against no floor, or the last zone's
         zone_ladders_ = game::zone_ladders(*zone_);
@@ -300,6 +306,7 @@ void ClientApp::unload_zone() {
     actor_library_.reset();
     if (nav_) nav_->zone_unloaded();
     collision_.reset();
+    animated_objects_.reset();
     zone_ladders_.clear();
     zone_line_.set_buried({});
     weather_.clear_particles(); // they land on the old zone's ground
@@ -582,6 +589,7 @@ void ClientApp::enter_zone() {
 namespace {
 constexpr std::size_t kSpellLights = 8; // of render::kMaxSceneLights
 constexpr std::size_t kBoltLights = 6;
+constexpr std::size_t kActorLights = 4; // each of the EDD and WLD actor effects
 } // namespace
 
 render::SceneLighting ClientApp::scene_lighting(const game::SceneLight& scene, float hour,
@@ -636,6 +644,20 @@ render::SceneLighting ClientApp::scene_lighting(const game::SceneLight& scene, f
                 dynamic.push_back(l);
                 if (moving) moving->spells.push_back(l);
             }
+        if (actor_emitters_ && dynamic_lights_) {
+            // The same modern glow as spell particles, following the model's posed effect nodes.
+            auto add_actor_lights = [&](const game::ParticleSystem& particles, bool cloud) {
+                for (const auto& l : game::particle_lights(
+                         particles, [this, cloud](const std::string& texture) {
+                             return actor_emitters_->texture_color(texture, cloud);
+                         }, kActorLights)) {
+                    dynamic.push_back(l);
+                    if (moving) moving->spells.push_back(l);
+                }
+            };
+            add_actor_lights(actor_emitters_->simulation(), false);
+            add_actor_lights(actor_emitters_->cloud_simulation(), true);
+        }
         std::span<const assets::PointLight> zone_lights;
         if (zone_) zone_lights = zone_->lights;
         lights = game::select_lights(zone_lights, dynamic, camera_.position, 600.0f, render::kMaxSceneLights);
@@ -748,6 +770,9 @@ std::optional<int> ClientApp::display_option(std::string_view name) const {
     // Hailstone: how far the flora is drawn, in units (render::FloraRenderer::set_reach).
     if (name == "flora_distance") return static_cast<int>(std::lround(flora_reach_));
     if (name == "grass_density") return grass_density_;
+    // Hailstone: the tier this computer is (render/graphics_tier.h): 0 Low, 1 Medium, 2 High; Options > Graphics'
+    // Detect applies it (set_display_option "detect_graphics").
+    if (name == "gpu_tier") return static_cast<int>(render::detect_graphics_tier(graphics_profile()));
     // The Options window's particle density combos (SyncDisplayPage's DensityChoice).
     for (std::string_view kind : {"spell", "environment", "actor"})
         if (name.starts_with(kind) && name.substr(kind.size()) == "_particle_density")
@@ -767,13 +792,16 @@ std::optional<int> ClientApp::display_option(std::string_view name) const {
     if (name == "upscale_quality")
         return static_cast<int>(render::upscale_quality_for(
             std::clamp(config_.get_int("display.render_scale", 100), render::kMinRenderScalePercent, 100)));
-    // 0 FSR 1 (spatial), 1 temporal, 2 FSR 3.1 (render/temporal.h); as saved, which shows at the next start.
+    // 0 Off, 1 FSR 1 (spatial), 2 temporal, 3 FSR 3.1, 4 on the installed upscaler providers (render/temporal.h
+    // upscaler_choice, option_choices "upscaler_providers"); as saved, which shows at the next start.
     if (name == "upscaler")
-        return static_cast<int>(render::parse_upscaler(config_.get_string("display.upscaler", "fsr1")));
+        return render::upscaler_choice(config_.get_string("display.upscaler", "off"),
+                                       upscaler_providers());
     if (name == "distance_blur") return config_.get_bool("display.distance_blur", true) ? 1 : 0;
     if (name == "color_grade") return config_.get_bool("display.color_grade", true) ? 1 : 0;
     if (name == "neighbour_zones") return neighbour_zones_ ? 1 : 0;
     if (name == "horizon_hills") return horizon_hills_ ? 1 : 0;
+    if (name == "volumetric_clouds") return volumetric_clouds_ ? 1 : 0;
     if (name == "tree_detail") return tree_detail_;
     // Hailstone: NPCs the server leaves in the air are drawn on the floor (game::WorldState::ground_npcs), on by default.
     if (name == "ground_npcs") return config_.get_bool("display.ground_npcs", true) ? 1 : 0;
@@ -809,6 +837,16 @@ std::optional<int> ClientApp::display_option(std::string_view name) const {
 }
 
 bool ClientApp::set_display_option(std::string_view name, int value) {
+    if (name == "detect_graphics") {
+        // The first start's settings for this computer again (render/graphics_tier.h), over the ones there; the
+        // sample count shows at the next start, as the Options window says.
+        const render::GraphicsTier tier = render::detect_graphics_tier(graphics_profile());
+        config_.set(render::kGraphicsTierKey, render::graphics_tier_name(tier));
+        render::apply_graphics_tier(config_, tier);
+        config_.save(config_path_);
+        apply_settings();
+        return true;
+    }
     if (name == "find_trail_style") {
         config_.set_int("display.find_trail_style", static_cast<int>(game::normalize_find_trail_style(value)));
         config_.save(config_path_);
@@ -844,6 +882,13 @@ bool ClientApp::set_display_option(std::string_view name, int value) {
         // The distant hills round an outdoor zone (render/horizon.h).
         horizon_hills_ = value != 0;
         config_.set_bool("display.horizon_hills", horizon_hills_);
+        config_.save(config_path_);
+        return true;
+    }
+    if (name == "volumetric_clouds") {
+        // The modern sky's clouds marched through the air, or its painted layer and patches (render/sky_renderer.h).
+        volumetric_clouds_ = value != 0;
+        config_.set_bool("display.volumetric_clouds", volumetric_clouds_);
         config_.save(config_path_);
         return true;
     }
@@ -909,9 +954,10 @@ bool ClientApp::set_display_option(std::string_view name, int value) {
         if (percent == 0) return true;
         config_.set_int("display.render_scale", percent);
     } else if (name == "upscaler") {
-        // Taken at start-up, as display.msaa: the temporal upscaler draws with one sample.
-        const auto chosen = value == 2 ? render::Upscaler::Fsr3 : value == 1 ? render::Upscaler::Taa : render::Upscaler::Fsr1;
-        config_.set("display.upscaler", std::string(render::upscaler_name(chosen)));
+        // Taken at start-up, as display.msaa: the temporal upscaler draws with one sample. Off's full size and no
+        // frame generation apply at once (apply_scene_options).
+        config_.set("display.upscaler",
+                    render::upscaler_choice_name(value, upscaler_providers()));
     } else if (name == "shadows") {
         config_.set("display.shadows", std::to_string(kShadowSizes[std::clamp(value, 0, 3)]));
     } else if (name == "msaa") {

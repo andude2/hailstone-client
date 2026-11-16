@@ -135,6 +135,7 @@ bool ClientApp::MountAnswers::mount_point(const game::Spawn& rider, const game::
 bool ClientApp::MountAnswers::can_i_fit_here() {
     ZoneMoveWorld world(app->collision_ ? &*app->collision_ : nullptr, app->world_objects_.get(),
                         app->zone_ ? &app->zone_->regions : nullptr);
+    world.set_animated(app->animated_objects_ ? &*app->animated_objects_ : nullptr);
     const game::Spawn* me = app->conn_->world().player();
     auto now_ms = static_cast<std::uint32_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - app->start_time_).count() + 1);
@@ -785,6 +786,7 @@ void ClientApp::update_player(float dt) {
         }
         float since_zone_in = std::chrono::duration<float>(Clock::now() - zone_entered_).count();
         ZoneMoveWorld world(collision_ ? &*collision_ : nullptr, world_objects_.get(), zone_ ? &zone_->regions : nullptr);
+        world.set_animated(animated_objects_ ? &*animated_objects_ : nullptr);
         update_vehicles();
         world.set_vehicles(&vehicles_, conn_->standing_on());
         update_npc_bodies();
@@ -853,6 +855,8 @@ void ClientApp::update_player(float dt) {
             }
         }
         const auto now_ms = static_cast<std::uint32_t>(st.ms + 1); // the step's time (as Clock::now() - start_time_ + 1)
+        // The zone objects' moving parts where their animation has them at this step.
+        if (animated_objects_) animated_objects_->set_time(zone_animation_ms(st.ms));
         {
             // CharacterZoneClient::DoPassageOfTime (0x45dc59): the target changed since the last frame (0xb827f8) while
             // auto attack is on: the red con context tip (game/targeting.h), unless we are in a group that has the

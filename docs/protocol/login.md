@@ -97,10 +97,11 @@ The issuer and login server enforce those. While a ticket is on the command line
 know are counted in the log but not named: a ticket split at a space would otherwise be logged.
 
 The endpoint is the explicit saved login-server profile `--server`, the explicit `--host`/`--port`, or the
-`eqhost.txt` of a game folder named for this run (`--game-dir` or `EQ_GAME_DIR`), in that order; explicit host/port
-override the chosen endpoint. The asset folder remembered in `hailstone.ini` does not count: it may be another
-server's, so without one of those the client refuses the ticket and sends nothing ("A login ticket needs its server
-named for this run: --server, --host, or --game-dir"). An unknown named profile also fails before sending anything.
+`eqhost.txt` of a game folder named for this run (`--game-dir` or `EQ_GAME_DIR`) or of the EverQuest folder Hailstone
+is installed in (`<EQ>/hailstone/`, as a server's patcher puts it; RoF2 reads the `eqhost.txt` beside it), in that
+order; explicit host/port override the chosen endpoint. The asset folder remembered in `hailstone.ini` does not
+count: it may be another server's, so without one of those the client refuses the ticket and sends nothing ("A login
+ticket needs its server named for this run: --server, --host, or --game-dir ..."). An unknown named profile also fails before sending anything.
 A profile matching the endpoint supplies the normal server assets and UI. With no profile, login is transient. The
 default port for an explicit host remains `ServerProfile`'s 5997; specify `--port` when another port is required.
 

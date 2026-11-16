@@ -11,6 +11,8 @@ layout(push_constant) uniform Push {
     vec4 camera_pos; // w: time-of-day brightness
     uint texture_index;
     uint instance; // index into the model matrices
+    uint maps;
+    uint flags; // material flags (fragment shader)
 } pc;
 
 layout(std430, set = 0, binding = 0) readonly buffer Instances {

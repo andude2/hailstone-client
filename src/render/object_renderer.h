@@ -113,6 +113,7 @@ private:
         float opacity = 1.0f;
         bool two_sided = false;
         bool fog = true;
+        bool lit = true;
         bool flame = false; // a flame mesh (assets::flame_material_hue): set_hide_flames leaves it out
     };
     struct GpuModel {

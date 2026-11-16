@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -13,8 +14,10 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "app/actor_emitters.h"
+#include "app/world_objects.h"
 #include "app/spell_particles.h"
 #include "assets/character.h"
+#include "assets/object_animation.h"
 #include "core/byte_io.h"
 #include "game/collision.h"
 #include "game/missiles.h"
@@ -537,6 +540,192 @@ TEST_CASE("Actor emitters use point-owner PESFactor, keep floor entries on the a
     CHECK(missing_tries == 2);
     particles.update(0.01f, {}, pose, {});
     CHECK(particles.simulation().emitters().empty());
+}
+
+TEST_CASE("WLD item clouds follow their held node without an actor EDD file and leave with the mesh") {
+    auto definition = std::make_shared<assets::EmitterDefinition>(dot());
+    definition->duration = -9999.0f;
+    definition->follow_attachment = 1;
+    definition->bone_orientation = 1;
+    definition->actor_scales_size = 1;
+    definition->scale2 = definition->max_opacity = 0.5f;
+    definition->per_tick = 1;
+    definition->ticks_per_second = 10.0f;
+    definition->texture = "fixture.dds";
+    assets::CharacterMesh mesh;
+    assets::MeshEmitter cloud;
+    cloud.bone = 2;
+    cloud.local = glm::translate(glm::mat4(1.0f), glm::vec3(3, 0, 0));
+    cloud.model_code = "IT42";
+    cloud.cloud = definition;
+    mesh.emitters.push_back(cloud);
+    auto heights = game::parse_height_tables({}, "[IT42]\nPESFactor=3\n");
+    app::ActorEmitters particles({}, heights); // WLD clouds do not need ActorEmittersNew.edd
+    particles.set_density(0.0f);               // the EDD list's setting does not disable the WLD list
+    glm::mat4 world = glm::translate(glm::mat4(1), glm::vec3(100, 20, 30));
+    world = glm::scale(world, glm::vec3(2));
+    std::array<app::ActorEmitters::Actor, 2> actors{{{7, &mesh, false, 0.25f}, {8, &mesh}}};
+    auto pose = [&](std::uint32_t id, int bone, glm::mat4& out) {
+        out = world;
+        if (id == 8) out[3].y += 50;
+        return bone == 2;
+    };
+    particles.update(0.01f, actors, pose, {});
+    CHECK(particles.simulation().emitters().empty());
+    REQUIRE(particles.cloud_simulation().emitters().size() == 2);
+    CHECK(particles.cloud_simulation().definitions().size() == 2); // one shared definition plus the sentinel
+    const auto& first = particles.cloud_simulation().emitters()[0];
+    CHECK(first.persistent);
+    CHECK(near(first.origin, {106, 20, 30}));
+    REQUIRE(first.particles.size() == 1);
+    CHECK(first.particles.front().color.a == doctest::Approx(0.0625f)); // WLD creator opacity x maximum x owner
+    CHECK(first.particles.front().size_factor == doctest::Approx(2.0f)); // node scale once, no EDD PESFactor
+    world[3].x += 10;
+    actors[0].alpha = 0.75f;
+    particles.update(0.01f, actors, pose, {});
+    CHECK(near(particles.cloud_simulation().emitters()[0].origin, {116, 20, 30}));
+    CHECK(near(particles.cloud_simulation().emitters()[0].particles.front().position, {116, 20, 30}));
+    CHECK(particles.cloud_simulation().emitters()[0].particles.front().color.a == doctest::Approx(0.1875f));
+    // A new appearance drops the old item's cloud, while another actor using the shared mesh keeps it.
+    assets::CharacterMesh plain;
+    actors[0].mesh = &plain;
+    particles.update(0.01f, actors, pose, {});
+    REQUIRE(particles.cloud_simulation().emitters().size() == 1);
+    CHECK(particles.cloud_simulation().emitters().front().actor == 8);
+    particles.update(0.01f, {}, pose, {});
+    CHECK(particles.cloud_simulation().emitters().empty());
+    particles.clear();
+    CHECK(particles.cloud_simulation().definitions().size() == 1);
+}
+
+TEST_CASE("An actor can carry independent EQG and WLD held-item effects") {
+    auto definition = std::make_shared<assets::EmitterDefinition>(dot());
+    assets::CharacterMesh mesh;
+    assets::MeshEmitter eqg;
+    eqg.bone = 0;
+    eqg.emitter.emitter = 1;
+    mesh.emitters.push_back(eqg);
+    auto cloud = eqg;
+    cloud.cloud = definition;
+    mesh.emitters.push_back(cloud);
+    app::ActorEmitters particles({assets::EmitterDefinition{}, dot()});
+    app::ActorEmitters::Actor actor{7, &mesh};
+    auto pose = [](std::uint32_t, int, glm::mat4& out) { out = glm::mat4(1); return true; };
+    particles.update(0.01f, std::span(&actor, 1), pose, {});
+    REQUIRE(particles.simulation().emitters().size() == 1);
+    REQUIRE(particles.cloud_simulation().emitters().size() == 1);
+    CHECK(particles.emitters() == 2);
+    mesh.serial = {};
+    particles.update(0.01f, std::span(&actor, 1), pose, {});
+    CHECK(particles.simulation().emitters().size() == 1);
+    CHECK(particles.cloud_simulation().emitters().size() == 1);
+    CHECK(particles.cloud_simulation().definitions().size() == 2);
+}
+
+TEST_CASE("Instanced item clouds keep independent spawn, object and missile attachment lifetimes") {
+    auto definition = std::make_shared<assets::EmitterDefinition>(dot());
+    definition->follow_attachment = 1;
+    definition->bone_orientation = 1;
+    assets::CharacterMesh mesh;
+    assets::MeshEmitter cloud;
+    cloud.bone = 0; // item meshes bake their node pose into the object's local frame
+    cloud.local = glm::translate(glm::mat4(1), glm::vec3(2, 0, 0));
+    cloud.cloud = definition;
+    mesh.emitters.push_back(cloud);
+    constexpr std::uint32_t spawn = 7, object = app::WorldObjects::kObjectActorBit | 7,
+                            missile = app::WorldObjects::kMissileActorBit | 7;
+    std::vector<app::ActorEmitters::Actor> actors{{spawn, &mesh}, {object, &mesh}, {missile, &mesh}};
+    glm::mat4 object_world = glm::rotate(glm::mat4(1), glm::radians(90.0f), glm::vec3(0, 0, 1));
+    object_world = glm::scale(object_world, glm::vec3(3));
+    object_world[3] = {20, 30, 40, 1};
+    auto pose = [&](std::uint32_t id, int bone, glm::mat4& world) {
+        if (bone != 0) return false;
+        if (id == object) world = object_world;
+        else world = glm::translate(glm::mat4(1), glm::vec3(id == missile ? 100 : 10, 0, 0));
+        return true;
+    };
+    app::ActorEmitters particles(std::vector<assets::EmitterDefinition>{});
+    particles.update(0.01f, actors, pose, {});
+    REQUIRE(particles.cloud_simulation().emitters().size() == 3);
+    CHECK(near(particles.cloud_simulation().emitters()[0].origin, {12, 0, 0}));
+    CHECK(near(particles.cloud_simulation().emitters()[1].origin, {20, 36, 40}));
+    CHECK(near(particles.cloud_simulation().emitters()[2].origin, {102, 0, 0}));
+    actors.erase(actors.begin() + 1); // the drop was picked up; the held and thrown instances remain
+    particles.update(0.01f, actors, pose, {});
+    REQUIRE(particles.cloud_simulation().emitters().size() == 2);
+    CHECK(particles.cloud_simulation().emitters()[0].actor == spawn);
+    CHECK(particles.cloud_simulation().emitters()[1].actor == missile);
+    actors = {{object + 1, &mesh}}; // another dropped instance gets a fresh owner, even with the same source model
+    particles.update(0.01f, actors, [](std::uint32_t, int, glm::mat4& world) {
+        world = glm::translate(glm::mat4(1), glm::vec3(200, 0, 0));
+        return true;
+    }, {});
+    REQUIRE(particles.cloud_simulation().emitters().size() == 1);
+    const auto& last = particles.cloud_simulation().emitters().front();
+    CHECK(last.actor == object + 1);
+    REQUIRE(last.particles.size() == 1);
+    CHECK(near(last.particles.front().position, {202, 0, 0}));
+}
+
+TEST_CASE("Authored held-item cloud tracks animate inside their host frame with an instance clock") {
+    auto definition = std::make_shared<assets::EmitterDefinition>(dot());
+    definition->follow_attachment = 1;
+    definition->bone_orientation = 1;
+    auto animation = std::make_shared<assets::ObjectAnimation>();
+    animation->period_ms = 500;
+    animation->nodes.resize(1);
+    auto& node = animation->nodes.front();
+    node.interval_ms = 250;
+    node.moves = true;
+    node.keys = {{glm::quat(1, 0, 0, 0), {2, 0, 0}, 1},
+                 {glm::quat(1, 0, 0, 0), {4, 0, 0}, 1},
+                 {glm::quat(1, 0, 0, 0), {2, 0, 0}, 1}};
+    animation->rest_inverse = {glm::translate(glm::mat4(1), glm::vec3(-2, 0, 0))};
+    assets::CharacterMesh mesh;
+    assets::MeshEmitter cloud;
+    cloud.bone = 0;
+    cloud.local = glm::translate(glm::mat4(1), glm::vec3(2, 0, 0)); // baked first key's node matrix
+    cloud.cloud = definition;
+    cloud.cloud_animation = animation;
+    mesh.emitters = {cloud, cloud}; // shared controller sampled once, with separate emitters on it
+    constexpr std::uint32_t object = app::WorldObjects::kObjectActorBit | 10,
+                            missile = app::WorldObjects::kMissileActorBit | 20;
+    std::vector<app::ActorEmitters::Actor> actors{{object, &mesh}};
+    const glm::mat4 host = glm::translate(glm::mat4(1), glm::vec3(20, 30, 40)) *
+                           glm::rotate(glm::mat4(1), glm::radians(90.0f), glm::vec3(0, 0, 1)) *
+                           glm::scale(glm::mat4(1), glm::vec3(3));
+    auto pose = [&](std::uint32_t id, int bone, glm::mat4& world) {
+        world = id == object ? host : glm::translate(glm::mat4(1), glm::vec3(100, 0, 0));
+        return bone == 0;
+    };
+    app::ActorEmitters particles(std::vector<assets::EmitterDefinition>{});
+    particles.update(0.125f, actors, pose, {});
+    REQUIRE(particles.cloud_simulation().emitters().size() == 2);
+    CHECK(near(particles.cloud_simulation().emitters()[0].origin, {20, 36, 40})); // new controller starts at phase 0
+    actors.push_back({missile, &mesh});
+    particles.update(0.125f, actors, pose, {});
+    REQUIRE(particles.cloud_simulation().emitters().size() == 4);
+    CHECK(near(particles.cloud_simulation().emitters()[0].origin, {20, 39, 40})); // 125 ms: node x=3, host turns/scales it
+    CHECK(near(particles.cloud_simulation().emitters()[2].origin, {102, 0, 0})); // another instance starts at its own 0
+    particles.update(0.125f, actors, pose, {});
+    CHECK(near(particles.cloud_simulation().emitters()[0].origin, {20, 42, 40}));
+    CHECK(near(particles.cloud_simulation().emitters()[2].origin, {103, 0, 0}));
+    const auto key = particles.cloud_simulation().emitters()[0].key;
+    particles.set_density(0.0f); // only the EDD list changes; the WLD controller and living particles stay
+    particles.update(0.0f, actors, pose, {});
+    CHECK(particles.cloud_simulation().emitters()[0].key == key);
+    CHECK(near(particles.cloud_simulation().emitters()[0].origin, {20, 42, 40}));
+    assets::CharacterMesh replacement = mesh; // another held item/appearance starts its own controller
+    actors[0].mesh = &replacement;
+    particles.update(0.125f, actors, pose, {});
+    REQUIRE(particles.cloud_simulation().emitters().size() == 4);
+    auto origin = [&](std::uint32_t id) {
+        for (const auto& emitter : particles.cloud_simulation().emitters())
+            if (emitter.actor == id) return emitter.origin;
+        return glm::vec3(-1);
+    };
+    CHECK(near(origin(object), {20, 36, 40}));
+    CHECK(near(origin(missile), {104, 0, 0}));
 }
 
 TEST_CASE("Local sharp-weapon damage produces asset-backed blood only at a supported actor point") {

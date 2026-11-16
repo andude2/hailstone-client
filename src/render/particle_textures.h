@@ -5,8 +5,10 @@
 // so it is tested.
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -14,8 +16,18 @@
 #include "assets/texture.h"
 
 namespace hailstone { class GameDir; }
+namespace hailstone::assets { struct EmitterDefinition; }
 
 namespace hailstone::render {
+
+struct ParticleTextureFrame {
+    std::string_view texture;
+    glm::uvec2 grid{1};
+    std::uint32_t atlas_frame = 0;
+};
+
+// EDD frames occupy cells of one texture; WLD sprites supply a separate whole bitmap per frame.
+ParticleTextureFrame particle_texture_frame(const assets::EmitterDefinition& definition, std::uint32_t frame);
 
 struct LoadedParticleTexture {
     std::optional<assets::Image> image; // as decoded; nullopt when no folder has it or it does not decode

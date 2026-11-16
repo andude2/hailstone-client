@@ -2055,12 +2055,21 @@ void chat_layout_loaded(ui::UiIni& ini, EqHost& host, const std::filesystem::pat
     main.scrollbar = num("ChatWindow0_Scrollbar", 1) != 0;
     main.font = num("ChatWindow0_FontStyle", 3);
     main.up = num("ChatWindow0_Up", -1);
-    int count = std::clamp(num("NumWindows", 1), 1, kMaxChatWindows - 1);
+    // Hailstone (a deliberate change from RoF2): a character whose file keeps no chat windows of its own yet (no
+    // NumWindows) takes defaults.ini's, as tabs of the main window; the game's defaults.ini makes "Other Chat"
+    // (ChatWindow1) a window of its own. Once the file has its own (save_manager writes them at every change), only
+    // they are read: read through defaults.ini, a window the player closed, whose keys save_manager erases, came back
+    // at the next start.
+    const bool own_windows = ini.get_own("ChatManager", "NumWindows").has_value();
+    auto has = [&](const std::string& key) {
+        return own_windows ? ini.get_own("ChatManager", key).has_value() : ini.get("ChatManager", key).has_value();
+    };
+    int count = std::clamp(num("NumWindows", own_windows ? 0 : 1), 0, kMaxChatWindows - 1);
     for (int w = 1; w <= count; ++w) {
         std::string k = std::format("ChatWindow{}_", w);
         m.num_windows = w + 1;
         // a window is there when it has a language key (the slot of a closed one has none)
-        if (!ini.get("ChatManager", k + "LanguageId") && !ini.get("ChatManager", k + "Language")) continue;
+        if (!has(k + "LanguageId") && !has(k + "Language")) continue;
         ChatWnd& c = m.wnd[static_cast<std::size_t>(w)];
         c.used = true;
         c.serial = m.next_serial++;
@@ -2072,7 +2081,7 @@ void chat_layout_loaded(ui::UiIni& ini, EqHost& host, const std::filesystem::pat
         c.scrollbar = num(k + "Scrollbar", 1) != 0;
         int font = num(k + "FontStyle", 3);
         c.font = font < 0 || font > 7 ? 3 : font;
-        c.dock = num(k + "Dock", -1);
+        c.dock = own_windows ? num(k + "Dock", -1) : 0;
         c.up = num(k + "Up", -1);
     }
     for (int w = 1; w < kMaxChatWindows; ++w) {

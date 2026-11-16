@@ -124,6 +124,10 @@ EffectParams effect_params(const MaterialDef& def, EqgShader cls) {
                255.0f;
     };
     e.slide = {f("e_fSlide1X", 0.0f), f("e_fSlide1Y", 0.0f), f("e_fSlide2X", 0.0f), f("e_fSlide2Y", 0.0f)};
+    if (contains(def.shader, "MPL")) {
+        e.coverage_map = lower(def.texture("e_TextureCoverage0"));
+        e.coverage_scale = f("e_fCoverageScale0", 1.0f);
+    }
     auto tex = [&](std::string_view name) { e.textures.push_back(lower(def.texture(name))); };
     switch (cls) {
     case EqgShader::Water:
@@ -160,14 +164,17 @@ EffectParams effect_params(const MaterialDef& def, EqgShader cls) {
         if (ends_with(suffix, ".fx")) suffix.remove_suffix(3);
         if (ends_with(suffix, "Max")) suffix.remove_suffix(3);
         // CBGG1 and CBSG1 select the same native material class: CMaterial::InitFromShaderName (EQGraphicsDX9.dll
-        // 0x10014660) gives both class 0xc, render class 0xd (eqlib's RenderMaterial_OpaqueCBSG1). That their
-        // static-model effect is SModelCBSG1.fxo, and that its map packs the normal in RG, self-illumination in B
-        // and gloss in A, is not confirmed (docs/unknowns.md "EQG"). Matched at the end of the name only; the
+        // 0x10014660) gives both class 0xc, render class 0xd (eqlib's RenderMaterial_OpaqueCBSG1). The
+        // SkinMeshCBSG1/CBSGE1 pixel shaders confirm RG normal with fixed Z=0.9, B added to ambient and A in
+        // place of e_fGloss0. CBSGE1 adds an environment sampler. Matched at the end of the name only; the
         // original matches the text anywhere.
-        e.packed_normal = ends_with(suffix, "CBGG1") || ends_with(suffix, "CBSG1");
+        e.packed_normal = ends_with(suffix, "CBGG1") || ends_with(suffix, "CBSG1") ||
+                          ends_with(suffix, "CBGGE1") || ends_with(suffix, "CBSGE1") ||
+                          ends_with(suffix, "CBE1") || ends_with(suffix, "CBSE1");
         e.glow = e.packed_normal;
         e.specular = contains(sh, "CBS") || contains(sh, "SB") || contains(sh, "GB") || contains(sh, "Full");
-        e.reflective = contains(sh, "CE1") || contains(sh, "CBSGE1");
+        e.reflective = contains(sh, "CE1") || contains(sh, "CBE1") || contains(sh, "CBSE1") ||
+                       contains(sh, "CBGGE1") || contains(sh, "CBSGE1");
         break;
     }
     default: break;

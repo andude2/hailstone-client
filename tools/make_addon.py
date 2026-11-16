@@ -4,7 +4,8 @@
 A script is one folder (its init.lua at the top); a plugin is one folder for each platform it is built for, each
 with its library (<name>.so, <name>.dll or <name>.dylib) at the top and its windows in ui/<pack>/; a tool (a program
 of its own) is one folder for each platform, with its program (<name>, <name>.exe on Windows) and its libraries at
-the top and its data anywhere. Upload
+the top and its data anywhere; an upscaler (sdk/hailstone_upscaler.h) is one folder for each platform, with its
+provider (<name>.dll, <name>.so, <name>.dylib) and the libraries it loads at the top and data anywhere. Upload
 everything in --out to a GitHub release of the add-on's repository: the client finds the manifest as the newest
 release's asset and the packages beside it.
 
@@ -15,6 +16,8 @@ usage:
       --platform linux-x64=build-linux/MQ2Hud --platform windows-x64=build-win/MQ2Hud --out release/
   tools/make_addon.py --name texstudio --kind tool --version 1.0.0 \
       --platform linux-x64=dist/linux --platform windows-x64=dist/windows --out release/
+  tools/make_addon.py --name xess --kind upscaler --version 1.0.0 \
+      --platform windows-x64=dist/windows --out release/
 
 Optional: --author, --description, --notes (the release's page), --min-client (the oldest Hailstone it needs).
 Then sign it, if you want players' clients to refuse versions signed by anyone else:
@@ -97,6 +100,21 @@ def check(name, kind, files, platform):
     lib = LIBRARY.get(platform.split("-", 1)[0])
     if not lib:
         sys.exit(f"{platform}: not a platform Hailstone has plugins for")
+    if kind == "upscaler":
+        provider = f"{name}{lib}"
+        if provider not in files:
+            sys.exit(f"{platform}: the package has its provider at its top, {provider}")
+        for f in files:
+            low = f.lower()
+            is_lib = low.endswith(lib) or (lib == ".so" and VERSIONED_SO.match(low.rsplit("/", 1)[-1]))
+            if is_lib:
+                if "/" in f:
+                    sys.exit(f"{f}: an upscaler's libraries go at its top, beside its provider")
+                continue
+            if low.endswith(PROGRAMS):
+                sys.exit(f"{f}: an upscaler may hold its provider, the libraries it loads for {platform} and data, "
+                         "nothing else that runs")
+        return
     if kind == "tool":
         program = tool_program(name, platform)
         if program not in files:
@@ -156,11 +174,11 @@ def one_line(text, what):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--name", required=True)
-    ap.add_argument("--kind", required=True, choices=["script", "plugin", "tool"])
+    ap.add_argument("--kind", required=True, choices=["script", "plugin", "tool", "upscaler"])
     ap.add_argument("--version", required=True)
-    ap.add_argument("--caps", default="", help="what it needs: read,ui,actions ... (docs/plugins.md); a tool none")
+    ap.add_argument("--caps", default="", help="what it needs: read,ui,actions ... (docs/plugins.md); a tool or an upscaler none")
     ap.add_argument("--dir", help="a script's folder")
-    ap.add_argument("--platform", action="append", default=[], help="a plugin's or a tool's PLATFORM=FOLDER, once for each")
+    ap.add_argument("--platform", action="append", default=[], help="a plugin's, a tool's or an upscaler's PLATFORM=FOLDER, once for each")
     ap.add_argument("--author", default="")
     ap.add_argument("--description", default="")
     ap.add_argument("--notes", default="", help="the release's page")
@@ -176,6 +194,9 @@ def main():
     if a.kind == "tool":
         if caps:
             sys.exit("--caps: a tool asks for none (it is a program of its own, not run by the client)")
+    elif a.kind == "upscaler":
+        if caps:
+            sys.exit("--caps: an upscaler asks for none (it sees only the frames it upscales)")
     elif not caps or any(c not in CAPS for c in caps):
         sys.exit(f"--caps: some of {', '.join(sorted(CAPS))}")
     if a.notes and (not a.notes.startswith(("https://", "http://")) or any(c.isspace() for c in a.notes)):

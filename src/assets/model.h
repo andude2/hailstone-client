@@ -63,7 +63,8 @@ struct EffectParams {
     glm::vec4 water_color1{1.0f}, water_color2{1.0f}, reflection_color{1.0f};
     float fresnel_bias = 0.0f, fresnel_power = 1.0f, reflection_amount = 0.0f;
     float uv_scale = 1.0f;       // e_fUVScale (water)
-    float coverage_scale = 1.0f; // e_fCoverageScale (Terrain)
+    float coverage_scale = 1.0f; // e_fCoverageScale (Terrain), e_fCoverageScale0 (MPL model surfaces)
+    std::string coverage_map;   // MPL e_TextureCoverage0, sampled separately from the diffuse/normal map
     glm::vec4 detail_scale{1.0f, 1.0f, 1.0f, 0.0f}; // TerrainTile: DetailScale0..2, detail layer count
     // TerrainTile of a tile's second or later ecosystem: drawn over the first
     // with the ColorMap alpha (the DAT layer mask) as its opacity.
@@ -76,7 +77,7 @@ struct EffectParams {
     std::string normal_map;
     float shininess = 40.0f, gloss = 0.2f, env_strength = 0.0f;
     bool specular = false, reflective = false;
-    // The packed CBGG1 / CBSG1 surface map: RG tangent normal, B self-illumination, A gloss. Other classes retain
+    // The packed CBGG1 / CBSG1 / CBSGE1 surface map: RG tangent normal, B self-illumination, A gloss. Other classes retain
     // their existing RGB normal interpretation; a missing map supplies neither the packed normal nor the glow.
     bool packed_normal = false, glow = false;
 };

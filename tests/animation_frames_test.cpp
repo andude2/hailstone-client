@@ -8,6 +8,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <type_traits>
@@ -74,7 +75,8 @@ void same_pose(const BonePose& a, const BonePose& b) {
     }
 }
 
-std::vector<std::byte> animation_model_wld() {
+// With `long_tracks`, also L01 (16 keys, untimed), L02 (15 keys) and L03 (16 keys at 70 ms) on the root bone.
+std::vector<std::byte> animation_model_wld(bool long_tracks = false) {
     using namespace test::wld_fixtures;
     WldBuilder builder;
     const auto bitmap = builder.add(0x03, builder.str("FIXTURE_SPRITE"), bitmap_name("fixture.bmp"));
@@ -94,7 +96,8 @@ std::vector<std::byte> animation_model_wld() {
     body.le(geometry);
     body.le<std::uint32_t>(0);
     const auto mesh_ref = builder.add(0x2d, 0, body);
-    auto add_track = [&](const std::string& name, const std::vector<wld::TrackFrame>& frames) {
+    auto add_track = [&](const std::string& name, const std::vector<wld::TrackFrame>& frames,
+                         std::optional<std::uint32_t> frame_ms = 100) {
         ByteWriter keys;
         keys.le<std::uint32_t>(0);
         keys.le(static_cast<std::uint32_t>(frames.size()));
@@ -102,8 +105,8 @@ std::vector<std::byte> animation_model_wld() {
         const auto definition = builder.add(0x12, 0, keys);
         ByteWriter reference;
         reference.le(definition);
-        reference.le<std::uint32_t>(1);
-        reference.le<std::uint32_t>(100);
+        reference.le<std::uint32_t>(frame_ms ? 1 : 0);
+        if (frame_ms) reference.le<std::uint32_t>(*frame_ms);
         return builder.add(0x13, builder.str(name), reference);
     };
     wld::TrackFrame rest, hidden;
@@ -115,6 +118,11 @@ std::vector<std::byte> animation_model_wld() {
     for (const auto* suffix : {"_TRACK", "TUNIC_POINT_TRACK"}) {
         add_track(std::string("C01AERM") + suffix, {rest, moving});
         add_track(std::string("D01HUM") + suffix, {rest, moving});
+    }
+    if (long_tracks) {
+        add_track("L01ERM_TRACK", std::vector<wld::TrackFrame>(16, moving), std::nullopt);
+        add_track("L02ERM_TRACK", std::vector<wld::TrackFrame>(15, moving));
+        add_track("L03ERM_TRACK", std::vector<wld::TrackFrame>(16, moving), 70);
     }
     ByteWriter skeleton;
     skeleton.le<std::uint32_t>(0);
@@ -516,5 +524,37 @@ TEST_CASE("shared animation tracks: character resource indices survive deferred 
                 REQUIRE(got.size() == want.size());
                 for (std::size_t i = 0; i < got.size(); ++i) same_pose(got[i], want[i]);
             }
+    }
+}
+
+TEST_CASE("WLD clips: a track of more than 15 keys plays at half its interval only from a halving archive") {
+    test::ScratchDir dir("animation-long-tracks");
+    const auto root = std::filesystem::canonical(dir.path());
+    const auto data = test::pfs_fixtures::make_pfs({{"fixture.wld", animation_model_wld(true)}});
+    {
+        std::ofstream file(root / "fixture_chr.s3d", std::ios::binary);
+        file.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+        REQUIRE(file.good());
+    }
+    GameDir game(root);
+    for (bool halves : {false, true}) {
+        CAPTURE(halves);
+        const auto archive = load_character_archive(game, "fixture_chr.s3d", halves);
+        REQUIRE(archive);
+        CHECK(archive->halves_long_tracks == halves);
+        CharacterLibrary library({archive});
+        const auto m = library.build("ERM");
+        const auto* untimed = m.clip("L01");
+        const auto* short_track = m.clip("L02");
+        const auto* timed = m.clip("L03");
+        REQUIRE(untimed);
+        REQUIRE(short_track);
+        REQUIRE(timed);
+        CHECK(untimed->frame_count == 16);
+        CHECK(untimed->frame_ms == (halves ? 50u : 100u)); // the 100 ms default, halved
+        CHECK(short_track->frame_count == 15);
+        CHECK(short_track->frame_ms == 100u); // 15 keys: never halved
+        CHECK(timed->frame_ms == (halves ? 35u : 70u));
+        CHECK(m.clip("C01")->frame_ms == 100u); // two keys
     }
 }

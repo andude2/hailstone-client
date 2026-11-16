@@ -3,6 +3,7 @@
 #include <limits>
 
 #include <cmath>
+#include <charconv>
 #include <cstdint>
 #include <numbers>
 #include <string>
@@ -10,10 +11,14 @@
 
 #include "assets/wld.h"
 #include "assets/wld_particles.h"
+#include "assets/character.h"
+#include "assets/object_animation.h"
 #include "assets/zone.h"
 #include "core/byte_io.h"
 #include "game/particles.h"
+#include "game/appearance.h"
 #include "game_files.h"
+#include "pfs_fixtures.h"
 #include "wld_fixtures.h"
 
 using namespace hailstone;
@@ -68,6 +73,178 @@ bool near(const glm::vec3& a, const glm::vec3& b) { return glm::length(a - b) < 
 
 } // namespace
 
+TEST_CASE("WLD actor and held-item clouds survive model building, dressing and rest-pose attachment") {
+    WldBuilder b;
+    auto sprite = add_sprite(b);
+    auto cloud = b.add(0x34, b.str("FIXTURE_PCD"), l307_body(sprite));
+    auto bad_cloud = b.add(0x34, b.str("MISSING_TEXTURE_PCD"), l307_body(0));
+    auto mat = b.add(0x30, b.str("FIXTURE_MDF"), material(0x80000001, 0));
+    auto palette = b.add(0x31, 0, refs({mat, mat, mat}));
+    auto geometry = b.add(0x36, b.str("FIXTURE_DMSPRITEDEF"), mesh(palette, false));
+    ByteWriter ref;
+    ref.le(geometry);
+    ref.le<std::uint32_t>(0);
+    auto mesh_ref = b.add(0x2d, 0, ref);
+    auto actor = [&](const std::string& code, bool host, bool geometry_present) {
+        ByteWriter skeleton;
+        skeleton.le<std::uint32_t>(0);
+        skeleton.le<std::uint32_t>(host ? 6 : 4);
+        skeleton.le<std::int32_t>(0);
+        for (int i = 0; i < (host ? 6 : 4); ++i) {
+            ByteWriter frame;
+            frame.le<std::uint32_t>(0);
+            frame.le<std::uint32_t>(i == 1 ? 2u : 1u);
+            for (int key = 0; key < (i == 1 ? 2 : 1); ++key) {
+                frame.f32(1.0f); // scale
+                for (float v : {i == 0 ? 10.0f : 0.0f, static_cast<float>(i + 2 * key), 0.0f,
+                                1.0f, 0.0f, 0.0f, 0.0f}) frame.f32(v);
+            }
+            auto track_def = b.add(0x12, 0, frame);
+            ByteWriter track;
+            track.le(track_def);
+            track.le<std::uint32_t>(0);
+            const std::string suffix = i == 4 ? "R_POINT_TRACK" : i == 5 ? "L_POINT_TRACK" : "B" + std::to_string(i) + "_TRACK";
+            auto track_ref = b.add(0x13, b.str(code + suffix), track);
+            skeleton.le<std::int32_t>(0);
+            skeleton.le<std::uint32_t>(0);
+            skeleton.le(track_ref);
+            skeleton.le<std::int32_t>(i == 0 ? (geometry_present ? mesh_ref : 0) : i < 3 ? cloud : i == 3 ? bad_cloud : 0);
+            skeleton.le<std::uint32_t>(i == 0 ? (host ? 5 : 3) : 0);
+            if (i == 0)
+                for (int child = 1; child < (host ? 6 : 4); ++child) skeleton.le<std::int32_t>(child);
+        }
+        auto sk = b.add(0x10, b.str(code + "_HS_DEF"), skeleton);
+        ByteWriter sr;
+        sr.le(sk);
+        sr.le<std::uint32_t>(0);
+        auto sk_ref = b.add(0x11, 0, sr);
+        ByteWriter a;
+        for (std::uint32_t value : {0u, 0u, 0u, 1u, 0u}) a.le(value);
+        a.le(sk_ref);
+        b.add(0x14, b.str(code + "_ACTORDEF"), a);
+    };
+    actor("TST", true, true);
+    actor("IT1", false, true);
+    actor("IT2", false, false); // a held effect may have no triangles at all
+    auto archive = std::make_shared<CharacterArchive>();
+    archive->archive = std::make_shared<PfsArchive>(PfsArchive::from_memory(
+        test::pfs_fixtures::make_pfs({{"fixture.wld", b.build()}}), "fixture.s3d"));
+    archive->wlds.push_back(wld::WldFile::parse(*archive->archive->read("fixture.wld")));
+    CharacterLibrary lib({archive});
+    auto model = lib.build("TST");
+    REQUIRE(model.clouds.size() == 2);
+    CHECK(model.clouds[0].bone == 1);
+    CHECK(model.clouds[1].bone == 2);
+    REQUIRE(model.clouds[0].cloud);
+    CHECK(model.clouds[0].cloud == model.clouds[1].cloud);
+    CHECK(model.clouds[0].cloud->texture == "GENG00.DDS");
+    // Built again, the model hands out the same definition (app::ActorEmitters registers each one once).
+    CHECK(lib.build("TST").clouds[0].cloud == model.clouds[0].cloud);
+    CHECK(model.default_mesh().emitters.size() == 2);
+    auto item = lib.item_mesh(1);
+    REQUIRE(item);
+    REQUIRE(item->mesh.emitters.size() == 2);
+    CHECK(item->mesh.emitters[0].bone == 0);
+    CHECK(near(glm::vec3(item->mesh.emitters[0].local[3]), {10.0f, 1.0f, 0.0f}));
+    CHECK(near(glm::vec3(item->mesh.emitters[1].local[3]), {10.0f, 2.0f, 0.0f}));
+    REQUIRE(item->mesh.emitters[0].cloud_animation);
+    CHECK(item->mesh.emitters[0].cloud_animation_node == 1);
+    CHECK_FALSE(item->mesh.emitters[1].cloud_animation);
+    std::vector<glm::mat4> cloud_pose;
+    item->mesh.emitters[0].cloud_animation->pose(100, cloud_pose);
+    CHECK(near(glm::vec3((cloud_pose[1] * item->mesh.emitters[0].local)[3]), {10.0f, 3.0f, 0.0f}));
+    auto effect_only = lib.item_mesh(2);
+    REQUIRE(effect_only);
+    CHECK(effect_only->mesh.indices.empty());
+    CHECK(effect_only->mesh.emitters.size() == 2);
+    game::Appearance appearance;
+    appearance.material[game::kSlotPrimary] = 1;
+    appearance.material[game::kSlotSecondary] = 2;
+    auto dressed = lib.dress(model, appearance);
+    REQUIRE(dressed);
+    REQUIRE(dressed->emitters.size() == 6);
+    CHECK(dressed->emitters[0].cloud == model.clouds[0].cloud);
+    CHECK(dressed->emitters[2].bone == 4);
+    CHECK(dressed->emitters[4].bone == 5);
+    CHECK(dressed->emitters[2].cloud == item->mesh.emitters[0].cloud);
+    CHECK(dressed->emitters[2].cloud_animation == item->mesh.emitters[0].cloud_animation);
+    CHECK(near(glm::vec3(dressed->emitters[2].local[3]), {10.0f, 1.0f, 0.0f}));
+    CHECK(lib.dress(model, appearance) == dressed);
+    appearance.material[game::kSlotPrimary] = 0;
+    appearance.material[game::kSlotSecondary] = 0;
+    auto unarmed = lib.dress(model, appearance);
+    REQUIRE(unarmed);
+    CHECK(unarmed->emitters.size() == 2);
+}
+
+TEST_CASE("RoF2 warrior epic models retain their authored red and blue clouds" *
+          doctest::skip(!hailstone::test::game_dir())) {
+    auto archive = load_character_archive(*hailstone::test::game_dir(), "gequip.s3d");
+    REQUIRE(archive);
+    CharacterLibrary lib({archive});
+    for (std::uint32_t number : {141u, 142u, 146u}) {
+        CAPTURE(number);
+        auto item = lib.item_mesh(number);
+        REQUIRE(item);
+        REQUIRE(item->mesh.emitters.size() == (number == 146 ? 2u : 1u));
+        for (const auto& e : item->mesh.emitters) {
+            REQUIRE(e.cloud);
+            CHECK(e.bone == 0);
+            CHECK(e.cloud->additive == 1);
+            CHECK_FALSE(e.cloud->texture.empty());
+            CHECK(e.cloud->texture_frames.size() == 5);
+            CHECK(static_cast<bool>(e.cloud_animation) == (number == 146));
+            CHECK(glm::length(glm::vec3(e.local[3])) > 0.0f);
+        }
+    }
+}
+
+TEST_CASE("equipment WLD cloud attachments and every separate texture frame resolve from the game folder" *
+          doctest::skip(!hailstone::test::game_dir())) {
+    const auto& game = *hailstone::test::game_dir();
+    auto globals = CharacterLibrary::load(game, "");
+    std::size_t items = 0, attachments = 0;
+    for (const auto& name : global_character_archives(game)) {
+        if (name.find("equip") == std::string::npos || !name.ends_with(".s3d")) continue;
+        auto archive = load_character_archive(game, name);
+        if (!archive) continue;
+        CharacterLibrary lib({archive});
+        wld::WldFile::ReadScope reads;
+        for (const auto& w : archive->wlds)
+            for (const auto& f : w.fragments()) {
+                const auto* actor = f.get<wld::ActorDef>();
+                if (!actor || !f.name.starts_with("IT") || !f.name.ends_with("_ACTORDEF")) continue;
+                std::uint32_t number = 0;
+                const auto parsed = std::from_chars(f.name.data() + 2, f.name.data() + f.name.size() - 9, number);
+                if (parsed.ec != std::errc{} || parsed.ptr != f.name.data() + f.name.size() - 9) continue;
+                std::size_t expected = 0;
+                for (const auto ref : actor->sprites)
+                    if (const auto* skeleton_ref = w.get<wld::SkeletonRef>(ref))
+                        if (const auto* skeleton = w.get<wld::Skeleton>(skeleton_ref->skeleton))
+                            for (const auto& node : skeleton->nodes)
+                                if (w.get<wld::ParticleCloud>(node.sprite)) ++expected;
+                if (expected == 0) continue;
+                CAPTURE(name);
+                CAPTURE(number);
+                auto item = lib.item_mesh(number);
+                REQUIRE(item);
+                REQUIRE(item->mesh.emitters.size() == expected);
+                ++items;
+                attachments += expected;
+                for (const auto& e : item->mesh.emitters) {
+                    REQUIRE(e.cloud);
+                    REQUIRE_FALSE(e.cloud->texture_frames.empty());
+                    for (const auto& file : e.cloud->texture_frames) {
+                        CAPTURE(file);
+                        CHECK(globals.read_file(file).has_value());
+                    }
+                }
+            }
+    }
+    CHECK(items > 0);
+    CHECK(attachments >= items);
+}
+
 TEST_CASE("WLD 0x34 particle clouds and their 0x26 sprites parse") {
     WldBuilder b;
     auto blit = add_sprite(b);
@@ -93,7 +270,80 @@ TEST_CASE("WLD 0x34 particle clouds and their 0x26 sprites parse") {
     CHECK(tex->frames == 1u);
     CHECK(tex->timing_ms == 100u);
     CHECK(tex->material == 0x80000017u);
+    CHECK(tex->files == std::vector<std::string>{"GENG00.DDS"});
     CHECK_FALSE(particle_texture(w, cloud)); // not a 0x26
+}
+
+TEST_CASE("WLD cloud sprite frames retain separate files and authored repeats") {
+    WldBuilder b;
+    auto first = b.add(0x03, 0, bitmap_name("first.bmp"));
+    auto second = b.add(0x03, 0, bitmap_name("second.bmp"));
+    ByteWriter info;
+    info.le<std::uint32_t>(8);
+    info.le<std::uint32_t>(3);
+    info.le<std::uint32_t>(40);
+    info.le(first);
+    info.le(second);
+    info.le(first);
+    auto sprite = b.add(0x04, 0, info);
+    ByteWriter ref;
+    ref.le(sprite);
+    ref.le<std::uint32_t>(0);
+    auto sprite_ref = b.add(0x05, 0, ref);
+    ByteWriter blit;
+    blit.le<std::uint32_t>(0);
+    blit.le(sprite_ref);
+    blit.le<std::uint32_t>(0x80000017);
+    auto cloud_sprite = b.add(0x26, 0, blit);
+    auto w = wld::WldFile::parse(b.build());
+    auto texture = particle_texture(w, cloud_sprite);
+    REQUIRE(texture);
+    CHECK(texture->frames == 3);
+    CHECK(texture->files == std::vector<std::string>{"first.bmp", "second.bmp", "first.bmp"});
+    auto definition = particle_cloud_definition({}, *texture, "fixture");
+    CHECK(definition.texture_frames == texture->files);
+    CHECK(definition.frames == 3);
+    CHECK(definition.frames_per_second == doctest::Approx(25));
+    // A missing later bitmap does not silently shorten the sequence: the first bitmap is drawn alone, as before the
+    // sequences were read, so the cloud does not vanish.
+    info = {};
+    info.le<std::uint32_t>(0);
+    info.le<std::uint32_t>(2);
+    info.le(first);
+    info.le<std::int32_t>(9999);
+    auto broken = b.add(0x04, b.str("broken"), info);
+    ref = {};
+    ref.le(broken);
+    ref.le<std::uint32_t>(0);
+    auto broken_ref = b.add(0x05, 0, ref);
+    blit = {};
+    blit.le<std::uint32_t>(0);
+    blit.le(broken_ref);
+    blit.le<std::uint32_t>(0x80000017);
+    auto broken_sprite = b.add(0x26, 0, blit);
+    w = wld::WldFile::parse(b.build());
+    auto still = particle_texture(w, broken_sprite);
+    REQUIRE(still);
+    CHECK(still->frames == 1);
+    CHECK(still->files == std::vector<std::string>{"first.bmp"});
+    // Only a sprite whose first bitmap is missing has no texture.
+    info = {};
+    info.le<std::uint32_t>(0);
+    info.le<std::uint32_t>(2);
+    info.le<std::int32_t>(9999);
+    info.le(first);
+    auto headless = b.add(0x04, b.str("headless"), info);
+    ref = {};
+    ref.le(headless);
+    ref.le<std::uint32_t>(0);
+    auto headless_ref = b.add(0x05, 0, ref);
+    blit = {};
+    blit.le<std::uint32_t>(0);
+    blit.le(headless_ref);
+    blit.le<std::uint32_t>(0x80000017);
+    auto headless_sprite = b.add(0x26, 0, blit);
+    w = wld::WldFile::parse(b.build());
+    CHECK_FALSE(particle_texture(w, headless_sprite));
 }
 
 TEST_CASE("particle_cloud_definition follows the DLL's 0x34 converter") {
@@ -150,6 +400,13 @@ TEST_CASE("particle_cloud_definition follows the DLL's 0x34 converter") {
         tex.material = 0x80000018u;
         CHECK(particle_material_alias(tex.material) == 0x01080507u);
         CHECK(particle_cloud_definition(c, tex, "BloodFixture").additive == 0u);
+    }
+
+    SUBCASE("the installed masked sprite alias is alpha blended and unknown aliases stay unresolved") {
+        tex.material = 0x80000019u;
+        CHECK(particle_material_alias(tex.material) == 0x00000587u);
+        CHECK(particle_cloud_definition(c, tex, "MaskedFixture").additive == 0u);
+        CHECK_FALSE(particle_material_alias(0x80000031u));
     }
 
     SUBCASE("without bit 0x100: no fade, half opacity") {

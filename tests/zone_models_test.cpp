@@ -78,6 +78,28 @@ TEST_CASE("zone models: a neighbour zone keeps the placements on its side of the
     CHECK(n.triangles == 4);
 }
 
+TEST_CASE("zone background: WLD detail blends require sky before the opaque group") {
+    assets::Zone zone;
+    zone.terrain.push_back(quad_model(1));
+    auto prepare = [&](bool expected, const render::ZoneRenderOptions& options = {}) {
+        const auto p = render::ZoneRenderer::prepare(zone, options, 16);
+        REQUIRE(p);
+        CHECK(render::ZoneRenderer::prepared_blends_background(*p) == expected);
+    };
+    prepare(false);
+    auto& material = zone.terrain.front().materials.front();
+    material.detail_layers.push_back({"detail.dds", 1.0f});
+    prepare(true);
+    render::ZoneRenderOptions without_details;
+    without_details.details = false;
+    prepare(false, without_details);
+    material.blend = assets::BlendMode::Masked;
+    prepare(true); // the base may leave depth clear, so testing the detail's depth alone is unsafe
+    material.detail_layers.clear();
+    material.blend = assets::BlendMode::Transparent25;
+    prepare(false); // ordinary translucency is already outside the opaque group
+}
+
 TEST_CASE("zone models: a generated tree sways by its branches' heights, or stands still, and never flutters") {
     // The game's tree: one level. A generated one: levels of detail. Both 100 units high.
     const render::PlantSway game = render::plant_sway(quad_model(1), 100.0f);

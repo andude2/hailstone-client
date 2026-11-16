@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string_view>
 #include <vector>
 
@@ -22,6 +23,8 @@ namespace hailstone { class GameDir; }
 namespace hailstone::assets { struct Sky; }
 
 namespace hailstone::render {
+
+class CloudRenderer;
 
 // The sky state for one frame, from the game clock (see SkyClock in game/).
 struct SkyFrame {
@@ -41,6 +44,13 @@ struct SkyFrame {
     glm::vec3 cloud_light{1.0f};
     float storm = 0.0f; // render::WeatherLook: an overcast sky, more cloud
     float flash = 0.0f; // the lightning
+    // display.volumetric_clouds, with the atmosphere: clouds marched through the air (render/cloud_renderer.h) in
+    // place of the painted cloud layer and the weather.ini patches, lit by the open sky's daylight under the weather
+    // (render::Daylight after render::apply_storm).
+    bool volumetric_clouds = false;
+    glm::vec3 to_light{0.0f, 0.0f, 1.0f}; // render::Daylight::to_light
+    glm::vec3 light{0.0f};                // render::Daylight::light
+    glm::vec3 sky_light{0.0f};            // render::Daylight::sky
 };
 
 // The light multiplier for an outdoor zone at a sky hour: the sky light level
@@ -67,6 +77,13 @@ public:
     bool has_atmosphere() const { return index_ == 1 || index_ == 2 || index_ == 4; }
     // CSkyBase's "TimeScale" property (sky+0x1c, 1.0 by default): sky time per real time.
     void set_time_scale(float scale) { time_scale_ = scale; }
+
+    // Records the volumetric clouds' march for this frame (SkyFrame::volumetric_clouds over the atmosphere; nothing
+    // otherwise): outside rendering, before VkContext::begin_scene, with the frame's projection and view as draw
+    // takes them. Without it draw shows no volumetric clouds that frame.
+    void prepare(const FrameInfo& frame, const glm::mat4& projection, const glm::mat4& view, const SkyFrame& sky);
+    // Whether the volumetric clouds were prepared for the frame being drawn.
+    bool volumetric_ready() const { return volumetric_ready_; }
 
     // `view` is the camera's view matrix; its translation is ignored.
     void draw(const FrameInfo& frame, const glm::mat4& projection, const glm::mat4& view, const SkyFrame& sky);
@@ -109,8 +126,16 @@ private:
     std::array<void*, VkContext::kFramesInFlight> cloud_mapped_{};
     double last_seconds_ = -1.0;
     float time_scale_ = 1.0f;
+
+    // The volumetric clouds, made the first time they are prepared; the atmosphere reads a clear 1x1 image without
+    // them (shaders/atmosphere.frag binding 2).
+    std::filesystem::path shader_dir_;
+    std::unique_ptr<CloudRenderer> volumetric_;
+    bool volumetric_ready_ = false;
+    bool volumetric_failed_ = false;
+    Texture clear_clouds_;
     void draw_clouds(VkCommandBuffer cmd, std::uint32_t slot, const glm::mat4& sky_vp, const SkyFrame& sky,
-                     bool atmosphere);
+                     bool atmosphere, bool hidden);
 };
 
 } // namespace hailstone::render

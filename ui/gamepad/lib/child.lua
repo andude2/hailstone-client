@@ -223,7 +223,7 @@ end
 -- A list child as a W.list: its rows (eq.ListInfo / eq.ListRow, 0-based there), the original's selection, A (or a
 -- click) selects the row in the original (eq.ListClick; opts.onA(row, texts) instead). opts: rowH (design px,
 -- default 58), columns = { { column (1-based), width fraction [, align] }, ... } (default: the first column),
--- draw(row, texts, x0, y0, x1, y1, focused) instead, filter(row, texts), color(row, texts) the text colour (default:
+-- draw(row, texts, x0, y0, x1, y1, focused, rowColor) instead, filter(row, texts), color(row, texts) the text colour (default:
 -- the row's colour from the list), empty (a text shown when there are no rows). Returns the focused row (0-based)
 -- and its texts.
 local DEFAULT_COLUMNS = { { 1, 1 } }
@@ -297,7 +297,7 @@ function CH.list(win, id, state, width, height, opts)
   local focusedRow
   local f = W.list(win .. id, state, count, visible, rowH, width, function(i, rx0, ry0, rx1, ry1, focused)
     local s = shown[i]
-    if opts.draw then return opts.draw(s.row, s.texts, rx0, ry0, rx1, ry1, focused) end
+    if opts.draw then return opts.draw(s.row, s.texts, rx0, ry0, rx1, ry1, focused, s.color) end
     local col = opts.color and opts.color(s.row, s.texts) or s.color or C.text
     if i == state.selected then col = C.accent end
     local cols = opts.columns or DEFAULT_COLUMNS

@@ -147,9 +147,13 @@ std::optional<AddonManifest> parse_addon_manifest(std::string_view text, std::st
             m.name = std::string(f[1]);
             have_name = true;
         } else if (f[0] == "kind") {
-            if (f.size() != 2 || have_kind || (f[1] != "script" && f[1] != "plugin" && f[1] != "tool"))
-                return fail(error, where + ": the kind is script, plugin or tool");
-            m.kind = f[1] == "script" ? AddonKind::Script : f[1] == "plugin" ? AddonKind::Plugin : AddonKind::Tool;
+            if (f.size() != 2 || have_kind ||
+                (f[1] != "script" && f[1] != "plugin" && f[1] != "tool" && f[1] != "upscaler"))
+                return fail(error, where + ": the kind is script, plugin, tool or upscaler");
+            m.kind = f[1] == "script"   ? AddonKind::Script
+                     : f[1] == "plugin" ? AddonKind::Plugin
+                     : f[1] == "tool"   ? AddonKind::Tool
+                                        : AddonKind::Upscaler;
             have_kind = true;
         } else if (f[0] == "version" || f[0] == "min_client") {
             auto v = f.size() == 2 ? parse_version(f[1]) : std::nullopt;
@@ -221,9 +225,14 @@ std::optional<AddonManifest> parse_addon_manifest(std::string_view text, std::st
             return fail(error, "a plugin's packages are each for one platform (package linux-x64 ...)");
         if (m.kind == AddonKind::Tool && p.platform == "any")
             return fail(error, "a tool's packages are each for one platform (package linux-x64 ...)");
+        if (m.kind == AddonKind::Upscaler && p.platform == "any")
+            return fail(error, "an upscaler's packages are each for one platform (package windows-x64 ...)");
     }
-    // A tool is a program of its own: the client grants it nothing, so it asks for nothing.
+    // A tool is a program of its own, and an upscaler sees only the frames it upscales: the client grants neither
+    // anything to ask for.
     if (m.kind == AddonKind::Tool && !m.caps.empty()) return fail(error, "a tool asks for no capabilities (caps none)");
+    if (m.kind == AddonKind::Upscaler && !m.caps.empty())
+        return fail(error, "an upscaler asks for no capabilities (caps none)");
     if (key && !signature) return fail(error, "the add-on's manifest has a key but no signature");
     if (signature && !key) return fail(error, "the add-on's manifest is signed but does not give its key");
     if (key) {

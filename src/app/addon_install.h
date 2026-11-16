@@ -51,7 +51,7 @@ struct InstalledAddon {
 std::filesystem::path addons_dir(const std::filesystem::path& data_dir);
 // scripts/<name>, plugins/<name> or tools/<name> under the data folder.
 std::filesystem::path addon_folder(const std::filesystem::path& data_dir, AddonKind kind, std::string_view name);
-std::string_view addon_kind_word(AddonKind kind); // "script", "plugin", "tool"
+std::string_view addon_kind_word(AddonKind kind); // "script", "plugin", "tool", "upscaler"
 // A tool's program in its package and its folder for `platform`: <name>.exe on Windows, <name> elsewhere.
 std::string addon_tool_program(std::string_view name, std::string_view platform);
 

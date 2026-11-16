@@ -929,6 +929,11 @@ Not built: the ghost's fit to walls and surfaces (ItemPlacement_UpdatePosition),
 
 ### Spawn (ENCODE(OP_ZoneSpawns))
 
+The temporary-pet byte is retained as `game::Spawn::temp_pet` (any nonzero value is true), independently of the
+summoned bit and pet owner. Combat chat uses it together with the owner to recognise the player's temporary pets;
+temporary pets do not take the permanent pet's window focus. Stock EQEmu writes this byte as zero and swarm spawns
+omit petOwnerId, so that wire record alone cannot establish swarm ownership (see the melee-line rules in docs/mechanics.md).
+
 cstr name; u32 spawn id; u8 level; f32 melee radius (size − 0.7); u8 type (0 PC, 1 NPC, 2/3 corpse); u32 bitfield (gender:2, pet, afk, anon:2, gm, sneak, lfg, betabuffed, invis:12 at 10, linkdead 22, showhelm 23, unknown 24, trader 25, animation-on-pop 26, targetable 27, targetable-with-hotkey 28, showname 29, idle-off 30, click-through 31); u8 OtherData (bit0 buyer, bit1 offline mode (EQEmu never sets it), bit2 LDoN chest/interactive, bit4 title follows, bit5 suffix follows; destructibles 0xe1); f32 −1; u32 0; [interactive: 3 cstr, u32 appearance, u32 animation, 10×u32 sounds, u8 collidable, u32 type]; u8 property count + count×u32 (EQEmu: 1, body type; 0 for destructibles); u8 HP %; 6×u8 hair colour, beard colour, eye 1, eye 2, hair style, beard; 3×u32 drakkin heritage, tattoo, details; u8 texture type (equip_chest2), u8 0, u8 0, u8 helm; f32 size; u8 face; f32 walk; f32 run; u32 race; u8 holding; u32 deity; u32 guild id, u32 guild rank (NPC: 0xffffffff, 0); u8 class, pvp, stand state, light, fly mode; cstr last name; u32 AA title; u8 guild show; u8 temp pet; u32 pet owner; u8 FindBits; u32 player state, npc tint, primary tint, secondary tint; 2×u32 0xffffffff; equipment: PC or PC-model race (≤12, 128, 130, 330, 522) → 9×u32 tints + 9×{5 u32 texture}, else 3×{5 u32} (slot 0 zero, primary, secondary); position 5 dwords: [0] y:19 at 12; [1] Δx:13 at 0, Δheading:10 at 13; [2] Δy:13 at 0, z:19 at 13; [3] x:19 at 0, animation:10 at 19; [4] heading:12 at 0, Δz:13 at 12; [title cstr]; [suffix cstr]; 2×u32; u8 mercenary; cstr "0000000000000000"; 2×u32 0xffffffff; 29 zero bytes, which the client reads as u8 always-show-aura, u32 physics effect count (+16 B each), 6×u32 spawn status.
 
 ### PlayerProfile (ENCODE(OP_PlayerProfile))

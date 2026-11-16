@@ -161,6 +161,7 @@ void ClientApp::update_addons() {
     const std::uint32_t serial = addons_ ? addons_->serial() : 0;
     if (serial != addons_serial_ || addons_dirty_) {
         addons_serial_ = serial;
+        upscaler_providers_.reset(); // an upscaler may have come or gone
         addons_dirty_ = false;
         if (automation_) automation_->set_addon_ceilings(addon_ceilings(data));
         addons_listed_ = {};
@@ -261,7 +262,8 @@ void ClientApp::update_addons() {
     // What this server does with the player's own: its hailstone.cfg as the last login left it.
     const plugin::Rules& rules = addons_rules_;
     auto server_note = [&](AddonKind kind, const std::string& name, std::uint32_t caps) -> std::string {
-        if (profile.empty() || kind == AddonKind::Tool) return {}; // a tool is no server's business: it is not run in it
+        // A tool or an upscaler is no server's business: neither is a script or a plugin it rules.
+        if (profile.empty() || kind == AddonKind::Tool || kind == AddonKind::Upscaler) return {};
         for (const auto& s : server_addons_)
             if (s.kind == kind && s.name == name) return "This server has its own " + name + ": that one runs there.";
         if (!rules.configured) return {};

@@ -255,8 +255,9 @@ std::string AddonManager::manifest_problem(const AddonManifest& m, std::uint32_t
     }
     if (m.kind != AddonKind::Script && !addon_package_for(m, env_.platform))
         return m.name + " has no build for " + (env_.platform.empty() ? std::string("this system") : env_.platform);
-    // A tool asks for nothing (the manifest refuses one that does): the client grants it nothing to ask for.
-    if (m.kind == AddonKind::Tool) {
+    // A tool or an upscaler asks for nothing (the manifest refuses one that does): the client grants it nothing to ask
+    // for.
+    if (m.kind == AddonKind::Tool || m.kind == AddonKind::Upscaler) {
         if (caps) *caps = 0;
         if (!m.key && !env_.settings.allow_unsigned)
             return m.name + " is not signed, and hailstone.ini addons.allow_unsigned is off";
@@ -913,6 +914,16 @@ std::vector<ManualAddon> manual_addons(const std::vector<fs::path>& dirs, const 
                 for (const auto& f : fs::directory_iterator(e.path(), ec))
                     if (f.is_regular_file(ec) && is_lib(f.path())) add(plugin::plugin_name(f.path()), AddonKind::Plugin, e.path());
             }
+        }
+        // The upscaler providers put in upscalers/ by hand or by a build (render/upscaler_provider.h): a folder with
+        // a library of its name.
+        entries.clear();
+        for (const auto& e : fs::directory_iterator(d / "upscalers", ec)) entries.push_back(e);
+        std::sort(entries.begin(), entries.end());
+        for (const auto& e : entries) {
+            const std::string name = e.path().filename().string();
+            if (e.is_directory(ec) && !lib.empty() && fs::is_regular_file(e.path() / (name + lib), ec))
+                add(name, AddonKind::Upscaler, e.path());
         }
     }
     std::sort(out.begin(), out.end(), [](const ManualAddon& a, const ManualAddon& b) { return lower(a.name) < lower(b.name); });

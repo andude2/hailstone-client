@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/asset_folder_choice.h"
 #include "core/server_profile.h"
 #include "core/wipe.h"
 #include "net/login.h"
@@ -66,12 +67,19 @@ bool consume_login_launch_arg(LoginLaunch& launch, std::span<const std::string_v
 void resolve_login_launch(const LoginLaunch& launch, std::string& user, std::string& password,
                           std::string& account, bool viewer);
 
+// Whether the asset folder's eqhost.txt may name a ticket's login server: a folder named for this run (--game-dir or
+// EQ_GAME_DIR), or the EverQuest folder Hailstone is installed in (<EQ>/hailstone/, as a server's patcher puts it;
+// never saved, so it is that installation's own, as RoF2 reads the eqhost.txt beside it). Not a folder remembered in
+// hailstone.ini: it may be another server's.
+inline bool eqhost_names_ticket_server(AssetFolderSource source) {
+    return source == AssetFolderSource::Override || source == AssetFolderSource::Found;
+}
+
 // A ticket must go to an explicitly selected endpoint, never the last-used server. The asset folder's eqhost.txt
-// counts only when that folder was named for this run (--game-dir or EQ_GAME_DIR: `game_dir_explicit`); a folder
-// remembered in hailstone.ini may be another server's. A matching profile supplies its assets/UI without changing
-// that endpoint.
+// counts only when `eqhost_trusted` (eqhost_names_ticket_server). A matching profile supplies its assets/UI without
+// changing that endpoint.
 ServerProfile token_login_profile(std::string_view saved_name, const ServerProfile* named,
-                                  const std::optional<ServerProfile>& eqhost, bool game_dir_explicit,
+                                  const std::optional<ServerProfile>& eqhost, bool eqhost_trusted,
                                   const std::vector<ServerProfile>& profiles, std::string_view host, int port);
 
 // Whether the updater may act on the install at start (main.cpp: update_at_start, which can roll an update back

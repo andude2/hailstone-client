@@ -286,22 +286,35 @@ int ClientApp::run() {
                     return std::nullopt;
                 });
         }
-        if (actor_emitters_ && in_world && conn_ && actor_renderer_) {
+        if (actor_emitters_ && actor_renderer_ && ((in_world && conn_) || pre_game)) {
             // The drawn spawns' own emitters, on the pose drawn last frame.
+            // The reader is set when the zone's library changes, not every frame; it reads in the texture loader's job.
+            if (emitter_reader_library_ != actor_library_) {
+                emitter_reader_library_ = actor_library_;
+                auto library = actor_library_;
+                actor_emitters_->set_texture_reader([library](const std::string& name) {
+                    return library ? library->read_file(name) : std::nullopt;
+                }, true);
+            }
             actor_emitter_list_.clear();
-            for (const auto& [id, spawn] : conn_->world().spawns)
+            const auto& world = pre_game ? *pre_game_world_ : conn_->world();
+            for (const auto& [id, spawn] : world.spawns)
                 if (const auto* mesh = actor_renderer_->drawn_mesh(id); mesh && !mesh->emitters.empty())
                     actor_emitter_list_.push_back({id, mesh, actor_renderer_->drawn_standing(id),
                                                    actor_renderer_->drawn_alpha(id)});
             // The missiles' (a spell bolt's flames: its model's own emitters, app/world_objects.h).
-            const WorldObjects* objects = world_objects_.get();
-            if (objects)
+            const WorldObjects* objects = in_world ? world_objects_.get() : nullptr;
+            if (objects) {
                 for (const auto& m : objects->missile_actors()) actor_emitter_list_.push_back({m.id, m.emitters});
+                for (const auto& o : objects->object_actors()) actor_emitter_list_.push_back({o.id, o.emitters});
+            }
             const render::ActorRenderer* actors = actor_renderer_.get();
             actor_emitters_->update(dt, actor_emitter_list_,
                                     [actors, objects](std::uint32_t id, int bone, glm::mat4& w) {
                                         if (id & WorldObjects::kMissileActorBit)
                                             return objects && bone == 0 && objects->missile_transform(id, w);
+                                        if (id & WorldObjects::kObjectActorBit)
+                                            return objects && bone == 0 && objects->object_transform(id, w);
                                         return actors->drawn_bone(id, bone, w);
                                     },
                                     camera_.position,
@@ -339,6 +352,8 @@ int ClientApp::run() {
         glm::vec4 horizon_haze(0.0f); // the sky's blend into the haze (render::SkyFrame)
         perf_ui_.mark(FramePhase::Prepare);
         update_view_area();
+        for (auto& slot : previews_)
+            if (slot.view) slot.view->prepare(dt);
         // A frame not drawn (the background frame rate, or a minimised window) runs as one the GPU had no image for.
         const bool screenshot_frame = !opts_.screenshot.empty() && opts_.frames && frame == opts_.frames - 1;
         auto f = pace.draw || screenshot_frame ? vk_.begin_frame_commands() : std::nullopt;
@@ -395,6 +410,10 @@ int ClientApp::run() {
                 }
                 game::SceneLight scene_light = game::compute_scene_light(light);
                 if (zone_renderer_) zone_renderer_->set_scene_light(scene_light);
+                // The zone objects that play their own animation, drawn where the zone's animation clock has them now.
+                if (zone_renderer_)
+                    zone_renderer_->set_animation_time(zone_animation_ms(static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start_time_).count())));
                 // modern or classic (/lighting, display.lighting): the same scene light for every renderer.
                 render::DynamicShadowLights moving_lights;
                 render::SceneLighting lighting = scene_lighting(scene_light, sky_hour, &moving_lights);
@@ -536,7 +555,10 @@ int ClientApp::run() {
                     neighbours_->set_debug_tint(neighbour_tint_);
                 }
                 frame_lighting_ = lighting;
-                if (actor_renderer_) actor_renderer_->set_lighting(lighting);
+                if (actor_renderer_) {
+                    actor_renderer_->set_lighting(lighting);
+                    actor_renderer_->set_time(t);
+                }
                 if (world_objects_) {
                     world_objects_->set_lighting(lighting);
                     world_objects_->set_time(t); // the zone renderer's clock: flames on doors flicker in step
@@ -592,12 +614,35 @@ int ClientApp::run() {
             }
         }
         for (auto& slot : previews_)
-            if (slot.view) slot.view->record(*f, dt); // the item previews' own passes (their images)
+            if (slot.view) slot.view->record(*f); // the item previews' own passes (their images)
         if (web_textures_) { // the browser tabs' changes; without a browser, only the retired textures reaped
             if (browser_) web_textures_->record(*f, *browser_);
             else web_textures_->collect();
         }
         lap.mark("item preview record");
+        // The sky this frame. The sky is drawn while SetFog leaves CDisplay +0x2d38 set (cleared under water, in lava
+        // and with fog ending before 101).
+        render::SkyFrame sky_frame{sky_hour, t, horizon_haze};
+        const bool sky_drawn = scene && sky_renderer_ && (!fog_frame || fog_frame->sky);
+        if (sky_drawn && modern) {
+            // The open sky's daylight under this weather, for the sky and its clouds.
+            render::Daylight sky_day = render::daylight(sky_hour, true, moon_phase_, blood_moon_);
+            render::apply_storm(sky_day, weather_look_.storm);
+            sky_frame.atmosphere = true;
+            sky_frame.to_sun = sky_day.to_sun;
+            sky_frame.to_moon = sky_day.to_moon;
+            sky_frame.blood_moon = sky_day.blood_moon;
+            sky_frame.aurora = opts_.aurora >= 0.0f ? opts_.aurora : sky_clock_.aurora(t);
+            sky_frame.cloud_light = render::cloud_light(sky_day) + glm::vec3(weather_look_.flash);
+            sky_frame.storm = weather_look_.storm;
+            sky_frame.flash = weather_look_.flash;
+            sky_frame.volumetric_clouds = volumetric_clouds_;
+            sky_frame.to_light = sky_day.to_light;
+            sky_frame.light = sky_day.light;
+            sky_frame.sky_light = sky_day.sky;
+            // Its volumetric clouds are marched before the scene begins (a compute pass), through the plain view.
+            sky_renderer_->prepare(*f, camera_.projection(width, height, lit.far_plane), camera_.view(), sky_frame);
+        }
         // The temporal upscaler follows the plain camera (render/temporal.h); begin_scene hands it to the scene's
         // shaders for their own motion, so it is given first.
         if (scene) vk_.set_temporal_view(camera_.view(), camera_.projection(width, height, lit.far_plane));
@@ -627,28 +672,17 @@ int ClientApp::run() {
             const glm::mat4 plain_vp = plain_proj * camera_.view();
             glm::mat4 proj = render::jittered(plain_proj, vk_.projection_jitter());
             glm::mat4 vp = proj * camera_.view();
-            // The sky is drawn while SetFog leaves CDisplay +0x2d38 set (cleared under water, in lava and with
-            // fog ending before 101).
-            render::SkyFrame sky_frame{sky_hour, t, horizon_haze};
-            // The open sky's daylight under this weather, for the sky, its clouds and the rain.
-            render::Daylight day = render::daylight(sky_hour, true, moon_phase_, blood_moon_);
-            render::apply_storm(day, weather_look_.storm);
-            if (modern) {
-                sky_frame.atmosphere = true;
-                sky_frame.to_sun = day.to_sun;
-                sky_frame.to_moon = day.to_moon;
-                sky_frame.blood_moon = day.blood_moon;
-                sky_frame.aurora = opts_.aurora >= 0.0f ? opts_.aurora : sky_clock_.aurora(t);
-                sky_frame.cloud_light = render::cloud_light(day) + glm::vec3(weather_look_.flash);
-                sky_frame.storm = weather_look_.storm;
-                sky_frame.flash = weather_look_.flash;
-            }
-            const bool sky_drawn = sky_renderer_ && (!fog_frame || fog_frame->sky);
-            if (sky_drawn) sky_renderer_->draw(*f, proj, camera_.view(), sky_frame);
-            lap.mark("sky");
-            // Where no sky is drawn, the modern haze fills the background as it fills the distance (with the sun's glow
-            // in it), not the plain fog colour; under water, the water.
-            if (zone_renderer_ && (under_water || (modern && !sky_drawn))) zone_renderer_->draw_backdrop(*f, vp);
+            const auto draw_background = [&] {
+                if (sky_drawn) sky_renderer_->draw(*f, proj, camera_.view(), sky_frame);
+                // Where no sky is drawn, the modern haze; under water, the water.
+                if (zone_renderer_ && (under_water || (modern && !sky_drawn))) zone_renderer_->draw_backdrop(*f, vp);
+                lap.mark("sky");
+            };
+            // Classic draws all zone parts together; WLD details can blend over uncovered samples.
+            const bool background_first = !modern ||
+                (zone_renderer_ && zone_renderer_->opaque_blends_background()) ||
+                (neighbours_ && modern && neighbour_zones_ && in_game && neighbours_->opaque_blends_background());
+            if (background_first) draw_background();
             // The land round an outdoor zone (render/horizon.h), under an open sky or none (not the planes' and
             // Luclin's painted skies); not where a neighbour zone is drawn.
             if (zone_renderer_) {
@@ -670,6 +704,10 @@ int ClientApp::run() {
             const bool neighbours = neighbours_ && modern && neighbour_zones_ && in_game;
             if (neighbours) neighbours_->draw(*f, vp, camera_.position, lit, t, first);
             lap.mark("neighbour zones draw");
+            // Objects still draw their blended parts in the same call as their opaque parts.
+            // Keep their background first, and the existing object/actor/silhouette order intact.
+            // The water colour copy must also already contain the sky (flora follows that copy).
+            if (!background_first) draw_background();
             if (world_objects_) {
                 world_objects_->set_brightness(brightness);
                 world_objects_->draw(*f, vp, camera_.position, lit);
@@ -755,7 +793,7 @@ int ClientApp::run() {
                                      std::min(lit.far_plane, 1500.0f), render::kParticleGlow);
             if (modern && spell_bolts_ && in_game)
                 spell_bolts_->draw(*f, vp, camera_.position, t, frame_lighting_, render::kParticleGlow);
-            if (actor_emitters_ && in_game)
+            if (actor_emitters_ && scene)
                 actor_emitters_->draw(*f, vp, camera_.view(), modern ? render::kParticleGlow : 1.0f, particle_lighting);
             if (spell_particles_ && in_game)
                 spell_particles_->draw(*f, vp, camera_.view(), lighting_mode_ == render::LightingMode::Modern ? render::kParticleGlow : 1.0f,

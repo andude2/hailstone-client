@@ -16,6 +16,7 @@
 
 #include <glm/glm.hpp>
 
+#include "assets/object_animation.h"
 #include "render/gpu.h"
 #include "render/horizon.h"
 #include "render/lod_bands.h"
@@ -165,6 +166,9 @@ enum class ZonePhase : std::uint8_t { All, Opaque, Translucent };
 // boxes, the cover and water maps' square, the lights' reach.
 class ZoneRenderer {
 public:
+    // WLD details blend in the opaque group, including over bases that may leave depth clear.
+    // Those zones still need their sky/background before the group.
+    bool opaque_blends_background() const { return opaque_blends_background_; }
     // The CPU half of the build (geometry, chunks, decoded textures with their mip chains): ZoneRenderer::prepare,
     // on any thread; the constructor taking it uploads it.
     struct Prepared;
@@ -180,6 +184,7 @@ public:
         std::size_t vertices = 0, indices = 0, instances = 0, triangles = 0, chunks = 0;
     };
     static PreparedCounts prepared_counts(const Prepared& prepared);
+    static bool prepared_blends_background(const Prepared& prepared);
     // What a prepare built of the land (render/horizon.h): the build it keeps for the neighbours, a neighbour's
     // footprint, and the land's triangles by Draw::land_fade (0 plain, 1 a neighbour's own ground, 2 the current
     // zone's in a neighbour's part).
@@ -221,6 +226,11 @@ public:
     void draw_point_shadow(const FrameInfo& frame, const PointReach& reach, std::uint32_t face);
     // Whether the zone has water surfaces (the water map is worth drawing).
     bool has_water() const;
+    // The zone's animation clock (assets/object_animation.h), ms since the zone was loaded: the objects that play their
+    // own animation are drawn where it has them at this time, from the next pass of the frame on.
+    void set_animation_time(std::uint64_t ms) { animation_ms_ = ms; }
+    // How many placed parts move with their object's animation (drawn instanced, posed each frame).
+    std::size_t animated_parts() const { return animated_instances_; }
     // Whether what draw_shadow draws into the cover or water map (kCoverLayer, kWaterLayer) moves from frame to frame
     // in the map's view, from the last set_lighting: the plants' swaying parts, with wind.
     bool map_moves(std::uint32_t layer) const;
@@ -318,6 +328,7 @@ private:
     static bool in_depth_prepass(const Draw& d) { return d.pass == Pass::Opaque && d.liquid != Liquid::Water; }
     // The modern lighting (set_lighting), not the classic.
     bool modern_lighting() const;
+    static bool blends_background(const Draw& draw);
 
     void upload(Prepared& prepared);
     void create_descriptors();
@@ -358,6 +369,7 @@ private:
     VkDescriptorSetLayout scene_layout_ = VK_NULL_HANDLE;
     std::array<VkDescriptorSet, VkContext::kFramesInFlight> scene_sets_{};
     std::vector<Draw> draws_;
+    bool opaque_blends_background_ = false; // opaque_blends_background, worked out once draws_ is set
     // Each draw's triangles in pieces of the zone with their bounding box (build), in draw order and, within a draw,
     // in index order: the culling's unit. The opaque draws' are by 128-unit cell; the blended and additive draws keep
     // their triangles' order, cut into runs that stay within a cell's size. The boxes take in how far the plants
@@ -393,6 +405,9 @@ private:
     std::vector<glm::vec3> instance_origins_;
     // Binds the vertex, instance and index buffers.
     void bind_geometry(VkCommandBuffer cmd) const;
+    // Writes the animated objects' motions at animation_ms_, and as they were a frame ago, into frame slot
+    // `frame_slot`'s motion buffer; once per frame (VkContext::frames_begun).
+    void animate_instances(std::uint32_t frame_slot);
     std::vector<Chunk> chunks_;
     // The casts_untextured draws merged for the shadow passes, one chunk a cell (render/shadow_chunks.h): its chunks
     // follow the draws' in chunks_, its indices the draws' in the index buffer. Only its chunk fields are set.
@@ -411,6 +426,23 @@ private:
     std::array<Buffer, 3> light_grid_buffers_{};
     Buffer vertex_buffer_;
     Buffer instance_buffer_; // GpuInstance: the identity, then the instanced models' placements
+    // The animated objects' moving nodes (assets/object_animation.h). Motion k (>= 1) is node motions_[k - 1].node of
+    // animations_[motions_[k - 1].animation]; an instance's normal_row[1].w names the motion its object space goes
+    // through before its placement (0: none). Each frame in flight has its motions' rows, now and a frame ago, in a
+    // storage buffer (zone.vert's and the shadow shaders' set 1 binding 4), written by animate_instances.
+    struct Motion {
+        std::uint32_t animation = 0;
+        std::uint16_t node = 0;
+    };
+    std::vector<Motion> motions_;
+    std::vector<assets::ObjectAnimation> animations_;
+    std::vector<std::vector<glm::mat4>> animation_poses_; // per animation, the last animate_instances' motion
+    std::vector<std::array<glm::vec4, 3>> motion_rows_;   // per motion, the rows last written (the next frame's past)
+    std::array<Buffer, VkContext::kFramesInFlight> motion_slots_{};
+    std::array<void*, VkContext::kFramesInFlight> motion_mapped_{};
+    std::size_t animated_instances_ = 0;
+    std::uint64_t animation_ms_ = 0;
+    std::uint64_t animated_frame_ = 0; // VkContext::frames_begun of the last animate_instances (0: none yet)
     Buffer index_buffer_;
     std::vector<Texture> textures_;
     VkSampler sampler_ = VK_NULL_HANDLE;

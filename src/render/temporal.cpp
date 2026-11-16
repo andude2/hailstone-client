@@ -15,7 +15,23 @@ Upscaler parse_upscaler(std::string_view name) {
 }
 
 std::string_view upscaler_name(Upscaler u) {
-    return u == Upscaler::Fsr3 ? "fsr3" : u == Upscaler::Taa ? "taa" : "fsr1";
+    return u == Upscaler::External ? "external" : u == Upscaler::Fsr3 ? "fsr3" : u == Upscaler::Taa ? "taa" : "fsr1";
+}
+
+bool upscaling_off(std::string_view name) { return name == kUpscalerOff; }
+
+int upscaler_choice(std::string_view name, const std::vector<std::string>& providers) {
+    if (upscaling_off(name)) return 0;
+    for (std::size_t i = 0; i < providers.size(); ++i)
+        if (providers[i] == name) return kFirstProviderChoice + static_cast<int>(i);
+    return static_cast<int>(parse_upscaler(name)) + 1;
+}
+
+std::string upscaler_choice_name(int choice, const std::vector<std::string>& providers) {
+    if (choice == 0) return std::string(kUpscalerOff);
+    if (choice >= kFirstProviderChoice && static_cast<std::size_t>(choice - kFirstProviderChoice) < providers.size())
+        return providers[static_cast<std::size_t>(choice - kFirstProviderChoice)];
+    return std::string(upscaler_name(choice == 3 ? Upscaler::Fsr3 : choice == 2 ? Upscaler::Taa : Upscaler::Fsr1));
 }
 
 UpscaleQuality upscale_quality_for(int percent) {

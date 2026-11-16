@@ -10,6 +10,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <string>
 
 #include <glm/glm.hpp>
 #include <volk.h>
@@ -62,6 +63,12 @@ public:
     // Records the passes into `cmd` (outside rendering).
     void dispatch(VkCommandBuffer cmd, const Inputs& in, const Params& p);
 
+    // Measuring (HAILSTONE_FSR3_TIMING, VkContext): GPU timestamps round the clears and each pass, read back a frame
+    // later and averaged. `period_ns` is the device's timestampPeriod (0: the device cannot time; nothing is done).
+    void enable_timing(float period_ns);
+    // Each pass's mean GPU time in milliseconds and their sum; empty when nothing was timed.
+    std::string timing_summary() const;
+
 private:
     struct Image {
         VkImage image = VK_NULL_HANDLE;
@@ -109,6 +116,17 @@ private:
     std::uint32_t history_frames_ = 0; // frames since the history started (FSR's frameIndex)
     glm::vec2 previous_jitter_{0.0f};
     float jitter_phase_count_ = 0.0f;
+
+    // enable_timing: kStamps timestamps per frame in flight; stamp_pass_ names the pass each one ends (kPasses: the
+    // clears), and time_ms_ / time_n_ sum each pass's times.
+    static constexpr std::uint32_t kStamps = 10;
+    VkQueryPool timing_ = VK_NULL_HANDLE;
+    float period_ns_ = 0.0f;
+    std::array<std::array<std::uint32_t, kStamps>, kFrames> stamp_pass_{};
+    std::array<std::uint32_t, kFrames> stamp_count_{};
+    std::array<double, kPasses + 1> time_ms_{};
+    std::array<std::uint32_t, kPasses + 1> time_n_{};
+    void read_timing(std::uint32_t slot);
 };
 
 } // namespace hailstone::render

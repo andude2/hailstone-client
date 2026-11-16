@@ -22,6 +22,12 @@
 
 namespace hailstone::app {
 
+bool NeighbourZones::opaque_blends_background() const {
+    return std::any_of(lines_.begin(), lines_.end(), [](const Line& line) {
+        return line.renderer && !line.idle && line.renderer->opaque_blends_background();
+    });
+}
+
 namespace {
 
 using Clock = std::chrono::steady_clock;

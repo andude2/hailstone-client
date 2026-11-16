@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 #include "assets/model.h"
 
@@ -23,11 +24,12 @@ struct MaterialState {
     bool fog = true;        // false: fog off (state flag +6)
     bool lit = true;        // false: texture only (COLOROP SELECTARG1, state flag +6)
     bool masked_texture = false; // decode palette index 0 of BMPs as transparent
+    bool layer_alpha = false; // an opaque effect still reads diffuse alpha to combine its layers
 
     // Opaque without an alpha test: the texture's alpha is never read (EQG Opaque_* classes, docs/graphics.md;
     // classic opaque methods), so the colour stored under its alpha 0 is drawn
     // (render::TextureUse::OpaqueColor).
-    bool alpha_unused() const { return draw && pass == 0 && alpha_ref == 0.0f && opacity == 1.0f; }
+    bool alpha_unused() const { return draw && pass == 0 && alpha_ref == 0.0f && opacity == 1.0f && !layer_alpha; }
 };
 
 // The frame an animated texture (assets::Material::frames, frame_delay_ms) shows at `time_ms`: a classic
@@ -39,6 +41,12 @@ struct MaterialState {
 inline std::size_t texture_frame(std::uint64_t time_ms, std::uint32_t delay_ms, std::size_t count) {
     if (count < 2 || delay_ms == 0) return 0;
     return static_cast<std::size_t>((time_ms / delay_ms) % count);
+}
+
+// All actor colour and shadow passes pick the same animated texture, including a cut-out's current silhouette.
+inline std::uint32_t animated_texture_slot(std::span<const std::uint32_t> frames, std::uint32_t fallback,
+                                         std::uint64_t time_ms, std::uint32_t delay_ms) {
+    return frames.empty() ? fallback : frames[texture_frame(time_ms, delay_ms, frames.size())];
 }
 
 inline MaterialState material_state(const assets::Material& m) {
@@ -56,9 +64,9 @@ inline MaterialState material_state(const assets::Material& m) {
     case EqgShader::WaterFall: s.pass = 1; s.alpha_ref = kRef16; return s;
     // RegionTerrain, RegionLava, RegionLava2 and the heightmap tiles: opaque,
     // z-write; a tile's later ecosystems blend over the first.
-    case EqgShader::Terrain:
+    case EqgShader::Terrain: return s;
     case EqgShader::Lava:
-    case EqgShader::Lava2: return s;
+    case EqgShader::Lava2: s.layer_alpha = true; return s;
     case EqgShader::TerrainTile: s.pass = m.effect.overlay ? 1 : 0; return s;
     // A classic region's detail pass (assets/wld_detail.h): state flag +5's SRCALPHA blend, no z-write, the
     // vertex alpha as the opacity.

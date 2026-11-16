@@ -269,6 +269,20 @@ TEST_CASE("EQG packed glow and gloss maps follow the CBGG1 and CBSG1 material cl
         def.shader = "Opaque_MaxCBSG1.fx";
         specular = true;
     }
+    SUBCASE("CBSGE1 keeps packed illumination alongside its environment reflection") {
+        def.shader = "Opaque_MaxCBSGE1.fx";
+        specular = true;
+    }
+    SUBCASE("CBGGE1 aliases the same native packed environment class") {
+        def.shader = "Opaque_OpaqueSkinMeshCBGGE1Max.fx";
+    }
+    SUBCASE("CBE1 selects the same native environment render class") {
+        def.shader = "Opaque_MaxCBE1.fx";
+    }
+    SUBCASE("CBSE1 selects the same native environment render class") {
+        def.shader = "Opaque_MaxCBSE1.fx";
+        specular = true;
+    }
     SUBCASE("ordinary RGB normal maps retain their existing interpretation") {
         def.shader = "OpaqueSModelCBS1Max.fx";
         packed = false;

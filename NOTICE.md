@@ -28,6 +28,10 @@ Hailstone only through:
 - the documented Lua interfaces (the `mq` module, the `eq.*` API and the UI pack files described in
   [docs/plugins.md](docs/plugins.md) and [docs/dev-ui.md](docs/dev-ui.md)).
 
+An upscaler provider built against `hailstone_upscaler.h` is such an add-on, and the exception holds for it too
+when it loads a separately licensed runtime of its own (a graphics vendor's upscaler library) and ships that
+runtime beside it, under that runtime's terms.
+
 An add-on that copies code from Hailstone outside [sdk/](sdk/), or is linked with it in any other way, is not
 covered by this exception, and the GPL applies to it as usual. This exception does not change what Hailstone
 itself is under. If you modify Hailstone, you may extend this exception to your version, but you are not obliged

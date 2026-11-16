@@ -439,7 +439,18 @@ TEST_CASE("fuzz: WLD files and the meshes built from them") {
         for (const auto& f : w.fragments()) {
             (void)w.resolve(static_cast<wld::Ref>(f.offset));
             if (const auto* m = f.get<wld::MeshDef>()) check_parts(wld::build_mesh(w, *m, f.name));
-            if (const auto* sk = f.get<wld::Skeleton>()) (void)wld::build_skeleton_pose(w, *sk, f.name);
+            if (const auto* sk = f.get<wld::Skeleton>()) {
+                std::vector<std::uint16_t> nodes;
+                auto pose = wld::build_skeleton_pose(w, *sk, f.name, &nodes);
+                if (pose) CHECK(nodes.size() == pose->vertices.size());
+                // The object's own animation, sampled across and past its period.
+                if (auto anim = wld::build_object_animation(w, *sk)) {
+                    CHECK(anim->period_ms > 0);
+                    std::vector<glm::mat4> motion;
+                    for (std::uint64_t ms : {std::uint64_t{0}, std::uint64_t{anim->period_ms} / 3, std::uint64_t{anim->period_ms} * 7 + 1})
+                        anim->pose(ms, motion);
+                }
+            }
             if (const auto* inst = f.get<wld::ActorInstance>()) (void)wld::placement_transform(*inst);
         }
         (void)w.string_at(-1000000);
@@ -606,6 +617,8 @@ TEST_CASE("fuzz: textures (DDS, BMP, TGA, PNG)") {
     cube[113] = std::byte{0xfe};
     sweep("decode_cube_as_octahedral", {cube}, 24, 400,
           [](std::span<const std::byte> d) { (void)decode_cube_as_octahedral(d, 16); });
+    sweep("decode_environment_as_octahedral", {cube, dds(4, 4, 1, nullptr, 32, 64), dds(4, 4, 1, "DXT1", 0, 8)},
+          24, 400, [](std::span<const std::byte> d) { (void)decode_environment_as_octahedral(d, 16); });
     sweep("decode_palette_map", {bmp(8, 8, 8, 0, 64), bmp(5, 3, 8, 0, 24)}, 2, 400,
           [](std::span<const std::byte> d) { (void)wld::decode_palette_map(d); });
     Rng rng(0x1be9);

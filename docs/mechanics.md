@@ -372,6 +372,20 @@ How a move meets walls:
   21 classic zones, 655 of 665 closed doors sit in their doorways (the slab and the way through it clear of the
   zone's geometry); with the heading turned clockwise 313 do. Walked live: halas door 14 and felwithea door 1 stop
   the player closed (2.3 from the slab's centre) and let it through open.
+- Animated zone objects (`game/animated_objects.h`; the animation in docs/formats/wld.md, "Placed-object animation"):
+  a placed object whose skeleton plays its own animation (Ssraeshza Temple's turning rings, swaying branches) is
+  solid where the animation has it. `CS3DFile::CreateZoneActorFromActorInst` (0x1001cad0) gives a zone object the
+  collision-volume type 1 only with placement flag 0x80 (none shipped), else 0; both are tested by their polygons.
+  A WLD skeleton has no static collision mesh, so the line-segment test takes its per-part mesh path (0x100c66e0) on
+  the world segment, where each part is placed by its node; the sphere test's polygon path is taken to work the same
+  way (not traced, docs/unknowns.md). Here the moving triangles are left out of `CollisionMesh` and kept per moving node in
+  the first key's pose; each movement step poses every definition once (`set_time`, the zone's animation clock:
+  milliseconds since the zone loaded), and the player's sweep, floor test and a boat's hull probes meet the parts
+  near them through placement x the node's motion, as a door is met through its transform. The other spawns' contact
+  probes, the line of sight, picking and the navigation mesh do not see the moving parts. Checked against Ssraeshza
+  Temple's water shaft (`tests/object_animation_test.cpp`, the game files): with the rings in their first pose, as
+  they stood before, a walk from the north corridor cannot reach the water; turning, it gets in within a turn
+  wherever the turn starts, swims up and climbs out over the top platform's rim through the gap at the south.
 - Vector results measured before the capsule and parallel edge-region changes above
   (tests/movement_vectors_test.cpp). **The current sweep has not been replayed against these recordings**: the
   numbers below are the earlier implementation's, and `movement_vectors_test` must be run with
@@ -610,6 +624,15 @@ lookup 1500, follow AI 3000):
   somebody else under filter 15 shows exactly when the player's pet hit (even an unreported killing blow); an NPC
   hitting itself is never reported; a miss on the player is hidden under 16, the player's own under 13, somebody
   else's on somebody else under 14 shows exactly when the player's pet missed. The pet's lines take colour 0x148.
+  Owned-pet classification matches ReportSuccessfulHit @0x52efd3: the focused pet (PetID), or an attacker with
+  the spawn record's temporary-pet byte set and MasterID equal to the local player's SpawnID. The summoned bit
+  alone does not qualify. The temporary flag is retained on every full spawn update and ownership changes apply
+  to subsequent lines. Packet-driven coverage is in `tests/pet_combat_chat_test.cpp`; live acceptance is pending.
+  Temporary pets do not replace PetID on arrival (@0x59687a) or when an owner is linked to its pet
+  (PlayerClient_LinkPetToOwner @0x4b9b10; the client's fallback scan skips them the same way), so a swarm
+  leaves the permanent pet's window and commands alone.
+  Stock EQEmu's RoF2 encoder writes the temporary-pet byte as zero and its swarm spawns omit petOwnerId, so those
+  swarms cannot be attributed from the received record. Names and target-cycling flags do not establish ownership.
 - `game/social.*`: the class titles and the /who class column, name trimming, partial player name lookup.
 - `game/follow.*`: the follow AI's step with `Fpu` (each record's x87 precision): bearing (fpatan's 64-bit result,
   then the rounded multiplies; an equal x with y1 < y2 takes the 270 branch), heading difference, the turn (snap
@@ -1378,6 +1401,21 @@ rank list is separate from the active group and raid leaders' ranks. Nontrainabl
 as purchasable assist or marker abilities. The records the RoF2 table marks untrainable (2, 3, 5, 18, 21) are not
 listed at all, although stock EQEmu still sells 2, 3 and 18: ranks bought through another client do not show, and
 an old hot button for one of them does nothing.
+
+Ability names in both packs use the original window's colours (CLeadershipWnd's refresh @0x6b77f0), in this order:
+
+| Colour | Meaning |
+|---|---|
+| Green (`#00FF00`) | The current group or raid leader supplies at least rank one, even if the player has not purchased it. |
+| Gold (`#D6B228`) | The player has purchased a rank, but the current leader does not supply one (inferred: the check @0x55fb60 is unnamed in the analysis; it is the one used for the Mark NPC prerequisite, which must be the player's own rank). |
+| White (`#FFFFFF`) | Unpurchased and affordable at the displayed native cost; Delegate Mark NPC also requires the player's corresponding Mark NPC rank. |
+| Grey (`#C0C0C0`) | Unpurchased and not affordable, or that prerequisite is missing. |
+
+The rank column still shows personal purchases. Green uses Leadership_HasAbilityRank @0x55eb10, rather than
+Leadership_IsAbilityActive @0x55eb70: it does not check population, expansion or delegation permissions. EQEmu
+sends the leader's ranks even below three group members or eighteen raid members, so an ability can remain green
+while its bonus or action is unavailable. Those activation checks remain separate. White uses the native cost
+estimate; the server still decides the purchase price, as described below.
 
 The raid member menu is a Hailstone UI extension in both packs: right-click a member, or select one and use
 Member actions. The gamepad pack also opens it with Y on the focused row. Main Assist and Mark NPC delegate

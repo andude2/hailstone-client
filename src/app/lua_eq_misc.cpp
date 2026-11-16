@@ -616,7 +616,8 @@ public:
 // ---------------------------------------------------------------- AuraWindow (CAuraWnd, not decoded)
 
 // The auras the server sent (OP_UpdateAura), name and icon; a right click removes one. A plain window, as CAuraWnd
-// is: its IniFlags (0xffffffff, the ctor @0x620cd0) show it on a character with no "Show" in the UI ini, and its
+// is: its IniFlags (0xffffffff, the ctor @0x620cd0) show it on a character with no "Show" in the UI ini (Hailstone
+// clears that bit, ui/ui_ini.cpp: it starts closed), and its
 // close box and CMD_TOGGLE_AURAWND (__ExecuteCmd case 124: Activate / Deactivate, StoreIniVis) open and close it,
 // the state kept in the UI ini. Gaining an aura never opens it (ClientSOIManager_AddAura @0x466db0 only adds its row).
 class AuraWindow : public StockWindow {

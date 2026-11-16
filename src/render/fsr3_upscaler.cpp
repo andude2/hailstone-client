@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <format>
+#include <iterator>
 #include <stdexcept>
 #include <vector>
 
@@ -275,6 +277,7 @@ Fsr3Upscaler::Fsr3Upscaler(VkDevice device, VmaAllocator allocator, VkPipelineCa
 
 Fsr3Upscaler::~Fsr3Upscaler() {
     destroy_images();
+    if (timing_) vkDestroyQueryPool(device_, timing_, nullptr);
     for (std::uint32_t i = 0; i < kFrames; ++i)
         if (ubo_[i]) vmaDestroyBuffer(allocator_, ubo_[i], ubo_alloc_[i]);
     if (lut_staging_) vmaDestroyBuffer(allocator_, lut_staging_, lut_staging_alloc_);
@@ -414,8 +417,60 @@ std::uint32_t groups(std::int32_t size, std::int32_t per) {
 
 } // namespace
 
+void Fsr3Upscaler::enable_timing(float period_ns) {
+    if (period_ns <= 0.0f || timing_) return;
+    VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    qi.queryCount = kStamps * kFrames;
+    vk_check(vkCreateQueryPool(device_, &qi, nullptr, &timing_), "vkCreateQueryPool (FSR 3 timing)");
+    period_ns_ = period_ns;
+}
+
+void Fsr3Upscaler::read_timing(std::uint32_t slot) {
+    const std::uint32_t n = stamp_count_[slot];
+    if (n < 2) return;
+    std::array<std::uint64_t, kStamps> t{};
+    // The slot's last frame finished before its fence let this frame start, so the results are there.
+    if (vkGetQueryPoolResults(device_, timing_, slot * kStamps, n, sizeof t, t.data(), sizeof(std::uint64_t),
+                              VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
+        return;
+    for (std::uint32_t i = 1; i < n; ++i) {
+        const std::uint32_t pass = stamp_pass_[slot][i];
+        time_ms_[pass] += static_cast<double>(t[i] - t[i - 1]) * period_ns_ / 1e6;
+        ++time_n_[pass];
+    }
+}
+
+std::string Fsr3Upscaler::timing_summary() const {
+    static constexpr const char* kNames[] = {"prepare inputs", "luma pyramid", "shading change pyramid",
+                                             "shading change", "prepare reactivity", "luma instability",
+                                             "accumulate", "accumulate+sharpen", "rcas", "clears"};
+    static_assert(std::size(kNames) == kPasses + 1);
+    std::string out;
+    double total = 0.0;
+    for (std::uint32_t i = 0; i <= kPasses; ++i) {
+        if (!time_n_[i]) continue;
+        const double ms = time_ms_[i] / time_n_[i];
+        total += ms;
+        out += std::format("{}{} {:.3f} ms", out.empty() ? "" : ", ", kNames[i], ms);
+    }
+    if (out.empty()) return out;
+    return std::format("{:.3f} ms in all ({}), at {}x{} from {}x{}", total, out, display_.width, display_.height,
+                       render_.width, render_.height);
+}
+
 void Fsr3Upscaler::dispatch(VkCommandBuffer cmd, const Inputs& in, const Params& p) {
     const std::uint32_t slot = p.frame_slot % kFrames;
+    if (timing_) {
+        read_timing(slot);
+        vkCmdResetQueryPool(cmd, timing_, slot * kStamps, kStamps);
+        stamp_count_[slot] = 0;
+    }
+    auto stamp = [&](std::uint32_t pass) {
+        if (!timing_ || stamp_count_[slot] >= kStamps) return;
+        vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timing_, slot * kStamps + stamp_count_[slot]);
+        stamp_pass_[slot][stamp_count_[slot]++] = pass;
+    };
     const bool first = fresh_;
     if (fresh_) {
         // New images: every one into GENERAL for good, the table copied in, the first histories cleared
@@ -619,6 +674,7 @@ void Fsr3Upscaler::dispatch(VkCommandBuffer cmd, const Inputs& in, const Params&
     // The clears (fsr3upscalerDispatch): on a reset the accumulation read, the luminance pyramid and the frame info
     // (auto exposure starts over); each frame the reconstructed previous depth (to 0: reverse Z), SPD's counter and
     // its mips.
+    stamp(kPasses);
     if (reset) {
         clear(cmd, accumulation_[read].image, 1, 0.0f);
         clear(cmd, frame_info_.image, 1, -1.0f, 1.0f);
@@ -627,6 +683,7 @@ void Fsr3Upscaler::dispatch(VkCommandBuffer cmd, const Inputs& in, const Params&
     clear_uint(cmd, spd_atomic_.image);
     clear(cmd, spd_mips_.image, spd_mips_.levels, 0.0f);
     barrier(cmd);
+    stamp(kPasses);
 
     const bool sharpen = p.sharpness > 0.0f;
     auto run = [&](Pass pass, std::uint32_t x, std::uint32_t y) {
@@ -634,6 +691,7 @@ void Fsr3Upscaler::dispatch(VkCommandBuffer cmd, const Inputs& in, const Params&
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layouts_[pass], 0, 1, &sets_[slot][pass], 0, nullptr);
         vkCmdDispatch(cmd, x, y, 1);
         barrier(cmd);
+        stamp(pass);
     };
     run(PrepareInputs, groups(rw, 8), groups(rh, 8));
     run(LumaPyramid, tiles_x, tiles_y);

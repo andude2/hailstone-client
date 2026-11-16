@@ -1,8 +1,42 @@
 #include <doctest/doctest.h>
 
 #include "assets/character.h"
+#include "assets/object_animation.h"
 
 using namespace hailstone::assets;
+
+TEST_CASE("character cloud definitions share storage across bones and dressed meshes") {
+    CharacterModel model;
+    auto cloud = std::make_shared<EmitterDefinition>();
+    cloud->name = "cloud";
+    cloud->texture = "cloud.dds";
+    cloud->texture_frames = {"cloud.dds", "next.dds"};
+    const auto before = model.retained_bytes();
+    model.clouds = {{0, glm::mat4(1.0f), {}, "TST", cloud}, {1, glm::mat4(1.0f), {}, "TST", cloud}};
+    const auto definition_bytes = sizeof(EmitterDefinition) + cloud->name.size() + cloud->texture.size() +
+                                  2 * sizeof(std::string) + cloud->texture_frames[0].size() + cloud->texture_frames[1].size();
+    CHECK(model.retained_bytes() == before + 2 * sizeof(MeshEmitter) + 6 + definition_bytes);
+    auto mesh = model.default_mesh();
+    std::unordered_set<const EmitterDefinition*> shared;
+    const auto shared_model = model.memory_breakdown(nullptr, &shared).total();
+    CHECK(shared_model == model.retained_bytes());
+    CHECK(mesh.retained_bytes(&shared) + definition_bytes == mesh.retained_bytes());
+    auto animation = std::make_shared<ObjectAnimation>();
+    animation->nodes.resize(2);
+    animation->rest_inverse.resize(2);
+    animation->nodes[0].keys.resize(3);
+    const auto animation_bytes = sizeof(ObjectAnimation) + 2 * sizeof(ObjectAnimationNode) + 2 * sizeof(glm::mat4) +
+                                 3 * sizeof(ObjectTrackKey);
+    const auto before_animation = model.retained_bytes();
+    model.clouds[0].cloud_animation = model.clouds[1].cloud_animation = animation;
+    CHECK(model.retained_bytes() == before_animation + animation_bytes);
+    std::unordered_set<const EmitterDefinition*> definitions;
+    std::unordered_set<const ObjectAnimation*> animations;
+    model.memory_breakdown(nullptr, &definitions, &animations);
+    auto animated_mesh = model.default_mesh();
+    CHECK(animated_mesh.retained_bytes(&definitions, &animations) + definition_bytes + animation_bytes ==
+          animated_mesh.retained_bytes());
+}
 
 TEST_CASE("character payload accounting includes animation keys and mesh buffers") {
     CharacterModel model;
@@ -87,4 +121,7 @@ TEST_CASE("model memory categories include skeletons, aliases and dynamic materi
     const auto named = model.memory_breakdown();
     CHECK(named.other_bytes == material.other_bytes + 3);
     CHECK(named.total() == model.retained_bytes());
+    model.materials[0].effect.coverage_map = "coverage.dds";
+    CHECK(model.memory_breakdown().geometry_bytes == named.geometry_bytes + 12);
+    CHECK(model.retained_bytes() == named.total() + 12);
 }

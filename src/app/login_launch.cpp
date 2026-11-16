@@ -97,7 +97,7 @@ std::vector<std::string> unknown_argument_warnings(const LoginLaunch& launch, co
 }
 
 ServerProfile token_login_profile(std::string_view saved_name, const ServerProfile* named,
-                                  const std::optional<ServerProfile>& eqhost, bool game_dir_explicit,
+                                  const std::optional<ServerProfile>& eqhost, bool eqhost_trusted,
                                   const std::vector<ServerProfile>& profiles, std::string_view host, int port) {
     if (!saved_name.empty() && !named) throw std::runtime_error("Token login's saved server was not found.");
     if (port < 0 || port > 65535) throw std::runtime_error("Login port must be between 1 and 65535.");
@@ -107,11 +107,11 @@ ServerProfile token_login_profile(std::string_view saved_name, const ServerProfi
         profile.host = host;
         if (port > 0) profile.port = port;
         profile.name = profile.host;
-    } else if (!game_dir_explicit)
+    } else if (!eqhost_trusted)
         throw std::runtime_error("A login ticket needs its server named for this run: --server, --host, or --game-dir "
-                                 "(whose eqhost.txt names it).");
+                                 "(whose eqhost.txt names it), or Hailstone installed in the EverQuest folder.");
     else if (eqhost) profile = *eqhost;
-    else throw std::runtime_error("A login ticket needs --server, --host, or an eqhost.txt in the --game-dir folder.");
+    else throw std::runtime_error("A login ticket needs --server, --host, or an eqhost.txt in the game folder.");
     if (!host.empty()) profile.host = host;
     if (port > 0) profile.port = port;
     if (profile.host.empty() || profile.port < 1 || profile.port > 65535)

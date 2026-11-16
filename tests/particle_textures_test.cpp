@@ -6,6 +6,7 @@
 #include "core/byte_io.h"
 #include "core/game_dir.h"
 #include "render/particle_textures.h"
+#include "assets/spell_effects.h"
 #include "scratch_dir.h"
 
 using namespace hailstone;
@@ -37,6 +38,23 @@ void write(const std::filesystem::path& p, const std::vector<std::byte>& d) {
     std::ofstream(p, std::ios::binary).write(reinterpret_cast<const char*>(d.data()), static_cast<std::streamsize>(d.size()));
 }
 } // namespace
+
+TEST_CASE("Particle textures: WLD bitmap sequences wrap without cropping EDD atlas frames") {
+    assets::EmitterDefinition definition;
+    definition.texture = "atlas.dds";
+    definition.frames = 16;
+    auto atlas = render::particle_texture_frame(definition, 7);
+    CHECK(atlas.texture == "atlas.dds");
+    CHECK(atlas.grid == glm::uvec2(4, 4));
+    CHECK(atlas.atlas_frame == 7);
+    definition.texture_frames = {"first.bmp", "second.bmp", "third.bmp", "fourth.bmp", "fifth.bmp"};
+    definition.frames = 5;
+    auto sequence = render::particle_texture_frame(definition, 7);
+    CHECK(sequence.texture == "third.bmp");
+    CHECK(sequence.grid == glm::uvec2(1));
+    CHECK(sequence.atlas_frame == 0);
+    CHECK(render::particle_texture_frame(definition, 5).texture == "first.bmp");
+}
 
 TEST_CASE("Particle textures: the zone's copy, else the effect folders in order; the colour of its texels") {
     test::ScratchDir dir("particle_textures");

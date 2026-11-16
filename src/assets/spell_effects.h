@@ -77,6 +77,8 @@ struct EmitterDefinition {
     float shrink_x = 0.0f, shrink_y = 0.0f; // [0x190, 0x194] extra shrink ramps
     std::uint32_t negative_radial = 0;   // [0x198]
     std::uint32_t actor_scales_offsets = 1; // [0x19c]
+    // WLD sprites use separate bitmap files in authored order. Empty for an EDD texture's atlas flipbook.
+    std::vector<std::string> texture_frames;
 };
 
 // Parses an EDD file. Throws std::runtime_error for a missing magic, a version

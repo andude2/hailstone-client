@@ -389,6 +389,12 @@ std::vector<std::string> ClientApp::option_choices(std::string_view name) const 
         out.push_back("Same as UI");
         for (auto& f : ui::font_families(font_faces())) out.push_back(f);
     }
+    // The upscaler providers installed (render/upscaler_provider.h): the Upscaler choices after FSR 3.1
+    // (display_option "upscaler" 4 on), each by its own name once it runs, else by its folder's.
+    if (name == "upscaler_providers") {
+        const render::UpscalerProvider* running = vk_.upscaler_provider();
+        for (const auto& p : upscaler_providers()) out.push_back(running && running->name() == p ? running->label() : p);
+    }
     // The asset folder the game runs with (one entry; "asset_folder_pick" changes it on the login screen).
     if (name == "asset_folder") out.push_back(game_.root().string());
     if (name == "ui_name")
@@ -732,6 +738,22 @@ void ClientApp::set_option_value(std::string_view o, int v) {
     config_.save(config_path_);
 }
 
+render::GpuProfile ClientApp::graphics_profile() const {
+    render::GpuProfile gpu = vk_.gpu_profile();
+    gpu.cpu_threads = std::thread::hardware_concurrency();
+    return gpu;
+}
+
+void ClientApp::detect_graphics_at_first_start() {
+    if (config_.get(render::kGraphicsTierKey)) return;
+    const render::GpuProfile gpu = graphics_profile();
+    const std::optional<render::GraphicsTier> applied = render::first_start_graphics(config_, gpu);
+    log::info("graphics: {} ({} MiB of its own memory, {} CPU threads) is {}{}", gpu.name, gpu.device_local_bytes >> 20,
+              gpu.cpu_threads, render::graphics_tier_name(render::detect_graphics_tier(gpu)),
+              applied ? ": its settings applied (a new install)" : "; the settings already there are kept");
+    config_.save(config_path_);
+}
+
 void ClientApp::apply_settings() {
     // display.lighting = modern (docs/graphics.md) | classic (the original's look); /lighting switches.
     lighting_mode_ = render::parse_lighting_mode(config_.get_string("display.lighting", "modern"))
@@ -765,6 +787,7 @@ void ClientApp::apply_settings() {
     grass_density_ = render::grass_density_percent(config_.get_int("display.grass_density", 100));
     neighbour_zones_ = config_.get_bool("display.neighbour_zones", true);
     horizon_hills_ = config_.get_bool("display.horizon_hills", true);
+    volumetric_clouds_ = config_.get_bool("display.volumetric_clouds", true);
     neighbour_tint_ = config_.get_bool("display.neighbour_tint", false);
     tree_detail_ = std::clamp(config_.get_int("display.tree_detail", 100), 50, 200);
     ring_cues_ = config_.get_bool("display.target_ring_cues", true);

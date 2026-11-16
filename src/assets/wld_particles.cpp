@@ -13,11 +13,23 @@ std::optional<ParticleTexture> particle_texture(const wld::WldFile& wld, wld::Re
     const auto* sprite = blit ? wld.get<wld::BitmapInfoRef>(blit->sprite) : nullptr;
     const auto* info = sprite ? wld.get<wld::BitmapInfo>(sprite->info) : nullptr;
     if (!info || info->frames.empty()) return std::nullopt;
-    const auto* bmp = wld.get<wld::BitmapName>(info->frames.front());
-    if (!bmp || bmp->files.empty()) return std::nullopt;
+    const auto* first = wld.get<wld::BitmapName>(info->frames.front());
+    if (!first || first->files.empty() || first->files.front().empty()) return std::nullopt;
     ParticleTexture t;
-    t.file = bmp->files.front();
-    t.frames = static_cast<std::uint32_t>(info->frames.size());
+    for (const auto frame : info->frames) {
+        const auto* bmp = wld.get<wld::BitmapName>(frame);
+        const bool whole = bmp && !bmp->files.empty() &&
+                           std::none_of(bmp->files.begin(), bmp->files.end(), [](const std::string& f) { return f.empty(); });
+        if (!whole) {
+            // A damaged later frame: the first bitmap alone, still, as before the sequences were read (a zone's cloud
+            // must not vanish), rather than a sequence silently shortened.
+            t.files.assign(1, first->files.front());
+            break;
+        }
+        t.files.insert(t.files.end(), bmp->files.begin(), bmp->files.end());
+    }
+    t.file = t.files.front();
+    t.frames = static_cast<std::uint32_t>(t.files.size());
     t.timing_ms = info->frame_delay_ms;
     t.material = blit->material;
     return t;
@@ -28,6 +40,7 @@ std::optional<std::uint32_t> particle_material_alias(std::uint32_t handle) {
     // the low 31 bits as the index (< 42) into the state cache's table.
     if (handle == 0x80000017u) return 0x011b0507u;
     if (handle == 0x80000018u) return 0x01080507u; // blood's alpha material (default installer 0x1009abe1)
+    if (handle == 0x80000019u) return 0x00000587u; // masked sprite (default installer 0x1009aa40)
     return std::nullopt;
 }
 
@@ -48,6 +61,7 @@ EmitterDefinition particle_cloud_definition(const wld::ParticleCloud& c, const P
     EmitterDefinition d;
     d.name = std::string(name);
     d.texture = tex.file;
+    d.texture_frames = tex.files;
     d.unknown_13c = c.selector; // +0x13c
     d.unknown_140 = c.bits;     // +0x140
     if (c.bits & 0xc000) d.follow_attachment = 1;                              // +0x74
@@ -135,11 +149,9 @@ EmitterDefinition particle_cloud_definition(const wld::ParticleCloud& c, const P
     d.scale1 = c.size; // +0x16c: the update scales the quad by it (0x10074aaf)
     d.color_start = d.color_end = glm::uvec3((c.color >> 16) & 0xff, (c.color >> 8) & 0xff, c.color & 0xff);
     // The texture: frame rate 1000 / its timing (a timing below 2 counts as
-    // 100), at least one frame. Several bitmaps are not laid out as a
-    // flipbook grid here (how the DLL builds the texture for them is not
-    // traced), so only the first is drawn.
+    // 100), at least one frame. WLD bitmap sequences remain separate files; the renderer selects one full texture.
     d.frames_per_second = 1000.0f / static_cast<float>(tex.timing_ms < 2 ? 100u : tex.timing_ms); // +0x134
-    d.frames = 1; // +0x130 = max(texture frames, 1)
+    d.frames = std::max(tex.frames, 1u); // +0x130
     // +0x68: a material with bit 0x1000000 picks the blend from bit 20
     // (DESTBLEND ONE when set); negative words go through the alias table.
     std::optional<std::uint32_t> material = tex.material;

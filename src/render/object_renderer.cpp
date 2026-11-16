@@ -38,6 +38,7 @@ struct PushConstants {
     std::uint32_t texture;
     std::uint32_t instance;
     std::uint32_t maps; // a texture pack's normal map slot | roughness map slot << 16 (0 = none)
+    std::uint32_t flags; // bit 0 unlit, bit 1 no fog
 };
 static_assert(sizeof(PushConstants) <= 128);
 
@@ -177,8 +178,7 @@ ObjectRenderer::~ObjectRenderer() {
 }
 
 std::uint32_t ObjectRenderer::frame_texture(const Part& part) const {
-    if (part.frames.empty()) return part.texture;
-    return part.frames[texture_frame(time_ms_, part.frame_delay_ms, part.frames.size())];
+    return animated_texture_slot(part.frames, part.texture, time_ms_, part.frame_delay_ms);
 }
 
 void ObjectRenderer::rebuild_descriptors(std::uint32_t slot) {
@@ -274,6 +274,7 @@ int ObjectRenderer::add_model(const assets::Mesh& mesh, const FileReader& read) 
         part.alpha_ref = st.alpha_ref;
         part.opacity = st.opacity;
         part.fog = st.fog;
+        part.lit = st.lit;
         part.flame = assets::flame_material_hue(m) != assets::FlameHue::None;
         g.parts.push_back(part);
     }
@@ -372,6 +373,7 @@ void ObjectRenderer::draw_prepared(const FrameInfo& frame, const glm::mat4& view
                 pc.texture = frame_texture(part);
                 pc.instance = p.instance;
                 pc.maps = part.maps;
+                pc.flags = (part.lit ? 0u : 1u) | (part.fog ? 0u : 2u);
                 pc.fog = part.fog ? glm::vec4(view.fog_start, view.fog_end, part.alpha_ref, part.opacity)
                                   : glm::vec4(kNoFogStart, kNoFogEnd, part.alpha_ref, part.opacity);
                 vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,

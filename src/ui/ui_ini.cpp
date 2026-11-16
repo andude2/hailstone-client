@@ -54,7 +54,9 @@ WindowIniInfo window_ini_info(std::string_view screen) {
         {"GroupWindow", {}, 0xffffffff, 1},       {"BuffWindow", {}, 0xffffffff, 1},
         {"ShortDurationBuffWindow", {}, 0xffffffff, 1}, {"CastSpellWnd", {}, 0xffffffff, 1},
         {"CompassWindow", {}, 0xffffffff, 1},     {"ExtendedTargetWnd", {}, 0xffffffff, 1},
-        {"AuraWindow", {}, 0xffffffff, 1},        {"ActionsWindow", {}, 0xfffffdff, 1},
+        // AuraWindow: CAuraWnd passes 0xffffffff (shown on a character with no "Show" yet). Hailstone: bit 9 off,
+        // so it starts closed (a deliberate change from RoF2; the EQ menu's Auras opens it).
+        {"AuraWindow", {}, 0xfffffdff, 1},        {"ActionsWindow", {}, 0xfffffdff, 1},
         {"CombatAbilityWnd", {}, 0xfffffdff, 1},  {"PetInfoWindow", {}, 0xfffffdff, 1},
         {"FriendsWindow", {}, 0xfffffdff, 1},     {"RaidWindow", {}, 0xfffffdff, 1},
         {"SelectorWindow", {}, 0xfffffdff, 1},    {"TradeskillWnd", {}, 0xfffffdff, 1},

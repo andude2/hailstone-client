@@ -226,7 +226,7 @@ void ClientApp::sync_item_preview(PreviewSlot& slot, const net::GameConnection::
     if (!slot.view) {
         if (!actor_library_) return;
         try {
-            slot.view = std::make_unique<ItemPreviewView>(vk_, actor_library_, shader_dir_);
+            slot.view = std::make_unique<ItemPreviewView>(vk_, game_, actor_library_, shader_dir_);
         } catch (const std::exception& e) {
             log::warn("item preview unavailable: {}", e.what());
             return;

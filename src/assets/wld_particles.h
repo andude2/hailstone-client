@@ -30,6 +30,7 @@ struct ParticleTexture {
     std::uint32_t frames = 1;      // bitmaps in the 0x04
     std::uint32_t timing_ms = 0;   // the 0x04's sleep
     std::uint32_t material = 0;    // the 0x26 material word
+    std::vector<std::string> files; // separate bitmap frames, including repeated frames in the authored sequence
 };
 
 // Follows a 0x26 reference; nullopt when the chain is broken.
@@ -38,7 +39,8 @@ std::optional<ParticleTexture> particle_texture(const wld::WldFile& wld, wld::Re
 // The renderer's default material alias table entry for a negative WLD
 // material handle (CRender's default alias installer). 0x80000017, the one
 // ordinary clouds use, resolves to 0x011b0507 (OpenEQ docs/WLD_PARTICLE_MATERIALS.md); blood's
-// 0x80000018 resolves to 0x01080507 (stock default installer 0x1009abe1). nullopt for other aliases.
+// 0x80000018 resolves to 0x01080507 (stock default installer 0x1009abe1), 0x80000019 to 0x00000587
+// (masked, default installer 0x1009aa40). nullopt for other aliases.
 std::optional<std::uint32_t> particle_material_alias(std::uint32_t handle);
 
 // The DLL's 0x34 -> emitter descriptor conversion (0x1001c650). `name` is the

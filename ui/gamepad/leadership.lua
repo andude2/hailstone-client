@@ -73,11 +73,11 @@ ui.window("Leadership", function()
     local listW = cw * 0.6
     ui.SetCursorPos(x0 - wx, ly - wy)
     local focusedRow = CH.list(LW, list, lists[tab], listW, y1 - ly, { rowH = 62, empty = "No abilities.",
-      draw = function(_, texts, rx0, ry0, rx1, ry1, focused)
+      draw = function(_, texts, rx0, ry0, rx1, ry1, focused, color)
         local cur, max = ranks(texts)
         local p = T.px(18)
         T.font(22)
-        T.textIn(rx0 + p, ry0, rx1 - T.px(260), ry1, T.fit(texts[1] or "", rx1 - rx0 - T.px(290)), cur > 0 and C.text or C.dim, 0)
+        T.textIn(rx0 + p, ry0, rx1 - T.px(260), ry1, T.fit(texts[1] or "", rx1 - rx0 - T.px(290)), color or C.text, 0)
         T.unfont()
         -- the ranks as pips, the next rank's cost on the right
         local midY = (ry0 + ry1) / 2

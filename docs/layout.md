@@ -33,6 +33,10 @@ hailstone/
                              pack.ini (what it was built with)
   tools/<name>/              tool add-ons, each a program of its own with its files (docs/addons.md "Tools"): the
                              add-on manager's alone, as nothing else is put there
+  upscalers/<name>/          upscaler add-ons, each a temporal upscaler (docs/addons.md "Upscalers"): <name>.so (.dll,
+                             .dylib) and the runtime it loads; display.upscaler = <name> loads it at the start, from
+                             a copy in cache/upscalers/. A build from source puts the example provider in
+                             upscalers/example/
   maps/                      the player's in-game maps for every server, maps/<dir>/ a maps directory (below)
   servers/<profile>/         one folder per saved server (core/server_profile.h); servers/.deleted/ the deleted ones
     server.ini               [Server] name, host, port, username, remember, game_files
@@ -84,7 +88,8 @@ hailstone/
                              scripts/<name>/ and plugins/<name>/
   update/                    the updater's downloads, the installed components' file lists, the files the last
                              update replaced (until the new version has started) and its journal (docs/updater.md)
-  cache/                     safe to delete while no client runs: cache/plugins/ holds the loaded plugins' copies, cache/pipelines.bin
+  cache/                     safe to delete while no client runs: cache/plugins/ holds the loaded plugins' copies,
+                             cache/upscalers/<name>-<key>/ the loaded upscaler's copy of its folder, cache/pipelines.bin
                              the compiled Vulkan pipelines, cache/navmesh/<server>/<zone>.navmesh the zones'
                              navigation meshes (docs/navigation.md), cache/horizon/<server>/<zone>/<neighbour>.bin
                              the neighbour zones' ground the land round a zone takes the shape of (docs/graphics.md
@@ -494,6 +499,9 @@ Every start makes the data folder and its empty folders when they are missing (`
 maps go without reading this. Folders and files already there are left alone; a folder that cannot be made (a file
 of that name is in the way, or the disk refuses) is named in the log, and the start goes on. Each writer still makes
 its own folder before it writes, so deleting one while Hailstone runs is harmless.
+
+A new install's graphics settings are fitted to the computer before they are first read: the GPU and CPU are
+sorted into a tier whose settings go into `hailstone.ini` (docs/graphics.md "Detected settings").
 
 Older builds kept their settings in a per-user folder (`~/.config/hailstone`, earlier `~/.config/nms-client`).
 Hailstone no longer reads it or copies anything from it: a new Hailstone folder starts empty. That old folder can be

@@ -212,6 +212,7 @@ std::filesystem::path ui_settings_file(std::string_view pack) {
     return ui_settings_dir() / (std::string(pack) + ".txt");
 }
 std::filesystem::path plugins_dir() { return data_dir() / "plugins"; }
+std::filesystem::path upscalers_dir() { return data_dir() / "upscalers"; }
 std::filesystem::path scripts_dir() { return data_dir() / "scripts"; }
 std::filesystem::path scripts_config_dir() { return scripts_dir() / "config"; }
 std::filesystem::path textures_dir() { return data_dir() / "textures"; }

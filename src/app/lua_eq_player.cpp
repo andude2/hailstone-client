@@ -859,11 +859,26 @@ public:
         sets.text = eqstr(host, 4610); // Save/Load target sets
         sets.submenu = [this, &host] { return target_set_menu(host); };
         rows.push_back(std::move(sets));
+        // Hailstone's row, not the original's: the modern pack's frame grows to show every slot up to the last
+        // filled one (hud.expand.ExtendedTargetWnd, ui/modern/lib/xtarget.lua), past the height the player gave it.
+        if (host.set_layout_setting) {
+            rows.push_back(separator());
+            EqHost::MenuRow expand;
+            expand.text = "Auto expand";
+            expand.check = host.layout_setting && host.layout_setting(kExpandKey) == "1";
+            expand.act = [&host] {
+                if (!host.set_layout_setting) return;
+                const bool on = host.layout_setting && host.layout_setting(kExpandKey) == "1";
+                host.set_layout_setting(kExpandKey, on ? "0" : "1");
+            };
+            rows.push_back(std::move(expand));
+        }
         host.open_menu(x, y, std::move(rows));
         return true;
     }
 
 private:
+    static constexpr std::string_view kExpandKey = "hud.expand.ExtendedTargetWnd";
     static EqHost::MenuRow separator() {
         EqHost::MenuRow r;
         r.separator = true;

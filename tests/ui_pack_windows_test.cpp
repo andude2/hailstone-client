@@ -1305,6 +1305,14 @@ end
             tool.can_remove = tool.can_start = true;
             tool.folder = "/x/tools/texstudio";
             login.addons.rows.push_back(tool);
+            // An installed upscaler (docs/addons.md "Upscalers").
+            ui::AddonRowView upscaler = tool;
+            upscaler.name = "xess";
+            upscaler.kind = "upscaler";
+            upscaler.source = "owner/xess";
+            upscaler.can_start = false;
+            upscaler.folder = "/x/upscalers/xess";
+            login.addons.rows.push_back(upscaler);
             // The store (docs/addons.md "Finding add-ons"): an item in each state, then the list being fetched, then
             // an empty one.
             for (const char* state : {"install", "update", "installed", "manual", "unavailable"}) {
@@ -1328,6 +1336,10 @@ end
             // A tool's install card: no permissions, the program's warning.
             login.addons.offer->kind = "tool";
             login.addons.offer->caps.clear();
+            s.frames(2);
+            CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
+            // An upscaler's: no permissions, its own warning.
+            login.addons.offer->kind = "upscaler";
             s.frames(2);
             CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
             login.addons.offer->kind = "plugin";
@@ -1445,6 +1457,103 @@ end
             s.frames(2);
             CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
             s.host.char_create_view = nullptr;
+        }
+        ImGui::DestroyContext(ctx);
+    }
+}
+
+TEST_CASE("UI packs: the login screen's More options pick the texture pack (eq.Option texture_pack)") {
+    for (const char* pack : {"modern", "gamepad"}) {
+        INFO(pack);
+        fs::path src = fs::path(__FILE__).parent_path().parent_path() / "ui" / pack;
+        hailstone::test::ScratchDir dir_scratch("ui_pack_login_texture_pack_test");
+        fs::path dir = dir_scratch.path();
+        fs::create_directories(dir / "game");
+        fs::copy(src, dir / pack, fs::copy_options::recursive);
+        ImGuiContext* ctx = ImGui::CreateContext();
+        ImGui::GetIO().IniFilename = nullptr;
+        unsigned char* px = nullptr;
+        int w = 0, h = 0;
+        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+        {
+            Session s(dir, pack);
+            s.host.in_game = s.host.ui_ready = false;
+            REQUIRE(luaL_dostring(s.lua.state(), "eq.InGame = function() return false end") == LUA_OK);
+            // A new server (no saved accounts, so the gamepad pack's More page has no box set list above).
+            ui::LoginView login;
+            login.servers_dir = dir / "servers";
+            login.ui_packs = {{"modern", "Modern", "", "mouse", false, {}}, {"gamepad", "Gamepad", "", "gamepad", false, {}}};
+            login.ui = login.default_ui = pack;
+            login.game_folders = {{"/games/rof2", false, true}};
+            s.host.login = &login;
+            int chosen = 0; // Off
+            bool asked = false;
+            std::vector<int> set;
+            s.host.find_option = [&](std::string_view o) -> std::optional<int> {
+                if (o != "texture_pack") return std::nullopt;
+                asked = true;
+                return chosen;
+            };
+            s.host.option_choices = [](std::string_view o) {
+                return o == "texture_pack" ? std::vector<std::string>{"Off", "classic", "default"} : std::vector<std::string>{};
+            };
+            s.host.set_option = [&](std::string_view o, int v) {
+                if (o != "texture_pack") return;
+                set.push_back(v);
+                chosen = v;
+            };
+            lua_State* L = s.lua.state();
+            // More options open from the first frame; a click on the pack "classic": the modern pack's list entry,
+            // the gamepad pack's field and then the second row of its list.
+            REQUIRE(luaL_dostring(L, R"lua(
+ui.SetSetting('test.login', 'more')
+clickPack, rows = false, 0
+local selectable, invisible = ui.Selectable, ui.InvisibleButton
+ui.Selectable = function(label, ...)
+  local hit = selectable(label, ...)
+  return hit or (clickPack and label == "classic")
+end
+ui.InvisibleButton = function(id, ...)
+  local hit = invisible(id, ...)
+  if not clickPack then return hit end
+  if id == "##texpack" then return true end
+  if id == "##row" then
+    rows = rows + 1
+    return hit or rows == 2
+  end
+  return hit
+end
+)lua") == LUA_OK);
+            s.frames(3);
+            CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
+            CHECK(asked);
+            CHECK(set.empty());
+            if (std::string(pack) == "modern") {
+                // the list drawn as an open combo would draw it (its entries in the row itself: no popup to end)
+                REQUIRE(luaL_dostring(L, R"lua(
+local begin, finish, faked = ui.BeginCombo, ui.EndCombo, false
+ui.BeginCombo = function(id, ...)
+  if id == "##texture_pack" and clickPack then faked = true; return true end
+  return begin(id, ...)
+end
+ui.EndCombo = function()
+  if faked then faked = false; return end
+  return finish()
+end
+clickPack = true
+)lua") == LUA_OK);
+                s.frames(1);
+            } else {
+                REQUIRE(luaL_dostring(L, "clickPack = true") == LUA_OK);
+                s.frames(1); // the field opens the list
+                REQUIRE(luaL_dostring(L, "rows = 0") == LUA_OK);
+                s.frames(1); // its second row
+            }
+            REQUIRE(luaL_dostring(L, "clickPack = false") == LUA_OK);
+            CHECK(set == std::vector<int>{1});
+            CHECK(chosen == 1);
+            s.frames(2); // the note that it is used from the next start
+            CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
         }
         ImGui::DestroyContext(ctx);
     }
@@ -2069,6 +2178,80 @@ TEST_CASE("UI packs (modern): the extended target window shows empty slots and s
         area = rows();
         REQUIRE(area != nullptr);
         CHECK(area->ContentSize.y >= 5 * 33 - 4);
+        CHECK(area->ScrollMax.y > 0.0f);
+    }
+    ImGui::DestroyContext(ctx);
+}
+
+// The modern extended target window with the most slots (20): six rows tall by default, the rest scrolling; Auto
+// expand (hud.expand.ExtendedTargetWnd, the slot menu's row and the frame's) grows it down to the last filled slot.
+TEST_CASE("UI packs (modern): the extended target window starts six rows tall and Auto expand grows it to its targets") {
+    fs::path src = fs::path(__FILE__).parent_path().parent_path() / "ui" / "modern";
+    hailstone::test::ScratchDir dir_scratch("ui_pack_xtarget_expand_test");
+    fs::path dir = dir_scratch.path();
+    fs::create_directories(dir / "game");
+    fs::copy(src, dir / "modern", fs::copy_options::recursive);
+    ImGuiContext* ctx = ImGui::CreateContext();
+    ImGui::GetIO().IniFilename = nullptr;
+    unsigned char* px = nullptr;
+    int w = 0, h = 0;
+    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    {
+        Session s(dir, "modern");
+        // Twenty slots: slot 0 and slot 15 hold a spawn.
+        ByteWriter b;
+        b.le<std::uint32_t>(20);
+        b.le<std::uint32_t>(2);
+        for (auto [slot, id, name] : {std::tuple{0u, 101u, std::string("a gnoll")}, std::tuple{15u, 102u, std::string("a pup")}}) {
+            b.le<std::uint32_t>(slot);
+            b.le<std::uint8_t>(1);
+            b.le<std::uint32_t>(id);
+            b.fixed_string(name, name.size() + 1);
+            game::Spawn& m = s.conn.world_for_test().spawns[id];
+            m.id = id;
+            m.name = name;
+            m.is_npc = true;
+            m.hp_percent = 80;
+        }
+        s.conn.receive_zone_packet_for_test(net::AppPacket(net::to_wire(net::Op::XTargetResponse), b.take()));
+        lua_State* L = s.lua.state();
+        REQUIRE(luaL_dostring(L, "eq.ShowWindow('ExtendedTargetWnd', true)") == LUA_OK);
+        s.frames(3);
+        CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
+        auto rows = []() -> ImGuiWindow* {
+            for (ImGuiWindow* win : GImGui->Windows)
+                if (std::string_view(win->Name).find("/##xtrows") != std::string_view::npos) return win;
+            return nullptr;
+        };
+        ImGuiWindow* area = rows();
+        REQUIRE(area != nullptr);
+        // Every slot is a row (30 + 3 pixels at scale 1); the frame shows about six of them and scrolls the rest.
+        CHECK(area->ContentSize.y >= 20 * 33 - 4);
+        CHECK(area->Size.y >= 6 * 33 - 4);
+        CHECK(area->Size.y < 7 * 33);
+        CHECK(area->ScrollMax.y > 0.0f);
+        // Auto expand: tall enough for the rows down to slot 15 (16 rows); the four after it still scroll.
+        REQUIRE(luaL_dostring(L, "ui.SetSetting('hud.expand.ExtendedTargetWnd', '1')") == LUA_OK);
+        s.frames(3);
+        CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
+        area = rows();
+        REQUIRE(area != nullptr);
+        CHECK(area->Size.y >= 16 * 33 - 4);
+        CHECK(area->Size.y < 17 * 33);
+        CHECK(area->ScrollMax.y > 0.0f);
+        // A size of the player's own taller than the targets need is kept.
+        REQUIRE(luaL_dostring(L, "ui.SetSetting('hud.size.ExtendedTargetWnd', '210,800')") == LUA_OK);
+        s.frames(3);
+        area = rows();
+        REQUIRE(area != nullptr);
+        CHECK(area->Size.y > 17 * 33);
+        // Off again: the player's size, here a short one, and the rows scroll.
+        REQUIRE(luaL_dostring(L, "ui.SetSetting('hud.size.ExtendedTargetWnd', '210,120') "
+                                 "ui.SetSetting('hud.expand.ExtendedTargetWnd', '0')") == LUA_OK);
+        s.frames(3);
+        area = rows();
+        REQUIRE(area != nullptr);
+        CHECK(area->Size.y < 3 * 33);
         CHECK(area->ScrollMax.y > 0.0f);
     }
     ImGui::DestroyContext(ctx);
@@ -4288,6 +4471,224 @@ TEST_CASE("UI packs: raid member context menus and leadership hotkeys are reacha
     }
 }
 
+TEST_CASE("UI packs: leadership names follow received ranks, purchases and training eligibility") {
+    for (const char* pack : {"modern", "gamepad"}) {
+        INFO(pack);
+        const bool modern = std::string_view(pack) == "modern";
+        test::ScratchDir scratch("ui_pack_leadership_colors");
+        const fs::path dir = scratch.path();
+        fs::create_directories(dir / "game");
+        fs::copy(fs::path(__FILE__).parent_path().parent_path() / "ui" / pack, dir / pack,
+                 fs::copy_options::recursive);
+        std::ofstream(dir / "UI_Test_Server.ini") << "[Tips]\nShowTips=0\nShowTOTD=0\n";
+        ImGuiContext* ctx = ImGui::CreateContext();
+        ImGui::GetIO().IniFilename = nullptr;
+        unsigned char* pixels = nullptr;
+        int width = 0, height = 0;
+        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+        {
+            Session s(dir, pack);
+            Config config;
+            app::Gamepad gamepad(config, {});
+            platform::GamepadState pad;
+            pad.connected = true;
+            gamepad.set_state(&pad);
+            gamepad.set_mode(app::PadMode::Menu);
+            s.host.gamepad = &gamepad;
+            test::Rig rig;
+            REQUIRE(rig.to_zone());
+            auto& conn = rig.conn;
+            s.host.conn = &conn;
+            const std::string me = conn.character_name();
+            auto owned = [&](std::uint32_t ability, std::uint32_t rank) {
+                ByteWriter w;
+                w.le(ability);
+                w.le(rank);
+                w.le<std::uint32_t>(0);
+                conn.receive_zone_packet_for_test(net::AppPacket(net::to_wire(net::Op::UpdateLeadershipAA), w.take()));
+            };
+            for (const std::uint32_t ability : {0u, 1u, 16u, 17u}) owned(ability, 1);
+            owned(0, 3);
+            auto group = [&](int count, const std::string& leader) {
+                net::GroupUpdateB u;
+                u.leader = leader;
+                for (int i = 0; i < count; ++i) {
+                    net::GroupUpdateMember member;
+                    member.slot = static_cast<std::uint32_t>(i);
+                    member.name = i ? "Friend" + std::to_string(i) : me;
+                    u.members.push_back(member);
+                }
+                conn.receive_zone_packet_for_test(net::encode(u));
+            };
+            net::GroupLeadershipUpdate active_group;
+            active_group.ranks[0] = active_group.ranks[1] = active_group.ranks[8] = 1;
+            group(2, "Friend1");
+            conn.receive_zone_packet_for_test(net::encode(active_group));
+            auto* L = s.lua.state();
+            auto run = [&](const std::string& code) {
+                const int rc = luaL_dostring(L, code.c_str());
+                INFO(code);
+                INFO((rc == LUA_OK ? "" : lua_tostring(L, -1)));
+                REQUIRE(rc == LUA_OK);
+                lua_settop(L, 0);
+            };
+            run(R"lua(
+                leadershipDrawn = {}
+                local draw = ui.DrawText
+                ui.DrawText = function(x, y, r, g, b, a, text, ...)
+                    if type(text) == 'string' then leadershipDrawn[text] = {r, g, b} end
+                    return draw(x, y, r, g, b, a, text, ...)
+                end
+                function checkLeadershipColor(list, name, r, g, b, rendered)
+                    local count = eq.ListInfo('LeadershipWindow', list)
+                    local found
+                    for i = 0, count - 1 do
+                        local row, cr, cg, cb = eq.ListRow('LeadershipWindow', list, i)
+                        if row[1] == name then found = {cr, cg, cb} break end
+                    end
+                    assert(found, 'Missing leadership row: ' .. name)
+                    local function check(c)
+                        assert(math.abs(c[1] - r) < 0.001 and math.abs(c[2] - g) < 0.001
+                            and math.abs(c[3] - b) < 0.001, 'Unexpected leadership color: ' .. name)
+                    end
+                    check(found)
+                    if rendered then
+                        assert(leadershipDrawn[name], 'Leadership name was not drawn: ' .. name)
+                        check(leadershipDrawn[name])
+                    end
+                end
+                ui.SetSetting('hud.size.LeadershipWindow', '1000,700')
+                ui.SetSetting('test.pos.LeadershipWindow', '20,20')
+                eq.ShowWindow('LeadershipWindow', true)
+            )lua");
+            auto render = [&] {
+                run("leadershipDrawn = {}");
+                s.frames(3);
+                REQUIRE(ImGui::FindWindowByName("UI errors") == nullptr);
+            };
+            auto gold = [&](const char* list, const char* name) {
+                run(std::string("checkLeadershipColor('") + list + "', '" + name +
+                    "', 214 / 255, 178 / 255, 40 / 255, true)");
+            };
+            auto green = [&](const char* list, const char* name) {
+                run(std::string("checkLeadershipColor('") + list + "', '" + name + "', 0, 1, 0, true)");
+            };
+            render();
+            CHECK_FALSE(conn.leadership_ability_active(1, 1));
+            green("LEList1", "NPC Health");
+            green("LEList1", "Mark NPC"); // leader rank 1 suffices even when the personal purchase is rank 3
+            group(3, "Friend1");
+            render();
+            CHECK(conn.leadership_ability_active(1, 1));
+            CHECK_FALSE(conn.leadership_ability_active(0, 1));
+            green("LEList1", "NPC Health");
+            green("LEList1", "Mark NPC"); // the window's color does not check the current member's role
+            const auto profile = *conn.profile();
+            auto without_god = profile;
+            without_god.expansions &= ~0x40u;
+            conn.set_profile_for_test(without_god);
+            render();
+            CHECK_FALSE(conn.leadership_ability_active(1, 1));
+            green("LEList1", "NPC Health");
+            conn.set_profile_for_test(profile);
+            // The current leader's ranks take precedence even without a personal purchase.
+            run("checkLeadershipColor('LEList1', 'Spell Awareness', 0, 1, 0, false)");
+            conn.receive_zone_packet_for_test(net::encode(net::GroupLeadershipUpdate{}));
+            render();
+            gold("LEList1", "NPC Health");
+            gold("LEList1", "Mark NPC");
+            run("checkLeadershipColor('LEList1', 'Spell Awareness', 192 / 255, 192 / 255, 192 / 255, false)");
+            owned(1, 0);
+            render();
+            run("checkLeadershipColor('LEList1', 'NPC Health', 192 / 255, 192 / 255, 192 / 255, true)");
+            net::LeadershipExp points;
+            points.group_points = 10;
+            conn.receive_zone_packet_for_test(net::encode(points));
+            render();
+            run("checkLeadershipColor('LEList1', 'NPC Health', 1, 1, 1, true)");
+            run("checkLeadershipColor('LEList1', 'Delegate Mark NPC', 1, 1, 1, true)");
+            owned(0, 0);
+            conn.receive_zone_packet_for_test(net::encode(points));
+            render();
+            run("checkLeadershipColor('LEList1', 'Delegate Mark NPC', 192 / 255, 192 / 255, 192 / 255, true)");
+            owned(0, 0xffffffffu);
+            conn.receive_zone_packet_for_test(net::encode(points));
+            render();
+            run("checkLeadershipColor('LEList1', 'Mark NPC', 192 / 255, 192 / 255, 192 / 255, true)");
+            run("checkLeadershipColor('LEList1', 'Delegate Mark NPC', 192 / 255, 192 / 255, 192 / 255, true)");
+            owned(1, 1);
+            render();
+            gold("LEList1", "NPC Health");
+            conn.receive_zone_packet_for_test(net::encode(active_group));
+            group(2, "Friend1");
+            render();
+            CHECK_FALSE(conn.leadership_ability_active(1, 1));
+            green("LEList1", "NPC Health");
+            conn.receive_zone_packet_for_test(net::encode_group_generic(net::Op::GroupDisbandYou, {me, me}));
+            render();
+            gold("LEList1", "NPC Health");
+
+            net::RaidUpdate raid;
+            raid.general.action = net::kRaidAddMember;
+            raid.general.leader_name = "Raider1";
+            for (int i = 0; i < 17; ++i) {
+                raid.general.player_name = i ? "Raider" + std::to_string(i) : me;
+                conn.receive_zone_packet_for_test(net::encode_raid_update(raid));
+            }
+            raid = {};
+            raid.general.action = net::kRaidSetLeader;
+            raid.general.leader_name = "Raider1";
+            raid.leadership[16] = raid.leadership[17] = 1;
+            conn.receive_zone_packet_for_test(net::encode_raid_update(raid));
+            if (modern) {
+                std::optional<ImVec2> at;
+                ImGuiContext& g = *ImGui::GetCurrentContext();
+                for (int i = 0; i < g.TabBars.GetMapSize() && !at; ++i)
+                    if (ImGuiTabBar* bar = g.TabBars.TryGetMapData(i))
+                        for (ImGuiTabItem& tab : bar->Tabs)
+                            if (std::string_view(ImGui::TabBarGetTabName(bar, &tab)) == "Raid abilities")
+                                at = ImVec2(bar->BarRect.Min.x + tab.Offset + tab.Width / 2,
+                                            (bar->BarRect.Min.y + bar->BarRect.Max.y) / 2);
+                REQUIRE(at);
+                auto& io = ImGui::GetIO();
+                io.AddMousePosEvent(at->x, at->y);
+                s.frames(1);
+                io.AddMouseButtonEvent(0, true);
+                s.frames(1);
+                io.AddMouseButtonEvent(0, false);
+            } else {
+                run("ui.SetWindowFocus('Leadership')");
+                pad.pressed[static_cast<std::size_t>(platform::PadButton::RB)] = true;
+                s.frames(1);
+                pad.pressed.fill(false);
+            }
+            render();
+            CHECK_FALSE(conn.leadership_ability_active(17, 1));
+            green("LEList2", "NPC Health");
+            green("LEList2", "Mark NPC");
+            raid = {};
+            raid.general.action = net::kRaidAddMember;
+            raid.general.player_name = "Raider17";
+            conn.receive_zone_packet_for_test(net::encode_raid_update(raid));
+            render();
+            CHECK(conn.leadership_ability_active(17, 1));
+            CHECK_FALSE(conn.leadership_ability_active(16, 1));
+            green("LEList2", "NPC Health");
+            green("LEList2", "Mark NPC");
+            raid.general.action = net::kRaidRemoveMember;
+            conn.receive_zone_packet_for_test(net::encode_raid_update(raid));
+            render();
+            CHECK_FALSE(conn.leadership_ability_active(17, 1));
+            green("LEList2", "NPC Health");
+            raid.general.action = net::kRaidDisband;
+            conn.receive_zone_packet_for_test(net::encode_raid_update(raid));
+            render();
+            gold("LEList2", "NPC Health");
+        }
+        ImGui::DestroyContext(ctx);
+    }
+}
+
 TEST_CASE("UI packs (modern): the Options window's Textures section picks the texture pack and starts the studio") {
     fs::path src = fs::path(__FILE__).parent_path().parent_path() / "ui" / "modern";
     hailstone::test::ScratchDir dir_scratch("ui_pack_textures_test");
@@ -4306,9 +4707,13 @@ TEST_CASE("UI packs (modern): the Options window's Textures section picks the te
             asked.insert(std::string(o));
             if (o == "texture_pack") return 2;
             if (o == "texture_studio") return 1;
+            if (o == "upscaler") return 4; // the first upscaler add-on (render/temporal.h kFirstProviderChoice)
             return std::nullopt;
         };
-        s.host.option_choices = [](std::string_view o) {
+        std::set<std::string> listed;
+        s.host.option_choices = [&listed](std::string_view o) {
+            listed.insert(std::string(o));
+            if (o == "upscaler_providers") return std::vector<std::string>{"Intel XeSS"};
             return o == "texture_pack" ? std::vector<std::string>{"Off", "default", "hd"} : std::vector<std::string>{};
         };
         lua_State* L = s.lua.state();
@@ -4332,6 +4737,9 @@ TEST_CASE("UI packs (modern): the Options window's Textures section picks the te
         s.frames(3);
         CHECK(asked.contains("texture_pack"));
         CHECK(asked.contains("texture_studio")); // the Texture Studio button is offered
+        // The Upscaler choices go on with the upscaler add-ons installed, one of them chosen.
+        CHECK(asked.contains("upscaler"));
+        CHECK(listed.contains("upscaler_providers"));
         CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
     }
     ImGui::DestroyContext(ctx);

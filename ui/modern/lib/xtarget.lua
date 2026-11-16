@@ -18,13 +18,18 @@
 -- module hides), one row per slot, an empty one too (faint, "(empty)" or the name the slot keeps), a filled one's name
 -- in its con colour over its health, and the slot's role when it is not an auto hater (the game's role button tool
 -- tip). A click targets it; a right click opens the game's menu for that slot (its type, Current Target, auto-add
--- haters, mana / endurance bars, target sets), so an empty slot can be given a type. The frame fits its rows until
--- the player drags its right or bottom edge; then the rows scroll inside it.
+-- haters, mana / endurance bars, target sets, and Hailstone's Auto expand), so an empty slot can be given a type. The
+-- frame is as tall as its first six rows until the player drags its right or bottom edge; the rows past its height
+-- scroll inside it. With Auto expand on (hud.expand.ExtendedTargetWnd: that menu's row, or the frame's own menu) it
+-- grows past that height to show every row down to the last filled one, and shrinks back as they empty, never taller
+-- than the screen.
 local hud = dofile("lib/hud.lua")
 local T = hud.T
 local C = T.color
 local WINDOW = "ExtendedTargetWnd"
 local MAX_SLOTS = 20
+local EXPAND = "hud.expand." .. WINDOW
+local DEFAULT_ROWS = 6 -- the rows a frame without a size of its own is tall enough for
 
 local M = {}
 
@@ -38,9 +43,9 @@ end
 
 -- This frame's window, worked out in size() (hud.Window asks for it only while the window is drawn): the rows (the
 -- first nRows of rows; each slot's row table is kept from frame to frame), the slots the game shows, how many hold
--- a spawn, the target's name and the window's height.
+-- a spawn, the target's name, and the window's height for its first DEFAULT_ROWS rows and down to its last filled row.
 local opts, extra = nil, nil
-local rows, nRows, slots, filledCount, target, total = {}, 0, 0, 0, "", 0
+local rows, nRows, slots, filledCount, target, base, full = {}, 0, 0, 0, "", 0, 0
 local rowOf, conOf = {}, {} -- slot -> its row table, its con colour table
 local NO_OPTS = {}
 local ROW, HEAD, PAD = 30, 24, 6
@@ -91,19 +96,39 @@ local function gather()
     end
   end
   target = eq.Label(28) or ""
-  total = HEAD + 4 + FOOT
+  base = HEAD + 4 + FOOT
+  full = base
   filledCount = 0
+  local h = base
   for i = 1, nRows do
     local r = rows[i]
-    total = total + rowH(r) + 3
-    if r.filled then filledCount = filledCount + 1 end
+    h = h + rowH(r) + 3
+    if i <= DEFAULT_ROWS then base = h end
+    if r.filled then
+      filledCount = filledCount + 1
+      full = h
+    end
   end
-  if nRows == 0 then total = total + 24 end
+  if nRows == 0 then base = base + 24 end
 end
 
 local function size()
   gather()
-  return opts.width or 210, total
+  return opts.width or 210, base
+end
+
+-- Auto expand: tall enough for the rows down to the last filled one, within the screen (its corner grip stays on it).
+local function grow(dw, dh, s)
+  if ui.GetSetting(EXPAND) ~= "1" then return dw, dh end
+  return dw, math.max(dh, math.min(full, ui.GetIO().height / s))
+end
+
+local function menu()
+  local on = ui.GetSetting(EXPAND) == "1"
+  if ui.MenuItem("Auto expand", on) then ui.SetSetting(EXPAND, on and "0" or "1") end
+  if ui.IsItemHovered() then
+    ui.SetTooltip("Grow the frame to show every slot down to the last one with a target, and shrink it back as they clear")
+  end
 end
 
 local ring = {}    -- (a row's outline colour, filled for each row)
@@ -199,8 +224,9 @@ local function body(x0, y, w0, h, s)
   ui.EndChild()
 end
 
--- Sized to its rows until the player drags an edge; then that size is kept and the rows scroll in it.
-local HUD_OPTS = { size = size, panelOpts = { opaque = true }, resizable = { 160, 70 } }
+-- Six rows tall until the player drags an edge; then that size is kept. The rows past it scroll, unless Auto expand
+-- grows the frame to them.
+local HUD_OPTS = { size = size, grow = grow, menu = menu, panelOpts = { opaque = true }, resizable = { 160, 70 } }
 
 function M.window(o)
   opts = o or NO_OPTS

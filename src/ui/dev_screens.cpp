@@ -449,7 +449,7 @@ LoginAction addons_window(AddonsView& a, bool busy, bool* open) {
         else ImGui::TextDisabled("from %s", o.source.c_str());
         if (!o.description.empty()) ImGui::TextWrapped("%s", o.description.c_str());
         if (!o.installed_version.empty()) ImGui::Text("Installed now: %s", o.installed_version.c_str());
-        if (o.kind != "tool") {
+        if (o.kind != "tool" && o.kind != "upscaler") {
             ImGui::TextUnformatted("It asks to:");
             list(o.caps);
         }
@@ -464,6 +464,12 @@ LoginAction addons_window(AddonsView& a, bool busy, bool* open) {
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s",
                                "A tool is a program of its own: it runs on your computer with your rights, outside "
                                "Hailstone, which starts it when you ask. Install only tools you trust.");
+        else if (o.kind == "upscaler")
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s",
+                               "An upscaler runs inside Hailstone with your rights: it sees only the frames it "
+                               "upscales through Hailstone, but it is a program and can do anything on your computer. "
+                               "Install only upscalers you trust. Pick it under Options, Graphics, Upscaler; it starts "
+                               "the next time the game does.");
         if (o.older)
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "This is an older version than the one installed (%s): "
                                "installing it goes back to %s.", o.installed_version.c_str(), o.version.c_str());

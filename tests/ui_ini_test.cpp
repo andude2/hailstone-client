@@ -47,6 +47,9 @@ TEST_CASE("window_ini_info: the window classes' IniFlags and versions") {
     CHECK(hb.flags == 0xfffffdffu);
     CHECK(hb.version == 2);
     CHECK(ui::window_ini_info("Chat1").section == "MainChat");
+    // Hailstone: the aura window keeps its Show but starts closed (CAuraWnd's 0xffffffff has bit 9, bInitVisibility).
+    CHECK(ui::window_ini_info("AuraWindow").flags == 0xfffffdffu);
+    CHECK((ui::window_ini_info("ExtendedTargetWnd").flags & 0x200u) != 0);
     CHECK(ui::window_ini_info("LootWnd").flags == 0xfffffcffu); // CSidlScreenWnd2
     // CItemDisplayManager::CreateWindowInstance: "ItemDisplay%d" by the displays made before.
     auto id = ui::window_ini_info("ItemDisplayWindow");

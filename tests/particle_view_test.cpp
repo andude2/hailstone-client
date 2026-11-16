@@ -14,6 +14,38 @@
 
 using namespace hailstone::render;
 
+namespace preview_alpha_test {
+using glm::vec3;
+using glm::vec4;
+using glm::clamp;
+using glm::max;
+#include "../shaders/preview_alpha.glsl"
+}
+
+TEST_CASE("Preview resolve preserves particle coverage when ImGui applies straight alpha") {
+    using preview_alpha_test::preview_straight_alpha;
+    // A half-transparent spark outside the item's opaque mesh, already blended into transparent black.
+    const glm::vec4 source(0.4f, 0.2f, 0.1f, 0.5f);
+    const glm::vec4 straight = preview_straight_alpha(source);
+    CHECK(straight == glm::vec4(0.8f, 0.4f, 0.2f, 0.5f));
+    CHECK(glm::vec3(straight) * straight.a == glm::vec3(source));
+    const glm::vec4 layered(0.6f, 0.3f, 0.15f, 0.75f);
+    const glm::vec4 resolved = preview_straight_alpha(layered);
+    CHECK(resolved.a == 0.75f);
+    CHECK(glm::length(glm::vec3(resolved) * resolved.a - glm::vec3(layered)) < 1e-6f);
+    CHECK(preview_straight_alpha(glm::vec4(0.2f, 0.4f, 0.6f, 1.0f)) == glm::vec4(0.2f, 0.4f, 0.6f, 1.0f));
+    CHECK(preview_straight_alpha(glm::vec4(0.0f)) == glm::vec4(0.0f));
+    CHECK(preview_straight_alpha(glm::vec4(1.0f, 0.0f, 0.0f, 0.0f)) == glm::vec4(0.0f));
+    // HDR emission stays linear until the sRGB attachment encodes it.
+    CHECK(preview_straight_alpha(glm::vec4(1.0f, 0.5f, 0.0f, 0.5f)).r == 2.0f);
+    // Additive black sprite texels retain the checkerboard, while coloured texels keep their emitted RGB.
+    CHECK(preview_alpha_test::preview_additive_particle(glm::vec3(0.0f)) == glm::vec4(0.0f));
+    const glm::vec3 emission(0.125f, 0.03125f, 0.0f);
+    const auto additive = preview_alpha_test::preview_additive_particle(emission);
+    CHECK(additive.a == 0.125f);
+    CHECK(glm::vec3(additive) * additive.a == emission);
+}
+
 namespace {
 
 // particle_light as it was worked out per particle before ParticleLight (render/particle_renderer.cpp's to_linear and

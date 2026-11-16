@@ -1,6 +1,8 @@
 // render/material_state.h texture_frame: which frame of an animated texture (a classic SIMPLESPRITEDEF) the zone
-// and object renderers draw at a time.
+// and object and actor renderers draw at a time.
 #include <doctest/doctest.h>
+
+#include <array>
 
 #include "assets/eqg.h"
 #include "render/material_state.h"
@@ -26,6 +28,28 @@ TEST_CASE("texture_frame keeps still textures on their only frame") {
     CHECK(texture_frame(12345, 200, 0) == 0); // no frames at all (the caller's guard)
 }
 
+TEST_CASE("Animated material slots select the same texture for colour and cut-out shadows") {
+    const std::array<std::uint32_t, 3> frames{7, 19, 4};
+    CHECK(animated_texture_slot(frames, 7, 0, 100) == 7);
+    CHECK(animated_texture_slot(frames, 7, 100, 100) == 19);
+    CHECK(animated_texture_slot(frames, 7, 299, 100) == 4);
+    CHECK(animated_texture_slot(frames, 7, 300, 100) == 7);
+    CHECK(animated_texture_slot(frames, 7, 299, 0) == 7);
+    CHECK(animated_texture_slot({}, 23, 299, 100) == 23);
+}
+
+TEST_CASE("Authored EQG AddAlpha materials remain unlit and unfogged") {
+    hailstone::assets::Material material;
+    material.eqg_shader = hailstone::assets::EqgShader::AddAlpha;
+    const auto state = material_state(material);
+    CHECK(state.pass == 2);
+    CHECK_FALSE(state.lit);
+    CHECK_FALSE(state.fog);
+    material.eqg_shader = hailstone::assets::EqgShader::Alpha;
+    CHECK(material_state(material).lit);
+    CHECK(material_state(material).fog);
+}
+
 TEST_CASE("alpha_unused: which materials never read their texture's alpha") {
     // An EQG material as eqg_character::append_pieces builds it from its shader name.
     auto eqg = [](const char* shader) {
@@ -40,6 +64,8 @@ TEST_CASE("alpha_unused: which materials never read their texture's alpha") {
     CHECK_FALSE(eqg("Chroma_MaxCBSGE1.fx").alpha_unused());
     CHECK_FALSE(eqg("Alpha_MaxCBS1.fx").alpha_unused());
     CHECK_FALSE(eqg("Opaque_AddAlphaC1Max.fx").alpha_unused());
+    CHECK_FALSE(eqg("Opaque_MaxLava.fx").alpha_unused()); // opaque output still uses diffuse alpha as its layer mask
+    CHECK_FALSE(eqg("Opaque_MaxLava2.fx").alpha_unused());
     hailstone::assets::Material classic;
     CHECK(material_state(classic).alpha_unused());
     classic.blend = hailstone::assets::BlendMode::Masked;

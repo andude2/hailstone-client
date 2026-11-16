@@ -36,6 +36,7 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include "assets/model.h"
+#include "assets/object_animation.h"
 #include "core/shared_file_cache.h"
 
 namespace hailstone::assets::wld {
@@ -588,8 +589,16 @@ Mesh build_mesh(const WldFile& wld, const MeshDef& def, std::string name);
 // Builds a static mesh from a skeleton in its first (rest) pose: each node's
 // frame 0 is composed parent * T * R * S, and each mesh is moved by its node
 // (whole mesh) or by its vertex runs. Returns nullopt when the skeleton is
-// malformed or a mesh cannot be tied to a node.
-std::optional<Mesh> build_skeleton_pose(const WldFile& wld, const Skeleton& skeleton, std::string name);
+// malformed or a mesh cannot be tied to a node. With `vertex_node`, it gets
+// the node each vertex of the result follows (one per vertex).
+std::optional<Mesh> build_skeleton_pose(const WldFile& wld, const Skeleton& skeleton, std::string name,
+                                        std::vector<std::uint16_t>* vertex_node = nullptr);
+
+// The skeleton's own animation (assets/object_animation.h): every node's
+// keys, the inverse of its first-key world matrix, and the set's period;
+// vertex_node is left to the caller. nullopt when no track has more than one
+// key, a moving track has no interval, or the hierarchy is malformed.
+std::optional<ObjectAnimation> build_object_animation(const WldFile& wld, const Skeleton& skeleton);
 
 // Each node's rest-pose matrix in actor space (frame 0, parent * T * R * S),
 // or nullopt for a malformed hierarchy (a bad child index, two parents, a cycle).

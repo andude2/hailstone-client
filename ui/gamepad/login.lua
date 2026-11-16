@@ -7,7 +7,7 @@
 --                   Start logs in, or asks for the first field missing
 --   Server settings the server's name, address, port, its own files folder, Save and Delete
 --   More (Y)        the box set (each account boxed or not, its world and character, Forget), Log in box set, the
---                   game files, the add-ons, About Hailstone (What's new, its GitHub page), the music and Quit
+--                   game files, the texture pack, the add-ons, About Hailstone (What's new, its GitHub page), the music and Quit
 --   Add-ons         a GitHub link to an add-on (docs/addons.md) and its install card, the store (every add-on of the
 --                   add-on index: A on one installs it through its card), then every script and plugin: A on one
 --                   lists what can be done with it and what it may do (the server's own: nothing that removes or
@@ -384,27 +384,6 @@ local function suggestionRows(v, x0, y, x1, w)
   return y
 end
 
--- The game files (the asset folder) the picked server plays with: its own, as the client switched to it for this
--- server, and changeable here. Drawn on the main page under Continue as and on the More options page.
-local function gameFilesField(v, x0, y, w)
-  P.at(x0, y)
-  local cur = v.gameFolders[1]
-  local label = cur and cur.label or "None found"
-  local note = v.gameFolderFixed and "Set by --game-dir or EQ_GAME_DIR" or (cur and cur.path) or ""
-  if P.field(F, "##game", "Playing with", label, w, px(76), { chevron = not v.gameFolderFixed, note = fitStart(note, w - px(260)),
-        disabled = v.busy or v.gameFolderFixed }) then
-    local items = {}
-    for i, f in ipairs(v.gameFolders) do
-      items[#items + 1] = { label = f.label, sub = f.usable and f.path or (f.path .. "  (not usable now)"),
-        current = i == 1, disabled = not f.usable,
-        fn = function() if i > 1 then eq.LoginDo("gameFolder", i) end end }
-    end
-    items[#items + 1] = { label = "Browse...", sub = "Pick another EverQuest folder", fn = function() eq.LoginDo("browse") end }
-    openPick("Game files", items, "##game", "In use")
-  end
-  return y + px(76)
-end
-
 local function mainPage(v, x0, y, x1, w)
   local rh, gap = px(ROW_H), px(GAP)
   local busy = v.busy
@@ -412,8 +391,6 @@ local function mainPage(v, x0, y, x1, w)
   if #v.characters > 0 then
     y = heading("Continue as", x0, y, w)
     y = y + drawTiles(v, x0, y, x1) + px(18)
-    -- the game files those characters play with (the server's: changeable here)
-    y = gameFilesField(v, x0, y, w) + px(18)
   end
 
   y = heading("Server", x0, y, w)
@@ -637,7 +614,43 @@ local function morePage(v, x0, y, x1, w)
   end
 
   y = heading("Game files", x0, y, w)
-  y = gameFilesField(v, x0, y, w) + px(22)
+  P.at(x0, y)
+  local cur = v.gameFolders[1]
+  local label = cur and cur.label or "None found"
+  local note = v.gameFolderFixed and "Set by --game-dir or EQ_GAME_DIR" or (cur and cur.path) or ""
+  if P.field(F, "##game", "Playing with", label, w, px(76), { chevron = not v.gameFolderFixed, note = fitStart(note, w - px(260)),
+        disabled = busy or v.gameFolderFixed }) then
+    local items = {}
+    for i, f in ipairs(v.gameFolders) do
+      items[#items + 1] = { label = f.label, sub = f.usable and f.path or (f.path .. "  (not usable now)"),
+        current = i == 1, disabled = not f.usable,
+        fn = function() if i > 1 then eq.LoginDo("gameFolder", i) end end }
+    end
+    items[#items + 1] = { label = "Browse...", sub = "Pick another EverQuest folder", fn = function() eq.LoginDo("browse") end }
+    openPick("Game files", items, "##game", "In use")
+  end
+  y = y + px(76) + gap
+
+  -- the texture pack (eq.Option "texture_pack", display.texture_folder; the Options page's row too): Off, then each
+  -- folder of Hailstone's textures/, such as a pack Hailstone Texture Studio built. Read at the next start.
+  local pack = eq.Option("texture_pack")
+  if pack ~= nil then
+    st.packAtStart = st.packAtStart or pack
+    local choices = eq.OptionChoices("texture_pack")
+    P.at(x0, y)
+    local packNote = pack ~= st.packAtStart and "Used from the next start" or "Replacement textures, from the next start"
+    if P.field(F, "##texpack", "Texture pack", choices[pack + 1] or "A folder of its own", w, px(76),
+          { chevron = true, note = packNote, disabled = busy }) then
+      local items = {}
+      for i, name in ipairs(choices) do
+        items[#items + 1] = { label = name, sub = i == 1 and "The game's own textures" or nil, current = i == pack + 1,
+          fn = function() if i ~= pack + 1 then eq.SetOption("texture_pack", i - 1) end end }
+      end
+      openPick("Texture pack", items, "##texpack", "Chosen")
+    end
+    y = y + px(76) + gap
+  end
+  y = y + px(22) - gap
 
   -- the add-ons (docs/addons.md): a page of their own
   local installed = 0
@@ -761,7 +774,7 @@ local function addonsPage(v, x0, y, x1, w)
     y = lines("A " .. o.kind .. (o.author ~= "" and (" by " .. o.author) or "") .. ", from " .. o.source
       .. (o.installedVersion ~= "" and ("  ·  installed now: " .. o.installedVersion) or ""), x0, y, x1)
     y = lines(o.description, x0, y, x1)
-    if o.kind ~= "tool" then y = lines("It asks to: " .. table.concat(o.caps, "; ") .. ".", x0, y, x1, false, 4) end
+    if o.kind ~= "tool" and o.kind ~= "upscaler" then y = lines("It asks to: " .. table.concat(o.caps, "; ") .. ".", x0, y, x1, false, 4) end
     y = lines(o.key ~= "" and ("Signed with key " .. o.key .. ": later versions must carry it.")
       or "Not signed: later versions come from whoever controls the repository.", x0, y, x1)
     if o.kind == "plugin" then
@@ -770,6 +783,10 @@ local function addonsPage(v, x0, y, x1, w)
     elseif o.kind == "tool" then
       y = lines("A tool is a program of its own: it runs on your computer with your rights, outside Hailstone, which "
         .. "starts it when you ask. Install only tools you trust.", x0, y, x1, true)
+    elseif o.kind == "upscaler" then
+      y = lines("An upscaler runs inside Hailstone with your rights: it sees only the frames it upscales through "
+        .. "Hailstone, but it is a program and can do anything on your computer. Install only upscalers you trust. "
+        .. "Pick it under Options, Graphics, Upscaler; it starts the next time the game does.", x0, y, x1, true)
     end
     if o.older then
       y = lines("This is an older version than the one installed (" .. o.installedVersion .. "): installing it goes "

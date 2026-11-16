@@ -51,7 +51,7 @@ struct PushConstants {
     glm::mat4 view_proj;
     glm::vec4 fog_color;
     glm::vec4 fog; // start, end, alpha_ref, opacity
-    glm::vec4 camera_pos; // w: this part's index in the frame's native armor surface table
+    glm::vec4 camera_pos; // w: actor_surface_token (surface index and material flags)
     std::uint32_t texture;
     std::uint32_t bone_offset;
     std::uint32_t tint; // 0xAARRGGBB; high byte 0 = none
@@ -422,8 +422,8 @@ ActorRenderer::ReadTexture ActorRenderer::read_texture(const assets::CharacterLi
     {
         assets::CharacterLookups rec; // what the image depends on, for the next zone (adopt)
         if (ref.environment) {
-            if (auto data = library.read_file(ref.name)) t.image = assets::decode_cube_as_octahedral(*data);
-            if (!t.image) t.error = "missing or invalid environment cube";
+            if (auto data = library.read_file(ref.name)) t.image = assets::decode_environment_as_octahedral(*data);
+            if (!t.image) t.error = "missing or invalid environment map";
         } else {
             t.image = ref.map ? library.texture_map(ref.name, *ref.map) : library.texture(ref.name, ref.masked, &t.error);
         }
@@ -506,23 +506,39 @@ ActorRenderer::MeshPlan ActorRenderer::plan_mesh(const assets::CharacterMesh& mo
         part.tint = p.material < model.tints.size() ? model.tints[p.material] : 0;
         part.two_sided = m.two_sided;
         MaterialState st = material_state(m);
-        pp.texture = {m.frames.front(), st.masked_texture,
-                      st.alpha_unused() ? TextureUse::OpaqueColor : TextureUse::Color, std::nullopt};
+        for (const auto& frame : m.frames)
+            pp.frames.push_back({frame, st.masked_texture,
+                                 st.alpha_unused() ? TextureUse::OpaqueColor : TextureUse::Color, std::nullopt});
+        part.frame_delay_ms = m.frame_delay_ms;
         if (!m.tint_layer.empty()) pp.texture2 = TextureRef{m.tint_layer, false, TextureUse::Color, std::nullopt};
         pp.normal = {m.frames.front(), false, TextureUse::Data, assets::TextureMap::Normal};
         pp.rough = {m.frames.front(), false, TextureUse::Data, assets::TextureMap::Roughness};
-        part.native_surface = has_actor_surface(m.effect);
+        const bool lava = actor_lava_surface(m.eqg_shader); // Lava2 too, as material_state keeps its layers' alpha
+        part.native_surface = has_actor_surface(m.effect) || m.eqg_shader == assets::EqgShader::WaterFall || lava;
         if (part.native_surface) {
             part.surface = actor_surface(m.effect, 0, 0);
+            pp.packed_normal = m.effect.packed_normal;
+            pp.glow = m.effect.glow;
             if (!m.effect.normal_map.empty())
                 pp.native_normal = TextureRef{m.effect.normal_map, false, TextureUse::Data, std::nullopt};
             if (m.effect.reflective && !m.effect.textures.empty() && !m.effect.textures[0].empty())
                 pp.environment = TextureRef{m.effect.textures[0], false, TextureUse::Color, std::nullopt, true};
+            if (actor_takes_coverage(m))
+                pp.coverage = TextureRef{m.effect.coverage_map, false, TextureUse::OpaqueColor, std::nullopt};
+            if (m.eqg_shader == assets::EqgShader::WaterFall) part.surface.slots.z |= kActorSurfaceWaterFall;
+            if (lava) {
+                part.surface.slots.z |= kActorSurfaceLava;
+                if (!m.effect.textures.empty() && !m.effect.textures[0].empty())
+                    pp.secondary = TextureRef{m.effect.textures[0], false, TextureUse::OpaqueColor, std::nullopt};
+                if (m.effect.textures.size() > 1 && !m.effect.textures[1].empty())
+                    pp.native_normal = TextureRef{m.effect.textures[1], false, TextureUse::Data, std::nullopt};
+            }
         }
         part.pass = static_cast<Pass>(st.pass);
         part.alpha_ref = st.alpha_ref;
         part.opacity = st.opacity;
         part.fog = st.fog;
+        part.lit = st.lit;
         plan.parts.push_back(std::move(pp));
     }
     return plan;
@@ -555,12 +571,22 @@ const ActorRenderer::GpuModel* ActorRenderer::install(const assets::CharacterMes
     };
     for (auto& pp : plan.parts) {
         Part part = pp.part;
-        part.texture = resolve(pp.texture);
+        for (const auto& frame : pp.frames) part.frames.push_back(resolve(frame));
+        part.texture = part.frames.front();
         if (pp.texture2) part.texture2 = resolve(*pp.texture2);
         part.normal_map = resolve(pp.normal);
         part.rough_map = resolve(pp.rough);
         if (pp.native_normal) part.surface.slots.x = resolve(*pp.native_normal);
         if (pp.environment) part.surface.slots.y = resolve(*pp.environment);
+        if (pp.coverage) {
+            part.surface.slots.w = resolve(*pp.coverage);
+            if (part.surface.slots.w != 0) part.surface.slots.z |= kActorSurfaceCoverage;
+        }
+        if (pp.secondary) part.surface.slots.w = resolve(*pp.secondary);
+        if (part.surface.slots.x != 0) {
+            if (pp.packed_normal) part.surface.slots.z |= kActorSurfacePackedNormal | kActorSurfaceSpecular;
+            if (pp.glow) part.surface.slots.z |= kActorSurfaceGlow;
+        }
         // A missing optional map keeps the pack normal / unreflected surface; slot zero is the white placeholder.
         if (part.surface.slots.y != 0 && part.surface.params.z > 0.0f)
             part.surface.slots.z |= kActorSurfaceReflective;
@@ -582,10 +608,13 @@ bool ActorRenderer::waits_for_claimed(const MeshPlan& plan) const {
         const std::string key = ref.key();
         return !texture_slots_.contains(key) && !plan.textures.contains(key) && claims_->pending(key);
     };
-    for (const auto& pp : plan.parts)
-        if (waits(pp.texture) || (pp.texture2 && waits(*pp.texture2)) || waits(pp.normal) || waits(pp.rough) ||
-            (pp.native_normal && waits(*pp.native_normal)) || (pp.environment && waits(*pp.environment)))
+    for (const auto& pp : plan.parts) {
+        if (std::any_of(pp.frames.begin(), pp.frames.end(), waits) ||
+            (pp.texture2 && waits(*pp.texture2)) || waits(pp.normal) || waits(pp.rough) ||
+            (pp.native_normal && waits(*pp.native_normal)) || (pp.environment && waits(*pp.environment)) ||
+            (pp.coverage && waits(*pp.coverage)) || (pp.secondary && waits(*pp.secondary)))
             return true;
+    }
     return false;
 }
 
@@ -605,12 +634,14 @@ ActorRenderer::Dressing ActorRenderer::dress_off_thread(const assets::CharacterL
         if (!d.plan->textures.contains(key) && d.held.claim(key)) d.plan->textures.emplace(key, read_texture(library, ref));
     };
     for (const auto& pp : d.plan->parts) {
-        read(pp.texture);
+        for (const auto& frame : pp.frames) read(frame);
         if (pp.texture2) read(*pp.texture2);
         read(pp.normal);
         read(pp.rough);
         if (pp.native_normal) read(*pp.native_normal);
         if (pp.environment) read(*pp.environment);
+        if (pp.coverage) read(*pp.coverage);
+        if (pp.secondary) read(*pp.secondary);
     }
     return d;
 }
@@ -1119,7 +1150,9 @@ void ActorRenderer::prepare(const FrameInfo& frame, std::span<const ActorDraw> a
     // One table per unique visible mesh, shared by its instances. Slot zero keeps every pre-existing material path
     // unchanged. The table is in the existing lighting SSBO; no new sampled-image or buffer descriptors are needed.
     lighting_data_.resize(sizeof(SceneLighting) + sizeof(ActorSurface));
-    std::memcpy(lighting_data_.data(), &lighting_, sizeof(lighting_));
+    SceneLighting material_lighting = lighting_;
+    material_lighting.time.w = static_cast<float>(texture_time_ms_ % 100000ull) * 0.001f;
+    std::memcpy(lighting_data_.data(), &material_lighting, sizeof(material_lighting));
     const ActorSurface plain;
     std::memcpy(lighting_data_.data() + sizeof(SceneLighting), &plain, sizeof(plain));
     std::unordered_map<const GpuModel*, std::uint32_t> surface_offsets;
@@ -1177,7 +1210,7 @@ void ActorRenderer::draw_shadow(const FrameInfo& frame, std::uint32_t cascade) {
                 vkCmdBindIndexBuffer(cmd, p.gpu->indices.buffer, 0, VK_INDEX_TYPE_UINT32);
                 bound = true;
             }
-            pc.texture = part.texture;
+            pc.texture = animated_texture_slot(part.frames, part.texture, texture_time_ms_, part.frame_delay_ms);
             pc.bone_offset = p.bone_offset;
             pc.fog.z = part.alpha_ref;
             vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc),
@@ -1224,7 +1257,7 @@ void ActorRenderer::draw_point_shadow(const FrameInfo& frame, const glm::vec3& l
                 vkCmdBindIndexBuffer(cmd, p.gpu->indices.buffer, 0, VK_INDEX_TYPE_UINT32);
                 bound = true;
             }
-            pc.texture = part.texture;
+            pc.texture = animated_texture_slot(part.frames, part.texture, texture_time_ms_, part.frame_delay_ms);
             pc.bone_offset = p.bone_offset;
             pc.fog.z = part.alpha_ref;
             vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc),
@@ -1287,10 +1320,12 @@ void ActorRenderer::record(const FrameInfo& frame, const glm::mat4& view_proj, c
                     vkCmdSetFrontFace(cmd, want_front);
                     front = static_cast<int>(want_front);
                 }
-                pc.texture = part.texture | part.rough_map << 16;
+                pc.texture = animated_texture_slot(part.frames, part.texture, texture_time_ms_, part.frame_delay_ms) |
+                             part.rough_map << 16;
                 pc.tint = part.tint;
                 pc.texture2 = (part.texture2 == 0xffffffffu ? 0xffffu : part.texture2) | part.normal_map << 16;
-                pc.camera_pos.w = p.surface_offset != 0 ? static_cast<float>(p.surface_offset + part_index) : 0.0f;
+                const auto surface = p.surface_offset != 0 ? p.surface_offset + static_cast<std::uint32_t>(part_index) : 0u;
+                pc.camera_pos.w = actor_surface_token(surface, part.lit, part.fog);
                 pc.bone_offset = p.bone_offset;
                 pc.fog = part.fog ? glm::vec4(view.fog_start, view.fog_end, part.alpha_ref, part.opacity * p.alpha)
                                   : glm::vec4(kNoFogStart, kNoFogEnd, part.alpha_ref, part.opacity * p.alpha);
@@ -1715,7 +1750,7 @@ void ActorRenderer::create_pipelines(const std::filesystem::path& shader_dir) {
     vk_check(vkCreatePipelineLayout(d, &li, nullptr, &layout_), "vkCreatePipelineLayout");
 
     VkShaderModule vs = load_shader(d, shader_dir / "actor.vert.spv");
-    VkShaderModule fs = load_shader(d, shader_dir / "actor.frag.spv");
+    VkShaderModule fs = load_shader(d, shader_dir / (scene_ ? "actor.frag.spv" : "actor_preview.frag.spv"));
     VkPipelineShaderStageCreateInfo stages[2] = {
         {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vs, "main", nullptr},
         {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fs, "main", nullptr},
@@ -1756,15 +1791,18 @@ void ActorRenderer::create_pipelines(const std::filesystem::path& shader_dir) {
     // shader's constant_id 0 makes its alpha the coverage (shaders/zone.frag, actor.frag, object.frag).
     const VkBool32 coverage = vk_.scene_samples() != VK_SAMPLE_COUNT_1_BIT ? VK_TRUE : VK_FALSE;
     // constant_id 2: the additive pass (actor.frag kAdditive).
-    const VkSpecializationMapEntry spec_entries[2] = {{0, 0, sizeof(VkBool32)}, {2, sizeof(VkBool32), sizeof(VkBool32)}};
-    VkBool32 spec_values[2] = {VK_FALSE, VK_FALSE};
-    VkSpecializationInfo spec{2, spec_entries, sizeof(spec_values), spec_values};
+    const VkSpecializationMapEntry spec_entries[4] = {{0, 0, sizeof(VkBool32)}, {2, sizeof(VkBool32), sizeof(VkBool32)},
+                                                     {3, 2 * sizeof(VkBool32), sizeof(VkBool32)},
+                                                     {1, 3 * sizeof(VkBool32), sizeof(VkBool32)}};
+    VkBool32 spec_values[4] = {VK_FALSE, VK_FALSE, scene_ ? VK_FALSE : VK_TRUE,
+                              static_cast<VkBool32>(vk_.scene_samples())};
+    VkSpecializationInfo spec{4, spec_entries, sizeof(spec_values), spec_values};
     stages[1].pSpecializationInfo = &spec;
 
     for (int pass = 0; pass < 3; ++pass) {
-        spec_values[0] = pass == 0 ? coverage : VK_FALSE;
+        spec_values[0] = pass == 0 ? (scene_ ? coverage : VK_TRUE) : VK_FALSE;
         spec_values[1] = pass == 2 ? VK_TRUE : VK_FALSE;
-        ms.alphaToCoverageEnable = spec_values[0];
+        ms.alphaToCoverageEnable = scene_ ? spec_values[0] : VK_FALSE;
         VkPipelineDepthStencilStateCreateInfo dss{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
         dss.depthTestEnable = VK_TRUE;
         dss.depthWriteEnable = pass == 0 ? VK_TRUE : VK_FALSE;
@@ -1785,7 +1823,8 @@ void ActorRenderer::create_pipelines(const std::filesystem::path& shader_dir) {
             ba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
             ba.colorBlendOp = VK_BLEND_OP_ADD;
             ba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-            ba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            // A preview exports straight alpha after resolving its coverage; keep that coverage bounded.
+            ba.dstAlphaBlendFactor = scene_ ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
             ba.alphaBlendOp = VK_BLEND_OP_ADD;
         }
         // The opaque pass draws the characters' own motion; the blended one (a see-through shield, hair) its motion

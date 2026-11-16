@@ -254,7 +254,16 @@ Tonemap parse_tonemap(std::string_view name) {
     return Tonemap::None;
 }
 
-VkContext::VkContext(platform::Window& window, bool validation) : window_(window) {
+namespace {
+std::string joined(const std::vector<std::string>& names) {
+    std::string out;
+    for (const std::string& n : names) out += (out.empty() ? "" : ", ") + n;
+    return out;
+}
+} // namespace
+
+VkContext::VkContext(platform::Window& window, bool validation, std::unique_ptr<UpscalerProvider> upscaler)
+    : window_(window), provider_(std::move(upscaler)) {
     const char* benchmark = core::env("GPU_BENCHMARK");
     gpu_benchmark_ = benchmark && std::strcmp(benchmark, "1") == 0;
     if (auto loader = window_.bundled_vulkan_loader())
@@ -265,9 +274,111 @@ VkContext::VkContext(platform::Window& window, bool validation) : window_(window
     surface_ = window_.create_surface(instance_);
     pick_physical_device();
     create_device();
+    if (provider_) {
+        HailstoneUpscalerDevice d{};
+        d.size = sizeof d;
+        d.api_version = VK_API_VERSION_1_3;
+        d.instance = instance_;
+        d.physical_device = physical_;
+        d.device = device_;
+        d.queue = queue_;
+        d.queue_family = queue_family_;
+        // The reactive mask is drawn beside the colour only with independentBlend (scene_motion()).
+        d.flags = caps_.independent_blend ? HAILSTONE_UPSCALER_DEVICE_REACTIVE : 0u;
+        d.get_instance_proc_addr = reinterpret_cast<void*>(vkGetInstanceProcAddr);
+        d.get_device_proc_addr = reinterpret_cast<void*>(vkGetDeviceProcAddr);
+        if (provider_->create(d))
+            log::info("upscaler {}: {} is ready", provider_->name(), provider_->label());
+        else
+            drop_provider("it did not start");
+    }
     create_swapchain();
     create_frames();
     create_shadow_resources();
+}
+
+void VkContext::run_provider(VkCommandBuffer cmd, const FrameInfo& frame, const Image& depth, bool keep,
+                             std::uint32_t phases, float near_plane, float far_plane, float fov_y, float exposure,
+                             float sharpness, std::chrono::steady_clock::time_point now) {
+    // What the provider reads was last written by draws; it may read it from any stage (compute, transfers), and its
+    // output was last read by the post pass a frame ago.
+    {
+        VkMemoryBarrier2 m{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        m.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
+                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        m.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        m.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        m.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT;
+        VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dep.memoryBarrierCount = 1;
+        dep.pMemoryBarriers = &m;
+        vkCmdPipelineBarrier2(cmd, &dep);
+    }
+    image_barrier(cmd, fsr3_output_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+    auto image = [](const Image& i, VkFormat format, VkExtent2D extent, VkImageUsageFlags usage, VkImageLayout layout,
+                    VkImageAspectFlags aspect) {
+        HailstoneUpscalerImage out{};
+        if (!i.image) return out;
+        out.image = reinterpret_cast<std::uint64_t>(i.image);
+        out.view = reinterpret_cast<std::uint64_t>(i.view);
+        out.format = static_cast<std::uint32_t>(format);
+        out.width = extent.width;
+        out.height = extent.height;
+        out.usage = usage;
+        out.layout = static_cast<std::uint32_t>(layout);
+        out.aspect = aspect;
+        return out;
+    };
+    constexpr VkImageUsageFlags kInput = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    HailstoneUpscalerFrame f{};
+    f.size = sizeof f;
+    f.flags = keep ? 0u : HAILSTONE_UPSCALER_FRAME_RESET;
+    f.command_buffer = cmd;
+    f.color = image(lit_, kSceneFormat, scene_extent_, kInput | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+    f.depth = image(depth, depth_format_, scene_extent_, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+    f.motion = image(motion_, kMotionFormat, scene_extent_, kInput, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_IMAGE_ASPECT_COLOR_BIT);
+    f.reactive = image(reactive_, kReactiveFormat, scene_extent_, kInput, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                       VK_IMAGE_ASPECT_COLOR_BIT);
+    f.output = image(fsr3_output_, kSceneFormat, view_extent_,
+                     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                     VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+    f.jitter_x = jitter_px_.x;
+    f.jitter_y = jitter_px_.y;
+    f.jitter_phases = phases;
+    f.frame_slot = frame.frame_slot;
+    f.frames_in_flight = kFramesInFlight;
+    f.motion_scale_x = static_cast<float>(scene_extent_.width);
+    f.motion_scale_y = static_cast<float>(scene_extent_.height);
+    f.near_plane = near_plane;
+    f.far_plane = far_plane;
+    f.fov_y = fov_y;
+    f.exposure = exposure;
+    f.frame_seconds = provider_last_.time_since_epoch().count() != 0
+                          ? std::chrono::duration<float>(now - provider_last_).count()
+                          : 1.0f / 60.0f;
+    provider_last_ = now;
+    f.sharpness = sharpness;
+    if (!provider_->evaluate(f)) {
+        // This frame's picture is whatever the output held; from the next one the client's own upscaler takes over
+        // (create_scene_targets, with the device idle).
+        provider_failed_ = true;
+        resize_pending_ = true;
+    }
+    image_barrier(cmd, fsr3_output_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL,
+                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                  VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+}
+
+void VkContext::drop_provider(std::string_view why) {
+    if (!provider_) return;
+    log::warn("upscaler {}: not used, {}; the client's own upscaler is used instead", provider_->name(), why);
+    provider_.reset(); // destroys it when it was made: every caller has the device idle
 }
 
 VkContext::~VkContext() {
@@ -295,6 +406,7 @@ VkContext::~VkContext() {
     }
     destroy_swapchain();
     fsr3_.reset();
+    provider_.reset();
     destroy_frame_gen();
     destroy_post_pipeline();
     destroy_shadow_map();
@@ -338,8 +450,23 @@ void VkContext::create_instance(bool validation) {
         for (const std::string& name : chosen.missing) names += (names.empty() ? "" : ", ") + name;
         throw std::runtime_error("vkCreateInstance: the Vulkan library lacks " + names);
     }
+    // An upscaler provider's own (render/upscaler_provider.h): one the loader lacks keeps it out, not the client.
+    std::vector<std::string> provider_extensions;
+    if (provider_) {
+        std::uint32_t min_api = 0;
+        if (!provider_->instance_requirements(provider_extensions, min_api))
+            drop_provider("it cannot run here");
+        else if (min_api > VK_API_VERSION_1_3)
+            drop_provider(std::format("it needs Vulkan {}.{}", VK_API_VERSION_MAJOR(min_api), VK_API_VERSION_MINOR(min_api)));
+        else if (const auto missing = missing_names(provider_extensions, offered); !missing.empty())
+            drop_provider("the Vulkan library lacks " + joined(missing));
+        if (!provider_) provider_extensions.clear();
+    }
     std::vector<const char*> extensions;
     for (const std::string& name : chosen.enable) extensions.push_back(name.c_str());
+    for (const std::string& name : provider_extensions)
+        if (std::find(chosen.enable.begin(), chosen.enable.end(), name) == chosen.enable.end())
+            extensions.push_back(name.c_str());
     std::vector<const char*> layers;
     VkInstanceCreateFlags flags = chosen.portability ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : 0;
 
@@ -484,6 +611,17 @@ void VkContext::pick_physical_device() {
                                    l.maxPerStageResources, l.maxDescriptorSetSamplers,
                                    l.maxDescriptorSetSampledImages});
     gpu_name_ = props.deviceName;
+    gpu_profile_.name = props.deviceName;
+    gpu_profile_.kind = seen[*selected.index].kind;
+    gpu_profile_.vendor_id = props.vendorID;
+    {
+        VkPhysicalDeviceMemoryProperties memory{};
+        vkGetPhysicalDeviceMemoryProperties(physical_, &memory);
+        for (std::uint32_t i = 0; i < memory.memoryHeapCount; ++i)
+            if (memory.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+                gpu_profile_.device_local_bytes = std::max<std::uint64_t>(gpu_profile_.device_local_bytes,
+                                                                          memory.memoryHeaps[i].size);
+    }
     gpu_description_ = std::format("{} ({}, {}), Vulkan {}.{}.{}", props.deviceName, driver.driverName, driver.driverInfo,
                                    VK_API_VERSION_MAJOR(props.apiVersion), VK_API_VERSION_MINOR(props.apiVersion),
                                    VK_API_VERSION_PATCH(props.apiVersion));
@@ -519,12 +657,13 @@ void VkContext::create_device() {
     queue.queueCount = 1;
     queue.pQueuePriorities = &priority;
 
-    VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+    // The client's features, then an upscaler provider's beside them (render/upscaler_provider.h DeviceFeatures).
+    DeviceFeatures features;
+    VkPhysicalDeviceVulkan13Features& f13 = features.f13;
     f13.dynamicRendering = VK_TRUE;
     f13.synchronization2 = VK_TRUE;
     f13.shaderDemoteToHelperInvocation = VK_TRUE; // required in 1.3; glslc emits it for discard
-    VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-    f12.pNext = &f13;
+    VkPhysicalDeviceVulkan12Features& f12 = features.f12;
     f12.runtimeDescriptorArray = VK_TRUE;
     f12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE; // nonuniformEXT in zone.frag and particle.frag
     f12.descriptorBindingPartiallyBound = VK_TRUE;
@@ -533,16 +672,40 @@ void VkContext::create_device() {
     // The depth format may fall back to one with stencil (below); every barrier on the depth images names the depth
     // aspect alone with DEPTH_ATTACHMENT_OPTIMAL, which on such a format is valid only with this feature.
     f12.separateDepthStencilLayouts = VK_TRUE;
-    VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-    f2.pNext = &f12;
+    VkPhysicalDeviceFeatures2& f2 = features.f2;
     f2.features.textureCompressionBC = caps_.bc_textures ? VK_TRUE : VK_FALSE;
     f2.features.samplerAnisotropy = caps_.max_anisotropy > 0.0f ? VK_TRUE : VK_FALSE;
     f2.features.independentBlend = caps_.independent_blend ? VK_TRUE : VK_FALSE;
     // FSR 3.1's storage images in R8, R16F, RG16F ... (Fsr3Upscaler::supported requires it for DeviceCaps::fsr3).
     f2.features.shaderStorageImageExtendedFormats = caps_.fsr3 ? VK_TRUE : VK_FALSE;
 
+    // An upscaler provider's extensions and features: one the GPU lacks keeps the provider out, not the client.
+    std::vector<std::string> provider_extensions;
+    if (provider_) {
+        DeviceFeatures wanted;
+        if (!provider_->device_requirements(instance_, physical_, provider_extensions, wanted)) {
+            drop_provider("this GPU cannot run it");
+        } else {
+            std::vector<std::string> offered;
+            for (const auto& e : available) offered.emplace_back(e.extensionName);
+            std::vector<std::string> missing = missing_names(provider_extensions, offered);
+            DeviceFeatures have;
+            vkGetPhysicalDeviceFeatures2(physical_, &have.f2);
+            for (std::string& m : missing_features(wanted, have)) missing.push_back(std::move(m));
+            if (!missing.empty())
+                drop_provider("the GPU lacks " + joined(missing));
+            else
+                add_features(features, wanted);
+        }
+        if (!provider_) provider_extensions.clear();
+    }
+    for (const std::string& name : provider_extensions)
+        if (std::none_of(extensions.begin(), extensions.end(),
+                         [&name](const char* e) { return name == e; }))
+            extensions.push_back(name.c_str());
+
     VkDeviceCreateInfo info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
-    info.pNext = &f2;
+    info.pNext = &features.f2;
     info.queueCreateInfoCount = 1;
     info.pQueueCreateInfos = &queue;
     info.enabledExtensionCount = static_cast<std::uint32_t>(extensions.size());
@@ -801,8 +964,19 @@ void VkContext::create_scene_targets() {
                                   VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_ASPECT_COLOR_BIT, bloom_extent_[i]);
     }
     constexpr VkImageUsageFlags kUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    // An upscaler provider that failed, or cannot upscale between these sizes, gives way to the client's own
+    // temporal upscaler: its targets are made below instead. Every caller has the device idle.
+    if (scene_options_.upscaler == Upscaler::External) {
+        if (provider_failed_)
+            drop_provider("it failed");
+        else if (provider_ && !provider_->resize(scene_extent_, view_extent_))
+            drop_provider(std::format("it cannot upscale {}x{} to {}x{}", scene_extent_.width, scene_extent_.height,
+                                      view_extent_.width, view_extent_.height));
+        if (!provider_) scene_options_.upscaler = Upscaler::Taa;
+    }
     const bool taa = scene_options_.upscaler == Upscaler::Taa;
     const bool fsr3 = scene_options_.upscaler == Upscaler::Fsr3 && fsr3_;
+    const bool external = scene_options_.upscaler == Upscaler::External && provider_;
     if (upscaling())
         upscale_source_ = create_target(kUpscaleFormat, kUsage, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
     if (upscaling() || taa)
@@ -811,19 +985,23 @@ void VkContext::create_scene_targets() {
         object_motion_ = create_target(kMotionFormat, kUsage, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
         reactive_ = create_target(kReactiveFormat, kUsage, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
     }
-    if (taa || fsr3) { // the temporal inputs (temporal_prep.frag), for either resolve
-        lit_ = create_target(kSceneFormat, kUsage, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+    if (taa || fsr3 || external) { // the temporal inputs (temporal_prep.frag), for any resolve
+        // A provider may copy the colour (sdk/hailstone_upscaler.h: TRANSFER_SRC).
+        lit_ = create_target(kSceneFormat, kUsage | (external ? VkImageUsageFlags{VK_IMAGE_USAGE_TRANSFER_SRC_BIT} : VkImageUsageFlags{0}),
+                             VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
         motion_ = create_target(kMotionFormat, kUsage, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
     }
     if (taa)
         for (Image& h : history_)
             h = create_target(kSceneFormat, kUsage, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_ASPECT_COLOR_BIT, view_extent_);
-    if (fsr3) {
-        fsr3_output_ = create_target(kSceneFormat, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+    if (fsr3 || external) {
+        fsr3_output_ = create_target(kSceneFormat,
+                                     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                         (external ? VkImageUsageFlags{VK_IMAGE_USAGE_TRANSFER_DST_BIT} : VkImageUsageFlags{0}),
                                      VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_ASPECT_COLOR_BIT, view_extent_);
-        fsr3_->resize(scene_extent_, view_extent_); // every caller has the device idle
+        if (fsr3) fsr3_->resize(scene_extent_, view_extent_); // every caller has the device idle
     }
-    if (frame_gen_ && (taa || fsr3)) {
+    if (frame_gen_ && (taa || fsr3 || external)) {
         // Frame generation's pictures at the view's size, and the UI's image at the window's.
         for (Image& p : pictures_)
             p = create_target(kUpscaleFormat, kUsage, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_ASPECT_COLOR_BIT, view_extent_);
@@ -863,6 +1041,13 @@ void VkContext::set_scene_options(const SceneOptions& options, const std::filesy
     const VkExtent2D scaled = scaled_extent(view_extent_, options.render_scale);
     const bool rescaled = scaled.width != scene_extent_.width || scaled.height != scene_extent_.height;
     SceneOptions chosen = options;
+    if (chosen.upscaler == Upscaler::External && (!provider_ || provider_failed_)) {
+        if (!provider_fallback_logged_)
+            log::warn("upscaler: the chosen upscaler provider is not running; {} is used",
+                      caps_.fsr3 ? "AMD FSR 3.1" : "the temporal upscaler (taa)");
+        provider_fallback_logged_ = true;
+        chosen.upscaler = Upscaler::Fsr3; // and Taa below where the GPU cannot run it
+    }
     if (chosen.upscaler == Upscaler::Fsr3 && !caps_.fsr3) {
         if (!fsr3_fallback_logged_)
             log::warn("upscaler: AMD FSR 3.1 needs storage images in its formats and quad subgroup operations, which "
@@ -898,6 +1083,8 @@ void VkContext::set_scene_options(const SceneOptions& options, const std::filesy
     if (scene_options_.upscaler == Upscaler::Fsr3 && !fsr3_) {
         vkDeviceWaitIdle(device_);
         fsr3_ = std::make_unique<Fsr3Upscaler>(device_, allocator_, pipeline_cache_, shader_dir);
+        // HAILSTONE_FSR3_TIMING: each pass's GPU time (Fsr3Upscaler::timing_summary, logged by the viewer's --frames).
+        if (core::env("FSR3_TIMING")) fsr3_->enable_timing(timestamp_period_ns_);
     }
     std::uint32_t shadow = options.shadow_size > 0 ? std::clamp(options.shadow_size, 256u, 8192u) : 1u;
     if (shadow != shadow_size_) {
@@ -1736,8 +1923,11 @@ void VkContext::begin_overlay(const FrameInfo& frame) {
     // taa_resolve.frag accumulates that into this frame's history at the view's, and the post pass below reads the
     // history in the scene's place (post_taa_sets_), at the view's size.
     VkDescriptorSet post_set = post_set_;
-    // Under FSR 3.1 its upscaler takes the resolve's place (render/fsr3_upscaler.h), on the same inputs.
-    const bool fsr3 = taa && fsr3_ && fsr3_output_.image;
+    // Under FSR 3.1 its upscaler takes the resolve's place (render/fsr3_upscaler.h), on the same inputs; so does an
+    // upscaler provider (render/upscaler_provider.h) under External.
+    const bool external = taa && scene_options_.upscaler == Upscaler::External && provider_ && !provider_failed_ &&
+                          fsr3_output_.image;
+    const bool fsr3 = taa && !external && scene_options_.upscaler == Upscaler::Fsr3 && fsr3_ && fsr3_output_.image;
     bool kept_history = false; // the temporal history went on from the last frame's (frame generation's test)
     if (taa) {
         const bool keep = history_valid_ && !camera_cut(prev_view_.view, view->view);
@@ -1750,36 +1940,46 @@ void VkContext::begin_overlay(const FrameInfo& frame) {
         prep.jitter = glm::vec4(jitter_ndc_, object_motion_.image ? 1.0f : 0.0f, 0.0f);
         const Image* prep_targets[2] = {&lit_, &motion_};
         draw_into(cmd, prep_targets, scene_extent_, prep_pipeline_, prep_layout_, post_set_, &prep, sizeof(prep));
-        if (fsr3) {
-            Fsr3Upscaler::Inputs in;
-            in.color = lit_.view;
-            in.depth = depth.view;
-            in.motion = motion_.view;
-            // The reactive mask (R8 at the scene's size, 0..1, SHADER_READ_ONLY_OPTIMAL): the blended and additive
-            // draws' (scene_motion()); none without independentBlend, FSR's default 0.
-            in.reactive = reactive_.view;
-            in.output = fsr3_output_.image;
-            in.output_view = fsr3_output_.view;
-            Fsr3Upscaler::Params fp;
-            fp.frame_slot = frame.frame_slot;
-            fp.jitter = jitter_px_;
+        if (fsr3 || external) {
             const float scale = static_cast<float>(scene_extent_.width) / static_cast<float>(std::max(view_extent_.width, 1u));
-            fp.jitter_phases = jitter_phases(scale);
+            const std::uint32_t phases = jitter_phases(scale);
             // The camera's planes and vertical field of view, from the plain projection (FlyCamera::projection:
             // reverse Z, p[2][2] = n / (f - n), p[3][2] = f n / (f - n)).
+            float near_plane = 1.0f, far_plane = 1000.0f, fov_y = 1.0f;
             const glm::mat4& pr = view->proj;
             if (pr[2][2] > 0.0f && pr[1][1] > 0.0f) {
-                fp.far_plane = pr[3][2] / pr[2][2];
-                fp.near_plane = pr[2][2] * fp.far_plane / (1.0f + pr[2][2]);
-                fp.fov_y = 2.0f * std::atan(1.0f / pr[1][1]);
+                far_plane = pr[3][2] / pr[2][2];
+                near_plane = pr[2][2] * far_plane / (1.0f + pr[2][2]);
+                fov_y = 2.0f * std::atan(1.0f / pr[1][1]);
             }
             const auto now = std::chrono::steady_clock::now();
-            if (fsr3_last_.time_since_epoch().count() != 0)
-                fp.frame_seconds = std::chrono::duration<float>(now - fsr3_last_).count();
-            fsr3_last_ = now;
-            fp.reset = !keep;
-            fp.sharpness = std::clamp(scene_options_.sharpness, 0.0f, 1.0f);
-            fsr3_->dispatch(cmd, in, fp);
+            const float sharpness = std::clamp(scene_options_.sharpness, 0.0f, 1.0f);
+            if (fsr3) {
+                Fsr3Upscaler::Inputs in;
+                in.color = lit_.view;
+                in.depth = depth.view;
+                in.motion = motion_.view;
+                // The reactive mask (R8 at the scene's size, 0..1, SHADER_READ_ONLY_OPTIMAL): the blended and additive
+                // draws' (scene_motion()); none without independentBlend, FSR's default 0.
+                in.reactive = reactive_.view;
+                in.output = fsr3_output_.image;
+                in.output_view = fsr3_output_.view;
+                Fsr3Upscaler::Params fp;
+                fp.frame_slot = frame.frame_slot;
+                fp.jitter = jitter_px_;
+                fp.jitter_phases = phases;
+                fp.near_plane = near_plane;
+                fp.far_plane = far_plane;
+                fp.fov_y = fov_y;
+                if (fsr3_last_.time_since_epoch().count() != 0)
+                    fp.frame_seconds = std::chrono::duration<float>(now - fsr3_last_).count();
+                fsr3_last_ = now;
+                fp.reset = !keep;
+                fp.sharpness = sharpness;
+                fsr3_->dispatch(cmd, in, fp);
+            } else {
+                run_provider(cmd, frame, depth, keep, phases, near_plane, far_plane, fov_y, push.exposure, sharpness, now);
+            }
             post_set = post_fsr3_set_;
         } else {
             // The history read: one never written (or dropped) is only made readable; the resolve does not look at it.
@@ -1806,7 +2006,9 @@ void VkContext::begin_overlay(const FrameInfo& frame) {
     // RCAS sharpens that into the swapchain below. Under the temporal upscaler RCAS alone sharpens the post pass's
     // picture at the view's size, when sharpness is above 0; under FSR 3.1 its own RCAS has done it.
     const bool fsr = !taa && upscaling() && post_pipeline_;
-    const bool sharpen = fsr || (taa && !fsr3 && scene_options_.sharpness > 0.0f && upscaled_.image);
+    // A provider that sharpens itself (HAILSTONE_UPSCALER_SHARPENS) is as FSR 3.1; one that does not gets RCAS.
+    const bool own_sharpening = fsr3 || (external && provider_ && provider_->sharpens());
+    const bool sharpen = fsr || (taa && !own_sharpening && scene_options_.sharpness > 0.0f && upscaled_.image);
     UpscalePush up;
     if (taa && sharpen) {
         PostPush source = push;
@@ -2036,6 +2238,10 @@ void VkContext::destroy_frame_gen() {
     if (fg_queries_) vkDestroyQueryPool(device_, fg_queries_, nullptr);
     fg_queries_ = VK_NULL_HANDLE;
     picture_ready_ = false;
+}
+
+std::string VkContext::fsr3_timing() const {
+    return fsr3_ ? fsr3_->timing_summary() : std::string{};
 }
 
 void VkContext::read_frame_gen_time(std::uint32_t frame_slot) {

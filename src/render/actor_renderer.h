@@ -5,6 +5,7 @@
 // position, heading and scale folded in) go to a per-frame storage buffer.
 // Textures use one bindless array, as in the zone renderer.
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -287,6 +288,8 @@ public:
     const ActorRenderStats& stats() const { return stats_; }
     // The scene light and point lights (render/scene_lighting.h), classic or modern; classic_full_bright until set.
     void set_lighting(const SceneLighting& l) { lighting_ = l; }
+    // Shared scene clock for animated material textures, including held items and preview models.
+    void set_time(double seconds) { texture_time_ms_ = static_cast<std::uint64_t>(std::max(0.0, seconds) * 1000.0); }
     const assets::CharacterLibrary& library() const { return *library_; }
 
 private:
@@ -295,6 +298,8 @@ private:
         std::uint32_t first_index = 0;
         std::uint32_t index_count = 0;
         std::uint32_t texture = 0;
+        std::vector<std::uint32_t> frames;
+        std::uint32_t frame_delay_ms = 0;
         Pass pass = Pass::Opaque;
         float alpha_ref = 0.0f;
         float opacity = 1.0f;
@@ -305,6 +310,7 @@ private:
         bool native_surface = false;
         bool two_sided = false;
         bool fog = true;
+        bool lit = true;
     };
     struct GpuModel {
         Buffer vertices;
@@ -367,9 +373,11 @@ private:
     struct MeshPlan {
         struct PartPlan {
             Part part; // all but its texture slots
-            TextureRef texture, normal, rough;
+            bool packed_normal = false, glow = false;
+            std::vector<TextureRef> frames;
+            TextureRef normal, rough;
             std::optional<TextureRef> texture2;
-            std::optional<TextureRef> native_normal, environment;
+            std::optional<TextureRef> native_normal, environment, coverage, secondary;
         };
         std::vector<std::byte> vertices;
         std::vector<PartPlan> parts;
@@ -483,6 +491,7 @@ private:
     std::unordered_map<std::uint32_t, std::pair<glm::vec3, float>> last_spawn_poses_; // their spawns' place, heading
     PlayerMotion player_motion_;
     std::uint32_t now_ms_ = 0; // the display clock
+    std::uint64_t texture_time_ms_ = 0;
     double clock_ = 0.0;
     std::minstd_rand rng_{0x5eed};
 

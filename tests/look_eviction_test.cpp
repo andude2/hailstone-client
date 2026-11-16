@@ -42,26 +42,55 @@ TEST_CASE("Appearance texture lifetime: native armor maps survive idle sweeps an
     struct Model { std::vector<Part> parts; };
     Part first;
     first.texture = 1;
-    first.surface.slots = {7, 8, kActorSurfaceReflective, 0};
+    first.surface.slots = {7, 8, kActorSurfaceReflective, 10};
     Part second;
     second.texture = 2;
-    second.surface.slots = {7, 9, kActorSurfaceReflective, 0};
+    second.surface.slots = {7, 9, kActorSurfaceReflective, 11};
     std::map<int, Model> models{{1, {{first}}}, {2, {{second}}}};
-    const std::unordered_set<std::uint32_t> resident{0, 1, 2, 7, 8, 9};
+    const std::unordered_set<std::uint32_t> resident{0, 1, 2, 7, 8, 9, 10, 11};
     CHECK(model_texture_slots(models) == resident);
     // The same callback list governs zone handoff/adoption and idle texture eviction.
     std::unordered_set<std::uint32_t> handed_off{0};
     for_each_part_texture_slot(first, [&](std::uint32_t slot) { handed_off.insert(slot); });
-    CHECK(handed_off == std::unordered_set<std::uint32_t>{0, 1, 7, 8});
+    CHECK(handed_off == std::unordered_set<std::uint32_t>{0, 1, 7, 8, 10}); // coverage survives the handoff too
     models.erase(1); // one appearance goes idle; another still samples the shared native normal map
     const auto used = model_texture_slots(models);
     std::unordered_set<std::uint32_t> released;
     for (std::uint32_t slot : resident)
         if (!used.contains(slot)) released.insert(slot);
-    CHECK(used == std::unordered_set<std::uint32_t>{0, 2, 7, 9});
-    CHECK(released == std::unordered_set<std::uint32_t>{1, 8});
+    CHECK(used == std::unordered_set<std::uint32_t>{0, 2, 7, 9, 11});
+    CHECK(released == std::unordered_set<std::uint32_t>{1, 8, 10});
     models.clear();
     CHECK(model_texture_slots(models) == std::unordered_set<std::uint32_t>{0});
+}
+
+TEST_CASE("Appearance texture lifetime: every animated frame survives eviction and zone handoff") {
+    using namespace hailstone::render;
+    struct Part {
+        std::uint32_t texture = 0, texture2 = 0xffffffffu, normal_map = 0, rough_map = 0;
+        std::vector<std::uint32_t> frames;
+    };
+    struct Model { std::vector<Part> parts; };
+    Part animated{2, 0xffffffffu, 0, 0, {2, 5, 8}};
+    const std::map<int, Model> models{{1, {{animated}}}};
+    CHECK(model_texture_slots(models) == std::unordered_set<std::uint32_t>{0, 2, 5, 8});
+    std::unordered_set<std::uint32_t> handed_off;
+    for_each_part_texture_slot(animated, [&](std::uint32_t slot) { handed_off.insert(slot); });
+    CHECK(handed_off == std::unordered_set<std::uint32_t>{0, 2, 5, 8});
+}
+
+TEST_CASE("Actor material flags preserve the complete surface index including fallback zero") {
+    using namespace hailstone::render;
+    for (const auto index : {0u, kMaxActorSurfaces - 1}) {
+        for (const bool lit : {false, true}) {
+            for (const bool fog : {false, true}) {
+                const auto token = static_cast<std::uint32_t>(actor_surface_token(index, lit, fog));
+                CHECK((token & (kMaxActorSurfaces - 1)) == index);
+                CHECK(((token & kActorMaterialUnlit) == 0) == lit);
+                CHECK(((token & kActorMaterialNoFog) == 0) == fog);
+            }
+        }
+    }
 }
 
 TEST_CASE("Appearance texture lifetime: exhausted uploads retry once capacity returns; absent images stay cached") {

@@ -4,8 +4,15 @@
 
 #include "assets/texture_overrides.h"
 #include "core/game_dir.h"
+#include "game/particles.h"
 
 namespace hailstone::render {
+
+ParticleTextureFrame particle_texture_frame(const assets::EmitterDefinition& definition, std::uint32_t frame) {
+    if (definition.texture_frames.empty())
+        return {definition.texture, game::flipbook_grid(definition.frames), frame};
+    return {definition.texture_frames[frame % definition.texture_frames.size()], glm::uvec2(1), 0};
+}
 
 LoadedParticleTexture load_particle_texture(const std::string& name, std::optional<std::vector<std::byte>> zone_bytes,
                                             const GameDir& game) {
