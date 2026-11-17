@@ -379,12 +379,23 @@ std::vector<const game::AltAbility*> GameConnection::aa_list(std::int32_t type, 
 }
 
 game::AAReadiness GameConnection::aa_readiness(std::uint32_t rank_id) const {
-    const game::AltAbility* a = alt_adv_.get(rank_id);
-    if (!a) return {};
-    std::int32_t reduction = 0;
-    if (a->refresh != 0 && profile_) {
-        // TotalEffect(SPA 264, items, the ability's group, AAs, buffs) through the character rules.
-        static const game::mechanics::GameTables no_tables;
+    const std::array<std::uint32_t, 1> id{rank_id};
+    return aa_readiness_bulk(id).front();
+}
+
+std::vector<game::AAReadiness> GameConnection::aa_readiness_bulk(std::span<const std::uint32_t> rank_ids) const {
+    std::vector<game::AAReadiness> out;
+    out.reserve(rank_ids.size());
+    // The reduction TotalEffect(SPA 264) asks for is the same sheet for every rank: build it once, and only when a
+    // rank has a reuse time to reduce.
+    const bool reductions = profile_ && std::any_of(rank_ids.begin(), rank_ids.end(), [this](std::uint32_t id) {
+        const game::AltAbility* a = alt_adv_.get(id);
+        return a && a->refresh != 0;
+    });
+    static const game::mechanics::GameTables no_tables;
+    game::mechanics::CharacterSheet sheet;
+    std::optional<game::mechanics::Character> character;
+    if (reductions) {
         game::mechanics::LiveState live;
         live.leadership = leadership_bonuses();
         live.drunkenness = drunkenness_;
@@ -393,12 +404,21 @@ game::AAReadiness GameConnection::aa_readiness(std::uint32_t rank_id) const {
         live.level = pstatus_.level;
         live.player_id = world_.player_id;
         live.now_ms = now_ms();
-        game::mechanics::CharacterSheet sheet = game::mechanics::build_sheet(*profile_, inventory_, spells_, live, nullptr, &world_);
+        sheet = game::mechanics::build_sheet(*profile_, inventory_, spells_, live, nullptr, &world_);
         sheet.abilities = alt_adv_.sheet_abilities();
-        game::mechanics::Character ch(sheet, no_tables, game::mechanics::spell_lookup(*spell_table_));
-        reduction = ch.total_effect(264, true, a->group, true, true);
+        character.emplace(sheet, no_tables, game::mechanics::spell_lookup(*spell_table_));
     }
-    return alt_adv_.readiness(*a, reduction, unix_now());
+    for (std::uint32_t rank_id : rank_ids) {
+        const game::AltAbility* a = alt_adv_.get(rank_id);
+        if (!a) {
+            out.push_back(game::AAReadiness{});
+            continue;
+        }
+        std::int32_t reduction = 0;
+        if (character && a->refresh != 0) reduction = character->total_effect(264, true, a->group, true, true);
+        out.push_back(alt_adv_.readiness(*a, reduction, unix_now()));
+    }
+    return out;
 }
 
 bool GameConnection::aa_train(std::uint32_t rank_id, bool train_all) {

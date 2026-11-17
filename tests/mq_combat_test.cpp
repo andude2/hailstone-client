@@ -4,6 +4,7 @@
 #include <doctest/doctest.h>
 
 #include <array>
+#include <ctime>
 #include <functional>
 #include <optional>
 #include <string>
@@ -120,12 +121,16 @@ TEST_CASE("eq.AbilityBook lists the activated AAs and never a passive one") {
     active.id = 9101;
     active.group = 701;
     active.spell = 11;
+    active.refresh = 600; // on reuse from now: the book reads it through aa_readiness_bulk
+    active.timers = {7};
     passive.id = 9102;
     passive.group = 702;
     aa.add(active);
     aa.add(passive);
     aa.owned.push_back({9101, 1, 0});
     aa.owned.push_back({9102, 1, 0});
+    const auto now = static_cast<std::int64_t>(std::time(nullptr));
+    aa.set_timer(7, static_cast<std::uint32_t>(now), static_cast<std::uint32_t>(now), now);
 
     bool ran = false;
     net::GameConnectionTestAccess::with_character(conn, [&](game::mechanics::Character& ch) {
@@ -147,6 +152,17 @@ TEST_CASE("eq.AbilityBook lists the activated AAs and never a passive one") {
                                  "end "
                                  "return table.concat(keys, ',')") == LUA_OK);
         CHECK(std::string(lua_tostring(L, -1)) == "aa:701");
+        // Its readiness, as ability_state gives it for the one AA.
+        REQUIRE(luaL_dostring(L, "for _, e in ipairs(eq.AbilityBook()) do "
+                                 "  if e.key == 'aa:701' then return e.reuse, e.remaining, e.ready end "
+                                 "end") == LUA_OK);
+        const auto one = app::ability_state(host, mq::AbilityKind::AltAbility, "701");
+        REQUIRE(one);
+        CHECK(lua_tointeger(L, -3) * 1000 == one->reuse_ms);
+        CHECK(lua_tointeger(L, -2) * 1000 == one->remaining_ms);
+        CHECK(lua_toboolean(L, -1) == 0);
+        CHECK_FALSE(one->ready);
+        CHECK(one->reuse_ms == 600000);
         lua_close(L);
     });
     CHECK(ran);

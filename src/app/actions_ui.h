@@ -191,9 +191,13 @@ public:
                    std::uint32_t skill);
     // Cmd_doability @0x4e8aa0 (/doability n): buttons 1..6 are the Abilities page's ([Abilities]), 7..10 the Combat
     // page's ([CombatSkills]); an empty one does nothing; any other number prints its usage (13256 and 13257,
-    // colour 0x111). UseSkill on the target.
+    // colour 0x111). UseSkill on the target. Hailstone's extension: a name instead of a number uses the player's
+    // ability of that name through `use_named` (app::use_ability_named: a skill, then a discipline, then an activated
+    // AA); none by that name, or no `use_named`, prints "No ability by that name.".
+    // `use_named`: nullopt when the player has no ability of that name, else whether it was used.
+    using NamedAbility = std::function<std::optional<bool>(std::string_view name)>;
     void doability_command(net::GameConnection& conn, const game::mechanics::Character* ch, const AbilityView& view,
-                           const std::string& args);
+                           const std::string& args, const NamedAbility& use_named = {});
     void set_page(int bar, int page);
     // Runs one button through DoHotButton without it being on a bar (the Actions window's buttons).
     void run_button(net::GameConnection& conn, const game::mechanics::Character* ch, const AbilityView& view,

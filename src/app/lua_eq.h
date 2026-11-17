@@ -540,5 +540,8 @@ std::vector<std::pair<game::AutoskillRule, std::string>> autoskill_list(EqHost& 
 // Uses one of the player's abilities as its hot button does (the Ability Book's path; hailstone.use_ability): false
 // when the player has no such ability or is not in the world. Readiness is the server's and the game's to refuse.
 bool use_ability(EqHost& h, mq::AbilityKind kind, std::string_view name);
+// /doability <name> (Hailstone's extension): the player's ability of that name, as use_ability finds it, trying a
+// skill first, then a discipline, then an activated AA. nullopt when none matches, else whether it was used.
+std::optional<bool> use_ability_named(EqHost& h, std::string_view name);
 
 } // namespace hailstone::app

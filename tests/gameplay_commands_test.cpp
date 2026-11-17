@@ -6,14 +6,22 @@
 
 #include <cstring>
 
+#include "app/actions_ui.h"
+#include "app/lua_eq.h"
+#include "core/config.h"
 #include "core/ini_file.h"
 #include "game/client_options.h"
+#include "game/mechanics/abilities.h"
+#include "game/mechanics/character.h"
 #include "mock_server/harness.h"
+#include "mq_test_world.h"
 #include "net/player_packets.h"
 
 using namespace hailstone;
 using namespace hailstone::net;
 using namespace hailstone::test;
+
+namespace mech = hailstone::game::mechanics;
 
 namespace {
 
@@ -33,6 +41,9 @@ int raw_count(const std::vector<AppPacket>& log, std::uint16_t opcode) {
     for (const auto& p : log) n += p.opcode == opcode;
     return n;
 }
+
+// UseSkill's Forage packet (0x5306): no target, no facing, so a command test can check the skill it used.
+constexpr std::uint16_t kOpForage = 0x5306;
 
 } // namespace
 
@@ -146,4 +157,42 @@ TEST_CASE("mock server: the kept TargetGroupBuff at zone-in; /spellscribe off wh
     rig.conn.send_command("/tgb");
     REQUIRE(rig.until([&] { return tgb_values(rig.server.zone_log).size() == 2; }));
     CHECK(raw_count(rig.server.zone_log, kOpSpellScribe) == 0);
+}
+
+TEST_CASE("mock server: /doability takes a skill's name") {
+    Rig rig;
+    REQUIRE(rig.to_zone());
+
+    Config config;
+    app::ActionsUi actions(config, rig.dir.path() / "hailstone.ini");
+    // The client's path: the name found as the Ability Book finds it, then its hot button run by the Actions window.
+    net::GameConnectionTestAccess::with_character(rig.conn, [&](mech::Character& ch) {
+        app::EqHost host;
+        host.in_game = host.ui_ready = true;
+        host.conn = &rig.conn;
+        host.character = &ch;
+        host.actions = &actions;
+        host.run_button = [&](const game::HotButton& b) { actions.run_button(rig.conn, &ch, app::AbilityView{}, b); };
+        actions.doability_command(rig.conn, &ch, app::AbilityView{}, "forage", // a name, in any case
+                                  [&](std::string_view name) { return app::use_ability_named(host, name); });
+    });
+    REQUIRE(rig.until([&] { return raw_count(rig.server.zone_log, kOpForage) == 1; }));
+
+    // A number is still the Actions window's button: Forage on button 1 sends the same.
+    app::ActionsUi by_button(config, rig.dir.path() / "hailstone.ini");
+    by_button.set_ability_button(false, 0, mech::skill::kForage);
+    net::GameConnectionTestAccess::with_character(rig.conn, [&](mech::Character& ch) {
+        by_button.doability_command(rig.conn, &ch, app::AbilityView{}, "1");
+    });
+    REQUIRE(rig.until([&] { return raw_count(rig.server.zone_log, kOpForage) == 2; }));
+
+    // A name the player has no such skill for says so, sends nothing and is not the button usage.
+    net::GameConnectionTestAccess::with_character(rig.conn, [&](mech::Character& ch) {
+        by_button.doability_command(rig.conn, &ch, app::AbilityView{}, "no such skill");
+    });
+    const auto messages = by_button.take_messages();
+    REQUIRE(messages.size() == 1);
+    CHECK(messages.front().first == "No ability by that name.");
+    rig.run_for(std::chrono::milliseconds(20));
+    CHECK(raw_count(rig.server.zone_log, kOpForage) == 2);
 }

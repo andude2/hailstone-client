@@ -14,6 +14,7 @@
 #include "assets/texture.h"
 #include "core/frame_sections.h"
 #include "core/log.h"
+#include "core/worker_pool.h"
 #include "core/work_budget.h"
 #include "game/anim_layers.h"
 #include "game/appearance.h"
@@ -304,6 +305,7 @@ std::unique_ptr<ActorRenderer::Kept> ActorRenderer::release_kept() {
     prepared_.clear();
     prepared_ids_.clear();
     last_draws_.clear();
+    bone_cache_.clear();
     return kept;
 }
 
@@ -902,7 +904,47 @@ bool ActorRenderer::playing(const ActorDraw& a, std::string_view code, float& ti
 
 bool ActorRenderer::drawn_bone(std::uint32_t id, int bone, glm::mat4& world) const {
     auto it = last_draws_.find(id);
-    return it != last_draws_.end() && bone_world(it->second, bone, world);
+    if (it == last_draws_.end()) return false;
+    const ActorDraw& a = it->second;
+    if (!a.model || !a.clip || bone < 0) return false;
+    // Posed once until this spawn is drawn again.
+    return cached_bone_world(a, bone, bone_cache_[id], bone_local_, bone_previous_, world);
+}
+
+bool ActorRenderer::cached_bone_world(const ActorDraw& a, int bone, BonePoseCache& c,
+                                      std::vector<assets::BonePose>& local, std::vector<assets::BonePose>& previous,
+                                      glm::mat4& world) {
+    if (!a.model || !a.clip || bone < 0) return false;
+    if (!c.valid) {
+        pose_bones(a, local, previous, c.bones);
+        c.instance = instance_matrix(a);
+        c.valid = true;
+    }
+    if (static_cast<std::size_t>(bone) >= c.bones.size()) return false;
+    world = c.instance * c.bones[static_cast<std::size_t>(bone)];
+    return true;
+}
+
+void ActorRenderer::pose_instances(std::span<const ActorDraw> actors, std::span<PoseJob> jobs,
+                                   std::span<glm::mat4> bones) {
+    core::parallel_for(jobs.size(), kPoseGrain, [&](std::size_t begin, std::size_t end) {
+        thread_local std::vector<assets::BonePose> local, previous;
+        thread_local std::vector<glm::mat4> world;
+        for (std::size_t j = begin; j < end; ++j) {
+            PoseJob& job = jobs[j];
+            job.posed = false;
+            const ActorDraw& a = actors[job.actor];
+            pose_bones(a, local, previous, world);
+            a.model->skin(world);
+            if (!job.mesh->append_skin_bones(world) || world.size() != job.count ||
+                std::size_t{job.first} + job.count > bones.size())
+                continue;
+            const glm::mat4 instance = instance_matrix(a);
+            glm::mat4* out = bones.data() + job.first;
+            for (std::size_t b = 0; b < world.size(); ++b) out[b] = instance * world[b];
+            job.posed = true;
+        }
+    });
 }
 
 bool ActorRenderer::drawn_transform(std::uint32_t id, glm::mat4& world) const {
@@ -930,8 +972,12 @@ bool ActorRenderer::name_position(const ActorDraw& actor, glm::vec3& position) {
 }
 
 bool ActorRenderer::drawn_name_position(std::uint32_t id, glm::vec3& position) const {
-    const auto it = last_draws_.find(id);
-    return it != last_draws_.end() && name_position(it->second, position);
+    // name_position's bone, through drawn_bone's pose kept for the frame.
+    const assets::CharacterModel* model = drawn_model(id);
+    glm::mat4 world;
+    if (!model || !drawn_bone(id, model->name_bone, world)) return false;
+    position = glm::vec3(world[3]);
+    return true;
 }
 
 bool ActorRenderer::seat_rider(const ActorDraw& mount, ActorDraw& rider, const game::HeightTables* tables) {
@@ -1093,8 +1139,10 @@ void ActorRenderer::prepare(const FrameInfo& frame, std::span<const ActorDraw> a
         bone_history_.begin_frame(vk_.frames_begun());
     else if (bone_history_.size())
         bone_history_.clear();
-    std::vector<assets::BonePose> local, previous;
-    std::vector<glm::mat4> world;
+    // Planned here (the culling, the bone budget, each instance's slice of the frame's bones), posed and skinned on
+    // the workers (core::parallel_for), each instance into its own slice, then the motion history here, in order.
+    // An instance whose skin bindings fail leaves its slice unused.
+    pose_jobs_.clear();
     for (std::size_t i = 0; i < actors.size(); ++i) {
         const auto& a = actors[i];
         if (!prepared_[i].gpu) continue;
@@ -1111,30 +1159,31 @@ void ActorRenderer::prepare(const FrameInfo& frame, std::span<const ActorDraw> a
             continue;
         }
         const auto& mesh = a.mesh ? *a.mesh : default_mesh(m);
-        if (used + m.parents.size() + mesh.skin_bindings.size() > kMaxBones) {
+        const std::size_t count = m.parents.size() + mesh.skin_bindings.size();
+        if (used + count > kMaxBones) {
             prepared_[i].gpu = nullptr;
             continue;
         }
-        pose_bones(a, local, previous, world);
-        m.skin(world);
-        if (!mesh.append_skin_bones(world)) {
-            prepared_[i].gpu = nullptr;
-            continue;
-        }
-        glm::mat4 instance = instance_matrix(a);
-        const std::uint32_t first = used;
         prepared_[i].bone_offset = used;
-        for (const auto& w : world) staged_bones_.push_back(instance * w);
-        used = static_cast<std::uint32_t>(staged_bones_.size());
+        pose_jobs_.push_back({i, &mesh, used, static_cast<std::uint32_t>(count), false});
+        used += static_cast<std::uint32_t>(count);
+    }
+    staged_bones_.resize(used);
+    pose_instances(actors, pose_jobs_, staged_bones_);
+    if (motion) staged_bones_before_.resize(used);
+    for (const PoseJob& job : pose_jobs_) {
+        if (!job.posed) {
+            prepared_[job.actor].gpu = nullptr;
+            continue;
+        }
         // A frame ago, beside them (the same bones, or this frame's for an instance new or changed since).
         if (motion) {
-            const glm::mat4* now = staged_bones_.data() + first;
-            const std::vector<glm::mat4>* before =
-                a.motion_key ? bone_history_.keep(a.motion_key, now, used - first) : nullptr;
-            if (before)
-                staged_bones_before_.insert(staged_bones_before_.end(), before->begin(), before->end());
-            else
-                staged_bones_before_.insert(staged_bones_before_.end(), now, now + (used - first));
+            const glm::mat4* now = staged_bones_.data() + job.first;
+            const auto key = actors[job.actor].motion_key;
+            const std::vector<glm::mat4>* before = key ? bone_history_.keep(key, now, job.count) : nullptr;
+            glm::mat4* out = staged_bones_before_.data() + job.first;
+            if (before && before->size() == job.count) std::copy(before->begin(), before->end(), out);
+            else std::copy(now, now + job.count, out);
         }
         ++stats_.instances;
     }
@@ -1693,7 +1742,14 @@ void ActorRenderer::prepare_spawns(const FrameInfo& frame, const glm::vec3& came
         draws.push_back(a);
         ids.push_back(id);
         last_draws_[id] = a;
+        if (auto cached = bone_cache_.find(id); cached != bone_cache_.end()) cached->second.valid = false;
         last_spawn_poses_[id] = {pos, heading};
+    }
+    // drawn_bone's poses of spawns no longer drawn are dropped once every kBoneCacheSweepMs, not each frame: such an
+    // entry is never read meanwhile (drawn_bone asks last_draws_ first, and drawing the spawn again marks it stale).
+    if (static_cast<std::uint32_t>(now_ms_ - last_bone_sweep_ms_) >= kBoneCacheSweepMs) {
+        last_bone_sweep_ms_ = now_ms_;
+        std::erase_if(bone_cache_, [this](const auto& kv) { return !last_draws_.contains(kv.first); });
     }
     std::erase_if(spawns_, [this](const auto& kv) {
         if (kv.second.seen) return false;

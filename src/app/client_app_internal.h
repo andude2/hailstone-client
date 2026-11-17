@@ -7,11 +7,15 @@
 #include <exception>
 
 #include "app/updater.h"
+#include "app/frame_pace.h"
 #include "platform/process.h"
 #include "core/step_clock.h"
+#include "core/worker_pool.h"
+#include "render/scene_recorder.h"
 #include "app/addon_manager.h"
 #include "app/addon_requirements.h"
 #include "app/addon_suggest.h"
+#include "app/ability_bulk.h"
 #include "app/window_icon.h"
 #include "app/automation.h"
 #include "app/progress_ui.h"
@@ -133,6 +137,7 @@
 #include "app/spell_bolts.h"
 #include "app/spell_particles.h"
 #include "app/zone_particles.h"
+#include "app/switch_particles.h"
 #include "audio/audio_system.h"
 #include "audio/listener.h"
 #include "game/server_ext.h"
@@ -271,7 +276,7 @@ public:
         config_path_ = default_config_path();
         config_.load(config_path_);
         if (opts_.clip_plane != 15) clip_plane_arg_ = opts_.clip_plane;
-        if (opts_.max_fps > 0) max_fps_arg_ = opts_.max_fps;
+        if (opts_.max_fps > 0 || opts_.max_fps == kMaxFpsAuto) max_fps_arg_ = opts_.max_fps;
         // The asset folder: --game-dir or EQ_GAME_DIR, else hailstone.ini assets.path, else the picker asks.
         if (!choose_asset_folder()) {
             quit_ = true;
@@ -464,6 +469,7 @@ public:
         };
         aenv.autoskill_list = [this] { return autoskill_list(eq_host_); };
         aenv.use_ability = [this](mq::AbilityKind kind, std::string_view name) { return use_ability(eq_host_, kind, name); };
+        aenv.ability_bulk = [this] { return ability_bulk_rows(eq_host_); };
         aenv.can_see = [this](std::uint32_t id) -> std::optional<bool> {
             return conn_ ? can_see_spawn(id) : std::nullopt;
         };
@@ -1069,10 +1075,23 @@ private:
     std::filesystem::path shader_dir_;
     platform::Window window_;
     std::string window_title_; // what update_window_title() set last
+    // The frame's worker threads (core/worker_pool.h; display.worker_threads), made in run(). Declared before every
+    // renderer and actor_emitters_, so it outlives the work they hand it.
+    std::unique_ptr<core::WorkerPool> workers_;
+    // This frame's actor-effect step, set in the Prepare phase and started once the frame is recorded
+    // (ActorEmitters::simulate_async), or at once for a frame not drawn.
+    std::function<void()> emitter_step_;
     render::VkContext vk_;
     // Declared after vk_, so it is destroyed before the Vulkan device it holds objects of: draw_nameplates makes it at its
     // first use.
     std::unique_ptr<NameplateLayer> plate_layer_; // draw_nameplates, made at its first use
+    // The scene's draws recorded on the worker threads (render/scene_recorder.h; display.parallel_record), made in
+    // run(); after vk_, so it goes before the device.
+    std::unique_ptr<render::SceneRecorder> scene_recorder_;
+    // The shadow layers' draws recorded the same way (display.parallel_record), with buffers of their own.
+    std::unique_ptr<render::SceneRecorder> shadow_recorder_;
+    std::vector<std::uint32_t> shadow_layers_; // this frame's shadow layers, kept for its capacity
+    bool parallel_record_ = true;
     // draw_nameplates' lists, kept for their capacity (and the plates' strings for theirs): the first plate_count_.
     struct PlateEntry {
         std::uint32_t id = 0;
@@ -1328,6 +1347,7 @@ private:
     std::uint8_t motion_head_wet_ = 0; // this frame's HeadWet (PlayerMovement)
     std::uint8_t motion_body_wet_ = 0; // this frame's BodyWet (+0xa2)
     std::unique_ptr<ZoneParticles> zone_particles_;         // the zone's torch and lantern flames (app/zone_particles.h)
+    std::unique_ptr<SwitchParticles> switch_particles_;     // server-placed legacy particle switches
     // The modern lighting's flames in place of the zone's own (render/fire_renderer.h): the zone's, found when it
     // loads (assets/zone_fires.h), and this frame's with the doors' and ground objects' added.
     std::unique_ptr<render::FireRenderer> fire_renderer_;
@@ -1476,6 +1496,7 @@ private:
     float step_turn_ = 0.0f, step_pitch_ = 0.0f;
     std::array<game::mechanics::SwitchSpawn, 1> rider_spawns_{};
     game::DoorRiders door_riders_;
+    game::DoorParticles door_particles_;
     PlayerMovement movement_;
     std::optional<PlayerMovement> local_body_movement_; // the passive body while an Eye has the controls
     std::uint32_t driven_eye_ = 0;
@@ -1517,9 +1538,6 @@ private:
     // Hailstone: the live NPCs near the player as the movement sweep's walls (game/npc_collision.h), unless the
     // server's hailstone.cfg turns them off ([movement] npc_collision).
     std::vector<game::NpcBody> npc_bodies_;
-    // The other spawns' contact probes' door hits (ZoneMoveWorld::set_contact_probe), kept so a probe does not
-    // allocate.
-    std::vector<WorldObjects::DoorHit> remote_door_hits_;
     void update_npc_bodies();
     // PlayerClient::TouchingSwitch for the local player on door `id` (game/mechanics/touching_switch.h); returns
     // whether pTouchingSwitch is cleared afterwards.

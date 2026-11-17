@@ -95,7 +95,7 @@ follow the RoF2 client; the ones Hailstone adds are marked as Hailstone's. For t
 | `/stopcast` | Stop casting. |
 | `/melody <gems>`, `/stopsong` | Twist songs; stop singing. |
 | `/discipline <name>`, `/stopdisc` | Use a discipline; end the active one. |
-| `/doability <n or name>` | Use an ability or skill. |
+| `/doability <n \| name>` | Use an ability or skill: button 1-10 of the Actions window, as RoF2; or (Hailstone's) the player's skill, discipline or activated AA of that name, in any case, as its Ability Book row uses it. A name more than one kind has is the skill's first, then the discipline's, then the AA's; a discipline's name may leave out its rank. |
 | `/pet <command>` | Pet commands (attack, back off, follow, guard, sit and the rest). |
 | `/shield`, `/shieldgroup` | Shield your target. |
 | `/targetgroupbuff [on\|off]`, `/tgb` | Group spells land on the target's group. |

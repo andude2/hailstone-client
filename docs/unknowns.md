@@ -2,6 +2,16 @@
 
 What the client does not implement yet, or implements with an approximation it cannot confirm. Entries are removed once settled.
 
+## Legacy environmental particles
+
+- Legacy particle switches (`app/switch_particles.*`, `assets/legacy_particles.*`): explicit-position stage-2 slots
+  are drawn from the player's old `spells.eff`; actor-dependent old selectors are still skipped. Native day/night
+  switch mode 2 also activates with `CDisplay::bRainScreen` (`0x488030`), whose renderer-state equivalent has not
+  been connected here; only its hour test is applied. Closing a switch removes its particles immediately rather
+  than the native one-second shutdown fade. The waterfall was seen live on the stock PEQ test server (Stonebrunt's
+  effect-142 switches, a level-69 character); the remaining gaps concern these unsupported selectors, the rain-screen
+  override, the shutdown tail and the slot level gates, which were not tried live with a low-level character.
+
 ## Server add-on policy
 
 - The optional required/allow/block policy is covered by parser, package identity, admission, runtime and gate
@@ -13,9 +23,6 @@ What the client does not implement yet, or implements with an approximation it c
 - Texture packs (Texture Studio's output in `textures/`) are not add-ons and have no repository, so no list names
   them; a server can block the Texture Studio tool, not the packs a player already built. A required tool is met by
   its installation: the client does not start it and cannot tell whether it runs.
-- A script add-on whose name has capitals is not found by the script loader on a case-sensitive file system
-  (`ScriptHost::run` looks scripts up by their lower-cased name). Admission holds such a requirement unmet rather
-  than letting it pass and fail to start; the loader itself is unchanged.
 
 ## Evolving items
 

@@ -474,7 +474,8 @@ void ClientApp::update_player(float dt) {
                 return true;
             }
             if (handler != "Cmd_doability" || !actions_ui_) return false;
-            actions_ui_->doability_command(*conn_, stats_ui_ ? stats_ui_->character() : nullptr, ability_view(), args);
+            actions_ui_->doability_command(*conn_, stats_ui_ ? stats_ui_->character() : nullptr, ability_view(), args,
+                                           [this](std::string_view name) { return use_ability_named(eq_host_, name); });
             return true;
         });
     }

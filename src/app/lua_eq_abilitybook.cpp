@@ -32,6 +32,7 @@
 
 #include <lua.hpp>
 
+#include "app/ability_bulk.h"
 #include "app/actions_ui.h"
 #include "app/skill_race.h"
 #include "core/ascii_case.h"
@@ -171,8 +172,36 @@ std::string aa_entry_name(const net::GameConnection& c, const game::AltAbility& 
     return name;
 }
 
-// An owned AA as an entry: its owned rank; its reuse from AltAdvManager::IsAbilityReady.
-std::optional<Entry> aa_entry(const net::GameConnection& c, const game::AltAbility& a) {
+// The readiness fields the Ability Book shows, ability_state returns and get_ability_data_bulk gives, in whole
+// seconds: one definition so the three cannot drift apart.
+void aa_ready_fields(const game::AAReadiness& r, const game::AltAbility& a, std::int32_t& reuse_s,
+                     std::int32_t& remaining_s) {
+    reuse_s = r.total > 0 ? r.total : a.refresh;
+    remaining_s = r.ready ? 0 : std::max(1, r.remaining);
+}
+
+void discipline_ready_fields(const net::GameConnection& c, const game::SpellData& s, std::int32_t timer,
+                             std::int32_t& reuse_s, std::int32_t& remaining_s) {
+    reuse_s = static_cast<std::int32_t>(s.recast_time / 1000);
+    const std::uint32_t r = c.discipline_reuse_timer(timer);
+    const auto now = static_cast<std::uint32_t>(std::time(nullptr));
+    remaining_s = r > now ? static_cast<std::int32_t>(r - now) : 0;
+}
+
+void skill_ready_fields(const EqHost& h, std::uint32_t skill, std::int32_t& reuse_s, std::int32_t& remaining_s) {
+    const auto now = static_cast<std::uint32_t>(net::GameConnection::now_ms());
+    const std::uint32_t left = h.actions ? h.actions->skill_state().timers.remaining(*h.character, skill, now) : 0;
+    remaining_s = static_cast<std::int32_t>((left + 999) / 1000);
+    // Slam shares Bash's combat timer; it has no separate entry in the 0..99 skill table.
+    const std::uint32_t reuse_ms =
+        mech::skill_table_entry(skill == mech::skill::kSlam ? mech::skill::kBash : skill).reuse_ms;
+    reuse_s = static_cast<std::int32_t>(reuse_ms / 1000);
+}
+
+// An owned AA as an entry: its owned rank; its reuse from AltAdvManager::IsAbilityReady, or `known` when the caller
+// asked aa_readiness_bulk for many at once.
+std::optional<Entry> aa_entry(const net::GameConnection& c, const game::AltAbility& a,
+                              const game::AAReadiness* known = nullptr) {
     if (a.group <= 0) return std::nullopt;
     Entry e;
     e.kind = AbilityKind::AltAbility;
@@ -191,9 +220,7 @@ std::optional<Entry> aa_entry(const net::GameConnection& c, const game::AltAbili
     if (!e.passive) {
         fill_spell(c, e, static_cast<std::uint32_t>(a.spell));
         e.timer = a.timers.empty() ? -1 : a.timers.front();
-        const game::AAReadiness r = c.aa_readiness(a.id);
-        e.reuse = r.total > 0 ? r.total : a.refresh;
-        e.remaining = r.ready ? 0 : std::max(1, r.remaining);
+        aa_ready_fields(known ? *known : c.aa_readiness(a.id), a, e.reuse, e.remaining);
         e.button.type = game::HotButtonType::Social; // the AA window's hotkey: DoHotButton queues /alt activate
         e.button.slot = game::kSocialCount + a.group;
     }
@@ -215,10 +242,7 @@ std::optional<Entry> discipline_entry(const net::GameConnection& c, int n) {
     e.level = c.spell_level_needed(*s, c.visible_class());
     e.rank = s->spell_rank;
     e.timer = c.combat_ability_timer(*s);
-    e.reuse = static_cast<std::int32_t>(s->recast_time / 1000);
-    const std::uint32_t r = c.discipline_reuse_timer(e.timer);
-    const auto now = static_cast<std::uint32_t>(std::time(nullptr));
-    e.remaining = r > now ? static_cast<std::int32_t>(r - now) : 0;
+    discipline_ready_fields(c, *s, e.timer, e.reuse, e.remaining);
     if (auto b = combat_ability_button(c, n)) e.button = *b;
     return e;
 }
@@ -247,11 +271,7 @@ Entry skill_entry(EqHost& h, std::uint32_t skill, bool combat) {
     e.description = std::string(game::skill_description(skill));
     e.combat = combat;
     e.timer = e.id;
-    const auto now = static_cast<std::uint32_t>(net::GameConnection::now_ms());
-    const std::uint32_t left = h.actions ? h.actions->skill_state().timers.remaining(*h.character, skill, now) : 0;
-    e.remaining = static_cast<std::int32_t>((left + 999) / 1000);
-    // Slam shares Bash's combat timer; it has no separate entry in the 0..99 skill table.
-    e.reuse = mech::skill_table_entry(skill == mech::skill::kSlam ? mech::skill::kBash : skill).reuse_ms / 1000;
+    skill_ready_fields(h, skill, e.reuse, e.remaining);
     e.button.type = game::HotButtonType::Skill;
     e.button.slot = e.id;
     e.button.label = e.name.substr(0, 63);
@@ -262,9 +282,19 @@ std::vector<Entry> all_entries(EqHost& h) {
     std::vector<Entry> out;
     if (!h.conn || !h.character) return out;
     const auto& c = *h.conn;
-    for (const auto& o : c.alt_adv().owned)
-        if (const game::AltAbility* a = o.id ? c.alt_adv().get(o.id) : nullptr)
-            if (auto e = aa_entry(c, *a); e && !e->passive) out.push_back(std::move(*e));
+    // The activated AAs' readiness in one pass (aa_readiness_bulk: the character's SPA 264 sheet built once, not once
+    // per AA).
+    std::vector<const game::AltAbility*> ranks;
+    std::vector<std::uint32_t> rank_ids;
+    for (const auto& o : c.alt_adv().owned) {
+        const game::AltAbility* a = o.id ? c.alt_adv().get(o.id) : nullptr;
+        if (!a || a->group <= 0 || !a->activated()) continue;
+        ranks.push_back(a);
+        rank_ids.push_back(a->id);
+    }
+    const std::vector<game::AAReadiness> readiness = c.aa_readiness_bulk(rank_ids);
+    for (std::size_t i = 0; i < ranks.size(); ++i)
+        if (auto e = aa_entry(c, *ranks[i], &readiness[i])) out.push_back(std::move(*e));
     for (int n = 0; n < kCombatAbilities; ++n)
         if (c.combat_ability(n) && combat_ability_listed(c, n))
             if (auto e = discipline_entry(c, n)) out.push_back(std::move(*e));
@@ -666,6 +696,68 @@ bool use_ability(EqHost& h, mq::AbilityKind kind, std::string_view name) {
     if (!e || e->passive) return false;
     log::info("script uses {} ({})", e->name, e->key);
     return use(h, *e);
+}
+
+std::optional<bool> use_ability_named(EqHost& h, std::string_view name) {
+    // A skill first: the kind RoF2's /doability uses (its Actions buttons hold skills alone).
+    using K = mq::AbilityKind;
+    for (const K kind : {K::Skill, K::Discipline, K::AltAbility})
+        if (const std::optional<Entry> e = by_name(h, kind, name)) {
+            if (e->passive) return false;
+            log::info("/doability uses {} ({})", e->name, e->key);
+            return use(h, *e);
+        }
+    return std::nullopt;
+}
+
+// The entries all_entries lists, without the allocations a window row needs (its description, classes, icon and hot
+// button): what get_ability_data_bulk writes. The same filters and the same readiness helpers as the book's entries.
+std::vector<plugin::AbilityBulkRow> ability_bulk_rows(EqHost& h) {
+    std::vector<plugin::AbilityBulkRow> out;
+    if (!h.conn || !h.character) return out;
+    const auto& c = *h.conn;
+
+    std::vector<const game::AltAbility*> ranks;
+    std::vector<std::uint32_t> rank_ids;
+    for (const auto& o : c.alt_adv().owned) {
+        const game::AltAbility* a = o.id ? c.alt_adv().get(o.id) : nullptr;
+        if (!a || a->group <= 0 || !a->activated()) continue;
+        ranks.push_back(a);
+        rank_ids.push_back(o.id);
+    }
+    out.reserve(ranks.size() + kCombatAbilities + 64);
+    // One character for every owned rank's SPA 264 reduction, not one per rank (aa_readiness_bulk).
+    const std::vector<game::AAReadiness> readiness = c.aa_readiness_bulk(rank_ids);
+    for (std::size_t i = 0; i < ranks.size(); ++i) {
+        std::int32_t reuse_s = 0, remaining_s = 0;
+        aa_ready_fields(readiness[i], *ranks[i], reuse_s, remaining_s);
+        out.push_back({mq::AbilityKind::AltAbility, ranks[i]->group, remaining_s <= 0,
+                       std::int64_t{remaining_s} * 1000, std::int64_t{reuse_s} * 1000, aa_entry_name(c, *ranks[i])});
+    }
+
+    // Disciplines by spell id, not profile slot: the slot moves with the list and the id is what the AA/disc bulk
+    // read and use_ability use.
+    for (int n = 0; n < kCombatAbilities; ++n) {
+        const std::uint32_t id = c.combat_ability(n);
+        const game::SpellData* s = id ? c.spell_table().get(id) : nullptr;
+        if (!s || !combat_ability_listed(c, n)) continue;
+        const std::int32_t timer = c.combat_ability_timer(*s);
+        std::int32_t reuse_s = 0, remaining_s = 0;
+        discipline_ready_fields(c, *s, timer, reuse_s, remaining_s);
+        out.push_back({mq::AbilityKind::Discipline, static_cast<std::int32_t>(id), remaining_s <= 0,
+                       std::int64_t{remaining_s} * 1000, std::int64_t{reuse_s} * 1000, s->name});
+    }
+
+    const auto race = skill_race(c, *h.character);
+    for (bool combat : {true, false})
+        for (std::uint32_t skill : mech::usable_skills(*h.character, combat, race)) {
+            std::int32_t reuse_s = 0, remaining_s = 0;
+            skill_ready_fields(h, skill, reuse_s, remaining_s);
+            out.push_back({mq::AbilityKind::Skill, static_cast<std::int32_t>(skill), remaining_s <= 0,
+                           std::int64_t{remaining_s} * 1000, std::int64_t{reuse_s} * 1000,
+                           skill == mech::skill::kSlam ? "Slam" : c.skill_name(skill)});
+        }
+    return out;
 }
 
 std::vector<std::pair<game::AutoskillRule, std::string>> autoskill_list(EqHost& h) {

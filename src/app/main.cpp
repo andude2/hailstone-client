@@ -13,9 +13,11 @@
 #include <random>
 #include <span>
 #include <string>
+#include <string_view>
 #include <system_error>
 
 #include "app/client_app.h"
+#include "app/frame_pace.h"
 #include "app/update_install.h"
 #include "app/updater.h"
 #include "core/build_info.h"
@@ -229,7 +231,8 @@ void usage() {
         "                     shot <file>, state, close, droplink; app/input_script.h; a virtual pad is attached; testing)\n"
         "  --window-size WxH  the window's size in pixels (default 1280x720)\n"
         "  --auto-accept      accept group invitations (testing)\n"
-        "  --max-fps N        cap the frame rate (the original's MaxFPS; movement physics runs per frame)\n"
+        "  --max-fps N|auto   cap the frame rate (the original's MaxFPS; movement physics runs per frame); auto: just\n"
+        "                     under the display's refresh rate\n"
         "  --load-stall MS    sleep MS milliseconds after loading each zone, as a slow disk would (testing)\n"
         "  --move-test T      after zoning in, drive and log the movement: speed, jump,\n"
         "                     fall:H (lift H units and drop) or swim (testing)\n"
@@ -665,7 +668,8 @@ Options parse_args(int argc, char** argv) {
             o.auto_accept_invite = true;
         } else if (arg("--max-fps")) {
             need(1);
-            o.max_fps = std::atoi(argv[++i]);
+            ++i;
+            o.max_fps = std::string_view(argv[i]) == "auto" ? hailstone::app::kMaxFpsAuto : std::atoi(argv[i]);
         } else if (arg("--load-stall")) {
             need(1);
             o.load_stall_ms = std::atoi(argv[++i]);

@@ -273,16 +273,25 @@ TEST_CASE("addon admission: a server that does not enforce never asks the add-on
     CHECK(g.ready_checks == 0);
 }
 
-TEST_CASE("addon requirements: a required script must be where the script loader looks for it") {
+TEST_CASE("addon requirements: a required script is found whatever its case, as the script loader finds it") {
     test::ScratchDir scratch("required_script_case");
     addon_test::put_file(addon_folder(scratch.path(), AddonKind::Script, "helper") / "init.lua", "-- helper");
     addon_test::put_file(addon_folder(scratch.path(), AddonKind::Script, "MixedCase") / "init.lua", "-- mixed");
     CHECK(required_script_found(scratch.path(), "helper"));
-    CHECK(required_script_found(scratch.path(), "HELPER"));
+    CHECK(required_script_found(scratch.path(), "MixedCase"));
+    // The registry's name is the add-on's own folder: another spelling is the folder the loader would start only
+    // where the file system folds case.
+    CHECK(required_script_found(scratch.path(), "HELPER") ==
+          std::filesystem::exists(scratch.path() / "scripts" / "HELPER"));
     CHECK_FALSE(required_script_found(scratch.path(), "absent"));
-    // The loader asks for scripts/mixedcase/init.lua: found on a case-insensitive file system only.
-    const bool folded = std::filesystem::exists(scratch.path() / "scripts" / "mixedcase" / "init.lua");
-    CHECK(required_script_found(scratch.path(), "MixedCase") == folded);
+    // A folder whose name differs only in case: the loader takes the exact (lower-case) one, never MixedCase's.
+    if (std::filesystem::exists(scratch.path() / "scripts" / "mixedcase")) {
+        MESSAGE("case-insensitive file system: two folders differing only in case cannot exist");
+        return;
+    }
+    addon_test::put_file(addon_folder(scratch.path(), AddonKind::Script, "mixedcase") / "init.lua", "-- other");
+    CHECK_FALSE(required_script_found(scratch.path(), "MixedCase"));
+    CHECK(required_script_found(scratch.path(), "mixedcase"));
 
     const auto r = required_rules();
     auto a = helper();

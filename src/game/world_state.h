@@ -15,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -2822,6 +2823,9 @@ namespace hailstone::game {
 		// them this frame, else at their position.
 		// `ground_floor` (optional): the floor ground_npcs measures against, which has the doors too (a portal stone's
 		// base, a platform); unset, `floor`.
+		// Threads: with a worker pool registered (core::set_workers), the spawns are stepped on its threads at once, so
+		// `floor`, `region`, `ground_floor` and `collision` may be called from several threads together and must only
+		// read what they share; `vehicle_under` is called on the caller's thread alone. smooth returns when all are done.
 		// `ground_floor_includes_zone`: assert that `ground_floor` also probes the same zone collision mesh the
 		// landing check uses, so after a landing on a zone floor f it returns at least f there (a higher door or
 		// placed-object floor only raises it). Only the client's ClientApp::grounding_floor promises this; a plain
@@ -2832,6 +2836,8 @@ namespace hailstone::game {
 		void smooth(float dt, double now, const FloorFn& floor = {}, const RegionFn& region = {},
 			const VehicleFn& vehicle_under = {}, const FloorFn& ground_floor = {}, const RemoteCollisionFn& collision = {},
 			bool ground_floor_includes_zone = false);
+		// smooth's list of the spawns it steps on the worker threads, kept for its capacity (nothing to read).
+		std::vector<std::pair<std::uint32_t, Spawn*>> smooth_scratch;
 		// Where the local player is drawn this frame: where the camera is, between the game clock's last two steps
 		// (app/client_app_player.cpp). Sets the drawn place and heading (0..512) of the player and of the mount it rides at
 		// once, so the eye on a mount follows it in the same frame; the next smooth keeps them and forgets the call.

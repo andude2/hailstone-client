@@ -80,6 +80,7 @@ struct Door {
     bool remain_open = false;         // +0xd5
     bool visible = true;              // +0xd6
     bool heading_changed = false;     // +0xd7
+    bool particle = false;            // +0xa8: a running type 0x35 particle effect
     std::vector<std::uint8_t> sound_states; // states entered since the sounds were last taken (ChangeState plays them)
 
     // World position of the actor (Y, X, Z -> world x, y, z; game/coords.h).
@@ -115,6 +116,9 @@ bool door_blocks_movement(const Door& door);
 // UseSwitch's early outs: types 0x36..0x38, unusable or invisible switches,
 // and switches still moving (the trap and 0x9d exceptions aside).
 bool door_can_be_used(const Door& door);
+// CDisplay_UpdateDayNightSwitch @0x488030: type 0x35's incline is 0 (keep the packet state), 1 (day) or 2
+// (night, or the display's rain-screen override). `hour` is the native/server 1..24 clock, not zero-based.
+void update_particle_switch_day_night(Door& door, int hour, bool rain_screen = false);
 
 // One frame of CDisplay_ProcessSwitches for every door. `ticks` are 1/50 s
 // since the last call (the original: elapsed ms * 0.02, and nothing moves on
@@ -138,10 +142,19 @@ struct DoorRiders {
     std::function<void(std::size_t)> reset_collision_counter;
     std::function<double(const Door&)> actor_radius; // the door actor's vf44
 };
+// Type 0x35 switches have no model: the app owns their particle effects. A successful start persists in
+// Door::particle until the switch closes; a replacement spawn record starts without a running effect.
+struct DoorParticles {
+    std::function<bool()> local_player;
+    std::function<void(Door&)> update_day_night;
+    std::function<bool(Door&, std::int32_t)> start;
+    std::function<void(Door&)> stop;
+};
 // The frame is game/mechanics/switches.h's exact ProcessSwitches; `zone` is
 // for EQSwitch_IsFloorSwitch.
 std::vector<std::uint8_t> process_doors(std::vector<Door>& doors, SwitchClock& clock, std::uint32_t now_ms,
-                                        std::int32_t zone = 0, const DoorRiders* riders = nullptr);
+                                        std::int32_t zone = 0, const DoorRiders* riders = nullptr,
+                                        const DoorParticles* particles = nullptr);
 // The same for one door with an explicit tick count (tests).
 std::vector<std::uint8_t> process_door(Door& door, float ticks, std::uint32_t now_ms);
 

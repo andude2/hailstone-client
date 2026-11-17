@@ -216,6 +216,9 @@ public:
 
     // Content scale of the window's display (1.0 at 96 dpi, 2.0 for 200% scaling).
     float content_scale() const;
+    // The refresh rate the window's display runs at now (its current mode: the fullscreen mode's, or the desktop's),
+    // in Hz; 0 when the system does not say. Follows the window to another display.
+    float refresh_rate() const;
     // Framebuffer pixels per window coordinate (2.0 on Retina-style displays).
     float pixel_density() const;
     SDL_Window* sdl_window() const { return window_; }

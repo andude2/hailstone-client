@@ -251,7 +251,13 @@ The windows are Lua scripts drawn with ImGui, grouped into user interfaces: ever
   Record phase's cover and water maps apart from the lights' cubes, each Lua window and the map views' lines, labels
   and spawn marks inside it, the script scan and the Lua garbage collection. The window's "Frame sections" table
   shows the same sections at all times, each one's average over the last 60 frames (0 ms in a frame it was not
-  marked in) and its slowest frame, longest first, with a filter (`app::SectionAverages`). Sections nest: "Lua UI
+  marked in) and its slowest frame, longest first, with a filter (`app::SectionAverages`). While the scene is recorded on the
+  worker threads (`display.parallel_record`, docs/graphics.md "Worker threads"), the Record phase's per-renderer laps
+  are named "... queued" ("zone queued", "actors queued") and time only the setting up and queuing of each draw; the
+  recording itself is in "scene record (opaque)" and "scene record". With it off they keep their "... draw" names
+  and time the drawing as before. The table is worked out again twice a second
+  (`app::kSectionsRefresh`), and at once when the filter changes, and only the rows scrolled into view are drawn:
+  rebuilding and drawing hundreds of rows every frame cost the frame time it was measuring. Sections nest: "Lua UI
   frame" holds every "Lua window ..." row. Its "KB/frame" column is what the Lua state allocated in "Lua UI frame" and
   in each Lua window, averaged the same way (the state's allocator counts every byte it hands out,
   `LuaUi::allocated_bytes`; `core::frame_sections::add_bytes`): with the collector stopped between its slices, nearly

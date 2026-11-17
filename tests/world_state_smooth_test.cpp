@@ -1,9 +1,11 @@
 // WorldState::smooth: the drawn place follows the spawn's and recovers from a value that is not a number.
 #include <doctest/doctest.h>
 
+#include <atomic>
 #include <cmath>
 #include <limits>
 
+#include "core/worker_pool.h"
 #include "game/world_state.h"
 
 using namespace hailstone::game;
@@ -201,4 +203,66 @@ TEST_CASE("smooth: controlled players, mounted riders and stale spawns do not ac
              [&](const Spawn&, const glm::vec3&, const glm::vec3&) { ++probes; return 6; });
     CHECK(probes == 0);
     for (std::uint32_t id : {1u, 2u, 3u, 4u}) CHECK(w.spawns.at(id).colliding_type == 0);
+}
+
+TEST_CASE("smooth: spawns stepped on the worker threads come out as they do stepped inline") {
+    // A busy zone twice: smoothed inline (no pool), and with a pool of three workers registered (as the client does).
+    auto make = [] {
+        WorldState w;
+        w.player_id = 1;
+        w.ground_npcs = true;
+        w.physics_steps = std::vector<float>{16.0f, 17.0f};
+        add(w, 1, {0.0f, 0.0f, 0.0f});
+        for (std::uint32_t id = 10; id < 410; ++id) {
+            Spawn& s = add(w, id, {static_cast<float>(id % 40) * 7.0f, static_cast<float>(id / 40) * 7.0f,
+                                   10.0f + static_cast<float>(id % 3)});
+            s.speed_run = 1.0f + static_cast<float>(id % 5) * 0.25f;
+            s.heading = static_cast<float>(id % 512);
+            s.velocity = glm::vec3(0.5f, -0.25f, 0.0f);
+            s.update_time = 1.0;
+        }
+        w.spawns.at(20).mount_id = 21; // a rider: drawn where its mount is, after the parallel pass
+        return w;
+    };
+    // Functions of their arguments alone, as the client's are (they read the zone, which nothing changes meanwhile).
+    WorldState::FloorFn floor = [](const glm::vec3& p) -> std::optional<float> {
+        return std::sin(p.x * 0.1f) + std::cos(p.y * 0.1f);
+    };
+    WorldState::RegionFn region = [](const glm::vec3& p) -> std::uint8_t { return p.x > 200.0f ? 1 : 0; };
+    std::atomic<int> probes{0};
+    WorldState::RemoteCollisionFn collision = [&](const Spawn& s, const glm::vec3&, const glm::vec3& to) {
+        probes.fetch_add(1);
+        return s.id % 7 == 0 && to.x > 50.0f ? 6 : 0;
+    };
+    auto run = [&](WorldState& w) {
+        for (int frame = 0; frame < 5; ++frame)
+            w.smooth(0.033f, 1.0 + 0.033 * frame, floor, region, {}, {}, collision);
+    };
+    WorldState inline_world = make();
+    run(inline_world);
+    const int inline_probes = probes.exchange(0);
+    WorldState pooled_world = make();
+    {
+        hailstone::core::WorkerPool pool(3);
+        hailstone::core::set_workers(&pool);
+        run(pooled_world);
+        hailstone::core::set_workers(nullptr);
+    }
+    CHECK(inline_probes > 0);
+    CHECK(probes.load() == inline_probes);
+    REQUIRE(pooled_world.spawns.size() == inline_world.spawns.size());
+    for (const auto& [id, s] : inline_world.spawns) {
+        CAPTURE(id);
+        const Spawn& p = pooled_world.spawns.at(id);
+        CHECK(p.position == s.position);
+        CHECK(p.velocity == s.velocity);
+        CHECK(p.heading == s.heading);
+        CHECK(p.display_position == s.display_position);
+        CHECK(p.display_heading == s.display_heading);
+        CHECK(p.colliding_type == s.colliding_type);
+        CHECK(p.body_wet == s.body_wet);
+        CHECK(p.feet_wet == s.feet_wet);
+        CHECK(p.ground_drop == s.ground_drop);
+    }
+    CHECK(pooled_world.spawns.at(20).display_position == pooled_world.spawns.at(21).display_position);
 }

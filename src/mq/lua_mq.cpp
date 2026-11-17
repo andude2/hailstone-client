@@ -56,6 +56,46 @@ std::string lower(std::string_view s) {
 
 } // namespace
 
+// A script is found whatever the case of its name, on a case-sensitive file system as on Windows and macOS: the
+// loader asks for a lower-cased name, and an add-on keeps its package's spelling on disk (scripts/AutoLoot). The
+// exact spelling wins; otherwise each part of the path must have exactly one match that differs only in case, so
+// Foo/ beside foo/ is refused rather than one picked.
+std::optional<fs::path> script_spelled_path(const fs::path& root, const fs::path& relative) {
+    if (relative.empty() || relative.has_root_path()) return std::nullopt;
+    const auto& native = relative.native();
+    // Nothing rooted (a leading backslash is not, to Linux), no drive or stream (':'), no NUL.
+    if (native.front() == static_cast<fs::path::value_type>('\\') ||
+        native.find(static_cast<fs::path::value_type>(':')) != fs::path::string_type::npos ||
+        native.find(fs::path::value_type{}) != fs::path::string_type::npos)
+        return std::nullopt;
+    for (const auto& part : relative)
+        if (part == "." || part == "..") return std::nullopt;
+    // As UTF-8: path::string() throws on Windows for a name the code page cannot hold.
+    auto utf8 = [](const fs::path& p) {
+        const auto u = p.u8string();
+        return std::string(u.begin(), u.end());
+    };
+    fs::path current = root;
+    for (const auto& part : relative) {
+        std::error_code ec;
+        const fs::path exact = current / part;
+        if (fs::exists(exact, ec)) {
+            current = exact;
+            continue;
+        }
+        const std::string want = utf8(part);
+        std::optional<fs::path> found;
+        for (fs::directory_iterator it(current, ec), end; !ec && it != end; it.increment(ec)) {
+            if (!iequals(utf8(it->path().filename()), want)) continue;
+            if (found) return std::nullopt; // Foo and foo: neither
+            found = it->path();
+        }
+        if (!found || ec) return std::nullopt;
+        current = *found;
+    }
+    return current;
+}
+
 // The running one first: one stopped while pulse() or imgui() walked the list stays in it until reap().
 Script* ScriptHost::Impl::find(std::string_view name) const {
     Script* stopped = nullptr;
@@ -1326,7 +1366,10 @@ std::optional<fs::path> ScriptHost::Impl::resolve(const std::string& name) const
         std::error_code ec;
         const fs::path root = fs::weakly_canonical(d, ec);
         if (ec) continue;
-        for (const fs::path& cand : {d / (base + ".lua"), d / base / "init.lua"}) {
+        for (const fs::path& relative : {fs::path(base + ".lua"), fs::path(base) / "init.lua"}) {
+            const auto spelled = script_spelled_path(d, relative.lexically_normal());
+            if (!spelled) continue;
+            const fs::path& cand = *spelled;
             if (in_config_dir(d, cand) || !fs::is_regular_file(cand, ec)) continue;
             // It must stay in the folder once links are followed.
             const fs::path rel = fs::weakly_canonical(cand, ec).lexically_relative(root);

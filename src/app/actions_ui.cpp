@@ -2,6 +2,7 @@
 #include "ui/lua/lua_host.h"
 
 #include <algorithm>
+#include <cctype>
 #include <functional>
 #include <cmath>
 #include <random>
@@ -399,10 +400,24 @@ bool ActionsUi::use_combat_ability_button(net::GameConnection& conn, int button)
 }
 
 void ActionsUi::doability_command(net::GameConnection& conn, const mech::Character* ch, const AbilityView& view,
-                                  const std::string& args) {
+                                  const std::string& args, const NamedAbility& use_named) {
     // _atoi(args) - 1: 0..5 index the [Abilities] list (0xe15e60), 6..9 the four dwords before it, the
     // [CombatSkills] list (0xe15e50; the original indexes 0xe15e38 + 4 * n).
     // In 64 bits: "-2147483648" - 1 overflowed.
+    std::string_view name = args;
+    while (!name.empty() && std::isspace(static_cast<unsigned char>(name.front()))) name.remove_prefix(1);
+    while (!name.empty() && std::isspace(static_cast<unsigned char>(name.back()))) name.remove_suffix(1);
+    // Hailstone's extension: anything that does not start as a number is the name of one of the player's abilities,
+    // used as the Ability Book's row of that name is (the plugins' use_ability, by name, in any case): a skill first,
+    // then a discipline, then an activated AA. RoF2's /doability takes only a button number, which stays as it was.
+    const bool numeric = name.empty() || std::isdigit(static_cast<unsigned char>(name.front())) ||
+                         name.front() == '-' || name.front() == '+';
+    if (!numeric) {
+        const std::optional<bool> used = use_named ? use_named(name) : std::nullopt;
+        // Found but refused for the moment (not in the world): nothing to say, as its hot button says nothing.
+        if (!used.has_value()) messages_.push_back({"No ability by that name.", 0x111});
+        return;
+    }
     const std::int64_t wide = std::int64_t{core::msvc_atoi(args)} - 1;
     if (wide < 0 || wide >= 10) {
         messages_.push_back({conn.strings().format(13256, {}), 0x111}); // Format: /doability 1 - 10

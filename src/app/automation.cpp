@@ -231,6 +231,9 @@ Automation::Automation(AutomationEnv env) : impl_(std::make_unique<Impl>()) {
     ne.set_hot_button = m.env.set_hot_button;
     ne.hot_bar_page = m.env.hot_bar_page;
     ne.set_hot_bar_page = m.env.set_hot_bar_page;
+    ne.use_ability = m.env.use_ability;
+    ne.ability = m.env.ability;
+    ne.ability_bulk = m.env.ability_bulk;
     ne.dirs = search_dirs(m.env.data_dir / "plugins", m.env.install_dir / "plugins");
     ne.cache_dir = m.env.data_dir / "cache" / "plugins";
     ne.config_dir = m.env.data_dir / "plugins";

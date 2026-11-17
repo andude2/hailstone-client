@@ -688,6 +688,11 @@ float Window::content_scale() const {
     return s > 0.0f ? s : 1.0f;
 }
 
+float Window::refresh_rate() const {
+    const SDL_DisplayMode* m = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window_));
+    return m && m->refresh_rate > 0.0f ? m->refresh_rate : 0.0f;
+}
+
 float Window::pixel_density() const {
     float d = SDL_GetWindowPixelDensity(window_);
     return d > 0.0f ? d : 1.0f;

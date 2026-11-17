@@ -4,6 +4,7 @@
 #include <doctest/doctest.h>
 
 #include <optional>
+#include <thread>
 #include <vector>
 
 #include "app/player_movement.h"
@@ -388,6 +389,39 @@ TEST_CASE("zone ladders: the contact probe answers as the full sweep does for a 
             CHECK(app::remote_collision_type(spawn, {0, y, 3.75f}, {12, y, 3.75f}, full) ==
                   app::remote_collision_type(spawn, {0, y, 3.75f}, {12, y, 3.75f}, contact));
         }
+    }
+}
+
+TEST_CASE("zone ladders: the per-thread contact probe answers as the buffered one, from several threads at once") {
+    game::Spawn spawn;
+    spawn.race = 1;
+    spawn.heights.avatar_height = 3.75f;
+    for (Wall wall : {Wall::Plain, Wall::Ladder, Wall::PassableLadder}) {
+        CAPTURE(static_cast<int>(wall));
+        const game::CollisionMesh mesh = wall_scene(wall);
+        std::vector<app::WorldObjects::DoorHit> doors;
+        app::ZoneMoveWorld buffered(&mesh, nullptr, nullptr);
+        buffered.apply_remote_rules(std::nullopt);
+        buffered.set_contact_probe(&doors);
+        app::ZoneMoveWorld shared(&mesh, nullptr, nullptr);
+        shared.apply_remote_rules(std::nullopt);
+        shared.set_contact_probe_per_thread();
+        const float ys[] = {0.0f, 4.0f, 20.0f};
+        std::int32_t expected[3] = {};
+        for (int i = 0; i < 3; ++i)
+            expected[i] = app::remote_collision_type(spawn, {0, ys[i], 3.75f}, {12, ys[i], 3.75f}, buffered);
+        // One world, probed by four threads together, as WorldState::smooth's workers probe it.
+        std::int32_t got[4][3] = {};
+        std::vector<std::thread> threads;
+        for (int t = 0; t < 4; ++t)
+            threads.emplace_back([&, t] {
+                for (int pass = 0; pass < 50; ++pass)
+                    for (int i = 0; i < 3; ++i)
+                        got[t][i] = app::remote_collision_type(spawn, {0, ys[i], 3.75f}, {12, ys[i], 3.75f}, shared);
+            });
+        for (auto& th : threads) th.join();
+        for (int t = 0; t < 4; ++t)
+            for (int i = 0; i < 3; ++i) CHECK(got[t][i] == expected[i]);
     }
 }
 

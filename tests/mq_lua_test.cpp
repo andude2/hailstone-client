@@ -434,6 +434,31 @@ TEST_CASE("MQ Lua: blocks apply to an installed add-on's entry, its paths and al
     CHECK_FALSE(h.scripts->running("main")); // require cannot reopen the blocked module
 }
 
+TEST_CASE("MQ Lua: a script is found whatever the case of its name, on any file system") {
+    Host h;
+    h.write("Relative/init.lua", "print('relative entry')\n");
+    REQUIRE(h.scripts->run("./Relative", {}));
+    h.pulses(1);
+    CHECK(h.printed_line("relative entry"));
+    h.write("AutoLoot/InIt.LuA", "print('mixed entry')\n");
+    REQUIRE(h.scripts->run("autoloot", {}));
+    h.pulses(1);
+    CHECK(h.printed_line("mixed entry"));
+}
+
+TEST_CASE("MQ Lua: a required script whose folder has capitals starts and is ready") {
+    Host h;
+    const std::string code = "while true do require('mq').delay(10) end\n";
+    h.write("MiXeD/InIt.LuA", code);
+    h.policy.set_ceilings({{plugin::FileKind::Script, sha256(code), plugin::kCapRead, "MiXeD", "owner/mixed"}});
+    h.policy.set(plugin::parse_server_cfg("[scripts]\nplayer = on\n[addons]\nenforce = on\ndefault = deny\n"
+                                          "required = owner/mixed\n"));
+    h.scripts->policy_changed();
+    REQUIRE(h.scripts->running("mixed"));
+    h.pulses(1);
+    CHECK(h.scripts->required_addons_ready());
+}
+
 TEST_CASE("MQ Lua: loaded module rechecks are confined to opted-in add-on rules") {
     Host h(plugin::kCapRead);
     const std::string helper = "return {}\n";

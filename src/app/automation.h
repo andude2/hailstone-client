@@ -27,6 +27,7 @@
 #include "mq/tlo.h"
 #include "plugin/consent.h"
 #include "plugin/hooks.h"
+#include "plugin/ability_bulk.h"
 #include "plugin/policy.h"
 
 namespace hailstone::net { class GameConnection; }
@@ -66,6 +67,8 @@ struct AutomationEnv {
     // The player's autoskill list with each ability's name (hailstone.autoskill_list); null: none.
     std::function<std::vector<std::pair<game::AutoskillRule, std::string>>()> autoskill_list;
     std::function<bool(mq::AbilityKind, std::string_view)> use_ability; // hailstone.use_ability; null: none
+    // The Ability Book's usable entries for get_ability_data_bulk; null: none.
+    std::function<std::vector<plugin::AbilityBulkRow>()> ability_bulk;
     std::function<std::optional<bool>(std::uint32_t spawn)> can_see;
     std::function<std::optional<bool>(const std::array<float, 3>&, const std::array<float, 3>&)> line_of_sight;
 };

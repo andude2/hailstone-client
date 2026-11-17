@@ -3,16 +3,21 @@
 #include <algorithm>
 #include <utility>
 
+#include "mq/lua_mq.h"
 #include "ui/dev_screens.h"
 
 namespace hailstone::app {
 
 bool required_script_found(const std::filesystem::path& data_dir, std::string_view name) {
+    namespace fs = std::filesystem;
+    // As ScriptHost::run asks for it: by its lower-cased name, which finds the folder's own spelling.
     std::string key(name);
     for (char& c : key)
         if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    const fs::path entry = addon_folder(data_dir, AddonKind::Script, name) / "init.lua";
+    const auto found = mq::script_spelled_path(entry.parent_path().parent_path(), fs::path(key) / "init.lua");
     std::error_code ec;
-    return std::filesystem::is_regular_file(addon_folder(data_dir, AddonKind::Script, key) / "init.lua", ec);
+    return found && fs::is_regular_file(*found, ec) && fs::equivalent(*found, entry, ec);
 }
 
 std::vector<AddonRequirementProblem> addon_requirement_problems(
@@ -34,8 +39,8 @@ std::vector<AddonRequirementProblem> addon_requirement_problems(
             } else if (!a.intact) {
                 problem = "Required add-on " + required + " has missing or changed files. Reinstall it in Add-ons.";
             } else if (a.kind == AddonKind::Script && !a.startable) {
-                problem = "Required add-on " + required + " cannot be started here: Hailstone finds scripts by their "
-                          "lower-case name, and its folder scripts/" + a.name + " has capitals.";
+                problem = "Required add-on " + required + " cannot be started here: another folder beside scripts/" +
+                          a.name + " has the same name in other letter case.";
             } else if ((a.kind == AddonKind::Script || a.kind == AddonKind::Plugin) &&
                        (a.caps == 0 || (a.caps & ~allowed_caps))) {
                 problem = "Required add-on " + required + " needs capabilities this server does not allow.";

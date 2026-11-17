@@ -32,9 +32,9 @@ struct AddonRequirementProblem {
 };
 
 // Whether the script loader finds the installed script add-on `name` to start it. ScriptHost looks a script up by
-// its lower-cased name (mq/lua_mq.cpp, ScriptHost::run and Impl::resolve), so on a case-sensitive file system a
-// folder with capitals (scripts/AutoLoot) is not found: admission holds such a requirement unmet rather than
-// passing it and failing to start it.
+// its lower-cased name and finds it whatever its case (mq::script_spelled_path), unless two folders' names differ
+// only in case (scripts/AutoLoot beside scripts/autoloot): then it finds the exact one or neither, and admission holds
+// a requirement whose own folder it would not start unmet rather than passing it and failing to start it.
 bool required_script_found(const std::filesystem::path& data_dir, std::string_view name);
 
 // Unasked native-code consent is handled by the existing prompt after connecting. A refusal blocks joining.

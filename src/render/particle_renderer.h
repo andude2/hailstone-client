@@ -18,6 +18,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -137,7 +138,8 @@ public:
     glm::vec3 texture_color(const std::string& name) const;
 
 private:
-    std::uint32_t texture_slot(const std::string& name) const;
+    // `name` lower-cased into lower_scratch_, valid until the next call: the per-frame lookups make no string.
+    const std::string& lowered(std::string_view name) const;
     void create_pipelines(const std::filesystem::path& shader_dir);
 
     VkContext& vk_;
@@ -150,6 +152,7 @@ private:
     std::vector<Texture> textures_;               // slot 0: white
     std::unordered_map<std::string, std::uint32_t> slots_; // lower-case name -> slot (0 = missing)
     std::unordered_map<std::string, glm::vec3> colors_;    // lower-case name -> texture_color
+    mutable std::string lower_scratch_;                    // lowered's buffer (main thread only)
     std::uint32_t version_ = 1;
     std::array<std::uint32_t, VkContext::kFramesInFlight> set_version_{};
     std::array<Buffer, VkContext::kFramesInFlight> vertices_{};
@@ -174,6 +177,11 @@ private:
     };
     struct Batch { std::uint32_t first, count; int pipeline; };
     std::vector<OrderItem> order_;
+    // The classic path's quads per emitter and each one's first vertex (draw gives the places out before the workers
+    // build the quads).
+    std::vector<std::uint32_t> emitter_quads_, emitter_firsts_;
+    static constexpr std::size_t kQuadGrain = 256;  // modern particles a worker builds at a time
+    static constexpr std::size_t kEmitterGrain = 8; // classic emitters a worker takes at a time
     std::vector<DefinitionLook> looks_;
     std::vector<std::int8_t> lit_by_definition_;
     std::vector<Batch> batches_;

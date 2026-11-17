@@ -1,5 +1,37 @@
 # Particles (EDD, spellsnew.eff, WLD particle clouds)
 
+## Legacy switch particles
+
+Type 53 (`0x35`) switches received through `OP_SpawnDoor` have no model. Their `door_param` selects one of the
+256 old `spells.eff` records (each `0xae8` bytes), and an active state starts that record's third stage. This is the
+separate legacy `DoParticleEffect` path (`0x521ca0`), not the EDD stage player. Waterfall cascades use this mechanism.
+
+`assets/legacy_particles.*` reads the explicit-position slots (selector 1) of that stage and resolves their sprites
+from the player's `gequip.s3d`. Each sprite is a WLD 0x26 -> 0x05 -> 0x04 -> 0x03 chain, including separate bitmap
+frames and the sprite's material. No effect records or textures are supplied by the client. Invalid file lengths,
+unresolved sprites, missing textures and unsafe slots create no fallback particles.
+
+The old stage's nonzero fields override the explicit-position cloud template: gravity, direction, radius, cone
+angle, lifetime, velocity, interval, size and RGB tint. The field called Rate is milliseconds between emissions.
+The native external-cloud converter (`0x10071640`) differs from the static WLD cloud converter: gravity comes from
+the third component of its gravity vector, cone tilt uses `(1 - angle / 512) * 100` along its horizontal direction,
+and size is multiplied by 1.5 (except the native smoke-name exception). The converter retains the sprite's material,
+frame sequence, full-lifetime opacity fade and bottom-up texture orientation. The first stage-2 slot is available at
+every level; the second and third require levels 24 and 39.
+
+`app::SwitchParticles` owns the persistent effects by door id. The normal switch runner starts each active emitter
+once, closes it with the switch, and restarts it on reactivation. Door-list replacement, zoning and disconnect
+retire the old owners. An unchanged duplicate door packet preserves the running simulation. The environment
+particle density controls these effects in both lighting modes, independently of spell effects. Day/night switch
+modes use the received game hour: mode 0 keeps the packet state, mode 1 is active at hours 5 through 18 inclusive,
+and mode 2 at night. The native mode-2 rain-screen override remains unconnected (docs/unknowns.md).
+
+Coverage includes synthetic parser, converter and lifecycle tests, plus installed-asset checks when `EQ_GAME_DIR`
+is set, and a test that the parsed effects are kept until `spells.eff` or `gequip.s3d` changes (each zone-in makes
+the switch manager again; `gequip.wld` is parsed only when a file's path, size or time differs). The waterfall was seen
+live on the stock PEQ test server in the Stonebrunt Mountains (effect 142). Other old effect selectors that need actor
+attachments are not implemented by this switch path.
+
 Code: `src/assets/spell_effects.{h,cpp}` (files), `src/game/particles.{h,cpp}` (stage loop, emitters), `src/render/particle_renderer.{h,cpp}` and `shaders/particle.{vert,frag}` (drawing), `src/app/spell_particles.{h,cpp}` (the game's cues). Tests: `tests/particles_test.cpp`.  Field meanings and the simulation are traced from EQGraphicsDX9.dll (CEmitterDef::CreateEmitter @0x1006c920, the emitter constructor @0x1006c4d0, the per-frame update and quad builder FUN_10072160); OpenEQ's spell effect format notes named the fields first.
 
 ## EDD

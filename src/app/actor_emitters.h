@@ -24,6 +24,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <unordered_map>
@@ -31,12 +32,13 @@
 
 #include <glm/glm.hpp>
 
+#include "core/worker_pool.h"
 #include "game/particles.h"
 #include "game/spawn_heights.h"
 #include "render/particle_renderer.h"
 
 namespace hailstone { class GameDir; }
-namespace hailstone::assets { struct CharacterMesh; }
+namespace hailstone::assets { struct CharacterMesh; struct MeshEmitter; }
 namespace hailstone::assets { struct ObjectAnimation; }
 
 namespace hailstone::app {
@@ -45,9 +47,12 @@ class ActorEmitters {
 public:
     ActorEmitters(render::VkContext& vk, const GameDir& game, const std::filesystem::path& shader_dir,
                   bool scene = true);
-    explicit ActorEmitters(std::vector<assets::EmitterDefinition> definitions, game::HeightTables heights = {});
-    const game::ParticleSystem& simulation() const { return particles_; }
-    const game::ParticleSystem& cloud_simulation() const { return clouds_; }
+    // Without a renderer (the tests). `async`: stepped by simulate_async as the scene's are, not by update.
+    explicit ActorEmitters(std::vector<assets::EmitterDefinition> definitions, game::HeightTables heights = {},
+                           bool async = false);
+    // The simulations as of the last step (waiting for a step still running on a worker).
+    const game::ParticleSystem& simulation() const { finish(); return particles_; }
+    const game::ParticleSystem& cloud_simulation() const { finish(); return clouds_; }
     // The loaded character/equipment archives supply WLD cloud sprites (outside the EDD effect folders).
     // `any_thread`: render::ParticleRenderer::set_texture_reader.
     void set_texture_reader(render::ParticleRenderer::TextureReader reader, bool any_thread = false);
@@ -66,14 +71,23 @@ public:
     using Playing = std::function<bool(std::uint32_t id, std::string_view code, float& time)>;
 
     // Starts the emitters of actors that came or changed their mesh, stops those of actors gone, and advances them
-    // by dt seconds for a viewer at `viewer`; then loads the textures they need (call outside a frame).
+    // by dt seconds for a viewer at `viewer`; then loads the textures they need (call outside a frame). The scene's
+    // (made with `scene`) does not advance them here: simulate_async does, after the frame is recorded.
     void update(float dt, std::span<const Actor> actors, const BoneWorld& bone_world, const glm::vec3& viewer,
                 const Playing& playing = {});
+    // The scene's step, by this frame's dt, on a worker (core::workers; inline without one): each attached emitter's
+    // place is read now from the poses as drawn this frame, then the particles move while the main thread goes on to
+    // the next frame. Every other call waits for the step first. The next frame draws its result, on the same poses
+    // the inline step used (the pose drawn last frame), the particles' time one frame behind. Nothing without `scene`.
+    void simulate_async(float dt, const BoneWorld& bone_world);
     // `modern`: render::ParticleRenderer::draw's.
     void draw(const render::FrameInfo& frame, const glm::mat4& view_proj, const glm::mat4& view, float glow = 1.0f,
               const render::SceneLighting* modern = nullptr);
     void clear();
-    std::size_t emitters() const { return particles_.emitters().size() + clouds_.emitters().size(); }
+    std::size_t emitters() const {
+        finish();
+        return particles_.emitters().size() + clouds_.emitters().size();
+    }
     // ActorParticleDensity (the Options window's combo; the effect manager's +0xac): the actors' emitters are made
     // again with it. eqclient_density() is the ini's, read at the start.
     void set_density(float density);
@@ -81,6 +95,14 @@ public:
     float eqclient_density() const { return eqclient_density_; }
 
 private:
+    struct Live;
+    static glm::mat4 local_matrix(Live& live, const assets::MeshEmitter& me);
+    std::optional<game::EmitterAttachment> attach(std::uint32_t id, std::int32_t i, const BoneWorld& bone_world);
+    static std::uint64_t attachment_key(std::uint32_t actor, std::int32_t point) {
+        return std::uint64_t{actor} << 32 | static_cast<std::uint32_t>(point);
+    }
+    void finish() const; // waits for simulate_async's step
+
     struct Live {
         // The mesh drawn last frame, and which one it is: a mesh freed and another dressed at its address (the
         // spawn dressed again) has another serial (assets::MeshSerial), so its emitters start afresh.
@@ -124,6 +146,10 @@ private:
     bool scene_ = true;
     std::unordered_map<std::uint32_t, Live> live_;
     std::uint32_t next_key_ = 1;
+    bool async_ = false; // the scene's: simulate_async steps the systems
+    // simulate_async's table of the attached emitters' places, by attachment_key; the step reads it alone.
+    std::unordered_map<std::uint64_t, std::optional<game::EmitterAttachment>> attachments_;
+    mutable core::WorkerPool::Task step_; // last: destroyed first, so a running step ends before what it uses goes
 };
 
 } // namespace hailstone::app

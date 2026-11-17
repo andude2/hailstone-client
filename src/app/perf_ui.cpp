@@ -366,8 +366,14 @@ void PerfUi::draw(const PerfInputs& in) {
     if (ImGui::CollapsingHeader("Frame sections (avg of the last 60 frames, and the slowest)") &&
         sections_.frames() > 0) {
         static ImGuiTextFilter filter;
-        filter.Draw("Filter##sections", -1.0f);
-        const auto rows = sections_.rows();
+        const bool filter_changed = filter.Draw("Filter##sections", -1.0f);
+        // Worked out twice a second (kSectionsRefresh), and at once for a new filter.
+        const auto now = Clock::now();
+        if (filter_changed || refresh_due(sections_at_, now, kSectionsRefresh)) {
+            section_rows_ = sections_.rows();
+            std::erase_if(section_rows_, [](const SectionAverages::Row& r) { return !filter.PassFilter(r.name); });
+            sections_at_ = now;
+        }
         constexpr ImGuiTableFlags kScroll = kTable | ImGuiTableFlags_ScrollY;
         if (ImGui::BeginTable("sections", 4, kScroll, ImVec2(0.0f, 260.0f))) {
             ImGui::TableSetupScrollFreeze(0, 1);
@@ -376,20 +382,26 @@ void PerfUi::draw(const PerfInputs& in) {
             ImGui::TableSetupColumn("slowest", ImGuiTableColumnFlags_WidthFixed, 60.0f);
             ImGui::TableSetupColumn("KB/frame", ImGuiTableColumnFlags_WidthFixed, 70.0f);
             ImGui::TableHeadersRow();
-            for (const auto& r : rows) {
-                if (!filter.PassFilter(r.name)) continue;
-                ImGui::TableNextRow();
-                ImGui::TableSetColumnIndex(0);
-                ImGui::TextUnformatted(r.name);
-                ImGui::TableSetColumnIndex(1);
-                ImGui::Text("%.3f", static_cast<double>(r.avg_ms));
-                ImGui::TableSetColumnIndex(2);
-                ImGui::Text("%.3f", static_cast<double>(r.max_ms));
-                ImGui::TableSetColumnIndex(3);
-                if (r.has_bytes) ImGui::Text("%.1f", static_cast<double>(r.avg_bytes) / 1024.0);
+            // Only the rows scrolled into view are drawn.
+            ImGuiListClipper clipper;
+            clipper.Begin(static_cast<int>(section_rows_.size()));
+            while (clipper.Step()) {
+                for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                    const auto& r = section_rows_[static_cast<std::size_t>(i)];
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::TextUnformatted(r.name);
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text("%.3f", static_cast<double>(r.avg_ms));
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::Text("%.3f", static_cast<double>(r.max_ms));
+                    ImGui::TableSetColumnIndex(3);
+                    if (r.has_bytes) ImGui::Text("%.1f", static_cast<double>(r.avg_bytes) / 1024.0);
+                }
             }
             ImGui::EndTable();
         }
+        ImGui::TextDisabled("Updated twice a second.");
         ImGui::TextDisabled("Sections nest: \"Lua UI frame\" holds every \"Lua window\" row and the Lua collector.");
         ImGui::TextDisabled("KB/frame: what the Lua state allocated in it, most of it garbage for the collector.");
     }

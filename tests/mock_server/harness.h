@@ -44,6 +44,9 @@ public:
                                               << "12293 CAMPING\n"
                                               << "12946 off\n"
                                               << "12947 on\n"
+                                              << "13867 Bash\n"  // a skill's name, as CSkillMgr_GetNameToken asks for it
+                                              << "13889 Forage\n"
+                                              << "13893 Kick\n"
                                               << "9342 NO ROOM FOR THE BANDOLIER\n";
     }
     ~EmptyGameDir() {

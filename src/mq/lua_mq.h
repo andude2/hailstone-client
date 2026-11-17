@@ -198,6 +198,11 @@ private:
 
 // The hex SHA-256 of a script file (for the developer window).
 std::optional<std::string> script_file_hash(const std::filesystem::path& file);
+// `relative` (a path inside `root`) as it is spelled on disk: the exact spelling if it exists, otherwise each part's one
+// match that differs only in case (two such matches: nullopt). Rooted paths, ".", "..", ':' and NUL are refused. The
+// caller checks the file's kind, and that it stays inside its folder once links are followed.
+std::optional<std::filesystem::path> script_spelled_path(const std::filesystem::path& root,
+                                                         const std::filesystem::path& relative);
 // A script's name as one folder name (its mq.configDir under config/, its hailstone.server_dir and character_dir under
 // plugin-config/), the same for no two names: bytes no system keeps as written are %XX (lua_mq.cpp).
 std::string script_folder_name(std::string_view name);

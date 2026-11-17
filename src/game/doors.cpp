@@ -266,6 +266,13 @@ bool door_can_be_used(const Door& d) {
     return true;
 }
 
+void update_particle_switch_day_night(Door& d, int hour, bool rain_screen) {
+    if (d.type != 0x35) return;
+    const bool day = hour >= 5 && hour <= 18;
+    if (d.default_door_angle == 1.0f) d.state = day ? kSwitchOpen : kSwitchClosed;
+    else if (d.default_door_angle == 2.0f) d.state = rain_screen || !day ? kSwitchOpen : kSwitchClosed;
+}
+
 namespace {
 
 mechanics::Switch to_switch(const Door& d) {
@@ -289,6 +296,7 @@ mechanics::Switch to_switch(const Door& d) {
     s.pitch = d.door_angle;
     s.swing_speed = d.accel;
     s.swing_stop = d.heading_changed;
+    s.particle = d.particle;
     return s;
 }
 
@@ -302,14 +310,15 @@ void from_switch(const mechanics::Switch& s, Door& d) {
     d.door_angle = s.pitch;
     d.accel = s.swing_speed;
     d.heading_changed = s.swing_stop;
+    d.particle = s.particle;
 }
 
 // ProcessSwitches' callees for the client's doors (game/mechanics/switches.h).
 class DoorFrame final : public mechanics::SwitchQueries {
 public:
     DoorFrame(std::vector<Door*>& doors, std::vector<mechanics::Switch>& switches_, std::uint32_t now,
-              std::int32_t zone, const DoorRiders* riders)
-        : switches(switches_), doors_(doors), now_(now), zone_(zone), riders_(riders) {}
+              std::int32_t zone, const DoorRiders* riders, const DoorParticles* particles)
+        : switches(switches_), doors_(doors), now_(now), zone_(zone), riders_(riders), particles_(particles) {}
     std::vector<mechanics::Switch>& switches;
     std::vector<std::uint8_t> use;
 
@@ -341,11 +350,29 @@ public:
         sync(s, d);
         return r ? 1 : 0;
     }
-    // The day/night switches (type 0x35) and their particles are not drawn by the client.
-    void update_day_night(mechanics::Switch&) override {}
-    bool local_player() override { return false; }
-    bool start_particle(mechanics::Switch&, std::int32_t) override { return false; }
-    void stop_particle(mechanics::Switch&) override {}
+    void update_day_night(mechanics::Switch& s) override {
+        if (!particles_ || !particles_->update_day_night) return;
+        Door& d = door(s);
+        from_switch(s, d);
+        particles_->update_day_night(d);
+        sync(s, d);
+    }
+    bool local_player() override { return particles_ && particles_->local_player && particles_->local_player(); }
+    bool start_particle(mechanics::Switch& s, std::int32_t id) override {
+        if (!particles_ || !particles_->start) return false;
+        Door& d = door(s);
+        from_switch(s, d);
+        d.particle = particles_->start(d, id);
+        sync(s, d);
+        return d.particle;
+    }
+    void stop_particle(mechanics::Switch& s) override {
+        Door& d = door(s);
+        from_switch(s, d);
+        if (particles_ && particles_->stop) particles_->stop(d);
+        d.particle = false;
+        sync(s, d);
+    }
     bool is_floor_switch(const mechanics::Switch& s) override { return game::is_floor_switch(door(s), zone_); }
     std::optional<double> actor_radius(const mechanics::Switch& s) override {
         const Door& d = door(s);
@@ -366,6 +393,7 @@ private:
     static void sync(mechanics::Switch& s, const Door& d) {
         mechanics::Switch t = to_switch(d);
         s.state = t.state;
+        s.default_state = t.default_state;
         s.timestamp = t.timestamp;
         s.position[0] = t.position[0];
         s.position[1] = t.position[1];
@@ -374,18 +402,20 @@ private:
         s.pitch = t.pitch;
         s.swing_speed = t.swing_speed;
         s.swing_stop = t.swing_stop;
+        s.particle = t.particle;
     }
     std::vector<Door*>& doors_;
     std::uint32_t now_;
     std::int32_t zone_;
     const DoorRiders* riders_;
+    const DoorParticles* particles_;
 };
 
 // `scratch.doors` holds the frame's doors; its other lists are filled here.
 std::vector<std::uint8_t> run_frame(SwitchClock::Scratch& scratch, std::uint32_t elapsed_ms, std::uint32_t now_ms,
-                                    std::int32_t zone, const DoorRiders* riders) {
+                                    std::int32_t zone, const DoorRiders* riders, const DoorParticles* particles) {
     std::vector<Door*>& doors = scratch.doors;
-    DoorFrame frame(doors, scratch.switches, now_ms, zone, riders);
+    DoorFrame frame(doors, scratch.switches, now_ms, zone, riders, particles);
     frame.switches.clear();
     for (Door* d : doors) frame.switches.push_back(to_switch(*d));
     scratch.list.clear();
@@ -401,11 +431,11 @@ std::vector<std::uint8_t> process_door(Door& d, float ticks, std::uint32_t now_m
     auto elapsed = static_cast<std::uint32_t>(std::lround(ticks / 0.02f));
     SwitchClock::Scratch scratch;
     scratch.doors.push_back(&d);
-    return run_frame(scratch, elapsed, now_ms, 0, nullptr);
+    return run_frame(scratch, elapsed, now_ms, 0, nullptr, nullptr);
 }
 
 std::vector<std::uint8_t> process_doors(std::vector<Door>& doors, SwitchClock& clock, std::uint32_t now_ms,
-                                        std::int32_t zone, const DoorRiders* riders) {
+                                        std::int32_t zone, const DoorRiders* riders, const DoorParticles* particles) {
     if (!clock.started) {
         clock.started = true;
         clock.last_ms = now_ms;
@@ -414,7 +444,7 @@ std::vector<std::uint8_t> process_doors(std::vector<Door>& doors, SwitchClock& c
     clock.last_ms = now_ms;
     clock.scratch.doors.clear();
     for (auto& d : doors) clock.scratch.doors.push_back(&d);
-    return run_frame(clock.scratch, elapsed, now_ms, zone, riders);
+    return run_frame(clock.scratch, elapsed, now_ms, zone, riders, particles);
 }
 
 glm::mat4 door_transform(const Door& d) {

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <format>
@@ -133,7 +134,8 @@ struct NativePlugins::Impl {
     struct ReadyInputs {
         std::uint32_t policy_serial = 0, approvals_generation = 0;
         std::vector<std::pair<std::string, Sha256Digest>> required;
-        std::vector<std::tuple<std::string, Sha256Digest, std::uint32_t>> loaded;
+        // A loaded plugin's name, file, capabilities and how many of its callbacks have let an exception out.
+        std::vector<std::tuple<std::string, Sha256Digest, std::uint32_t, std::size_t>> loaded;
         std::vector<std::pair<std::string, std::string>> failures;
         std::vector<Sha256Digest> pending;
         std::vector<std::pair<Sha256Digest, bool>> session_answers;
@@ -1923,6 +1925,85 @@ std::uint32_t h_aa_value(void* h, std::int32_t group) {
     return 0;
 }
 
+// HS_ABILITY_* (the SDK's) as the app's mq::AbilityKind; nullopt for a value this client does not know.
+std::optional<mq::AbilityKind> ability_kind(int kind) {
+    switch (kind) {
+    case HS_ABILITY_SKILL: return mq::AbilityKind::Skill;
+    case HS_ABILITY_DISCIPLINE: return mq::AbilityKind::Discipline;
+    case HS_ABILITY_ALT: return mq::AbilityKind::AltAbility;
+    default: return std::nullopt;
+    }
+}
+
+int h_use_ability(void* h, int kind, const char* name) {
+    Loaded& l = Loaded::of(h);
+    if (!acting(l, "use_ability")) return 0;
+    const auto k = ability_kind(kind);
+    if (!k || !name || !*name || !l.host->env.use_ability) return 0;
+    return l.host->env.use_ability(*k, name) ? 1 : 0;
+}
+
+int h_ability_state(void* h, int kind, const char* name, std::int64_t* remaining_ms, std::int64_t* reuse_ms) {
+    Loaded& l = Loaded::of(h);
+    if (!readable(l, "ability_state")) return -1;
+    const auto k = ability_kind(kind);
+    if (!k || !name || !*name || !l.host->env.ability) return -1;
+    const std::optional<mq::AbilityState> st = l.host->env.ability(*k, name);
+    if (!st) return -1;
+    if (remaining_ms) *remaining_ms = st->remaining_ms;
+    if (reuse_ms) *reuse_ms = st->reuse_ms;
+    return st->ready ? 1 : 0;
+}
+
+// HS_ABILITY_* for a row's mq::AbilityKind (the two enums order their values differently).
+int sdk_ability_kind(mq::AbilityKind kind) {
+    switch (kind) {
+    case mq::AbilityKind::Skill: return HS_ABILITY_SKILL;
+    case mq::AbilityKind::Discipline: return HS_ABILITY_DISCIPLINE;
+    case mq::AbilityKind::AltAbility: return HS_ABILITY_ALT;
+    }
+    return HS_ABILITY_SKILL;
+}
+
+int32_t h_get_ability_data_bulk(void* h, unsigned char* out, int32_t out_size) {
+    Loaded& l = Loaded::of(h);
+    // Without a connection (the login screen) the header alone, count and total 0, as the AA and discipline reads; 0
+    // bytes only without 'read'.
+    const bool connected = readable(l, "get_ability_data_bulk") != nullptr;
+    if (!connected && !l.can(kCapRead)) return 0;
+    static_assert(sizeof(HS_BulkListHeader) == HS_BULK_LIST_HEADER_SIZE);
+    static_assert(sizeof(HS_Bulk_AbilityRecord) == HAILSTONE_ABILITY_RECORD_SIZE);
+    static_assert(offsetof(HS_Bulk_AbilityRecord, kind) == 0);
+    static_assert(offsetof(HS_Bulk_AbilityRecord, id) == 4);
+    static_assert(offsetof(HS_Bulk_AbilityRecord, ready) == 8);
+    static_assert(offsetof(HS_Bulk_AbilityRecord, remainingMs) == 12);
+    static_assert(offsetof(HS_Bulk_AbilityRecord, reuseMs) == 20);
+    static_assert(offsetof(HS_Bulk_AbilityRecord, nameSize) == 28);
+    if (!out || out_size < static_cast<int32_t>(sizeof(HS_BulkListHeader))) return 0;
+    const std::vector<AbilityBulkRow> rows =
+        connected && l.host->env.ability_bulk ? l.host->env.ability_bulk() : std::vector<AbilityBulkRow>{};
+    auto* header = reinterpret_cast<HS_BulkListHeader*>(out);
+    header->count = 0;
+    header->total = static_cast<int32_t>(rows.size());
+    int32_t at = static_cast<int32_t>(sizeof(HS_BulkListHeader));
+    for (const AbilityBulkRow& row : rows) {
+        const auto name_size = static_cast<int32_t>(row.name.size());
+        if (name_size > out_size - at - static_cast<int32_t>(sizeof(HS_Bulk_AbilityRecord))) break;
+        auto* rec = reinterpret_cast<HS_Bulk_AbilityRecord*>(out + at);
+        rec->kind = sdk_ability_kind(row.kind);
+        rec->id = row.id;
+        rec->ready = row.ready ? 1 : 0;
+        rec->remainingMs = row.remaining_ms;
+        rec->reuseMs = row.reuse_ms;
+        rec->nameSize = name_size;
+        at += static_cast<int32_t>(sizeof(HS_Bulk_AbilityRecord));
+        if (name_size > 0) std::memcpy(out + at, row.name.data(), static_cast<std::size_t>(name_size));
+        at += name_size;
+        ++header->count;
+    }
+    return at;
+}
+
 std::int32_t h_hot_bar_page(void* h, std::int32_t bar) {
     Loaded& l = Loaded::of(h);
     if (!readable(l, "hot_bar_page") || !l.host->env.hot_bar_page) return -1;
@@ -2129,6 +2210,18 @@ template <typename R, typename... A, R (*F)(void*, A...)> struct MainOnly<F> {
     }
 };
 template <auto F> constexpr auto main_only = &MainOnly<F>::call;
+// The same, for a host function whose 0 means something: off the client's thread it returns `off` instead.
+template <auto F, auto Off> struct MainOnlyOr;
+template <typename R, typename... A, R (*F)(void*, A...), auto Off> struct MainOnlyOr<F, Off> {
+    static R call(void* h, A... a) {
+        if (!on_main_thread()) {
+            off_thread(h);
+            return static_cast<R>(Off);
+        }
+        return F(h, a...);
+    }
+};
+template <auto F, auto Off> constexpr auto main_only_or = &MainOnlyOr<F, Off>::call;
 
 template <typename F> F symbol(SDL_SharedObject* lib, const char* name) {
     return reinterpret_cast<F>(SDL_LoadFunction(lib, name));
@@ -2408,6 +2501,9 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
     p.table.get_avail_disc_data_bulk = main_only<h_get_avail_disc_data_bulk>;
     p.table.get_buff_name_data_bulk = main_only<h_get_buff_name_data_bulk>;
     p.table.get_raid_data_bulk = main_only<h_get_raid_data_bulk>;
+    p.table.use_ability = main_only<h_use_ability>;
+    p.table.ability_state = main_only_or<h_ability_state, -1>; // off the thread "unknown", not 0 ("on reuse")
+    p.table.get_ability_data_bulk = main_only<h_get_ability_data_bulk>;
     p.table.cursor_origin = main_only<h_cursor_origin>;
     p.owner = m.env.hooks->new_guest("plugin:" + name);
 
@@ -2635,7 +2731,7 @@ bool NativePlugins::required_addons_ready(std::string* problem) const {
     const auto& rules = *m.env.policy->current();
     if (!rules.addons.enabled || rules.provisional) return true;
     Impl::ReadyInputs inputs{m.env.policy->serial(), plugin_approvals_generation(), m.required, {}, {}, {}, {}};
-    for (const auto& l : m.loaded) inputs.loaded.emplace_back(l->name, l->hash, l->caps);
+    for (const auto& l : m.loaded) inputs.loaded.emplace_back(l->name, l->hash, l->caps, l->threw_at.size());
     for (const auto& f : m.failures) inputs.failures.emplace_back(f.name, f.error);
     for (const auto& p : m.pending) inputs.pending.push_back(p.sha256);
     for (const auto& a : m.session_answers) inputs.session_answers.emplace_back(a.sha256, a.allowed);
@@ -2665,6 +2761,10 @@ bool NativePlugins::check_required_addons(std::string* problem) const {
         const Loaded* l = m.find(name);
         if (l && l->hash != hash)
             return fail("Required add-on " + name + " is shadowed by a different plugin");
+        // One that let an exception out stays loaded (its other callbacks may still work) but is not counted as
+        // running as the server requires: the player is told, and plays on (ClientApp::addon_world_allowed).
+        if (l && l->hash == hash && !l->threw_at.empty())
+            return fail("Required add-on " + name + " failed with an error in " + l->threw_at.front());
         const Consent consent = m.consent_for(hash);
         if (consent == Consent::Denied) return fail("Required add-on " + name + " was not approved");
         if (consent == Consent::Unasked) {

@@ -97,7 +97,7 @@ bool ClientApp::set_video_option(std::string_view name, int value) {
         config_.set("display.vsync", kVsyncModes[v]);
         vk_.set_vsync(static_cast<render::VkContext::Vsync>(v));
     } else if (name == "max_fps") {
-        opts_.max_fps = value <= 0 ? 0 : std::clamp(value, 10, 1000);
+        opts_.max_fps = max_fps_setting(value); // kMaxFpsAuto: just under the display's refresh rate
         config_.set_int("display.max_fps", opts_.max_fps);
     } else if (name == "background_fps") {
         background_fps_ = background_fps_setting(value);
@@ -135,7 +135,9 @@ bool ClientApp::set_video_option(std::string_view name, int value) {
 void ClientApp::apply_frame_options() {
     vk_.set_vsync(static_cast<render::VkContext::Vsync>(
         index_of(kVsyncModes, 3, config_.get_string("display.vsync", "on"), 1)));
-    opts_.max_fps = max_fps_arg_ ? *max_fps_arg_ : std::max(0, config_.get_int("display.max_fps", 0)); // --max-fps first
+    // --max-fps first; -1 (kMaxFpsAuto) is auto.
+    const int max_fps = max_fps_arg_ ? *max_fps_arg_ : config_.get_int("display.max_fps", 0);
+    opts_.max_fps = max_fps == kMaxFpsAuto ? kMaxFpsAuto : std::max(0, max_fps); // as read before auto came
     background_fps_ = background_fps_setting(config_.get_int("display.background_fps", 0));
     float fov = config_float("display.fov", 0.0f);
     (iso() ? iso_saved_fov_ : camera_.fov_units) = fov > 0.0f ? fov : game::kStockFovUnits;

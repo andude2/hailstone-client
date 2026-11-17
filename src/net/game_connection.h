@@ -22,6 +22,7 @@
 #include <unordered_map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -521,6 +522,7 @@ public:
     std::uint16_t zone_id() const { return new_zone_ ? new_zone_->zone_id : 0; }
     // The spawns ProcessSwitches checks for a moving floor switch's riders (the app's player); null: none.
     void set_door_riders(const game::DoorRiders* riders) { door_riders_ = riders; }
+    void set_door_particles(const game::DoorParticles* particles) { door_particles_ = particles; }
     // The instance the player is in: the player profile's when it is for this zone. Stock EQEmu fills only
     // OP_NewZone's zone id (zone.cpp: newzone_data.zone_instance is never set), so OP_NewZone's instance is 0 in an
     // instance, and a request for the player's own instanced zone (a summon, a #goto) would look like another zone
@@ -2046,6 +2048,10 @@ public:
     std::vector<const game::AltAbility*> aa_list(std::int32_t type, const game::AAFilter& filter) const;
     // AltAdvManager::IsAbilityReady (SPA 264 reduces the reuse time).
     game::AAReadiness aa_readiness(std::uint32_t rank_id) const;
+    // AltAdvManager::IsAbilityReady for many owned ranks at once: aa_readiness builds the character the SPA 264
+    // reduction needs for every rank; this builds it once for the call. The answers are in rank_ids' order; an id the
+    // AA table does not hold reads as AAReadiness{} (its defaults).
+    std::vector<game::AAReadiness> aa_readiness_bulk(std::span<const std::uint32_t> rank_ids) const;
     // The item recast timers, in Util::FastTime seconds (time(0),
     // as the server's ItemSerializationHeader last_cast_time): the item's own (ItemBase +0x34, net::Item
     // last_cast_time) and the profile's 100 by recast type (PcBase +0x6a5c, PcBase_Get/SetItemRecastTimer).
@@ -2817,6 +2823,7 @@ private:
     // Sends an OP_ZoneChange and waits for its answer (RequestZoneChangeStatus).
     void start_zone_change(const ZoneChange& request);
     const game::DoorRiders* door_riders_ = nullptr;
+    const game::DoorParticles* door_particles_ = nullptr;
     // Riding (net/game_connection_mounts.cpp).
     game::MountQueries* mount_queries_ = nullptr;
     game::MountQueries& mount_queries();

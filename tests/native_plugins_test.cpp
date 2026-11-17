@@ -15,6 +15,7 @@
 #include "plugin/native_plugins.h"
 #include "mq_test_world.h"
 #include "plugin_consent_helper.h"
+#include "app/addon_requirements.h"
 #include "app/web_service.h"
 #include "plugin/web_access.h"
 #include "web/browser_host.h"
@@ -35,6 +36,9 @@ struct Host {
     mq::Registry reg;
     mq::Context ctx;
     std::vector<std::string> printed, sent;
+    std::vector<std::pair<int, std::string>> used, checked; // use_ability, ability_state (kind and name)
+    bool ability_ready = true;
+    std::vector<plugin::AbilityBulkRow> ability_rows; // get_ability_data_bulk's rows
     std::vector<std::pair<plugin::Stream, net::AppPacket>> packets;
     std::unique_ptr<mq::Commands> commands;
     std::unique_ptr<plugin::NativePlugins> plugins;
@@ -70,6 +74,20 @@ struct Host {
         ne.config_dir = world.dir / "config";
         ne.web = web;
         ne.connection = [this] { return world.conn.get(); };
+        ne.use_ability = [this](mq::AbilityKind kind, std::string_view name) {
+            used.emplace_back(static_cast<int>(kind), std::string(name));
+            return true;
+        };
+        ne.ability = [this](mq::AbilityKind kind, std::string_view name) -> std::optional<mq::AbilityState> {
+            checked.emplace_back(static_cast<int>(kind), std::string(name));
+            mq::AbilityState st;
+            st.name = std::string(name);
+            st.ready = ability_ready;
+            st.remaining_ms = ability_ready ? 0 : 1500;
+            st.reuse_ms = 6000;
+            return st;
+        };
+        ne.ability_bulk = [this] { return ability_rows; };
         plugins = std::make_unique<plugin::NativePlugins>(ne);
     }
     ~Host() {
@@ -625,6 +643,47 @@ TEST_CASE("native plugins: a required plugin initialization failure prevents rea
     CHECK(problem.find("InitializePlugin failed") != std::string::npos);
 }
 
+// A required plugin whose callback let an exception out is a requirement not met, worked out again at once.
+TEST_CASE("native plugins: a required plugin that throws in the world is a warning, and play goes on") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    const fs::path profile = h.world.dir / "servers" / "required";
+    fs::create_directories(profile / "plugins");
+    h.plugins->set_server_dir(profile / "plugins");
+    auto rules = plugin::parse_server_cfg("[plugins]\nplayer = on\n[addons]\nenforce = on\nrequired = owner/probe\n");
+    h.policy.set_ceilings({{plugin::FileKind::Plugin, h.hash(), plugin::kCapAll, "HostProbe", "owner/probe"}});
+    h.policy.set(rules);
+    h.plugins->policy_changed({});
+    REQUIRE(h.plugins->consent());
+    h.plugins->answer_consent(true);
+    REQUIRE(h.plugins->loaded("HostProbe"));
+
+    // The gate as ClientApp::addon_world_allowed drives it.
+    app::AddonAdmission admission;
+    auto frame = [&] {
+        return admission.update(&rules, 1, true, [] { return std::string(); }, [&]() -> std::optional<std::string> {
+            std::string problem;
+            if (h.plugins->required_addons_ready(&problem)) return std::string();
+            if (problem.empty()) return std::nullopt;
+            return problem;
+        });
+    };
+    CHECK(frame().step == app::AddonAdmission::Step::Start);
+    REQUIRE(frame().step == app::AddonAdmission::Step::Play);
+    REQUIRE(admission.admitted());
+    CHECK(frame().warning.empty()); // readiness worked out, and kept
+
+    h.run("/probethrow"); // the command's callback lets an exception out
+    std::string problem;
+    CHECK_FALSE(h.plugins->required_addons_ready(&problem)); // seen although nothing else changed
+    CHECK(problem == "Required add-on hostprobe failed with an error in a command");
+    auto r = frame();
+    CHECK(r.step == app::AddonAdmission::Step::Play); // never a disconnect or a hold
+    CHECK(r.warning == problem);
+    CHECK(frame().warning.empty()); // said once
+    CHECK(h.plugins->loaded("HostProbe"));
+    CHECK(admission.admitted());
+}
+
 TEST_CASE("native plugins: a binary in the plugin's own folder under plugins/") {
     Host h(true);
     auto all = h.plugins->list();
@@ -689,6 +748,10 @@ TEST_CASE("native plugins: host functions from another thread do nothing; the ca
     REQUIRE(h.plugins->load("HostProbe"));
     h.run("/probethread");
     CHECK(h.printed_line("[Probe] thread: add_command 0, caps 0, imgui null"));
+    // ability_state's 0 means "on reuse": off the client's thread it is -1 ("unknown"), the times untouched, and the
+    // host's state is never asked.
+    CHECK(h.printed_line("[Probe] thread: ability_state -1, -2 of -2 ms"));
+    CHECK(h.checked.empty());
     CHECK_FALSE(h.printed_line("[Probe] written from the thread"));
     CHECK_FALSE(h.printed_line("from the thread"));
     CHECK_FALSE(h.hooks.has_command("/fromthread"));
@@ -1445,4 +1508,97 @@ TEST_CASE("native plugins: the buff bulk reads need 'read'") {
     CHECK(h.printed_line("[Probe] aas 0 bytes"));
     h.run("/probediscs 2048");
     CHECK(h.printed_line("[Probe] discs 0 bytes"));
+}
+
+TEST_CASE("native plugins: use_ability and ability_state, by kind and name, held to 'read' and 'actions'") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll);
+    REQUIRE(h.plugins->load("HostProbe"));
+    h.run("/probeability 0 Kick"); // HS_ABILITY_SKILL
+    REQUIRE(h.used.size() == 1);
+    CHECK(h.used[0].first == static_cast<int>(mq::AbilityKind::Skill));
+    CHECK(h.used[0].second == "Kick");
+    REQUIRE(h.checked.size() == 1);
+    CHECK(h.checked[0].first == static_cast<int>(mq::AbilityKind::Skill));
+    CHECK(h.checked[0].second == "Kick");
+    CHECK(h.printed_line("[Probe] ability 0 Kick: state 1, 0 of 6000 ms, use 1"));
+
+    // On reuse: ability_state says so, with the remaining time; use_ability is still the plugin's to try.
+    h.ability_ready = false;
+    h.run("/probeability 1 Guard"); // HS_ABILITY_DISCIPLINE
+    REQUIRE(h.used.size() == 2);
+    CHECK(h.used[1].first == static_cast<int>(mq::AbilityKind::Discipline));
+    CHECK(h.used[1].second == "Guard");
+    CHECK(h.printed_line("[Probe] ability 1 Guard: state 0, 1500 of 6000 ms, use 1"));
+
+    Host denied(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    denied.approve(plugin::kCapAll & ~(plugin::kCapRead | plugin::kCapActions));
+    REQUIRE(denied.plugins->load("HostProbe"));
+    denied.run("/probeability 2 Innate");
+    CHECK(denied.printed_line("[Plugin] HostProbe: ability_state needs the server's 'read' permission"));
+    CHECK(denied.printed_line("[Plugin] HostProbe: use_ability needs the server's 'actions' permission"));
+    CHECK(denied.used.empty());
+    CHECK(denied.checked.empty());
+}
+
+TEST_CASE("native plugins: get_ability_data_bulk, its layout, truncation and the read gate") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll);
+    h.ability_rows = {
+        {mq::AbilityKind::Skill, 30, true, 0, 6000, "Kick"},
+        {mq::AbilityKind::Discipline, 4498, false, 1500, 60000, "Test Discipline"},
+        {mq::AbilityKind::AltAbility, 5, true, 0, 6000, "Innate Strength"},
+    };
+    REQUIRE(h.plugins->load("HostProbe"));
+    h.run("/probeabilities");
+    CHECK(h.printed_line("[Probe] ability 0: kind 0, id 30, ready 1, 0 of 6000 ms, name Kick"));
+    CHECK(h.printed_line("[Probe] ability 1: kind 1, id 4498, ready 0, 1500 of 60000 ms, name Test Discipline"));
+    CHECK(h.printed_line("[Probe] ability 2: kind 2, id 5, ready 1, 0 of 6000 ms, name Innate Strength"));
+    CHECK(h.printed_line("[Probe] abilities count 3, total 3, 138 bytes, 3 records, 0 bytes left"));
+
+    // Whole records only: the third needs 47 bytes, 100 leaves 9 after the first two.
+    h.printed.clear();
+    h.run("/probeabilities 100");
+    CHECK(h.printed_line("[Probe] ability 0: kind 0, id 30, ready 1, 0 of 6000 ms, name Kick"));
+    CHECK(h.printed_line("[Probe] ability 1: kind 1, id 4498, ready 0, 1500 of 60000 ms, name Test Discipline"));
+    CHECK_FALSE(h.printed_line("[Probe] ability 2: kind 2, id 5, ready 1, 0 of 6000 ms, name Innate Strength"));
+    CHECK(h.printed_line("[Probe] abilities count 2, total 3, 91 bytes, 2 records, 0 bytes left"));
+    CHECK(h.printed_line("[Probe] abilities past the end 0"));
+    h.printed.clear();
+    h.run("/probeabilities 8"); // the header alone
+    CHECK(h.printed_line("[Probe] abilities count 0, total 3, 8 bytes, 0 records, 0 bytes left"));
+    h.printed.clear();
+    h.run("/probeabilities 7"); // below the header
+    CHECK(h.printed_line("[Probe] abilities 0 bytes"));
+    CHECK(h.printed_line("[Probe] abilities past the end 0"));
+
+    // Nothing to list: the header alone, count 0 and total 0.
+    Host empty(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    empty.approve(plugin::kCapAll);
+    REQUIRE(empty.plugins->load("HostProbe"));
+    empty.run("/probeabilities");
+    CHECK(empty.printed_line("[Probe] abilities count 0, total 0, 8 bytes, 0 records, 0 bytes left"));
+
+    // Without read: 0 bytes, and the denial said once.
+    Host denied(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    denied.approve(plugin::kCapAll & ~plugin::kCapRead);
+    REQUIRE(denied.plugins->load("HostProbe"));
+    denied.run("/probeabilities");
+    CHECK(denied.printed_line("[Probe] abilities 0 bytes"));
+    CHECK(denied.printed_line("[Plugin] HostProbe: get_ability_data_bulk needs the server's 'read' permission"));
+
+    // No game connection at all (the login screen): the header alone, count and total 0, as get_avail_aa_data_bulk
+    // and get_avail_disc_data_bulk; the rows are not asked for.
+    Host disconnected(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    disconnected.approve(plugin::kCapAll);
+    disconnected.ability_rows = {{mq::AbilityKind::Skill, 30, true, 0, 6000, "Kick"}};
+    REQUIRE(disconnected.plugins->load("HostProbe"));
+    auto conn = std::move(disconnected.world.conn);
+    disconnected.run("/probeabilities");
+    CHECK(disconnected.printed_line("[Probe] abilities count 0, total 0, 8 bytes, 0 records, 0 bytes left"));
+    disconnected.printed.clear();
+    disconnected.run("/probeabilities 7"); // below the header: nothing written
+    CHECK(disconnected.printed_line("[Probe] abilities 0 bytes"));
+    CHECK(disconnected.printed_line("[Probe] abilities past the end 0"));
+    disconnected.world.conn = std::move(conn);
 }

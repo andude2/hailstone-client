@@ -124,6 +124,7 @@ add_library(hailstone_engine STATIC
   src/core/sha1.cpp
   src/core/sha256.cpp
   src/core/shared_file_cache.cpp
+  src/core/worker_pool.cpp
   src/plugin/hooks.cpp
   src/plugin/consent.cpp
   src/plugin/policy.cpp
@@ -299,6 +300,7 @@ add_library(hailstone_engine STATIC
   src/platform/message_box.cpp
   src/platform/crash_log.cpp
   src/platform/local_time.cpp
+  src/platform/precise_sleep.cpp
   src/platform/private_file.cpp
   src/platform/durable_file.cpp
   src/platform/shared_file.cpp
@@ -377,6 +379,7 @@ add_library(hailstone_engine STATIC
   src/assets/sky_weather.cpp
   src/assets/spell_effects.cpp
   src/assets/wld_particles.cpp
+  src/assets/legacy_particles.cpp
   src/assets/zone_fires.cpp
   src/platform/window.cpp
   src/platform/mouse_capture.cpp
@@ -405,6 +408,7 @@ add_library(hailstone_engine STATIC
   src/render/frame_gen.cpp
   src/render/fsr3_upscaler.cpp
   src/render/particle_renderer.cpp
+  src/render/scene_recorder.cpp
   src/render/fire_renderer.cpp
   src/render/flora_renderer.cpp
   src/render/spell_fx_renderer.cpp
@@ -648,6 +652,7 @@ add_library(hailstone_engine STATIC
   src/app/spell_particles.cpp
   src/app/spell_bolts.cpp
   src/app/zone_particles.cpp
+  src/app/switch_particles.cpp
   src/audio/codec_impl.cpp
   src/platform/audio_device.cpp
 )
@@ -1080,6 +1085,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/mq_combat_test.cpp
     tests/automation_test.cpp
     tests/mq_lua_test.cpp
+    tests/mq_script_path_test.cpp
     tests/mq_event_pattern_test.cpp
     tests/lua_social_test.cpp
     tests/code_syntax_test.cpp
@@ -1108,6 +1114,9 @@ if(HAILSTONE_BUILD_TESTS)
     tests/zone_settle_test.cpp
     tests/work_budget_test.cpp
     tests/latest_jobs_test.cpp
+    tests/worker_pool_test.cpp
+    tests/precise_sleep_test.cpp
+    tests/scene_lanes_test.cpp
     tests/animation_track_test.cpp
     tests/character_memory_test.cpp
     tests/character_share_test.cpp
@@ -1304,6 +1313,8 @@ if(HAILSTONE_BUILD_TESTS)
     tests/particles_test.cpp
     tests/spell_effect_timers_test.cpp
     tests/wld_particles_test.cpp
+    tests/legacy_particles_test.cpp
+    tests/switch_particles_test.cpp
     tests/wld_detail_test.cpp
     tests/movement_test.cpp
     tests/movement_vectors_test.cpp

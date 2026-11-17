@@ -40,14 +40,16 @@ public:
         if (mesh_ && s.valid()) {
             const std::int32_t tri = mesh_->sweep_sphere_hit(s);
             out.ladder_hit = tri >= 0 && (mesh_->triangles()[static_cast<std::size_t>(tri)].flags & game::kTriangleLadder);
-            if (contact_doors_) {
+            if (contact_doors_ || contact_per_thread_) {
                 // The contact probe: a door hit only matters after a ladder (it would set the switch type over the
                 // ladder's), so the doors are swept only then, into the probe's own buffer.
                 if (passable_ladders_ && !out.ladder_hit) out.ladder_hit = mesh_->touches_passable_ladder(s);
                 if (out.ladder_hit && objects_) {
-                    contact_doors_->clear();
-                    out.door_hit = objects_->sweep_sphere(s, contact_doors_, pass_doors_.empty() ? nullptr : &pass_doors_);
-                    for (const auto& h : *contact_doors_) out.door_hits.push_back({h.id, h.type});
+                    thread_local std::vector<WorldObjects::DoorHit> own; // set_contact_probe_per_thread's
+                    std::vector<WorldObjects::DoorHit>& doors = contact_doors_ ? *contact_doors_ : own;
+                    doors.clear();
+                    out.door_hit = objects_->sweep_sphere(s, &doors, pass_doors_.empty() ? nullptr : &pass_doors_);
+                    for (const auto& h : doors) out.door_hits.push_back({h.id, h.type});
                 }
                 out.out = game::sweep_output(s);
                 out.collided = s.collided;
@@ -159,7 +161,16 @@ public:
     // Only a ladder gives a contact the animation shows (CollidingType 6), and a door hit after it overrides it
     // with the switch type (3), so the doors are swept only after a ladder hit, into `door_buffer` (kept by the
     // caller across probes, so a probe does not allocate); the vehicles and NPC bodies are not swept. Null: off.
-    void set_contact_probe(std::vector<WorldObjects::DoorHit>* door_buffer) { contact_doors_ = door_buffer; }
+    void set_contact_probe(std::vector<WorldObjects::DoorHit>* door_buffer) {
+        contact_doors_ = door_buffer;
+        contact_per_thread_ = false;
+    }
+    // The contact probe with a buffer of each calling thread's own, so one world serves probes run on several
+    // threads at once (WorldState::smooth steps the spawns on the worker threads); sweep() is then safe to call so.
+    void set_contact_probe_per_thread() {
+        contact_doors_ = nullptr;
+        contact_per_thread_ = true;
+    }
     // The vehicle spawns' models as they were drawn (PlayerClient_IsVehicleRace), for the floor test and the walls;
     // `standing_on` is the vehicle the player stands on, which wins a tie between overlapping decks (game/boats.h).
     using Vehicle = game::VehicleHull;
@@ -197,6 +208,7 @@ private:
     bool passable_ladders_ = false;
     std::vector<std::uint8_t> pass_doors_;
     std::vector<WorldObjects::DoorHit>* contact_doors_ = nullptr;
+    bool contact_per_thread_ = false;
 };
 
 } // namespace hailstone::app

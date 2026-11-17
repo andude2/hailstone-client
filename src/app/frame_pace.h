@@ -21,6 +21,28 @@ struct FramePace {
     bool draw = true; // this frame is drawn
 };
 
+// display.max_fps (and --max-fps auto): a cap just under the display's refresh rate (auto_frame_cap). Hailstone's own.
+inline constexpr int kMaxFpsAuto = -1;
+
+// The cap kMaxFpsAuto takes for a display refreshing `refresh_hz` times a second: refresh - refresh^2 / 3600, rounded
+// down (59 at 60 Hz, 116 at 120, 138 at 144, 224 at 240). On a variable-refresh display that keeps every frame inside
+// its range, a little longer than its shortest refresh, so vsync never takes over and its queue never fills; on a fixed
+// one it is a frame rate that vsync shows with an occasional repeated frame. 0 (no cap) when the refresh is unknown.
+inline int auto_frame_cap(float refresh_hz) {
+    if (!(refresh_hz >= 10.0f) || !(refresh_hz <= 1000.0f)) return 0;
+    return std::max(10, static_cast<int>(refresh_hz - refresh_hz * refresh_hz / 3600.0f));
+}
+
+// display.max_fps as it is kept: 0 (none), kMaxFpsAuto, or 10 .. 1000.
+inline int max_fps_setting(int value) {
+    return value == kMaxFpsAuto ? kMaxFpsAuto : value <= 0 ? 0 : std::clamp(value, 10, 1000);
+}
+
+// The cap this frame: display.max_fps, or under kMaxFpsAuto the cap for the window's display as it is now.
+inline int effective_max_fps(int max_fps, float refresh_hz) {
+    return max_fps == kMaxFpsAuto ? auto_frame_cap(refresh_hz) : std::max(max_fps, 0);
+}
+
 // display.background_fps as it is kept: 0 (as max_fps), kBackgroundNoDraw, or 1 .. 1000.
 inline int background_fps_setting(int value) {
     return value < 0 ? kBackgroundNoDraw : value == 0 ? 0 : std::min(value, 1000);
@@ -49,6 +71,16 @@ inline FramePace frame_pace(int max_fps, int background_fps, bool focused, std::
         // Half a tick early: the loop's ticks land on the interval or just after it, not a whole tick late.
         pace.draw = since_drawn >= std::chrono::microseconds(1000000 / background_fps - 500000 / pace.cap);
     return pace;
+}
+
+// The moment the next frame may start under a cap of one frame per `period`: one period after the last such moment,
+// or `now` when that has passed (a frame that ran long). Timed from the deadline, not from when the wait ended, so the
+// wait's own lateness is not added every frame; a late frame is not made up by running the next ones back to back,
+// which sent the GPU frames faster than it presented them and made a later frame wait (worse 1 % lows).
+template <class TimePoint, class Duration>
+TimePoint next_frame_deadline(TimePoint last_deadline, TimePoint now, Duration period) {
+    const TimePoint next = last_deadline + period;
+    return next < now ? now : next;
 }
 
 } // namespace hailstone::app

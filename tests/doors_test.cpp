@@ -445,6 +445,156 @@ TEST_CASE("process_doors skips a frame that came more than 15 ticks late") {
     CHECK(doors[0].heading == 8.0f);
 }
 
+TEST_CASE("particle switches keep one effect while active and stop before reactivation") {
+    game::DoorSpawn spawn;
+    spawn.id = 7;
+    spawn.type = 53;
+    spawn.state = spawn.default_state = 1;
+    spawn.param = 42;
+    spawn.y = 10.0f;
+    spawn.x = -20.0f;
+    spawn.z = 30.0f;
+    std::vector<game::Door> doors{game::make_door(spawn, 0)};
+    game::SwitchClock clock;
+    int starts = 0, stops = 0;
+    bool player = true;
+    game::DoorParticles particles;
+    particles.local_player = [&] { return player; };
+    particles.start = [&](game::Door& d, std::int32_t id) {
+        CHECK(d.id == 7);
+        CHECK(d.world_position() == glm::vec3(10.0f, -20.0f, 30.0f));
+        CHECK_FALSE(d.particle);
+        CHECK(id == 42);
+        ++starts;
+        return true;
+    };
+    particles.stop = [&](game::Door& d) {
+        CHECK(d.particle);
+        ++stops;
+    };
+    auto tick = [&](std::uint32_t now) { game::process_doors(doors, clock, now, 0, nullptr, &particles); };
+
+    tick(100);
+    CHECK(doors[0].state == 1);
+    CHECK(doors[0].default_state == 1);
+    CHECK(doors[0].particle);
+    tick(150);
+    tick(200);
+    CHECK(starts == 1);
+    CHECK(stops == 0);
+
+    // Shutdown does not need the player who was required to create the effect.
+    player = false;
+    doors[0].state = doors[0].default_state = 0;
+    tick(250);
+    CHECK_FALSE(doors[0].particle);
+    tick(300);
+    CHECK(stops == 1);
+    player = true;
+    doors[0].state = doors[0].default_state = 1;
+    tick(350);
+    CHECK(doors[0].particle);
+    CHECK(starts == 2);
+
+    // A new packet replaces the running state; the app retires the old effect by its identity.
+    CHECK_FALSE(game::make_door(spawn, 400).particle);
+}
+
+TEST_CASE("particle switches require a local player and a valid legacy effect index") {
+    game::DoorSpawn spawn;
+    spawn.type = 53;
+    spawn.state = spawn.default_state = 1;
+    spawn.param = 42;
+    std::vector<game::Door> doors{game::make_door(spawn, 0)};
+    game::SwitchClock clock;
+    int starts = 0;
+    bool player = false, succeeds = false;
+    game::DoorParticles particles;
+    particles.local_player = [&] { return player; };
+    particles.start = [&](game::Door&, std::int32_t) {
+        ++starts;
+        return succeeds;
+    };
+    std::uint32_t now = 0;
+    auto tick = [&] { game::process_doors(doors, clock, now += 50, 0, nullptr, &particles); };
+
+    tick();
+    CHECK(starts == 0);
+    CHECK_FALSE(doors[0].particle);
+    player = true;
+    for (std::int32_t invalid : {-1, 0, 256}) {
+        doors[0].param = invalid;
+        tick();
+        CHECK_FALSE(doors[0].particle);
+    }
+    CHECK(starts == 0);
+    doors[0].param = 255;
+    tick();
+    CHECK(starts == 1);
+    CHECK_FALSE(doors[0].particle);
+    succeeds = true;
+    tick();
+    CHECK(starts == 2);
+    CHECK(doors[0].particle);
+    tick();
+    CHECK(starts == 2);
+}
+
+TEST_CASE("particle switch day and night callbacks run before the active state is tested") {
+    game::DoorSpawn spawn;
+    spawn.type = 53;
+    spawn.param = 1;
+    std::vector<game::Door> doors{game::make_door(spawn, 0)};
+    game::SwitchClock clock;
+    int starts = 0, stops = 0;
+    bool active = true;
+    game::DoorParticles particles;
+    particles.local_player = [] { return true; };
+    particles.update_day_night = [&](game::Door& d) { d.state = d.default_state = active ? 1 : 0; };
+    particles.start = [&](game::Door&, std::int32_t) { ++starts; return true; };
+    particles.stop = [&](game::Door&) { ++stops; };
+
+    game::process_doors(doors, clock, 100, 0, nullptr, &particles);
+    CHECK(starts == 1);
+    CHECK(doors[0].particle);
+    active = false;
+    game::process_doors(doors, clock, 150, 0, nullptr, &particles);
+    CHECK(stops == 1);
+    CHECK_FALSE(doors[0].particle);
+}
+
+TEST_CASE("particle switch day and night modes use native hours and preserve packet-controlled states") {
+    game::Door d;
+    d.type = 53;
+    d.default_state = game::kSwitchOpen;
+    d.timestamp = 123;
+    for (float mode : {0.0f, 3.0f}) {
+        d.default_door_angle = mode;
+        d.state = game::kSwitchOpening;
+        game::update_particle_switch_day_night(d, 12, true);
+        CHECK(d.state == game::kSwitchOpening);
+    }
+    for (const auto& [hour, day] : {std::pair{1, false}, std::pair{4, false}, std::pair{5, true},
+                                  std::pair{18, true}, std::pair{19, false}, std::pair{24, false}}) {
+        d.default_door_angle = 1.0f;
+        game::update_particle_switch_day_night(d, hour);
+        CHECK(d.state == (day ? game::kSwitchOpen : game::kSwitchClosed));
+        game::update_particle_switch_day_night(d, hour, true);
+        CHECK(d.state == (day ? game::kSwitchOpen : game::kSwitchClosed));
+        d.default_door_angle = 2.0f;
+        game::update_particle_switch_day_night(d, hour);
+        CHECK(d.state == (day ? game::kSwitchClosed : game::kSwitchOpen));
+        game::update_particle_switch_day_night(d, hour, true);
+        CHECK(d.state == game::kSwitchOpen);
+    }
+    CHECK(d.default_state == game::kSwitchOpen);
+    CHECK(d.timestamp == 123);
+    d.type = 0;
+    d.state = game::kSwitchClosed;
+    game::update_particle_switch_day_night(d, 1, true);
+    CHECK(d.state == game::kSwitchClosed);
+}
+
 TEST_CASE("a type 0x28 door off its default state is clicked back once per repop period, at any frame rate") {
     game::DoorSpawn s;
     s.type = 0x28;

@@ -1,5 +1,7 @@
 #include <doctest/doctest.h>
 
+#include <chrono>
+
 #include "app/perf_ui.h"
 #include "core/frame_sections.h"
 
@@ -150,4 +152,16 @@ TEST_CASE("perf: frame generation's rates count every image displayed against th
     // Nothing yet, or histories that do not match: no rates.
     CHECK(frame_rates({}, {}).rendered_fps == 0.0f);
     CHECK(frame_rates({10.0f}, {}).displayed_fps == 0.0f);
+}
+
+TEST_CASE("perf: the frame sections table is worked out again twice a second") {
+    using T = std::chrono::steady_clock::time_point;
+    using std::chrono::milliseconds;
+    const T never{};
+    const T at = never + milliseconds(10000);
+    CHECK(refresh_due(never, at, kSectionsRefresh)); // never worked out: at once
+    CHECK_FALSE(refresh_due(at, at, kSectionsRefresh));
+    CHECK_FALSE(refresh_due(at, at + milliseconds(499), kSectionsRefresh));
+    CHECK(refresh_due(at, at + milliseconds(500), kSectionsRefresh));
+    CHECK(refresh_due(at, at + milliseconds(5000), kSectionsRefresh)); // the header was closed a while
 }

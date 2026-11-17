@@ -11,6 +11,7 @@
 #include "assets/texture_overrides.h"
 #include "core/game_dir.h"
 #include "core/log.h"
+#include "core/worker_pool.h"
 #include "game/particles.h"
 #include "game/sine_table.h"
 #include "render/culling.h"
@@ -56,19 +57,17 @@ float light_pool(float d2, float r) {
 
 // Additive smoke (the Luclin chimneys' CSMOKE.DDS): light the smoke scatters, not light of its own; the modern
 // lighting lights it as the alpha-blended smoke, so it does not glow at night.
-bool scatters_light(const std::string& texture) {
-    std::string name = texture;
-    for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return name.find("smoke") != std::string::npos;
+bool scatters_light(std::string_view texture) {
+    // Case-blind search without a lowered copy (asked once per lit definition each frame).
+    constexpr std::string_view kSmoke = "smoke";
+    const auto it = std::search(texture.begin(), texture.end(), kSmoke.begin(), kSmoke.end(), [](char a, char b) {
+        return std::tolower(static_cast<unsigned char>(a)) == static_cast<unsigned char>(b);
+    });
+    return it != texture.end();
 }
 
 VkShaderModule load_shader(VkDevice device, const std::filesystem::path& path) {
     return create_shader_module(device, path);
-}
-
-std::string lower(std::string s) {
-    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return s;
 }
 
 } // namespace
@@ -252,13 +251,15 @@ ParticleRenderer::~ParticleRenderer() {
     for (auto& b : vertices_) b.destroy(vk_.allocator());
 }
 
-std::uint32_t ParticleRenderer::texture_slot(const std::string& name) const {
-    auto it = slots_.find(lower(name));
-    return it == slots_.end() ? 0u : it->second;
+const std::string& ParticleRenderer::lowered(std::string_view name) const {
+    // assign keeps the buffer's capacity, so the lookups made every frame allocate nothing once it has grown.
+    lower_scratch_.assign(name);
+    for (char& c : lower_scratch_) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return lower_scratch_;
 }
 
 glm::vec3 ParticleRenderer::texture_color(const std::string& name) const {
-    auto it = colors_.find(lower(name));
+    auto it = colors_.find(lowered(name));
     return it == colors_.end() ? glm::vec3(1.0f) : it->second;
 }
 
@@ -270,7 +271,8 @@ void ParticleRenderer::prepare(const game::ParticleSystem& particles) {
     if (loader_) done = loader_->take();
     std::vector<std::string> wanted;
     auto request = [&](std::string_view texture) {
-        std::string name = lower(std::string(texture));
+        // Every live emitter asks each frame; only a name not yet loaded or loading is copied.
+        const std::string& name = lowered(texture);
         if (!name.empty() && !slots_.contains(name) && !loading_.contains(name) &&
             std::find(wanted.begin(), wanted.end(), name) == wanted.end())
             wanted.push_back(name);
@@ -341,19 +343,20 @@ void ParticleRenderer::draw(const FrameInfo& frame, const glm::mat4& view_proj, 
     auto* out = static_cast<GpuVertex*>(mapped_[slot]);
     std::uint32_t count = 0;
     const glm::vec3 forward = glm::cross(up, right);
-    // One particle's quad: the corners top-left, top-right, bottom-right, bottom-left (particle_corners), the
-    // depth offset (+0xd0) taking it that much nearer along the view (the DLL subtracts it from the view depth
-    // before projecting, so it keeps its place on the screen and its pixels grow).
-    auto quad = [&](const game::Particle& p, std::uint32_t tex, glm::uvec2 grid, std::uint32_t atlas_frame,
-                    const glm::vec4& shade,
-                    const glm::vec4& haze, std::uint32_t billboard, float depth_offset) {
+    // One particle's quad, its six vertices at `dst`: the corners top-left, top-right, bottom-right, bottom-left
+    // (particle_corners), the depth offset (+0xd0) taking it that much nearer along the view (the DLL subtracts it
+    // from the view depth before projecting, so it keeps its place on the screen and its pixels grow). False when it
+    // shows nothing. Called on the workers: it reads only what is shared and writes only `dst`.
+    auto quad = [&](GpuVertex* dst, const game::Particle& p, std::uint32_t tex, glm::uvec2 grid,
+                    std::uint32_t atlas_frame, const glm::vec4& shade, const glm::vec4& haze, std::uint32_t billboard,
+                    float depth_offset) {
         std::array<glm::vec3, 4> corners;
-        if (!particle_corners(p, billboard, right, up, corners)) return;
+        if (!particle_corners(p, billboard, right, up, corners)) return false;
         if (depth_offset != 0.0f) {
             const float z = glm::dot(p.position - eye, forward);
             if (z > 0.0f) {
                 const float k = (z - depth_offset) / z;
-                if (k <= 0.0f) return;
+                if (k <= 0.0f) return false;
                 for (auto& v : corners) v = eye + (v - eye) * k;
             }
         }
@@ -364,12 +367,19 @@ void ParticleRenderer::draw(const FrameInfo& frame, const glm::mat4& view_proj, 
             return GpuVertex{corners[static_cast<std::size_t>(i)], (cell + glm::vec2(u, row)) * cs, p.color, tex, shade,
                              haze};
         };
-        out[count++] = v(0, 0.0f, true);
-        out[count++] = v(1, 1.0f, true);
-        out[count++] = v(2, 1.0f, false);
-        out[count++] = v(0, 0.0f, true);
-        out[count++] = v(2, 1.0f, false);
-        out[count++] = v(3, 0.0f, false);
+        dst[0] = v(0, 0.0f, true);
+        dst[1] = v(1, 1.0f, true);
+        dst[2] = v(2, 1.0f, false);
+        dst[3] = v(0, 0.0f, true);
+        dst[4] = v(2, 1.0f, false);
+        dst[5] = v(3, 0.0f, false);
+        return true;
+    };
+    // In place of a quad that shows nothing after its place in the buffer was given out (the places are given out
+    // before the quads are built, so the workers can build them at once): six vertices at one point draw no pixel.
+    auto empty_quad = [](GpuVertex* dst) {
+        const GpuVertex none{glm::vec3(0.0f), glm::vec2(0.0f), glm::vec4(0.0f), 0u, glm::vec4(0.0f), glm::vec4(0.0f)};
+        for (int i = 0; i < 6; ++i) dst[i] = none;
     };
     // The classic lighting draws what the DLL draws: nothing nearer than 2 units or beyond 500 along the view
     // (0x100721d2: the camera's far distance, at most 500). A preview instead uses its own close camera and clip planes.
@@ -383,7 +393,8 @@ void ParticleRenderer::draw(const FrameInfo& frame, const glm::mat4& view_proj, 
     // Only what can show: a particle outside the camera's view is not lit, sorted or built (it was, every one of
     // them, every frame).
     const Frustum frustum = frustum_from(view_proj);
-    // The definitions' texture slots and flipbook grids, looked up once a frame rather than once a particle.
+    // The definitions' texture slots and flipbook grids, looked up once a frame rather than once a particle. Filled
+    // on this thread (look) before the workers read them (looks[definition]).
     std::vector<DefinitionLook>& looks = looks_;
     looks.resize(particles.definitions().size());
     for (auto& l : looks) l.known = false;
@@ -399,20 +410,24 @@ void ParticleRenderer::draw(const FrameInfo& frame, const glm::mat4& view_proj, 
             for (std::size_t i = 0; i < frame_count; ++i) {
                 const auto texture_frame_info = particle_texture_frame(d, static_cast<std::uint32_t>(i));
                 l.grid = texture_frame_info.grid;
-                const std::string name(texture_frame_info.texture);
-                l.frames.push_back({texture_slot(name), loading_.contains(lower(name))});
+                // Lowered once into the scratch buffer for both lookups, no string made.
+                const std::string& name = lowered(texture_frame_info.texture);
+                auto found = slots_.find(name);
+                l.frames.push_back({found == slots_.end() ? 0u : found->second, loading_.contains(name)});
             }
         }
         return l;
     };
+    const auto& emitters = particles.emitters();
+    const auto& definitions = particles.definitions();
     if (modern) {
         // Every particle in one stream, back to front by distance (the nearest kept when there are too many).
         const glm::vec3 camera(modern->camera);
         std::vector<OrderItem>& order = order_;
         order.clear();
-        for (std::size_t ei = 0; ei < particles.emitters().size(); ++ei) {
+        for (std::size_t ei = 0; ei < emitters.size(); ++ei) {
             if (ei < hidden.size() && hidden[ei]) continue;
-            const auto& ps = particles.emitters()[ei].particles;
+            const auto& ps = emitters[ei].particles;
             for (std::size_t pi = 0; pi < ps.size(); ++pi) {
                 const auto& p = ps[pi];
                 if (p.hidden || !particle_in_view(frustum, p.position, extent(p), p.height, p.size_factor)) continue;
@@ -421,57 +436,104 @@ void ParticleRenderer::draw(const FrameInfo& frame, const glm::mat4& view_proj, 
             }
         }
         keep_nearest_back_to_front(order, kMaxVertices / 6);
-        // Light sources stay unlit; the haze takes away their light. Smoke and dust are lit and hazed.
+        // Light sources stay unlit; the haze takes away their light. Smoke and dust are lit and hazed. Each
+        // definition's look and lit flag first, here; then every item's quad at its own place, on the workers.
         std::vector<std::int8_t>& lit_by_definition = lit_by_definition_;
-        lit_by_definition.assign(particles.definitions().size(), -1);
-        const ParticleLight scene_light(*modern);
+        lit_by_definition.assign(definitions.size(), -1);
         for (const OrderItem& item : order) {
-            const auto& e = particles.emitters()[item.emitter];
-            const auto& d = particles.definitions()[e.definition];
-            const auto& p = e.particles[item.particle];
-            const DefinitionLook& dl = look(e.definition);
-            const FrameLook& fl = dl.frames[p.frame % dl.frames.size()];
-            if (fl.loading) continue;
-            ParticleHaze h = haze_at(*modern, p.position);
-            std::int8_t& lit = lit_by_definition[e.definition];
-            if (lit < 0) lit = !d.additive || scatters_light(d.texture) ? 1 : 0;
-            glm::vec3 light = (lit ? scene_light.at(p.position) : glm::vec3(glow)) * h.absorb;
-            // It fades into the scene over a quarter of its size.
-            float soft = std::max(p.width, p.height) * p.size_factor * 0.25f;
-            std::uint32_t tex = fl.tex | (d.additive ? kAdditiveBit : 0u);
-            // A flat one lying on what it meets (a rune circle on the ground) would fade away whole: it fades over
-            // a quarter unit.
-            if (d.billboard == 2 || d.billboard == game::kWorldBasisBillboard) soft = 0.25f;
-            quad(p, tex, dl.grid, dl.separate_frames ? 0u : p.frame,
-                 glm::vec4(light, std::max(soft, 0.25f)), glm::vec4(h.color, h.through),
-                 d.billboard, d.depth_offset);
+            const auto definition = emitters[item.emitter].definition;
+            look(definition);
+            std::int8_t& lit = lit_by_definition[definition];
+            if (lit < 0) lit = !definitions[definition].additive || scatters_light(definitions[definition].texture) ? 1 : 0;
         }
+        const ParticleLight scene_light(*modern);
+        core::parallel_for(order.size(), kQuadGrain, [&](std::size_t begin, std::size_t end) {
+            for (std::size_t i = begin; i < end; ++i) {
+                const OrderItem& item = order[i];
+                GpuVertex* dst = out + i * 6;
+                const auto& e = emitters[item.emitter];
+                const auto& d = definitions[e.definition];
+                const auto& p = e.particles[item.particle];
+                const DefinitionLook& dl = looks[e.definition];
+                const FrameLook& fl = dl.frames[p.frame % dl.frames.size()];
+                if (fl.loading) {
+                    empty_quad(dst);
+                    continue;
+                }
+                ParticleHaze h = haze_at(*modern, p.position);
+                glm::vec3 light = (lit_by_definition[e.definition] ? scene_light.at(p.position) : glm::vec3(glow)) * h.absorb;
+                // It fades into the scene over a quarter of its size.
+                float soft = std::max(p.width, p.height) * p.size_factor * 0.25f;
+                std::uint32_t tex = fl.tex | (d.additive ? kAdditiveBit : 0u);
+                // A flat one lying on what it meets (a rune circle on the ground) would fade away whole: it fades
+                // over a quarter unit.
+                if (d.billboard == 2 || d.billboard == game::kWorldBasisBillboard) soft = 0.25f;
+                if (!quad(dst, p, tex, dl.grid, dl.separate_frames ? 0u : p.frame,
+                          glm::vec4(light, std::max(soft, 0.25f)), glm::vec4(h.color, h.through), d.billboard,
+                          d.depth_offset))
+                    empty_quad(dst);
+            }
+        });
+        count = static_cast<std::uint32_t>(order.size() * 6);
         if (count > 0) batches.push_back({0, count, -1});
     } else {
-        for (std::size_t ei = 0; ei < particles.emitters().size(); ++ei) {
-            const auto& e = particles.emitters()[ei];
-            if (ei < hidden.size() && hidden[ei]) continue;
-            const auto& d = particles.definitions()[e.definition];
-            const DefinitionLook& dl = look(e.definition);
-            const glm::uvec2 grid = dl.grid;
-            const glm::vec4 shade(glm::vec3(d.additive ? glow : 1.0f), 0.0f);
-            std::uint32_t first = count;
-            for (const auto& p : e.particles) {
-                if (count + 6 > kMaxVertices) break;
-                if (p.hidden || !classic_in_range(p) ||
-                    !particle_in_view(frustum, p.position, extent(p), p.height, p.size_factor))
-                    continue;
-                const FrameLook& fl = dl.frames[p.frame % dl.frames.size()];
-                if (fl.loading) continue;
-                const auto texture = fl.tex | (!scene_ && d.additive ? kAdditiveBit : 0u);
-                quad(p, texture, grid, dl.separate_frames ? 0u : p.frame, shade,
-                     glm::vec4(0.0f, 0.0f, 0.0f, 1.0f), d.billboard, d.depth_offset);
+        // Each emitter's particles that show, counted on the workers; their places in the buffer given out here in
+        // the emitters' order, up to the buffer's size; then their quads built on the workers.
+        auto shows = [&](const game::Particle& p, const DefinitionLook& dl) {
+            return !p.hidden && classic_in_range(p) &&
+                   particle_in_view(frustum, p.position, extent(p), p.height, p.size_factor) &&
+                   !dl.frames[p.frame % dl.frames.size()].loading;
+        };
+        for (std::size_t ei = 0; ei < emitters.size(); ++ei)
+            if (!(ei < hidden.size() && hidden[ei]) && !emitters[ei].particles.empty()) look(emitters[ei].definition);
+        std::vector<std::uint32_t>& quads = emitter_quads_;
+        std::vector<std::uint32_t>& firsts = emitter_firsts_;
+        quads.assign(emitters.size(), 0);
+        firsts.assign(emitters.size(), 0);
+        core::parallel_for(emitters.size(), kEmitterGrain, [&](std::size_t begin, std::size_t end) {
+            for (std::size_t ei = begin; ei < end; ++ei) {
+                const auto& e = emitters[ei];
+                if ((ei < hidden.size() && hidden[ei]) || e.particles.empty()) continue;
+                const DefinitionLook& dl = looks[e.definition];
+                std::uint32_t n = 0;
+                for (const auto& p : e.particles)
+                    if (shows(p, dl)) ++n;
+                quads[ei] = n;
             }
+        });
+        for (std::size_t ei = 0; ei < emitters.size(); ++ei) {
+            const std::uint32_t room = (kMaxVertices - count) / 6;
+            quads[ei] = std::min(quads[ei], room);
+            if (quads[ei] == 0) continue;
+            firsts[ei] = count;
             // The DLL's particle render state (FUN_1009eec0(5)) turns depth writes off for every emitter, +0x64 or
             // not (its +0x64 branch turns them back on after its own draw, so the emitters after it in that list
             // write depth: not copied).
-            if (count > first) batches.push_back({first, count - first, d.additive ? 1 : 0});
+            batches.push_back({count, quads[ei] * 6, definitions[emitters[ei].definition].additive ? 1 : 0});
+            count += quads[ei] * 6;
         }
+        core::parallel_for(emitters.size(), kEmitterGrain, [&](std::size_t begin, std::size_t end) {
+            for (std::size_t ei = begin; ei < end; ++ei) {
+                const std::uint32_t n = quads[ei];
+                if (n == 0) continue;
+                const auto& e = emitters[ei];
+                const auto& d = definitions[e.definition];
+                const DefinitionLook& dl = looks[e.definition];
+                const glm::vec4 shade(glm::vec3(d.additive ? glow : 1.0f), 0.0f);
+                GpuVertex* dst = out + firsts[ei];
+                std::uint32_t written = 0;
+                for (const auto& p : e.particles) {
+                    if (written == n) break;
+                    if (!shows(p, dl)) continue;
+                    const FrameLook& fl = dl.frames[p.frame % dl.frames.size()];
+                    const auto texture = fl.tex | (!scene_ && d.additive ? kAdditiveBit : 0u);
+                    if (!quad(dst + written * 6, p, texture, dl.grid, dl.separate_frames ? 0u : p.frame, shade,
+                              glm::vec4(0.0f, 0.0f, 0.0f, 1.0f), d.billboard, d.depth_offset))
+                        empty_quad(dst + written * 6);
+                    ++written;
+                }
+            }
+        });
     }
     if (batches.empty()) return;
     vmaFlushAllocation(vk_.allocator(), vertices_[slot].allocation, 0, VK_WHOLE_SIZE);

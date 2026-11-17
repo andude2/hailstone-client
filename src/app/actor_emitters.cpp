@@ -10,6 +10,7 @@
 #include "core/game_dir.h"
 #include "core/ini_file.h"
 #include "core/log.h"
+#include "core/worker_pool.h"
 #include "game/mechanics/anim_select.h"
 
 namespace hailstone::app {
@@ -26,12 +27,13 @@ std::string_view triggered_clip(std::int32_t animation) {
 }
 } // namespace
 
-ActorEmitters::ActorEmitters(std::vector<assets::EmitterDefinition> definitions, game::HeightTables heights)
-    : particles_(std::move(definitions)), heights_(std::move(heights)) {}
+ActorEmitters::ActorEmitters(std::vector<assets::EmitterDefinition> definitions, game::HeightTables heights,
+                             bool async)
+    : particles_(std::move(definitions)), heights_(std::move(heights)), async_(async) {}
 
 ActorEmitters::ActorEmitters(render::VkContext& vk, const GameDir& game, const std::filesystem::path& shader_dir,
                              bool scene)
-    : vk_(&vk), game_(&game), shader_dir_(shader_dir), scene_(scene) {
+    : vk_(&vk), game_(&game), shader_dir_(shader_dir), scene_(scene), async_(scene) {
     try {
         if (auto data = game.read("actoremittersnew.edd")) particles_ = game::ParticleSystem(assets::parse_edd(*data));
     } catch (const std::exception& e) {
@@ -64,23 +66,43 @@ glm::vec3 ActorEmitters::texture_color(const std::string& name, bool cloud) cons
     return renderer ? renderer->texture_color(name) : glm::vec3(1.0f);
 }
 
+glm::mat4 ActorEmitters::local_matrix(Live& live, const assets::MeshEmitter& me) {
+    if (!me.cloud_animation) return me.local;
+    const auto& animation = *me.cloud_animation;
+    auto& posed = live.cloud_poses[&animation];
+    const auto ms = animation.period_ms > 0
+                        ? static_cast<std::uint64_t>(std::fmod(live.elapsed * 1000.0, animation.period_ms))
+                        : std::uint64_t{0};
+    if (posed.ms != ms) {
+        animation.pose(ms, posed.motion);
+        posed.ms = ms;
+    }
+    return me.cloud_animation_node < posed.motion.size() ? posed.motion[me.cloud_animation_node] * me.local
+                                                         : me.local;
+}
+
+std::optional<game::EmitterAttachment> ActorEmitters::attach(std::uint32_t id, std::int32_t i,
+                                                             const BoneWorld& bone_world) {
+    auto it = live_.find(id);
+    if (it == live_.end() || !it->second.mesh || i < 0 ||
+        static_cast<std::size_t>(i) >= it->second.mesh->emitters.size())
+        return std::nullopt;
+    const auto& me = it->second.mesh->emitters[static_cast<std::size_t>(i)];
+    glm::mat4 bone;
+    if (!bone_world(id, me.bone, bone)) return std::nullopt;
+    glm::mat4 m = bone * local_matrix(it->second, me);
+    game::EmitterAttachment at;
+    at.position = glm::vec3(m[3]);
+    at.axes = glm::mat3(m);
+    at.alpha = it->second.alpha;
+    at.particle_scale = me.cloud ? 1.0f : heights_.pes_factor(me.model_code);
+    return at;
+}
+
 void ActorEmitters::update(float dt, std::span<const Actor> actors, const BoneWorld& bone_world,
                            const glm::vec3& viewer, const Playing& playing) {
+    finish();
     for (auto& [id, live] : live_) live.seen = false;
-    auto local_matrix = [](Live& live, const assets::MeshEmitter& me) {
-        if (!me.cloud_animation) return me.local;
-        const auto& animation = *me.cloud_animation;
-        auto& posed = live.cloud_poses[&animation];
-        const auto ms = animation.period_ms > 0
-                            ? static_cast<std::uint64_t>(std::fmod(live.elapsed * 1000.0, animation.period_ms))
-                            : std::uint64_t{0};
-        if (posed.ms != ms) {
-            animation.pose(ms, posed.motion);
-            posed.ms = ms;
-        }
-        return me.cloud_animation_node < posed.motion.size() ? posed.motion[me.cloud_animation_node] * me.local
-                                                             : me.local;
-    };
     // One persistent emitter for a mesh's entry `i` on the actor.
     auto start = [&](const Actor& a, std::size_t i, std::int32_t duration_ms = -1) -> std::optional<std::uint32_t> {
         const auto& me = a.mesh->emitters[i];
@@ -215,24 +237,11 @@ void ActorEmitters::update(float dt, std::span<const Actor> actors, const BoneWo
     }
     particles_.set_viewer(viewer);
     clouds_.set_viewer(viewer);
-    auto attachment = [&](std::uint32_t id, std::int32_t i) -> std::optional<game::EmitterAttachment> {
-        auto it = live_.find(id);
-        if (it == live_.end() || !it->second.mesh || i < 0 ||
-            static_cast<std::size_t>(i) >= it->second.mesh->emitters.size())
-            return std::nullopt;
-        const auto& me = it->second.mesh->emitters[static_cast<std::size_t>(i)];
-        glm::mat4 bone;
-        if (!bone_world(id, me.bone, bone)) return std::nullopt;
-        glm::mat4 m = bone * local_matrix(it->second, me);
-        game::EmitterAttachment at;
-        at.position = glm::vec3(m[3]);
-        at.axes = glm::mat3(m);
-        at.alpha = it->second.alpha;
-        at.particle_scale = me.cloud ? 1.0f : heights_.pes_factor(me.model_code);
-        return at;
-    };
-    particles_.update(dt, attachment);
-    clouds_.update(dt, attachment);
+    auto attachment = [&](std::uint32_t id, std::int32_t i) { return attach(id, i, bone_world); };
+    if (!async_) {
+        particles_.update(dt, attachment);
+        clouds_.update(dt, attachment);
+    }
     if (!particles_.emitters().empty() && !renderer_ && vk_ && game_)
         renderer_ = std::make_unique<render::ParticleRenderer>(*vk_, *game_, shader_dir_, scene_);
     if (renderer_) renderer_->prepare(particles_);
@@ -244,8 +253,40 @@ void ActorEmitters::update(float dt, std::span<const Actor> actors, const BoneWo
     if (cloud_renderer_) cloud_renderer_->prepare(clouds_);
 }
 
+void ActorEmitters::simulate_async(float dt, const BoneWorld& bone_world) {
+    finish();
+    if (!async_) return;
+    // Every attached emitter's place, from the poses as drawn this frame, read here: the actors, the bones and the
+    // objects belong to this thread. The step itself runs on a worker over the two systems and this table alone.
+    attachments_.clear();
+    auto keep = [&](const game::ParticleSystem& system) {
+        for (const auto& e : system.emitters())
+            if (e.actor != 0) {
+                const std::uint64_t key = attachment_key(e.actor, e.point);
+                if (!attachments_.contains(key)) attachments_.emplace(key, attach(e.actor, e.point, bone_world));
+            }
+    };
+    keep(particles_);
+    keep(clouds_);
+    auto step = [this, dt] {
+        auto attachment = [this](std::uint32_t id, std::int32_t i) -> std::optional<game::EmitterAttachment> {
+            auto it = attachments_.find(attachment_key(id, i));
+            return it == attachments_.end() ? std::nullopt : it->second;
+        };
+        particles_.update(dt, attachment);
+        clouds_.update(dt, attachment);
+    };
+    if (core::WorkerPool* pool = core::workers()) step_ = pool->run(step);
+    else step();
+}
+
+void ActorEmitters::finish() const {
+    if (step_.valid()) step_.wait();
+}
+
 void ActorEmitters::draw(const render::FrameInfo& frame, const glm::mat4& view_proj, const glm::mat4& view,
                          float glow, const render::SceneLighting* modern) {
+    finish();
     if (renderer_) renderer_->draw(frame, view_proj, view, particles_, glow, {}, modern);
     if (cloud_renderer_) cloud_renderer_->draw(frame, view_proj, view, clouds_, glow, {}, modern);
 }
@@ -258,6 +299,7 @@ void ActorEmitters::set_density(float density) {
 }
 
 void ActorEmitters::clear() {
+    finish();
     particles_.clear();
     clouds_ = game::ParticleSystem({assets::EmitterDefinition{}});
     cloud_indexes_.clear();

@@ -76,6 +76,16 @@ private:
     std::size_t head_ = 0;       // next slot to write once full
 };
 
+// The "Frame sections" table is worked out again this often, not every frame: SectionAverages::rows goes over every
+// section of 60 frames and sorts them (hundreds with plugin windows), and numbers that change every frame cannot be
+// read anyway.
+inline constexpr std::chrono::milliseconds kSectionsRefresh{500};
+// Whether a view last worked out at `last` (the clock's epoch: never) is due again at `now`.
+inline bool refresh_due(std::chrono::steady_clock::time_point last, std::chrono::steady_clock::time_point now,
+                        std::chrono::steady_clock::duration every) {
+    return last == std::chrono::steady_clock::time_point{} || now - last >= every;
+}
+
 // The frame rates over a history of frames: `ms` each real frame's time, `presented` how many images it put on the
 // screen (2 with an in-between frame from frame generation, else 1; same length). Rendered counts real frames,
 // displayed every image; `generated_share` is the share of real frames that had an in-between frame.
@@ -147,6 +157,8 @@ private:
     SectionAverages sections_;
     SectionAverages::Sections taken_sections_; // the frame's sections, their storage recycled (add_swap)
     SectionAverages::Allocations taken_bytes_;
+    std::vector<SectionAverages::Row> section_rows_; // the table's rows, filtered, as of sections_at_
+    Clock::time_point sections_at_{};
     std::uint8_t current_presented_ = 1;
     std::uint8_t current_generated_ = 0;
     std::size_t head_ = 0;  // next slot to write

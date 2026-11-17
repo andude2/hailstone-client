@@ -2,6 +2,7 @@
 
 #include "app/client_app_internal.h"
 #include "app/frame_pace.h"
+#include "platform/precise_sleep.h"
 #include "core/build_info.h"
 #include "core/frame_sections.h"
 #include "core/wipe.h"
@@ -18,22 +19,44 @@ int ClientApp::run() {
     auto last = Clock::now();
     auto start = last;
     auto last_drawn = last;
+    auto frame_deadline = last; // the frame cap's schedule (next_frame_deadline)
     float fps = 0.0f;
     // The game clock (core/step_clock.h): the rules run at 60 steps a second; game.fixed_step false steps once a
     // drawn frame instead, as the original's code is written (docs/mechanics.md "Frame rate").
     step_clock_.set_fixed(config_.get_bool("game.fixed_step", true));
+    {
+        // The frame's worker threads: display.worker_threads, -1 (the default) for core::default_worker_count, 0 for
+        // none (every loop on the main thread, as before they came).
+        const int wanted = config_.get_int("display.worker_threads", -1);
+        const unsigned count = wanted < 0 ? core::default_worker_count() : static_cast<unsigned>(std::min(wanted, 16));
+        workers_ = std::make_unique<core::WorkerPool>(count);
+        core::set_workers(workers_.get());
+        log::info("worker threads: {}", count);
+        // The scene's draws recorded on them (render/scene_recorder.h): display.parallel_record, 0 for inline.
+        parallel_record_ = config_.get_bool("display.parallel_record", true);
+        scene_recorder_ = std::make_unique<render::SceneRecorder>(vk_);
+        shadow_recorder_ = std::make_unique<render::SceneRecorder>(vk_, false);
+    }
     for (int frame = 0; !quit_ && window_.poll_events(); ++frame) {
         if (opts_.frames && frame >= opts_.frames) break;
         retired_ui_textures_.reset(); // the last frame, which may have drawn it, is submitted (waits for the GPU)
         perf_ui_.begin_frame();
         // The frame cap (display.max_fps, --max-fps), and display.background_fps while another window has the focus:
         // below 10 there, the loop runs on at 10 a second and draws only some frames, or none (app/frame_pace.h).
+        // Auto: just under the refresh rate of the display the window is on now (auto_frame_cap).
+        const int max_fps =
+            effective_max_fps(opts_.max_fps, opts_.max_fps == kMaxFpsAuto ? window_.refresh_rate() : 0.0f);
         // A login/loading screen keeps an unlimited cap at kLightScreenCap so it does not spin; that includes the
         // settle after zone-in, where screen_ is already InGame but the loading overlay is still drawn.
         const bool light_screen = is_light_screen(screen_ == Screen::InGame, zone_settling());
-        const FramePace pace = frame_pace(opts_.max_fps, background_fps_, window_.focused(),
+        const FramePace pace = frame_pace(max_fps, background_fps_, window_.focused(),
             std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - last_drawn), light_screen);
-        if (pace.cap > 0) std::this_thread::sleep_until(last + std::chrono::microseconds(1000000 / pace.cap));
+        // To the microsecond on every system (platform/precise_sleep.h), timed from the last deadline (next_frame_deadline).
+        if (pace.cap > 0) {
+            frame_deadline = next_frame_deadline(frame_deadline, Clock::now(),
+                                                 std::chrono::microseconds(1000000 / pace.cap));
+            platform::precise_sleep_until(frame_deadline);
+        }
         perf_ui_.mark(FramePhase::Sleep);
         if (!opts_.screenshot.empty() && opts_.frames && frame == opts_.frames - 1) vk_.request_screenshot(opts_.screenshot);
         screenshot_this_frame_ = false;
@@ -151,14 +174,15 @@ int ClientApp::run() {
             game::WorldState::FloorFn ground_floor;
             if (collision_) ground_floor = [this](const glm::vec3& p) { return grounding_floor(p); };
             // The other spawns' ladder contact (remote_collision_type), built with the player's passable-ladder rule
-            // (ZoneMoveWorld::apply_remote_rules; not the doors the player's /nav passes) and in the contact-probe mode, which reuses one door buffer. Only spawns
-            // within the actor clip are probed (WorldState::remote_probe_range): farther ones are not drawn.
+            // (ZoneMoveWorld::apply_remote_rules; not the doors the player's /nav passes) and in the contact-probe mode, with a
+            // door buffer of each thread's own: smooth steps the spawns on the worker threads. Only spawns within the actor
+            // clip are probed (WorldState::remote_probe_range): farther ones are not drawn.
             game::WorldState::RemoteCollisionFn remote_collision;
             std::optional<ZoneMoveWorld> remote_world;
             if (collision_ && screen_ == Screen::InGame) {
                 remote_world.emplace(&*collision_, world_objects_.get(), zone_ ? &zone_->regions : nullptr);
                 remote_world->apply_remote_rules(conn_->server_rules());
-                remote_world->set_contact_probe(&remote_door_hits_);
+                remote_world->set_contact_probe_per_thread();
                 remote_collision = [&remote_world](const game::Spawn& spawn, const glm::vec3& from,
                                                    const glm::vec3& to) {
                     return remote_collision_type(spawn, from, to, *remote_world);
@@ -266,6 +290,10 @@ int ClientApp::run() {
             audio_->update(now_ms);
         }
         if (zone_particles_ && (in_world || pre_game)) zone_particles_->update(dt, camera_.position);
+        if (switch_particles_ && in_world && conn_) {
+            switch_particles_->reconcile(conn_->doors());
+            switch_particles_->update(dt, camera_.position);
+        }
         if (spell_particles_ && in_world && conn_) {
             auto cues = conn_->take_spell_effect_cues();
             auto effect_packets = conn_->take_effect_packets();
@@ -314,18 +342,17 @@ int ClientApp::run() {
                 for (const auto& o : objects->object_actors()) actor_emitter_list_.push_back({o.id, o.emitters});
             }
             const render::ActorRenderer* actors = actor_renderer_.get();
-            actor_emitters_->update(dt, actor_emitter_list_,
-                                    [actors, objects](std::uint32_t id, int bone, glm::mat4& w) {
-                                        if (id & WorldObjects::kMissileActorBit)
-                                            return objects && bone == 0 && objects->missile_transform(id, w);
-                                        if (id & WorldObjects::kObjectActorBit)
-                                            return objects && bone == 0 && objects->object_transform(id, w);
-                                        return actors->drawn_bone(id, bone, w);
-                                    },
-                                    camera_.position,
+            ActorEmitters::BoneWorld bones = [actors, objects](std::uint32_t id, int bone, glm::mat4& w) {
+                if (id & WorldObjects::kMissileActorBit) return objects && bone == 0 && objects->missile_transform(id, w);
+                if (id & WorldObjects::kObjectActorBit) return objects && bone == 0 && objects->object_transform(id, w);
+                return actors->drawn_bone(id, bone, w);
+            };
+            actor_emitters_->update(dt, actor_emitter_list_, bones, camera_.position,
                                     [actors](std::uint32_t id, std::string_view code, float& time) {
                                         return actors->drawn_playing(id, code, time);
                                     });
+            // The step itself, on the poses as drawn this frame, once the frame is recorded (below).
+            emitter_step_ = [this, dt, bones = std::move(bones)] { actor_emitters_->simulate_async(dt, bones); };
         }
         float brightness = (in_world || pre_game) && outdoor_light_ ? render::outdoor_brightness(sky_hour) : 1.0f;
         std::optional<game::SceneFogFrame> fog_frame;
@@ -366,6 +393,7 @@ int ClientApp::run() {
         if (f) last_drawn = now;
         if (!f) {
             ui_.end_frame_without_render();
+            if (emitter_step_) std::exchange(emitter_step_, nullptr)();
             continue;
         }
         lap = core::frame_sections::Lap();
@@ -596,15 +624,6 @@ int ClientApp::run() {
                                                     pre_game ? pre_game_hidden_id() : hidden_spawn(), dt);
                     lap.mark("actors prepare_spawns");
                 }
-                if (shadows)
-                    for (std::uint32_t c = 0; c < render::kShadowCascades; ++c) {
-                        vk_.begin_shadow_cascade(*f, c);
-                        zone_renderer_->draw_shadow(*f, c);
-                        if (actor_renderer_) actor_renderer_->draw_shadow(*f, c);
-                        if (world_objects_) world_objects_->draw_shadow(*f, c);
-                        vk_.end_shadow_cascade(*f);
-                    }
-                lap.mark("sun shadows");
                 // Each map only when what it shows has changed: its view, the zone, the doors and objects in it, the
                 // plants swaying in it (render/cover_map.h). Its layer keeps its depths meanwhile.
                 const bool draw_cover = render::cover_map_stale(
@@ -616,15 +635,59 @@ int ClientApp::run() {
                     water_state_, watering, cover_,
                     render::cover_contents(watering ? zone_renderer_->id() : 0, vk_.shadow_generation(), 0),
                     watering && zone_renderer_->map_moves(render::kWaterLayer));
-                for (std::uint32_t layer : {render::kCoverLayer, render::kWaterLayer}) {
-                    if (!(layer == render::kCoverLayer ? draw_cover : draw_water)) continue;
-                    vk_.begin_shadow_cascade(*f, layer);
-                    zone_renderer_->draw_shadow(*f, layer);
-                    if (world_objects_) world_objects_->draw_shadow(*f, layer);
-                    vk_.end_shadow_cascade(*f);
+                // The shadow layers: the sun's cascades, then the cover and water maps when they are drawn. With the worker
+                // threads, every layer's draws are recorded at once, a renderer's in a lane of its own (its layers in order,
+                // on one thread: render/scene_recorder.h), then each layer's rendering executes its buffers in the inline
+                // order. Without them, or with display.parallel_record off, they are drawn inline as before.
+                shadow_layers_.clear();
+                if (shadows)
+                    for (std::uint32_t c = 0; c < render::kShadowCascades; ++c) shadow_layers_.push_back(c);
+                if (draw_cover) shadow_layers_.push_back(render::kCoverLayer);
+                if (draw_water) shadow_layers_.push_back(render::kWaterLayer);
+                render::SceneRecorder& shadow_rec = *shadow_recorder_;
+                if (!shadow_layers_.empty() && shadow_rec.begin_frame(*f, parallel_record_)) {
+                    for (std::uint32_t layer : shadow_layers_) {
+                        shadow_rec.add_target({[this] { return vk_.shadow_inheritance(); },
+                                               [this, layer](VkCommandBuffer c) { vk_.set_shadow_state(c, layer); }});
+                        shadow_rec.add(*f, zone_renderer_.get(),
+                                       [this, layer](const render::FrameInfo& fr) { zone_renderer_->draw_shadow(fr, layer); });
+                        if (layer < render::kShadowCascades && actor_renderer_)
+                            shadow_rec.add(*f, actor_renderer_.get(), [this, layer](const render::FrameInfo& fr) {
+                                actor_renderer_->draw_shadow(fr, layer);
+                            });
+                        if (world_objects_)
+                            shadow_rec.add(*f, world_objects_.get(), [this, layer](const render::FrameInfo& fr) {
+                                world_objects_->draw_shadow(fr, layer);
+                            });
+                    }
+                    shadow_rec.record(*f);
+                    for (std::size_t i = 0; i < shadow_layers_.size(); ++i) {
+                        vk_.begin_shadow_cascade(*f, shadow_layers_[i], true);
+                        shadow_rec.execute(*f, i);
+                        vk_.end_shadow_cascade(*f);
+                    }
+                    shadow_rec.reset();
+                    lap.mark("shadow layers recorded");
+                } else {
+                    if (shadows)
+                        for (std::uint32_t c = 0; c < render::kShadowCascades; ++c) {
+                            vk_.begin_shadow_cascade(*f, c);
+                            zone_renderer_->draw_shadow(*f, c);
+                            if (actor_renderer_) actor_renderer_->draw_shadow(*f, c);
+                            if (world_objects_) world_objects_->draw_shadow(*f, c);
+                            vk_.end_shadow_cascade(*f);
+                        }
+                    lap.mark("sun shadows");
+                    for (std::uint32_t layer : {render::kCoverLayer, render::kWaterLayer}) {
+                        if (!(layer == render::kCoverLayer ? draw_cover : draw_water)) continue;
+                        vk_.begin_shadow_cascade(*f, layer);
+                        zone_renderer_->draw_shadow(*f, layer);
+                        if (world_objects_) world_objects_->draw_shadow(*f, layer);
+                        vk_.end_shadow_cascade(*f);
+                    }
+                    lap.mark("cover and water maps");
                 }
                 cover_drawn_ = covering;
-                lap.mark("cover and water maps");
                 if (light_shadows)
                     render::draw_point_shadows(vk_, *f, point_shadows_, zone_->lights, point_builds, *zone_renderer_,
                                                actor_renderer_.get(), objects);
@@ -664,6 +727,11 @@ int ClientApp::run() {
         // The temporal upscaler follows the plain camera (render/temporal.h); begin_scene hands it to the scene's
         // shaders for their own motion, so it is given first.
         if (scene) vk_.set_temporal_view(camera_.view(), camera_.projection(width, height, lit.far_plane));
+        // The scene's draws go into secondary command buffers recorded on the workers (SceneRecorder), or inline.
+        render::SceneRecorder& rec = *scene_recorder_;
+        // While it records in parallel, the laps below (frame_sections) time only the queuing ("... queued"); the
+        // recording itself is in "scene record (opaque)" and "scene record".
+        rec.begin_frame(*f, scene && parallel_record_);
         // The loading screen's backdrop is black (ui::loading_overlay's too, while the zone settles behind it).
         vk_.begin_scene(*f, screen_ == Screen::Loading ? glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)
                                                        : glm::vec4(under_water ? water_color : lit.fog_color, 1.0f));
@@ -690,19 +758,14 @@ int ClientApp::run() {
             const glm::mat4 plain_vp = plain_proj * camera_.view();
             glm::mat4 proj = render::jittered(plain_proj, vk_.projection_jitter());
             glm::mat4 vp = proj * camera_.view();
-            const auto draw_background = [&] {
-                if (sky_drawn) sky_renderer_->draw(*f, proj, camera_.view(), sky_frame);
-                // Where no sky is drawn, the modern haze; under water, the water.
-                if (zone_renderer_ && (under_water || (modern && !sky_drawn))) zone_renderer_->draw_backdrop(*f, vp);
-                lap.mark("sky");
-            };
-            // Classic draws all zone parts together; WLD details can blend over uncovered samples.
-            const bool background_first = !modern ||
-                (zone_renderer_ && zone_renderer_->opaque_blends_background()) ||
-                (neighbours_ && modern && neighbour_zones_ && in_game && neighbours_->opaque_blends_background());
-            if (background_first) draw_background();
+            // Each draw is a job of the scene recorder, in a lane by what it touches (render/scene_recorder.h): a
+            // renderer's own draws in its lane; the characters, the spawn boxes and the markers, which ask the
+            // character renderer's caches, in one. Nothing they read changes before rec.flush.
+            static const char kActorsLane = 0;
+            const void* const actors_lane = &kActorsLane;
             // The land round an outdoor zone (render/horizon.h), under an open sky or none (not the planes' and
-            // Luclin's painted skies); not where a neighbour zone is drawn.
+            // Luclin's painted skies); not where a neighbour zone is drawn. Set before the first draw is queued: a
+            // queued draw runs at rec.flush and reads the zone renderer's state then.
             if (zone_renderer_) {
                 zone_renderer_->set_distant(in_game && modern && outdoor && horizon_hills_ &&
                                             (!sky_renderer_ || sky_renderer_->has_atmosphere()));
@@ -714,23 +777,46 @@ int ClientApp::run() {
                     zone_renderer_->set_distant_hidden(std::move(cells));
                 }
             }
+            const auto draw_background = [&] {
+                if (sky_drawn)
+                    rec.add(*f, sky_renderer_.get(), [&](const render::FrameInfo& fr) {
+                        sky_renderer_->draw(fr, proj, camera_.view(), sky_frame);
+                    });
+                // Where no sky is drawn, the modern haze; under water, the water.
+                if (zone_renderer_ && (under_water || (modern && !sky_drawn)))
+                    rec.add(*f, zone_renderer_.get(), [&](const render::FrameInfo& fr) { zone_renderer_->draw_backdrop(fr, vp); });
+                lap.mark(rec.active() ? "sky queued" : "sky");
+            };
+            // Classic draws all zone parts together; WLD details can blend over uncovered samples.
+            const bool background_first = !modern ||
+                (zone_renderer_ && zone_renderer_->opaque_blends_background()) ||
+                (neighbours_ && modern && neighbour_zones_ && in_game && neighbours_->opaque_blends_background());
+            if (background_first) draw_background();
             // The modern water reads the opaque world: the zone's other draws wait for VkContext::begin_translucent.
             const render::ZonePhase first = modern ? render::ZonePhase::Opaque : render::ZonePhase::All;
-            if (zone_renderer_) zone_renderer_->draw_depth(*f, vp, camera_.position, lit, t);
-            if (zone_renderer_) zone_renderer_->draw(*f, vp, camera_.position, lit, t, first);
-            lap.mark("zone draw");
+            if (zone_renderer_)
+                rec.add(*f, zone_renderer_.get(), [&](const render::FrameInfo& fr) {
+                    zone_renderer_->draw_depth(fr, vp, camera_.position, lit, t);
+                    zone_renderer_->draw(fr, vp, camera_.position, lit, t, first);
+                });
+            lap.mark(rec.active() ? "zone queued" : "zone draw");
             const bool neighbours = neighbours_ && modern && neighbour_zones_ && in_game;
-            if (neighbours) neighbours_->draw(*f, vp, camera_.position, lit, t, first);
-            lap.mark("neighbour zones draw");
+            if (neighbours)
+                rec.add(*f, neighbours_.get(), [&](const render::FrameInfo& fr) {
+                    neighbours_->draw(fr, vp, camera_.position, lit, t, first);
+                });
+            lap.mark(rec.active() ? "neighbour zones queued" : "neighbour zones draw");
             // Objects still draw their blended parts in the same call as their opaque parts.
             // Keep their background first, and the existing object/actor/silhouette order intact.
             // The water colour copy must also already contain the sky (flora follows that copy).
             if (!background_first) draw_background();
             if (world_objects_) {
                 world_objects_->set_brightness(brightness);
-                world_objects_->draw(*f, vp, camera_.position, lit);
+                rec.add(*f, world_objects_.get(), [&](const render::FrameInfo& fr) {
+                    world_objects_->draw(fr, vp, camera_.position, lit);
+                });
             }
-            lap.mark("objects draw");
+            lap.mark(rec.active() ? "objects queued" : "objects draw");
             if (flora_renderer_ && grass_) {
                 flora_renderer_->set_reach(flora_reach_);
                 flora_renderer_->set_density(static_cast<float>(grass_density_) / 100.0f);
@@ -761,62 +847,108 @@ int ClientApp::run() {
             // hides them: before the characters, which cover it where the player is in sight.
             if (actor_renderer_ && in_game && iso() && iso_silhouette_)
                 if (const game::Spawn* me = conn_->world().player()) {
-                    const std::uint32_t ids[2] = {me->id, me->mount_id};
-                    actor_renderer_->draw_silhouette(*f, vp, camera_.position,
-                                                     std::span<const std::uint32_t>(ids, me->mount_id ? 2u : 1u),
-                                                     glm::vec4(0.55f, 0.75f, 1.0f, 0.55f));
+                    const std::array<std::uint32_t, 2> ids{me->id, me->mount_id};
+                    const std::size_t count = me->mount_id ? 2u : 1u;
+                    rec.add(*f, actors_lane, [&, ids, count](const render::FrameInfo& fr) {
+                        actor_renderer_->draw_silhouette(fr, vp, camera_.position,
+                                                         std::span<const std::uint32_t>(ids.data(), count),
+                                                         glm::vec4(0.55f, 0.75f, 1.0f, 0.55f));
+                    });
                 }
             // The characters' blended and additive parts wait for the grass (below): they write no depth, so grass
-            // drawn after them would cover them.
+            // drawn after them would cover them. The spawn boxes take the set the characters drew (same lane, after).
             if (actor_renderer_)
-                modelled = &actor_renderer_->draw_prepared(*f, vp, camera_.position, lit,
-                                                           render::ActorPhase::Opaque);
-            lap.mark("actors draw");
-            if (in_game) spawn_renderer_->draw(*f, vp, camera_.position, lit, conn_->world(), hidden_spawn(), modelled);
-            lap.mark("spawns draw");
+                rec.add(*f, actors_lane, [&](const render::FrameInfo& fr) {
+                    modelled = &actor_renderer_->draw_prepared(fr, vp, camera_.position, lit, render::ActorPhase::Opaque);
+                });
+            lap.mark(rec.active() ? "actors queued" : "actors draw");
+            if (in_game) {
+                const auto hidden = hidden_spawn();
+                rec.add(*f, actors_lane, [&, hidden](const render::FrameInfo& fr) {
+                    spawn_renderer_->draw(fr, vp, camera_.position, lit, conn_->world(), hidden, modelled);
+                });
+            }
+            lap.mark(rec.active() ? "spawns queued" : "spawns draw");
             // The depth copy is taken before the grass: the target ring lies on the ground under it, not on the
             // blades (a ring traced over them twists into a coil). The water, drawn after the grass, still meets it
             // in the depth buffer.
-            if (modern || (in_game && (target_ring_shown() || iso_marker_shown() || (iso() && iso_hover_.shown))))
+            if (modern || (in_game && (target_ring_shown() || iso_marker_shown() || (iso() && iso_hover_.shown)))) {
+                rec.flush(*f); // the opaque world, before its copies are taken
+                lap.mark("scene record (opaque)");
                 vk_.begin_translucent(*f);
-            if (flora_renderer_ && grass_) flora_renderer_->draw(*f, vp, camera_.position, t, frame_lighting_, modern);
-            lap.mark("flora draw");
+            }
+            if (flora_renderer_ && grass_)
+                rec.add(*f, flora_renderer_.get(), [&](const render::FrameInfo& fr) {
+                    flora_renderer_->draw(fr, vp, camera_.position, t, frame_lighting_, modern);
+                });
+            lap.mark(rec.active() ? "flora queued" : "flora draw");
             if (actor_renderer_)
-                actor_renderer_->draw_prepared(*f, vp, camera_.position, lit, render::ActorPhase::Translucent);
+                rec.add(*f, actors_lane, [&](const render::FrameInfo& fr) {
+                    actor_renderer_->draw_prepared(fr, vp, camera_.position, lit, render::ActorPhase::Translucent);
+                });
             if (modern) {
                 if (zone_renderer_)
-                    zone_renderer_->draw(*f, vp, camera_.position, lit, t, render::ZonePhase::Translucent);
-                if (neighbours) neighbours_->draw(*f, vp, camera_.position, lit, t, render::ZonePhase::Translucent);
+                    rec.add(*f, zone_renderer_.get(), [&](const render::FrameInfo& fr) {
+                        zone_renderer_->draw(fr, vp, camera_.position, lit, t, render::ZonePhase::Translucent);
+                    });
+                if (neighbours)
+                    rec.add(*f, neighbours_.get(), [&](const render::FrameInfo& fr) {
+                        neighbours_->draw(fr, vp, camera_.position, lit, t, render::ZonePhase::Translucent);
+                    });
             }
             // The target ring lies on the depth copy (taken above, or by it in the classic lighting), under the
-            // weather and particles. Character select draws no target.
-            if (in_game) draw_target_ring(*f, vp, lit.far_plane, modern, t);
-            if (in_game) draw_iso_marker(*f, vp, lit.far_plane, modern, t);
-            if (in_game) draw_iso_hover(*f, vp, lit.far_plane, modern, t);
+            // weather and particles. Character select draws no target. The markers ask the character renderer
+            // (model_for): the characters' lane.
+            if (in_game)
+                rec.add(*f, actors_lane, [&](const render::FrameInfo& fr) {
+                    draw_target_ring(fr, vp, lit.far_plane, modern, t);
+                    draw_iso_marker(fr, vp, lit.far_plane, modern, t);
+                    draw_iso_hover(fr, vp, lit.far_plane, modern, t);
+                });
             // Rain or snow: the precipitation manager's particles. The original draws them in every zone type,
             // with or without a sky (CRender's scene, 0x10097420).
             if (weather_renderer_ && in_game) {
                 const float pixel = 2.0f / (static_cast<float>(std::max(1, width)) * proj[0][0]);
-                weather_renderer_->draw(*f, vp, camera_.position, camera_.forward(), pixel, weather_.particles(),
-                                        1.0f + weather_look_.flash,
-                                        modern ? render::kModernPrecipitation : render::kClassicPrecipitation);
+                rec.add(*f, weather_renderer_.get(), [&, pixel](const render::FrameInfo& fr) {
+                    weather_renderer_->draw(fr, vp, camera_.position, camera_.forward(), pixel, weather_.particles(),
+                                            1.0f + weather_look_.flash,
+                                            modern ? render::kModernPrecipitation : render::kClassicPrecipitation);
+                });
             }
             // The modern particles read the depth copy (after begin_translucent above) and the frame's lighting.
             const render::SceneLighting* particle_lighting = modern ? &frame_lighting_ : nullptr;
             if (zone_particles_)
-                zone_particles_->draw(*f, vp, camera_.view(), modern ? render::kParticleGlow : 1.0f, !modern,
-                                      particle_lighting);
+                rec.add(*f, zone_particles_.get(), [&](const render::FrameInfo& fr) {
+                    zone_particles_->draw(fr, vp, camera_.view(), modern ? render::kParticleGlow : 1.0f, !modern,
+                                          particle_lighting);
+                });
+            if (switch_particles_ && in_game)
+                rec.add(*f, switch_particles_.get(), [&](const render::FrameInfo& fr) {
+                    switch_particles_->draw(fr, vp, camera_.view(), modern ? render::kParticleGlow : 1.0f,
+                                            particle_lighting);
+                });
             if (modern && fire_renderer_)
-                fire_renderer_->draw(*f, vp, camera_.position, t, frame_fire_list_, frame_lighting_,
-                                     std::min(lit.far_plane, 1500.0f), render::kParticleGlow);
+                rec.add(*f, fire_renderer_.get(), [&](const render::FrameInfo& fr) {
+                    fire_renderer_->draw(fr, vp, camera_.position, t, frame_fire_list_, frame_lighting_,
+                                         std::min(lit.far_plane, 1500.0f), render::kParticleGlow);
+                });
             if (modern && spell_bolts_ && in_game)
-                spell_bolts_->draw(*f, vp, camera_.position, t, frame_lighting_, render::kParticleGlow);
+                rec.add(*f, spell_bolts_.get(), [&](const render::FrameInfo& fr) {
+                    spell_bolts_->draw(fr, vp, camera_.position, t, frame_lighting_, render::kParticleGlow);
+                });
             if (actor_emitters_ && scene)
-                actor_emitters_->draw(*f, vp, camera_.view(), modern ? render::kParticleGlow : 1.0f, particle_lighting);
+                rec.add(*f, actor_emitters_.get(), [&](const render::FrameInfo& fr) {
+                    actor_emitters_->draw(fr, vp, camera_.view(), modern ? render::kParticleGlow : 1.0f,
+                                          particle_lighting);
+                });
             if (spell_particles_ && in_game)
-                spell_particles_->draw(*f, vp, camera_.view(), lighting_mode_ == render::LightingMode::Modern ? render::kParticleGlow : 1.0f,
-                                       particle_lighting);
-            lap.mark("translucent, weather, particles");
+                rec.add(*f, spell_particles_.get(), [&](const render::FrameInfo& fr) {
+                    spell_particles_->draw(fr, vp, camera_.view(), modern ? render::kParticleGlow : 1.0f,
+                                           particle_lighting);
+                });
+            lap.mark(rec.active() ? "translucent, weather, particles queued" : "translucent, weather, particles");
+            rec.flush(*f); // before the name plates read the characters' poses, and before the scene ends
+            lap.mark("scene record");
             if (in_game) { // character select draws no target, names or picking
                 if (nav_ && nav_->overlay())
                     nav_->draw_overlay(ImGui::GetBackgroundDrawList(), plain_vp,
@@ -842,6 +974,9 @@ int ClientApp::run() {
         lap.mark("scene other");
         ui_.render(*f);
         lap.mark("ImGui render");
+        // The actor effects' next step, on a worker while this frame is submitted and the next one begins.
+        if (emitter_step_) std::exchange(emitter_step_, nullptr)();
+        lap.mark("actor effects step start");
         perf_ui_.mark(FramePhase::Record);
         vk_.end_frame(*f);
         perf_ui_.set_presented(vk_.frames_presented(), vk_.frame_generated());

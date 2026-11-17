@@ -70,6 +70,27 @@ void ClientApp::load_zone(const std::string& short_name) {
         mark("flora");
         zone_particles_ = std::make_unique<ZoneParticles>(vk_, game_, shader_dir_, *zone_);
         zone_particles_->set_density(environment_particle_density_);
+        switch_particles_ = std::make_unique<SwitchParticles>(vk_, game_, shader_dir_);
+        switch_particles_->set_density(environment_particle_density_);
+        if (conn_) {
+            door_particles_.local_player = [this] {
+                return switch_particles_ && conn_ && conn_->world().player();
+            };
+            door_particles_.update_day_night = [this](game::Door& door) {
+                if (door.particle && switch_particles_ && !switch_particles_->active(door)) door.particle = false;
+                if (conn_)
+                    if (const auto time = conn_->current_time_of_day())
+                        game::update_particle_switch_day_night(door, time->hour);
+            };
+            door_particles_.start = [this](game::Door& door, std::int32_t effect) {
+                const auto* me = conn_ ? conn_->world().player() : nullptr;
+                return switch_particles_ && me && switch_particles_->start(door, effect, me->level);
+            };
+            door_particles_.stop = [this](game::Door& door) {
+                if (switch_particles_) switch_particles_->stop(door);
+            };
+            conn_->set_door_particles(&door_particles_);
+        }
         // PlayerClient::PostBuildInit makes the spawns' lights only with ShowDynamicLights (/dynamiclights: "takes
         // effect the next time you zone").
         dynamic_lights_ = config_.get_bool("display.dynamic_lights", true);
@@ -87,6 +108,26 @@ void ClientApp::load_zone(const std::string& short_name) {
             log::info("zone fires: {} flames, {} lights added for them", zone_fires_.size(), lights);
             if (!fire_renderer_) fire_renderer_ = std::make_unique<render::FireRenderer>(vk_, shader_dir_);
         }
+        // The zone's CPU-only builds (collision, moving parts, ladders, baked light) read the finished zone and nothing
+        // else: they run on the worker threads while this thread makes the zone's GPU objects below, which only read
+        // it too, and are waited for where they are used. Nothing changes the zone until then. On an exception the
+        // tasks' handles wait in their destructors, before the zone is unloaded.
+        const assets::Zone& built_from = *zone_;
+        std::optional<game::CollisionMesh> built_collision;
+        std::optional<game::AnimatedObjects> built_animated;
+        std::vector<game::ZoneLadder> built_ladders;
+        std::optional<render::AmbientProbe> built_probe;
+        auto start = [pool = workers_.get()](std::function<void()> work) {
+            if (pool) return pool->run(std::move(work));
+            work();
+            return core::WorkerPool::Task{};
+        };
+        core::WorkerPool::Task collision_task, animated_task, ladders_task, probe_task;
+        if (!tested_collision)
+            collision_task = start([&] { built_collision = game::CollisionMesh::build(built_from); });
+        animated_task = start([&] { built_animated = game::AnimatedObjects::build(built_from); });
+        ladders_task = start([&] { built_ladders = game::zone_ladders(built_from); });
+        probe_task = start([&] { built_probe.emplace(built_from); });
         {
             // The neighbours' ground measured on earlier visits shapes the land round the zone (app/neighbour_zones.h),
             // and past them the zones of the world atlas (app/world_atlas.h).
@@ -107,8 +148,10 @@ void ClientApp::load_zone(const std::string& short_name) {
         if (spell_particles_) spell_particles_->clear();
         if (spell_bolts_) spell_bolts_->clear();
         if (actor_emitters_) actor_emitters_->clear();
-        collision_ = tested_collision ? std::move(*tested_collision) : game::CollisionMesh::build(*zone_);
-        animated_objects_ = game::AnimatedObjects::build(*zone_);
+        collision_task.wait();
+        collision_ = tested_collision ? std::move(*tested_collision) : std::move(*built_collision);
+        animated_task.wait();
+        animated_objects_ = std::move(*built_animated);
         zone_animation_origin_ms_ = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start_time_).count());
         if (!animated_objects_->empty())
@@ -116,14 +159,16 @@ void ClientApp::load_zone(const std::string& short_name) {
                       animated_objects_->part_count());
         mark("collision");
         if (conn_) conn_->reground(); // ground_npcs measured the spawns against no floor, or the last zone's
-        zone_ladders_ = game::zone_ladders(*zone_);
+        ladders_task.wait();
+        zone_ladders_ = std::move(built_ladders);
         if (nav_)
             nav_->zone_loaded(*collision_, &zone_->regions,
                               platform::cache_dir() / "navmesh" /
                                   (server_profile_.id.empty() ? std::string("default") : server_profile_.id) /
                                   nav::ZoneNav::cache_name(short_name));
         mark("navigation");
-        ambient_probe_ = render::AmbientProbe(*zone_);
+        probe_task.wait();
+        ambient_probe_ = std::move(*built_probe);
         mark("ambient probe");
         probe_blend_.reset();
         // Zone-line boxes under the terrain (a client addition, game/zone_lines.h): walking over them fires them.
@@ -294,6 +339,8 @@ void ClientApp::unload_zone() {
     zone_renderer_.reset();
     flora_renderer_.reset(); // holds the zone's plants
     zone_particles_.reset(); // reads the zone's archives
+    if (conn_) conn_->set_door_particles(nullptr);
+    switch_particles_.reset();
     zone_fires_.clear();
     zone_mesh_fires_.clear();
     frame_fires_.clear();
@@ -740,6 +787,7 @@ void ClientApp::set_particle_density(std::string_view kind, float density) {
     } else {
         environment_particle_density_ = density;
         if (zone_particles_) zone_particles_->set_density(density);
+        if (switch_particles_) switch_particles_->set_density(density);
     }
     config_.set(std::format("display.{}_particle_density", kind), std::format("{:.2f}", density));
 }

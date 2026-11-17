@@ -1731,14 +1731,32 @@ void VkContext::begin_scene_rendering(VkCommandBuffer cmd, bool load, const glm:
     rendering.colorAttachmentCount = count;
     rendering.pColorAttachments = colors;
     rendering.pDepthAttachment = &depth;
+    // Drawn from secondary command buffers (set_scene_secondary): the primary then holds only their execution, and
+    // each secondary sets the dynamic state itself (set_scene_state).
+    if (scene_secondary_) rendering.flags = VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT;
     vkCmdBeginRendering(cmd, &rendering);
+    if (!scene_secondary_) set_scene_state(cmd);
+}
 
+void VkContext::set_scene_state(VkCommandBuffer cmd) const {
     // Flip Y so that +Y is up in clip space, as in GL-style projections.
     VkViewport vp{0.0f, static_cast<float>(scene_extent_.height), static_cast<float>(scene_extent_.width),
                   -static_cast<float>(scene_extent_.height), 0.0f, 1.0f};
     VkRect2D scissor{{0, 0}, scene_extent_};
     vkCmdSetViewport(cmd, 0, 1, &vp);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
+}
+
+VkCommandBufferInheritanceRenderingInfo VkContext::scene_inheritance() const {
+    // As begin_scene_rendering renders: the colour, and under the motion targets the object motion and the reactive
+    // mask; the depth alone (no stencil attachment, whatever the depth format holds).
+    VkCommandBufferInheritanceRenderingInfo info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO};
+    info.colorAttachmentCount = object_motion_.image ? 3u : 1u;
+    info.pColorAttachmentFormats = scene_color_formats_.data();
+    info.depthAttachmentFormat = depth_format_;
+    info.stencilAttachmentFormat = VK_FORMAT_UNDEFINED;
+    info.rasterizationSamples = scene_samples_;
+    return info;
 }
 
 void VkContext::begin_translucent(const FrameInfo& frame) {
@@ -1799,6 +1817,7 @@ void VkContext::begin_translucent(const FrameInfo& frame) {
 void VkContext::begin_overlay(const FrameInfo& frame) {
     if (!scene_open_) return;
     scene_open_ = false;
+    scene_secondary_ = false; // the next frame's scene says again (set_scene_secondary)
     // This frame's AO view (set_ao_view), used up here.
     const std::optional<AoView> taken = ao_view_;
     ao_view_.reset();
@@ -2856,7 +2875,7 @@ void VkContext::destroy_shadow_map() {
     shadow_size_ = 0;
 }
 
-void VkContext::begin_shadow_cascade(const FrameInfo& frame, std::uint32_t cascade) {
+void VkContext::begin_shadow_cascade(const FrameInfo& frame, std::uint32_t cascade, bool secondary) {
     VkCommandBuffer cmd = frame.cmd;
     shadow_open_ = cascade;
     // The previous frame's scene read this layer.
@@ -2873,7 +2892,21 @@ void VkContext::begin_shadow_cascade(const FrameInfo& frame, std::uint32_t casca
     rendering.renderArea = {{0, 0}, {shadow_size_, shadow_size_}};
     rendering.layerCount = 1;
     rendering.pDepthAttachment = &depth;
+    if (secondary) rendering.flags = VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT;
     vkCmdBeginRendering(cmd, &rendering);
+    if (!secondary) set_shadow_state(cmd, cascade);
+}
+
+VkCommandBufferInheritanceRenderingInfo VkContext::shadow_inheritance() const {
+    // As begin_shadow_cascade renders: the depth alone, one sample.
+    VkCommandBufferInheritanceRenderingInfo info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO};
+    info.depthAttachmentFormat = shadow_format_;
+    info.stencilAttachmentFormat = VK_FORMAT_UNDEFINED;
+    info.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    return info;
+}
+
+void VkContext::set_shadow_state(VkCommandBuffer cmd, std::uint32_t cascade) const {
     VkViewport vp{0.0f, 0.0f, static_cast<float>(shadow_size_), static_cast<float>(shadow_size_), 0.0f, 1.0f};
     VkRect2D scissor{{0, 0}, {shadow_size_, shadow_size_}};
     vkCmdSetViewport(cmd, 0, 1, &vp);

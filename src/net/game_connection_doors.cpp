@@ -175,7 +175,7 @@ void GameConnection::update_doors() {
             if (!object_in_reach(ground_objects_, world_container_->drop_id, at)) close_world_container();
         }
     }
-    auto use = game::process_doors(doors_, switch_clock_, switch_time(), zone_id(), door_riders_);
+    auto use = game::process_doors(doors_, switch_clock_, switch_time(), zone_id(), door_riders_, door_particles_);
     // RepopSwitch "uses" types 0x28 and 0x2d again: UseSwitch(0, 0, 0xff, 0),
     // which online is an OP_ClickDoor without a player.
     for (std::uint8_t id : use) {

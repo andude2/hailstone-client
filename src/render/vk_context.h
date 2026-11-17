@@ -223,7 +223,13 @@ public:
     // Depth-only rendering into one layer of the shadow map (shadow_format(), one sample, no colour attachment,
     // a slope-scaled depth bias set): a cascade, or kCoverLayer. Every cascade is drawn in a frame that uses shadows;
     // the cover map when it is used.
-    void begin_shadow_cascade(const FrameInfo& frame, std::uint32_t cascade);
+    // `secondary`: its draws come from secondary command buffers (render/scene_recorder.h), which set the layer's
+    // dynamic state themselves (set_shadow_state); the rendering then holds nothing but vkCmdExecuteCommands.
+    void begin_shadow_cascade(const FrameInfo& frame, std::uint32_t cascade, bool secondary = false);
+    // A secondary command buffer's inheritance for a shadow layer's rendering, and the dynamic state
+    // begin_shadow_cascade sets for `cascade` (the viewport, the scissor, the depth bias), into `cmd`.
+    VkCommandBufferInheritanceRenderingInfo shadow_inheritance() const;
+    void set_shadow_state(VkCommandBuffer cmd, std::uint32_t cascade) const;
     void end_shadow_cascade(const FrameInfo& frame);
     bool shadows_enabled() const { return scene_options_.shadow_size > 0; }
     // Turns on the AO and the distance blur for this frame (the modern lighting's 3D view); call before begin_overlay.
@@ -264,6 +270,16 @@ public:
     // Without independentBlend (DeviceCaps) the temporal upscaler runs on the camera's motion alone.
     bool scene_motion() const { return scene_options_.upscaler != Upscaler::Fsr1 && caps_.independent_blend; }
     VkPipelineRenderingCreateInfo scene_rendering(bool scene = true) const;
+    // This frame's scene takes its draws from secondary command buffers (render/scene_recorder.h): set before
+    // begin_scene, cleared when the scene ends (begin_overlay). The scene's renderings then hold nothing but
+    // vkCmdExecuteCommands.
+    void set_scene_secondary(bool on) { scene_secondary_ = on; }
+    bool scene_secondary() const { return scene_secondary_; }
+    // A secondary command buffer's inheritance for the scene's rendering: its attachments' formats and samples.
+    VkCommandBufferInheritanceRenderingInfo scene_inheritance() const;
+    // The scene's dynamic state as begin_scene sets it (the flipped viewport, the scissor), into `cmd`: each secondary
+    // command buffer of the scene starts with it.
+    void set_scene_state(VkCommandBuffer cmd) const;
     SceneBlends scene_blends(const VkPipelineColorBlendAttachmentState& color, SceneOutput output,
                              bool scene = true) const;
     std::uint32_t shadow_size() const { return shadow_size_; }
@@ -466,6 +482,7 @@ private:
     void destroy_point_shadow_map();
     void write_water_descriptors();
     void begin_scene_rendering(VkCommandBuffer cmd, bool load, const glm::vec4& clear_color);
+    bool scene_secondary_ = false; // set_scene_secondary
 
     platform::Window& window_;
     VkInstance instance_ = VK_NULL_HANDLE;
