@@ -419,7 +419,8 @@ public:
                 const game::WorldState::RegionFn& region = {},
                 const game::WorldState::VehicleFn& vehicle_under = {},
                 const game::WorldState::FloorFn& ground_floor = {},
-                const game::WorldState::RemoteCollisionFn& collision = {});
+                const game::WorldState::RemoteCollisionFn& collision = {},
+                bool ground_floor_includes_zone = false); // see WorldState::smooth: only the client's grounding_floor qualifies
     // The vehicles' part of smooth, before the local player moves (WorldState::smooth_vehicles).
     void smooth_vehicles(float dt);
     // The game clock's steps for the other spawns' physics (WorldState::physics_steps; nullopt: one per frame).

@@ -1,6 +1,8 @@
 // game/world_atlas.h: the atlas's records, and the walk that places the zones round the current one.
 #include <doctest/doctest.h>
 
+#include <glm/gtc/matrix_transform.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -52,6 +54,8 @@ AtlasZone zone(const std::string& name, float ground, float water_from = 1e9f) {
     z.top.assign(n, ground + 5.0f);
     z.water.assign(n, std::nanf(""));
     z.color.assign(n, 0xff336699u);
+    z.trees.assign(n, 0);
+    if (n > 3) z.trees[3] = 7;
     for (int y = 0; y < z.ny; ++y)
         for (int x = 0; x < z.nx; ++x)
             if ((static_cast<float>(x) + 0.5f) * z.cell >= water_from)
@@ -150,6 +154,7 @@ TEST_CASE("world atlas: a zone's record is written and read back; a damaged one 
     CHECK(back->open_sky == 0.75f);
     CHECK(back->ground == c.ground);
     CHECK(back->color == c.color);
+    CHECK(back->trees == c.trees);
     for (std::size_t i = 0; i < c.water.size(); ++i) CHECK(std::isnan(back->water[i]) == std::isnan(c.water[i]));
     REQUIRE(back->lines.size() == 1);
     CHECK(back->lines[0].zone_id == c.lines[0].zone_id);
@@ -452,6 +457,51 @@ TEST_CASE("world atlas: each square's ground takes the colour of the texture on 
     REQUIRE(color.size() == 16);
     for (std::size_t i = 0; i < 15; ++i) CHECK(color[i] == 0xff0000ffu);
     CHECK(color[15] == 0u);
+}
+
+TEST_CASE("world atlas: a zone's trees are counted by the square they stand in") {
+    assets::Zone zone;
+    // A mesh `height` tall with one material.
+    auto mesh = [](float height, assets::BlendMode blend, const char* texture) {
+        assets::Mesh m;
+        assets::Material mat;
+        mat.blend = blend;
+        mat.frames = {texture};
+        m.materials.push_back(mat);
+        for (float z : {0.0f, height, 0.0f}) {
+            assets::Vertex v;
+            v.position = {z, 1.0f, z};
+            m.vertices.push_back(v);
+        }
+        m.indices = {0, 1, 2};
+        assets::MeshPart part;
+        part.index_count = 3;
+        m.parts.push_back(part);
+        return m;
+    };
+    zone.objects["TREE1_ACTORDEF"] = mesh(40.0f, assets::BlendMode::Masked, "leaves.bmp");
+    zone.objects["BUSH_ACTORDEF"] = mesh(5.0f, assets::BlendMode::Masked, "bush.bmp");      // too low
+    zone.objects["HOUSE_ACTORDEF"] = mesh(60.0f, assets::BlendMode::Opaque, "wall.bmp");    // no plant
+    auto place = [&](const char* actor, glm::vec2 at, float scale = 1.0f) {
+        assets::Placement p;
+        p.actor = actor;
+        p.transform = glm::translate(glm::mat4(1.0f), glm::vec3(at, 0.0f)) * glm::scale(glm::mat4(1.0f), glm::vec3(scale));
+        zone.placements.push_back(p);
+    };
+    place("TREE1_ACTORDEF", {10.0f, 10.0f});
+    place("TREE1_ACTORDEF", {20.0f, 30.0f});
+    place("TREE1_ACTORDEF", {100.0f, 10.0f});
+    place("TREE1_ACTORDEF", {100.0f, 100.0f}, 0.25f); // 10 units tall at its scale: a bush
+    place("BUSH_ACTORDEF", {10.0f, 100.0f});
+    place("BUSH_ACTORDEF", {10.0f, 100.0f}, 8.0f); // 40 units tall: a tree
+    place("HOUSE_ACTORDEF", {100.0f, 100.0f});
+    place("TREE1_ACTORDEF", {900.0f, 10.0f}); // off the grid
+    const auto trees = app::measure_trees(zone, {0.0f, 0.0f}, 64.0f, 2, 2);
+    REQUIRE(trees.size() == 4);
+    CHECK(trees[0] == 2);
+    CHECK(trees[1] == 1);
+    CHECK(trees[2] == 1);
+    CHECK(trees[3] == 0);
 }
 
 // ---- Real files (EQ_GAME_DIR) ----

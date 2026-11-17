@@ -243,6 +243,10 @@ struct SpellHitLine {
 // Recognised EQEmu formatted-message ids and their typed argument positions, never arbitrary chat text. Unknown
 // messages or missing/malformed arguments return nullopt so their normal text remains intact.
 std::optional<SpellHitLine> spell_message_hit_report(std::uint32_t eqstr, std::span<const std::string> args);
+// Some servers carry complete English combat reports in GENERIC_STRING or OP_SpecialMesg instead of typed
+// substitutions; stock EQEmu does so only for its caster-less "You have been healed for %d points of damage.".
+// Recognise only complete hit/heal forms on combat message types; unrelated text stays intact.
+std::optional<SpellHitLine> spell_text_hit_report(std::string_view text, std::uint32_t color);
 // OP_Damage's native spell line contains an amount only on the local player. Other landing and zero-damage
 // messages keep their normal presentation; the packet does not identify a periodic tick.
 std::optional<SpellHitLine> spell_damage_hit_report(const WorldState& world, const SpellData& spell,

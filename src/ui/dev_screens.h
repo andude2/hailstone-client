@@ -89,6 +89,7 @@ struct AddonSuggestionView {
     std::string source; // owner/repo: what AddonSuggestLook, AddonSuggestLater and AddonSuggestNever are for
     std::string text;   // the sentence the screen shows
     bool from_server = false;
+    bool required = false; // required to play: review/install, without optional-suggestion dismissal buttons
 };
 struct AddonRowView {
     std::string name, kind;   // kind: "script", "plugin" or "tool"

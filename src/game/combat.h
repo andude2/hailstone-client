@@ -64,6 +64,13 @@ std::uint32_t con_rgb(Con con);
 // "Name plates"): its consider colour. nullopt for everything else, and for every spawn while the option is off, so
 // the caller keeps the stock colours.
 std::optional<std::uint32_t> npc_name_colour(const Spawn& s, int my_level, std::int32_t pvp_rules, bool enabled);
+// The GM name colour, 0x1da64b, as PlayerClient::SetNameSpriteTint @0x58bf00 gives it: a spawn with IsGM that is
+// not an NPC (type 1) and is neither anonymous nor roleplaying (Anon 0). nullopt for every other spawn, and (a
+// deliberate difference from the original) for every corpse, which keeps the ordinary corpse colour.
+std::optional<std::uint32_t> gm_name_colour(const Spawn& s);
+// A mercenary's name colour, 0xe1b511 (amber), as SetNameSpriteTint gives a live NPC with IsMercenary (+0x208).
+// nullopt for every other spawn.
+std::optional<std::uint32_t> mercenary_name_colour(const Spawn& s);
 
 // BuildConsiderMessage: "<name> <standing> -- <difficulty>". faction is the
 // server's (remapped) standing 1..9; short_form is Consider_Struct +16 (the

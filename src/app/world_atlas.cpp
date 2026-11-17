@@ -6,6 +6,7 @@
 #include <format>
 #include <limits>
 #include <span>
+#include <unordered_map>
 #include <utility>
 
 #include "assets/texture.h"
@@ -55,6 +56,15 @@ std::vector<std::uint32_t> crop_color(const game::AtlasZone& z, int x0, int y0, 
         for (int x = 0; x < w; ++x)
             out[static_cast<std::size_t>(y) * static_cast<std::size_t>(w) + static_cast<std::size_t>(x)] =
                 z.color[static_cast<std::size_t>(y + y0) * static_cast<std::size_t>(z.nx) + static_cast<std::size_t>(x + x0)];
+    return out;
+}
+
+std::vector<std::uint8_t> crop_trees(const game::AtlasZone& z, int x0, int y0, int w, int h) {
+    std::vector<std::uint8_t> out(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+            out[static_cast<std::size_t>(y) * static_cast<std::size_t>(w) + static_cast<std::size_t>(x)] =
+                z.trees[static_cast<std::size_t>(y + y0) * static_cast<std::size_t>(z.nx) + static_cast<std::size_t>(x + x0)];
     return out;
 }
 
@@ -303,6 +313,25 @@ std::vector<float> measure_water(const assets::Zone& zone, glm::vec2 lo, float c
     return water;
 }
 
+std::vector<std::uint8_t> measure_trees(const assets::Zone& zone, glm::vec2 lo, float cell, int nx, int ny) {
+    const auto n = static_cast<std::size_t>(std::max(nx, 0)) * static_cast<std::size_t>(std::max(ny, 0));
+    std::vector<std::uint8_t> trees(n, 0);
+    if (n == 0 || !(cell > 0.0f)) return trees;
+    std::unordered_map<std::string, float> heights; // per actor: its mesh's height if a plant, else 0
+    for (const auto& p : zone.placements) {
+        auto it = zone.objects.find(p.actor);
+        if (it == zone.objects.end()) continue;
+        auto [h, fresh] = heights.try_emplace(p.actor, 0.0f);
+        if (fresh && render::is_plant(p.actor, it->second)) h->second = render::mesh_height(it->second);
+        if (!(h->second * glm::length(glm::vec3(p.transform[2])) >= render::kLandTreeMinHeight)) continue;
+        const glm::vec2 at = (glm::vec2(p.transform[3]) - lo) / cell;
+        if (!(at.x >= 0.0f && at.y >= 0.0f && at.x < static_cast<float>(nx) && at.y < static_cast<float>(ny))) continue;
+        std::uint8_t& t = trees[static_cast<std::size_t>(at.y) * static_cast<std::size_t>(nx) + static_cast<std::size_t>(at.x)];
+        if (t < 255) ++t;
+    }
+    return trees;
+}
+
 game::AtlasZone measure_atlas_zone(assets::Zone& zone, std::uint64_t key, const std::atomic<bool>* cancelled) {
     game::AtlasZone out;
     out.zone = zone.name;
@@ -322,6 +351,7 @@ game::AtlasZone measure_atlas_zone(assets::Zone& zone, std::uint64_t key, const 
     out.top.assign(n, nan);
     out.water.assign(n, nan);
     out.color.assign(n, 0u);
+    out.trees.assign(n, 0);
 
     // Its terrain alone: its placed objects (trees, houses) are not its ground.
     auto placements = std::move(zone.placements);
@@ -361,6 +391,7 @@ game::AtlasZone measure_atlas_zone(assets::Zone& zone, std::uint64_t key, const 
     if (cancelled && *cancelled) return {};
     out.color = measure_ground_color(zone, out.grid_lo, cell, nx, ny, out.ground, cancelled);
     if (cancelled && *cancelled) return {};
+    out.trees = measure_trees(zone, out.grid_lo, cell, nx, ny);
     out.open_sky = with_ground ? static_cast<float>(open) / static_cast<float>(with_ground) : 0.0f;
     out.nx = nx;
     out.ny = ny;
@@ -418,7 +449,8 @@ AtlasLand atlas_land(const GameDir& game, std::string_view server, std::string_v
             render::HorizonSource s = render::horizon_source(
                 p.zone, lo + glm::vec2(static_cast<float>(x0), static_cast<float>(y0)) * z->cell, z->cell, w, h,
                 crop(*z, z->ground, x0, y0, w, h, p.offset.z), crop(*z, z->top, x0, y0, w, h, p.offset.z),
-                crop(*z, z->water, x0, y0, w, h, p.offset.z), crop_color(*z, x0, y0, w, h));
+                crop(*z, z->water, x0, y0, w, h, p.offset.z), crop_color(*z, x0, y0, w, h),
+                crop_trees(*z, x0, y0, w, h));
             s = cut(s);
             s.draws_water = true;
             if (!s.valid()) continue;

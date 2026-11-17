@@ -229,3 +229,19 @@ TEST_CASE("eq.PluginConsent in a plugin's code: nil, and its answer is refused")
     }
     ImGui::DestroyContext(ctx);
 }
+
+TEST_CASE("plugin consent: each write of the answers changes their generation, and answers read once can be asked") {
+    test::ScratchDir dir("plugin_consent_generation");
+    const auto a = sha256(std::string_view("plugin a")), b = sha256(std::string_view("plugin b"));
+    const auto before = plugin::plugin_approvals_generation();
+    REQUIRE(plugin::set_plugin_consent(dir.path(), "A", a, true));
+    const auto after_allow = plugin::plugin_approvals_generation();
+    CHECK(after_allow != before);
+    REQUIRE(plugin::set_plugin_consent(dir.path(), "B", b, false));
+    CHECK(plugin::plugin_approvals_generation() != after_allow);
+    const auto answers = plugin::read_plugin_approvals(dir.path());
+    CHECK(plugin::consent_in(answers, a) == plugin::Consent::Allowed);
+    CHECK(plugin::consent_in(answers, b) == plugin::Consent::Denied);
+    CHECK(plugin::consent_in(answers, sha256(std::string_view("other"))) == plugin::Consent::Unasked);
+    CHECK(plugin::consent_in(answers, a) == plugin::plugin_consent(dir.path(), a));
+}

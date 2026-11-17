@@ -95,8 +95,11 @@ public:
     // "" (the player) always.
     bool web_owner_alive(const std::string& owner) const;
     // The installed add-ons' capability ceilings (docs/addons.md, app/addon_install.h addon_ceilings): what runs is
-    // checked again against them.
+    // checked again against them. Changed/extra code identities are scanned only while the server enforces rules.
     void set_addon_ceilings(std::vector<plugin::Ceiling> ceilings);
+    // False with an empty problem while required native add-ons await consent or scripts start; a nonempty
+    // problem identifies refusal/failure. The login's package check separately handles missing installations.
+    bool required_addons_ready(std::string* problem = nullptr) const;
     // The server's compiled plugins waiting for the player's word (plugin/consent.h, docs/plugins.md "The server's
     // compiled plugins ask first"), with the server's name; nullopt none. The UI packs show it (eq.PluginConsent),
     // else imgui() does.

@@ -507,6 +507,166 @@ TEST_CASE("Spell hit modes preserve malformed and unrelated messages") {
         CHECK_FALSE(game::spell_message_hit_report(id, std::array<std::string, 3>{"Caster", "Victim", "123"}));
 }
 
+TEST_CASE("Spell hit modes recognize complete combat text on matching message types") {
+    using Report = game::SpellHitReport;
+    struct Fixture {
+        std::string text;
+        std::uint32_t color;
+        Report kind;
+        std::string compact, amount;
+    };
+    const std::array fixtures{
+        Fixture{"Diddles hit a Broken Skull guardian for 486 points of non-melee damage. (Time Rend)", 379,
+                Report::DirectDamage, "Diddles -> a Broken Skull guardian: 486 damage (Time Rend)", "486"},
+        Fixture{"Diddles has healed herself for 315 points of damage. (Killing Spree)", 375,
+                Report::Healing, "Diddles -> herself: 315 heal (Killing Spree)", "315"},
+        Fixture{"You have healed your pet for 1 point of damage.", 374,
+                Report::Healing, "You -> your pet: 1 heal", "1"},
+        Fixture{"Caster42 hit a guardian for 1 point of non-melee damage.", 397,
+                Report::DirectDamage, "Caster42 -> a guardian: 1 damage", "1"},
+        Fixture{"Caster hit a guardian for 1,234 points of non-melee damage. (Venom)", 376,
+                Report::DamageOverTime, "Caster -> a guardian: 1,234 DoT (Venom)", "1,234"},
+    };
+    for (const auto& fixture : fixtures) {
+        CAPTURE(fixture.text);
+        const auto line = game::spell_text_hit_report(fixture.text, fixture.color);
+        REQUIRE(line);
+        CHECK(line->kind == fixture.kind);
+        CHECK(line->amount == fixture.amount);
+        CHECK(game::report_spell_hit_line(*line, fixture.text, 0) == fixture.text);
+        CHECK(game::report_spell_hit_line(*line, fixture.text, 1) == fixture.compact);
+        CHECK(game::report_spell_hit_line(*line, fixture.text, 2) == fixture.amount);
+    }
+    const std::string damage = "Caster hit Victim for 27 points of non-melee damage.";
+    const std::string heal = "Caster has healed Victim for 28 points of damage.";
+    for (std::uint32_t color : {283u, 302u, 379u, 397u, 398u}) {
+        CAPTURE(color);
+        const auto line = game::spell_text_hit_report(damage, color);
+        REQUIRE(line);
+        CHECK(line->kind == Report::DirectDamage);
+    }
+    for (std::uint32_t color : {376u, 377u, 399u, 400u, 401u}) {
+        CAPTURE(color);
+        const auto line = game::spell_text_hit_report(damage, color);
+        REQUIRE(line);
+        CHECK(line->kind == Report::DamageOverTime);
+        CHECK_FALSE(game::spell_text_hit_report(heal, color));
+    }
+    for (std::uint32_t color : {283u, 302u, 374u, 375u, 402u, 403u, 404u}) {
+        CAPTURE(color);
+        const auto line = game::spell_text_hit_report(heal, color);
+        REQUIRE(line);
+        // A raw healing sentence supplies no periodic-tick discriminator.
+        CHECK(line->kind == Report::Healing);
+    }
+    for (const std::string amount : {"0", "1,234", "12,345,678", "18446744073709551615"}) {
+        const auto line = game::spell_text_hit_report("Caster hit Victim for " + amount +
+                                                        " points of non-melee damage.", 283);
+        REQUIRE(line);
+        CHECK(line->amount == amount);
+    }
+}
+
+TEST_CASE("Spell hit modes leave malformed, ambiguous and non-combat text intact") {
+    const std::string damage = "Caster hit Victim for 27 points of non-melee damage.";
+    const std::string heal = "Caster has healed Victim for 28 points of damage.";
+    for (std::uint32_t color : {0u, 10u, 256u, 274u, 289u, 336u, 99999u}) {
+        CAPTURE(color);
+        CHECK_FALSE(game::spell_text_hit_report(damage, color));
+        CHECK_FALSE(game::spell_text_hit_report(heal, color));
+    }
+    for (std::uint32_t color : {374u, 375u, 402u, 403u, 404u})
+        CHECK_FALSE(game::spell_text_hit_report(damage, color));
+    for (std::uint32_t color : {379u, 397u, 398u})
+        CHECK_FALSE(game::spell_text_hit_report(heal, color));
+    for (const std::string amount : {"", "12 HP", "1.5", "-1", "+1", " 1", "1 ", "12,34", ",123", "123,",
+                                     "1,,234", "1234,567", "18446744073709551616"}) {
+        CAPTURE(amount);
+        CHECK_FALSE(game::spell_text_hit_report("Caster hit Victim for " + amount +
+                                                  " points of non-melee damage.", 283));
+        CHECK_FALSE(game::spell_text_hit_report("Caster has healed Victim for " + amount +
+                                                  " points of damage.", 375));
+    }
+    for (const std::string text : {
+             "", "Caster casts a spell for 27 points of non-melee damage.",
+             " hit Victim for 27 points of non-melee damage.",
+             " Caster hit Victim for 27 points of non-melee damage.",
+             "Caster hit  for 27 points of non-melee damage.",
+             "Caster hit Victim  for 27 points of non-melee damage.",
+             "Caster hit Another hit Victim for 27 points of non-melee damage.",
+             "Caster has healed Another has healed Victim for 27 points of damage.",
+             "Caster has healed Another have healed Victim for 27 points of damage.",
+             "Caster has healed Another hit Victim for 27 points of non-melee damage.",
+             "Caster hit Another has healed Victim for 27 points of damage.",
+             "Caster hit Victim for 27 points of non-melee damage",
+             "Caster hit Victim for 27 points of non-melee damage. trailing text",
+             "Caster hit Victim for 27 points of non-melee damage.(Venom)",
+             "Caster hit Victim for 27 points of non-melee damage. ()",
+             "Caster hit Victim for 27 points of non-melee damage. ( )",
+             "Caster hit Victim for 27 points of non-melee damage. (Venom",
+             "Caster hit Victim for 27 points of non-melee damage. (Ve(nom)",
+             "Caster hit Victim for 27 points of non-melee damage. (Ve)nom)",
+             "Caster hit Victim for 27 points of non-melee damage. (Venom) extra",
+             "Caster\nhit Victim for 27 points of non-melee damage.",
+             "Caster hit Vic\ttim for 27 points of non-melee damage.",
+             "Caster hit Victim for 27 points of non-melee damage. (Ve\nnom)",
+         }) {
+        CAPTURE(text);
+        CHECK_FALSE(game::spell_text_hit_report(text, 283));
+    }
+}
+
+TEST_CASE("Spell hit modes recognize stock EQEmu's caster-less heal") {
+    // zone/attack.cpp Mob::HealDamage: Message(Chat::NonMelee, "You have been healed for %d points of damage.")
+    const std::string text = "You have been healed for 42 points of damage.";
+    const auto line = game::spell_text_hit_report(text, 283);
+    REQUIRE(line);
+    CHECK(line->kind == game::SpellHitReport::Healing);
+    CHECK(line->amount == "42");
+    CHECK(game::report_spell_hit_line(*line, text, 0) == text);
+    CHECK(game::report_spell_hit_line(*line, text, 1) == "You: 42 heal");
+    CHECK(game::report_spell_hit_line(*line, text, 2) == "42");
+    CHECK_FALSE(game::spell_text_hit_report(text, 376)); // a DoT type carries no heal
+    CHECK_FALSE(game::spell_text_hit_report(text, 256));
+    CHECK_FALSE(game::spell_text_hit_report("You have been healed for 42 points of non-melee damage.", 283));
+    CHECK_FALSE(game::spell_text_hit_report("You have been healed for 4x points of damage.", 283));
+}
+
+TEST_CASE("Spell hit modes keep speaker prefixes whole and accept multi-word NPC names") {
+    for (const std::string text : {
+             "Somebody says, Bob hit Fred for 5 points of non-melee damage.",
+             "Somebody says, 'Bob hit Fred for 5 points of non-melee damage.",
+             "Bob says Bob hit Fred for 5 points of non-melee damage.",
+             "Bob tells you Bob hit Fred for 5 points of non-melee damage.",
+             "Bob shouts Bob hit Fred for 5 points of non-melee damage.",
+             "Bob auctions Bob hit Fred for 5 points of non-melee damage.",
+             "Bob tells General:1 Bob hit Fred for 5 points of non-melee damage.",
+             "\"Bob\" hit Fred for 5 points of non-melee damage.",
+             "Bob hit Fred, Sue for 5 points of non-melee damage.",
+             "Somebody says, Bob has healed Fred for 5 points of damage.",
+             "Bob has healed Fred says for 5 points of damage.",
+         }) {
+        CAPTURE(text);
+        CHECK_FALSE(game::spell_text_hit_report(text, 283));
+    }
+    struct Fixture {
+        std::string text, compact;
+    };
+    for (const auto& fixture : {
+             Fixture{"Lord Nagafen hit a gnoll`s pup for 5 points of non-melee damage.",
+                     "Lord Nagafen -> a gnoll`s pup: 5 damage"},
+             Fixture{"Ka'rul the Wise hit an orc pawn for 5 points of non-melee damage.",
+                     "Ka'rul the Wise -> an orc pawn: 5 damage"},
+             Fixture{"Guard Gehnus has healed Captain Tillin for 12 points of damage.",
+                     "Guard Gehnus -> Captain Tillin: 12 heal"},
+         }) {
+        CAPTURE(fixture.text);
+        const auto line = game::spell_text_hit_report(fixture.text, 283);
+        REQUIRE(line);
+        CHECK(line->abbreviated == fixture.compact);
+    }
+}
+
 TEST_CASE("OP_Damage spell hit modes retain nonnumeric landing lines") {
     game::WorldState world;
     world.player_id = 1;

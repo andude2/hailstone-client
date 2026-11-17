@@ -2807,6 +2807,9 @@ namespace hailstone::game {
 		// (optional) gives the floor height under a point, to keep spawns on the
 		// ground (the landing check).
 		using FloorFn = std::function<std::optional<float>(const glm::vec3&)>;
+		// The step_up above the spawn the client's grounding floor query probes (ClientApp::grounding_floor,
+		// app/client_app_input.cpp). The landing short-cut checks a floor it settled on is still inside this reach.
+		static constexpr float kGroundingFloorReach = 4.0f;
 		// `region` (optional) gives the region type at a point (the low byte of its flags; 0 outside any).
 		using RegionFn = std::function<std::uint8_t(const glm::vec3&)>;
 		// `vehicle_under` (optional) gives the vehicle whose deck is under a point (0: none): a spawn an update puts
@@ -2819,8 +2822,16 @@ namespace hailstone::game {
 		// them this frame, else at their position.
 		// `ground_floor` (optional): the floor ground_npcs measures against, which has the doors too (a portal stone's
 		// base, a platform); unset, `floor`.
+		// `ground_floor_includes_zone`: assert that `ground_floor` also probes the same zone collision mesh the
+		// landing check uses, so after a landing on a zone floor f it returns at least f there (a higher door or
+		// placed-object floor only raises it). Only the client's ClientApp::grounding_floor promises this; a plain
+		// FloorFn (a test's, a door mesh that missed the zone floor) does not, and the flag must be left false so
+		// ground_npcs still runs its full query. With it true, a landing makes that query's result known to be a
+		// drop of 0 (a higher floor only shortens the drop, and only a positive drop over 0.25 is drawn), so the
+		// second zone-mesh search is skipped.
 		void smooth(float dt, double now, const FloorFn& floor = {}, const RegionFn& region = {},
-			const VehicleFn& vehicle_under = {}, const FloorFn& ground_floor = {}, const RemoteCollisionFn& collision = {});
+			const VehicleFn& vehicle_under = {}, const FloorFn& ground_floor = {}, const RemoteCollisionFn& collision = {},
+			bool ground_floor_includes_zone = false);
 		// Where the local player is drawn this frame: where the camera is, between the game clock's last two steps
 		// (app/client_app_player.cpp). Sets the drawn place and heading (0..512) of the player and of the mount it rides at
 		// once, so the eye on a mount follows it in the same frame; the next smooth keeps them and forgets the call.

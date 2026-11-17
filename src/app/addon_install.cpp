@@ -5,8 +5,11 @@
 #include <chrono>
 #include <fstream>
 #include <map>
+#include <mutex>
+#include <span>
 #include <sstream>
 #include <system_error>
+#include <vector>
 
 #include <lua.hpp>
 
@@ -480,11 +483,68 @@ const InstalledAddon* find_pinned_addon(const std::vector<InstalledAddon>& addon
     return a;
 }
 
+namespace {
+// addon_file_sha256's: by the file's path, its size and modification time then, and its SHA-256.
+struct KnownHash {
+    std::uint64_t size = 0;
+    fs::file_time_type::rep stamp{};
+    Sha256Digest sha256{};
+};
+std::mutex g_known_hashes_mutex;
+std::map<std::u8string, KnownHash> g_known_hashes;
+constexpr std::size_t kKnownHashesMax = 16384; // a whole add-on library many times over; emptied when reached
+} // namespace
+
+std::optional<Sha256Digest> addon_file_sha256(const fs::path& file) {
+    std::error_code ec;
+    const std::uint64_t size = fs::file_size(file, ec);
+    if (ec) return std::nullopt;
+    const auto time = fs::last_write_time(file, ec);
+    if (ec) return std::nullopt;
+    const auto stamp = time.time_since_epoch().count();
+    const std::u8string key = file.lexically_normal().generic_u8string();
+    // A file written in the last moments may be written again within the same tick of the file system's clock
+    // (coarse on some): it is read each time until its time is safely past.
+    const bool settled = fs::file_time_type::clock::now() - time > std::chrono::seconds(3);
+    if (settled) {
+        std::lock_guard lock(g_known_hashes_mutex);
+        if (auto it = g_known_hashes.find(key); it != g_known_hashes.end() && it->second.size == size &&
+                                                it->second.stamp == stamp)
+            return it->second.sha256;
+    }
+    // Read outside the lock (the add-on manager's worker asks too). Stamped with the size and time taken before the
+    // read: a file that changes while it is read has another time at the next look, and is read again.
+    std::ifstream in(file, std::ios::binary);
+    if (!in) return std::nullopt;
+    Sha256 h;
+    std::vector<char> buf(1 << 16);
+    std::uint64_t read = 0;
+    while (in) {
+        in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+        const auto n = static_cast<std::size_t>(in.gcount());
+        read += n;
+        if (n) h.update(std::as_bytes(std::span(buf.data(), n)));
+    }
+    if (in.bad() || read != size) return std::nullopt;
+    const Sha256Digest digest = h.finish();
+    std::lock_guard lock(g_known_hashes_mutex);
+    if (g_known_hashes.size() >= kKnownHashesMax) g_known_hashes.clear();
+    g_known_hashes[key] = {size, stamp, digest};
+    return digest;
+}
+
+bool addon_file_matches(const fs::path& file, std::uint64_t size, const Sha256Digest& sha256) {
+    std::error_code ec;
+    if (fs::file_size(file, ec) != size || ec) return false;
+    const auto digest = addon_file_sha256(file);
+    return digest && *digest == sha256;
+}
+
 std::vector<std::string> modified_addon_files(const fs::path& data_dir, const InstalledAddon& addon) {
     std::vector<std::string> out;
     const fs::path folder = addon_folder(data_dir, addon.kind, addon.name);
     for (const auto& f : addon.files)
-        if (!package_file_matches(folder / rel(f.path), f.size, f.sha256)) out.push_back(f.path);
+        if (!addon_file_matches(folder / rel(f.path), f.size, f.sha256)) out.push_back(f.path);
     return out;
 }
 
@@ -992,9 +1052,40 @@ bool library_file(std::string_view path) {
 }
 } // namespace
 
-std::vector<plugin::Ceiling> addon_ceilings(const fs::path& data_dir) {
+std::vector<plugin::Ceiling> addon_ceilings(const fs::path& data_dir, bool scan_for_enforcement) {
     const AddonRegistry reg = read_addon_registry(data_dir);
     std::vector<plugin::Ceiling> out = addon_ceilings(reg.addons);
+    // Changed or extra code in a managed folder still belongs to that source for explicit blocks. Its bytes are
+    // not manifest-verified, so it cannot satisfy a closed allowlist or a requirement. With enforcement off it
+    // keeps the existing behavior of a player-edited file, rather than gaining the original manifest's ceiling.
+    if (scan_for_enforcement) {
+        for (const auto& a : reg.addons) {
+            if (a.kind != AddonKind::Script && a.kind != AddonKind::Plugin) continue;
+            const fs::path folder = addon_folder(data_dir, a.kind, a.name);
+            std::error_code ec;
+            if (!fs::is_directory(folder, ec)) continue;
+            auto take = [&](const fs::path& file, plugin::FileKind kind) {
+                const auto digest = addon_file_sha256(file);
+                if (!digest) return;
+                const auto hash = *digest;
+                const auto relative = file.lexically_relative(folder).generic_string();
+                if (std::any_of(a.files.begin(), a.files.end(), [&](const AddonFile& f) {
+                        return iequal(f.path, relative) && f.sha256 == hash;
+                    })) return;
+                out.push_back({kind, hash, 0, a.name, a.source, false, false});
+            };
+            if (a.kind == AddonKind::Script) {
+                for (auto it = fs::recursive_directory_iterator(folder, ec); !ec && it != fs::recursive_directory_iterator();
+                     it.increment(ec))
+                    if (it->is_regular_file(ec) && extension_of(it->path().filename().string()) == ".lua")
+                        take(it->path(), plugin::FileKind::Script);
+            } else {
+                for (const auto& e : fs::directory_iterator(folder, ec))
+                    if (e.is_regular_file(ec) && library_file(e.path().filename().string()))
+                        take(e.path(), plugin::FileKind::Plugin);
+            }
+        }
+    }
     // An add-on whose record does not read: what it was allowed is not known, so its files may do nothing (not what
     // a file put in by hand may). Every Lua file of its folder, and every library at its top, by their bytes now.
     for (const auto& u : reg.unreadable) {
@@ -1006,7 +1097,7 @@ std::vector<plugin::Ceiling> addon_ceilings(const fs::path& data_dir) {
             if (!fs::is_directory(folder, ec)) continue;
             auto take = [&](const fs::path& file, plugin::FileKind fk) {
                 if (auto bytes = read_text_file(file)) {
-                    out.push_back({fk, sha256(*bytes), 0});
+                    out.push_back({fk, sha256(*bytes), 0, u.name, {}, true, false});
                     ++refused;
                 }
             };
@@ -1035,11 +1126,12 @@ std::vector<plugin::Ceiling> addon_ceilings(const std::vector<InstalledAddon>& a
     for (const auto& a : addons)
         for (const auto& f : a.files) {
             const std::string ext = extension_of(f.path);
-            if (a.kind == AddonKind::Script && ext == ".lua") out.push_back({plugin::FileKind::Script, f.sha256, a.caps});
+            if (a.kind == AddonKind::Script && ext == ".lua")
+                out.push_back({plugin::FileKind::Script, f.sha256, a.caps, a.name, a.source, true, iequal(f.path, "init.lua")});
             else if (a.kind == AddonKind::Plugin && (ext == ".so" || ext == ".dll" || ext == ".dylib") &&
                      f.path.find('/') == std::string::npos &&
                      iequal(plugin::plugin_name(rel(f.path)), a.name))
-                out.push_back({plugin::FileKind::Plugin, f.sha256, a.caps});
+                out.push_back({plugin::FileKind::Plugin, f.sha256, a.caps, a.name, a.source});
         }
     return out;
 }

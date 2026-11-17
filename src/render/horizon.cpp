@@ -576,7 +576,8 @@ void sort_sources(HorizonSources& sources) {
 }
 
 HorizonSource horizon_source(std::string name, glm::vec2 lo, float cell, int nx, int ny, std::vector<float> ground,
-                             std::vector<float> top, std::vector<float> water, std::vector<std::uint32_t> color) {
+                             std::vector<float> top, std::vector<float> water, std::vector<std::uint32_t> color,
+                             std::vector<std::uint8_t> trees) {
     HorizonSource s;
     s.name = std::move(name);
     s.cell = cell;
@@ -600,6 +601,8 @@ HorizonSource horizon_source(std::string name, glm::vec2 lo, float cell, int nx,
     if (waters) s.water.assign(raw.size(), nan);
     const bool colors = color.size() == ground.size();
     if (colors) s.color.assign(raw.size(), 0u);
+    const bool tree_counts = trees.size() == ground.size();
+    if (tree_counts) s.trees.assign(raw.size(), 0);
     for (int y = 0; y < ny; ++y)
         for (int x = 0; x < nx; ++x) {
             const auto i = static_cast<std::size_t>(y) * static_cast<std::size_t>(nx) + static_cast<std::size_t>(x);
@@ -607,6 +610,7 @@ HorizonSource horizon_source(std::string name, glm::vec2 lo, float cell, int nx,
             if (tops) s.top[at(x + pad, y + pad)] = std::isfinite(top[i]) ? top[i] : nan;
             if (waters) s.water[at(x + pad, y + pad)] = std::isfinite(water[i]) ? water[i] : nan;
             if (colors) s.color[at(x + pad, y + pad)] = color[i];
+            if (tree_counts) s.trees[at(x + pad, y + pad)] = trees[i];
         }
     // A wall or quay along its edge with its water straight in behind it within kHorizonShoreWall is no ground of the
     // land's (South Qeynos's harbour is ringed by one a square wide, which stood as a strip of land across the sea):
@@ -877,6 +881,7 @@ HorizonSource cut_horizon_source(const HorizonSource& source, std::span<const gl
             if (i < s.top.size()) s.top[i] = nan;
             if (i < s.water.size()) s.water[i] = nan;
             if (i < s.color.size()) s.color[i] = 0;
+            if (i < s.trees.size()) s.trees[i] = 0;
         }
     finish_horizon_source(s);
     return s;
@@ -1052,6 +1057,114 @@ HorizonMesh horizon_mesh(const HorizonField& g, const HorizonSources& sources, i
             mesh.water.insert(mesh.water.end(), {wa, wb, wc, wa, wc, wd});
         }
     return mesh;
+}
+
+std::optional<float> horizon_surface(const HorizonField& g, const HorizonMesh& mesh, glm::vec2 p, glm::vec3* normal) {
+    const std::size_t cols = g.xs.size(), rows = g.ys.size();
+    if (cols < 2 || rows < 2 || mesh.positions.size() < cols * rows) return std::nullopt;
+    if (!(p.x >= g.xs.front() && p.x <= g.xs.back() && p.y >= g.ys.front() && p.y <= g.ys.back())) return std::nullopt;
+    auto line = [](const std::vector<float>& v, float x) {
+        const auto it = std::upper_bound(v.begin(), v.end(), x);
+        const auto i = static_cast<std::size_t>(std::max<std::ptrdiff_t>(it - v.begin() - 1, 0));
+        return std::min(i, v.size() - 2);
+    };
+    const std::size_t c = line(g.xs, p.x), r = line(g.ys, p.y);
+    const glm::vec3 q0 = mesh.positions[r * cols + c], q1 = mesh.positions[r * cols + c + 1],
+                    q2 = mesh.positions[(r + 1) * cols + c + 1], q3 = mesh.positions[(r + 1) * cols + c];
+    const float fx = (p.x - q0.x) / (q1.x - q0.x), fy = (p.y - q0.y) / (q3.y - q0.y);
+    // The triangle horizon_mesh splits the square into there (along the diagonal shorter in height).
+    glm::vec3 a, b, cc;
+    if (std::abs(q0.z - q2.z) <= std::abs(q1.z - q3.z)) {
+        if (fx >= fy) a = q0, b = q1, cc = q2;
+        else a = q0, b = q2, cc = q3;
+    } else {
+        if (fx + fy <= 1.0f) a = q0, b = q1, cc = q3;
+        else a = q1, b = q2, cc = q3;
+    }
+    const glm::vec3 n = glm::cross(b - a, cc - a);
+    if (!(std::abs(n.z) > 1e-6f)) return std::nullopt;
+    if (normal) *normal = glm::normalize(n.z < 0.0f ? -n : n);
+    // The plane through the three: n . (x - a) = 0.
+    return a.z - (n.x * (p.x - a.x) + n.y * (p.y - a.y)) / n.z;
+}
+
+std::vector<HorizonTree> horizon_trees(const HorizonField& g, const HorizonSources& sources, const HorizonMesh& mesh,
+                                       float woods, float open) {
+    std::vector<HorizonTree> out;
+    if (!g.valid() || !(woods > 0.0f) || !(open >= woods)) return out;
+    const Shape k = shape_of(g.land);
+    // The spots: one a square of `woods` each way, jittered within it, over the land out to the trees' reach.
+    const glm::vec2 lo(std::max(g.xs.front(), g.lo.x - kHorizonTreeReach),
+                       std::max(g.ys.front(), g.lo.y - kHorizonTreeReach));
+    const glm::vec2 hi(std::min(g.xs.back(), g.lo.x + static_cast<float>(g.nx) * g.cell + kHorizonTreeReach),
+                       std::min(g.ys.back(), g.lo.y + static_cast<float>(g.ny) * g.cell + kHorizonTreeReach));
+    if (!(hi.x > lo.x) || !(hi.y > lo.y)) return out;
+    const auto nx = static_cast<std::int32_t>(std::ceil((hi.x - lo.x) / woods));
+    const auto ny = static_cast<std::int32_t>(std::ceil((hi.y - lo.y) / woods));
+    const float open_share = (woods / open) * (woods / open);
+    struct Found {
+        float d;
+        HorizonTree tree;
+    };
+    std::vector<Found> found;
+    for (std::int32_t y = 0; y < ny; ++y)
+        for (std::int32_t x = 0; x < nx; ++x) {
+            auto rnd = [&](std::uint32_t salt) { return lattice(x, y, k.seed * 7919u + salt); };
+            const glm::vec2 p = lo + (glm::vec2(static_cast<float>(x), static_cast<float>(y)) +
+                                      glm::vec2(rnd(1u), rnd(2u))) * woods;
+            float extra = 0.0f;
+            const std::size_t i = g.square(p, extra);
+            if (extra <= 0.0f && (g.covered(i) || !g.open[i] || std::isfinite(g.under[i]))) continue;
+            const float d = std::max(g.dist[i] - 0.5f, 0.0f) * g.cell + extra;
+            if (d < kHorizonTreeFrom || d > kHorizonTreeReach) continue;
+            // The woods as horizon_mesh shades them (with no slope or peak yet: those are tested below). Tested first
+            // where no source is, as it is cheap and most spots go on it.
+            const float in_woods = smooth(0.52f, 0.64f, fbm(p / 650.0f, 3, k.seed + 13u, false));
+            float keep = in_woods + (1.0f - in_woods) * open_share;
+            if (d > kHorizonTreeThin) keep *= kHorizonTreeThin / d;
+            const bool sourced = std::any_of(sources.begin(), sources.end(), [&](const auto& src) {
+                return !src->trees.empty() && sample_source(*src, p).cover >= 0.5f;
+            });
+            if (!sourced && rnd(3u) >= keep) continue;
+            const Point pt = land_point(g, sources, k, p, -1);
+            if (pt.tucked || pt.sea > 0.05f || pt.peak > 0.2f) continue;
+            if (pt.cover >= 0.5f) {
+                // A source's ground: only where it says its trees stand, as thick as they stand in its square.
+                const HorizonSource& s = *sources[static_cast<std::size_t>(pt.owner)];
+                if (s.trees.size() != s.height.size()) continue;
+                const glm::vec2 q = (p - s.lo) / s.cell;
+                if (!(q.x >= 0.0f && q.y >= 0.0f && q.x < static_cast<float>(s.nx) && q.y < static_cast<float>(s.ny)))
+                    continue;
+                const std::size_t si = static_cast<std::size_t>(q.y) * static_cast<std::size_t>(s.nx) +
+                                       static_cast<std::size_t>(q.x);
+                if (!std::isfinite(s.height[si]) || s.trees[si] == 0) continue;
+                if (si < s.wet.size() && s.wet[si] > 0.0f) continue;
+                const float there = static_cast<float>(s.trees[si]) * (woods * woods) / (s.cell * s.cell);
+                if (rnd(7u) >= there * (d > kHorizonTreeThin ? kHorizonTreeThin / d : 1.0f)) continue;
+            } else if (sourced && rnd(3u) >= keep) {
+                continue;
+            }
+            glm::vec3 n(0.0f, 0.0f, 1.0f);
+            const std::optional<float> z = horizon_surface(g, mesh, p, &n);
+            if (!z || n.z < kHorizonTreeSlope) continue;
+            // Not standing in the water, where the land dips under the zone's own or a neighbour's surface.
+            if (pt.sea > 0.0f && *z < pt.level + 4.0f) continue;
+            HorizonTree t;
+            t.foot = glm::vec3(p, *z - kHorizonTreeSink);
+            t.yaw = rnd(4u) * 6.2831853f;
+            t.scale = 0.8f + 0.4f * rnd(5u);
+            t.pick = rnd(6u);
+            t.sourced = pt.cover >= 0.5f;
+            found.push_back({d, t});
+        }
+    if (found.size() > kHorizonTreeMax) {
+        std::nth_element(found.begin(), found.begin() + static_cast<std::ptrdiff_t>(kHorizonTreeMax), found.end(),
+                         [](const Found& a, const Found& b) { return a.d < b.d; });
+        found.resize(kHorizonTreeMax);
+    }
+    out.reserve(found.size());
+    for (const Found& f : found) out.push_back(f.tree);
+    return out;
 }
 
 namespace {

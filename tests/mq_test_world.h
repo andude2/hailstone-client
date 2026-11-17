@@ -5,11 +5,13 @@
 // Selo's Accelerando, Holy Armor and a discipline, 4498, for the NMS and Triune plugins' timer tables), and two AA
 // names in dbstr_us.txt (9001 Innate Strength, 9002 Mystical Shielding).
 
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "core/game_dir.h"
@@ -25,6 +27,8 @@ struct GameConnectionTestAccess {
     static game::SpellState& spells(GameConnection& c) { return c.spells_; }
     static std::int32_t& drunkenness(GameConnection& c) { return c.drunkenness_; }
     static game::GroupState& group(GameConnection& c) { return c.group_; }
+    static game::RaidState& raid(GameConnection& c) { return c.raid_; }
+    static GameConnection::Leadership& leadership(GameConnection& c) { return c.leadership_; }
     static std::vector<std::pair<std::uint32_t, game::BuffSlot>>& pet_buffs(GameConnection& c) { return c.pet_buffs_; }
     static game::Inventory& inventory(GameConnection& c) { return c.inventory_; }
     // How often the evolving transfer's item list was built, and its pair compared with the snapshots.
@@ -68,6 +72,21 @@ struct GameConnectionTestAccess {
 } // namespace hailstone::net
 
 namespace hailstone::mq_test {
+
+// A raid member by name, so a test does not depend on RaidMember's field order.
+inline game::RaidMember raid_member(std::string name, std::uint32_t group = 0xffffffff, std::uint8_t class_ = 0,
+                                    std::uint8_t level = 0, bool group_leader = false, bool main_assist = false,
+                                    bool marker = false) {
+    game::RaidMember m;
+    m.name = std::move(name);
+    m.group = group;
+    m.class_ = class_;
+    m.level = level;
+    m.group_leader = group_leader;
+    m.main_assist = main_assist;
+    m.marker = marker;
+    return m;
+}
 
 inline std::string spell_line(std::initializer_list<std::pair<int, std::string>> set) {
     std::vector<std::string> cols(237, "0");

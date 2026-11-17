@@ -33,6 +33,12 @@ bool write_plugin_approvals(const std::filesystem::path& profile_dir, const std:
 
 // The answer for these bytes (Unasked: none, or no profile folder).
 Consent plugin_consent(const std::filesystem::path& profile_dir, const Sha256Digest& hash);
+// The same from answers already read (read_plugin_approvals).
+Consent consent_in(const std::vector<PluginApproval>& approvals, const Sha256Digest& hash);
+// Changes with every write_plugin_approvals in this process (any server's), so a holder of answers it read can tell
+// when to read them again rather than reading the file each frame. A change from outside the client is seen when the
+// holder reads again for another reason (the next zone-in's rules).
+std::uint32_t plugin_approvals_generation();
 // The answer for these bytes, in place of every earlier answer for this plugin name (another version's).
 bool set_plugin_consent(const std::filesystem::path& profile_dir, std::string_view name, const Sha256Digest& hash,
                         bool allowed);

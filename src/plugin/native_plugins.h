@@ -106,6 +106,9 @@ public:
     // After the server's rules changed: unloads what they no longer allow; loads the server's own plugins and the
     // allowed ones `autoload` names ("*" all) that are not loaded yet.
     void policy_changed(const std::vector<std::string>& autoload);
+    // Required add-ons are active, and no loaded plugin is forbidden by the current add-on rules. False with an
+    // empty problem waits for native-code consent; a nonempty problem is a refusal or a load failure.
+    bool required_addons_ready(std::string* problem = nullptr) const;
     // The server's plugins/ folder (servers/<profile>/plugins), looked in before env.dirs; empty for none.
     void set_server_dir(const std::filesystem::path& dir);
     // Inside the ImGui frame: OnUpdateImGui.
@@ -130,6 +133,8 @@ private:
     // never answered) or a plugin or script (never asks).
     enum class Asker : std::uint8_t { Player, Rules, Script };
     bool load_file(std::string_view name, std::string* why, Asker asker);
+    bool unload_file(std::string_view name);
+    bool check_required_addons(std::string* problem) const; // required_addons_ready's work, uncached
 
     std::unique_ptr<Impl> impl_;
 };

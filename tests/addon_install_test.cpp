@@ -4,6 +4,8 @@
 
 #include <doctest/doctest.h>
 
+#include <chrono>
+
 #include "addon_test_util.h"
 #include "app/addon_install.h"
 #include "app/update_install.h"
@@ -463,10 +465,12 @@ TEST_CASE("addon_install: names that are taken") {
 TEST_CASE("addon_install: the ceilings are the add-on's Lua files and its library") {
     InstalledAddon s;
     s.name = "autoloot";
+    s.source = "owner/autoloot@v1";
     s.caps = plugin::kCapRead;
     s.files = {{"init.lua", 1, sha256(std::string_view("i"))}, {"data.txt", 1, sha256(std::string_view("d"))}};
     InstalledAddon p;
     p.name = "MQ2Hud";
+    p.source = "owner/hud";
     p.kind = AddonKind::Plugin;
     p.caps = plugin::kCapUi;
     p.files = {{"MQ2Hud.so", 1, sha256(std::string_view("l"))},
@@ -477,9 +481,76 @@ TEST_CASE("addon_install: the ceilings are the add-on's Lua files and its librar
     CHECK(c[0].kind == plugin::FileKind::Script);
     CHECK(c[0].sha256 == sha256(std::string_view("i")));
     CHECK(c[0].caps == plugin::kCapRead);
+    CHECK(c[0].addon_name == "autoloot");
+    CHECK(c[0].addon_source == s.source);
     CHECK(c[1].kind == plugin::FileKind::Plugin);
     CHECK(c[1].sha256 == sha256(std::string_view("l")));
     CHECK(c[1].caps == plugin::kCapUi);
+    CHECK(c[1].addon_name == "MQ2Hud");
+    CHECK(c[1].addon_source == p.source);
+}
+
+TEST_CASE("addon_install: every script module carries its source identity and changed bytes fail a closed policy") {
+    test::ScratchDir dir("addon_identity");
+    install_script(dir.path(), "needed", "1.0.0",
+                   {{"init.lua", "require('helper')\n"}, {"helper.lua", "return 42\n"}});
+    const auto ceilings = addon_ceilings(dir.path());
+    REQUIRE(ceilings.size() == 2);
+    plugin::Policy policy;
+    policy.set_ceilings(ceilings);
+    policy.set(plugin::parse_server_cfg("[scripts]\nplayer = on\n[addons]\nenforce = on\ndefault = deny\n"
+                                       "required = owner/needed\n"));
+    for (const auto& c : ceilings) {
+        CHECK(c.addon_name == "needed");
+        CHECK(c.addon_source == "owner/needed");
+        CHECK(policy.caps(c.kind, c.sha256, "needed") != 0);
+        CHECK(policy.required_file(c.kind, c.sha256));
+    }
+    const auto entries = policy.required_entries(plugin::FileKind::Script);
+    REQUIRE(entries.size() == 1);
+    CHECK(entries[0].first == "needed");
+    CHECK(entries[0].second == sha256(std::string_view("require('helper')\n")));
+    put_file(dir.path() / "scripts/needed/init.lua", "print('changed')\n");
+    CHECK(policy.caps(plugin::FileKind::Script, sha256(std::string_view("print('changed')\n")), "needed") == 0);
+}
+
+TEST_CASE("addon_install: source blocks retain changed and extra managed files without changing legacy caps") {
+    test::ScratchDir dir("addon_changed_identity");
+    install_script(dir.path(), "needed", "1.0.0", {{"init.lua", "print('original')\n"}});
+    put_file(dir.path() / "scripts/needed/init.lua", "print('changed')\n");
+    put_file(dir.path() / "scripts/needed/extra.lua", "return 'extra'\n");
+    plugin::Policy policy;
+    // Legacy startup/install reads only verified registry hashes, without attributing changed or extra code.
+    const auto legacy = addon_ceilings(dir.path());
+    REQUIRE(legacy.size() == 1);
+    CHECK(legacy.front().verified);
+    CHECK(legacy.front().sha256 == sha256(std::string_view("print('original')\n")));
+    const auto explicit_legacy = addon_ceilings(dir.path(), false);
+    REQUIRE(explicit_legacy.size() == legacy.size());
+    CHECK(explicit_legacy.front().sha256 == legacy.front().sha256);
+    const auto ceilings = addon_ceilings(dir.path(), true);
+    REQUIRE(ceilings.size() == 3);
+    policy.set_ceilings(ceilings);
+    for (const auto& c : ceilings)
+        if (!c.verified) {
+            CHECK(c.addon_name == "needed");
+            CHECK(c.addon_source == "owner/needed");
+        }
+    const auto changed = sha256(std::string_view("print('changed')\n"));
+    const auto extra = sha256(std::string_view("return 'extra'\n"));
+    policy.set(plugin::Rules{});
+    CHECK(policy.caps(plugin::FileKind::Script, changed, "needed") == plugin::kCapAll);
+    CHECK(policy.caps(plugin::FileKind::Script, extra, "needed") == plugin::kCapAll);
+    auto closed = plugin::parse_server_cfg("[scripts]\nplayer = on\n[addons]\nenforce = on\ndefault = deny\n"
+                                          "required = owner/needed\n");
+    policy.set(closed);
+    CHECK(policy.caps(plugin::FileKind::Script, changed, "needed") == 0);
+    CHECK(policy.caps(plugin::FileKind::Script, extra, "needed") == 0);
+    CHECK_FALSE(policy.required_file(plugin::FileKind::Script, changed));
+    policy.set(plugin::parse_server_cfg("[scripts]\nplayer = on\n[addons]\nenforce = on\ndefault = allow\n"
+                                       "block = owner/needed\n"));
+    CHECK(policy.caps(plugin::FileKind::Script, changed, "needed") == 0);
+    CHECK(policy.caps(plugin::FileKind::Script, extra, "needed") == 0);
 }
 
 // A lost or damaged installed.txt fails closed: an add-on's files never become hand-installed ones (every
@@ -610,4 +681,34 @@ TEST_CASE("addon_manager: the server's own and the hand-installed, listed beside
         REQUIRE(plugin::set_plugin_consent(profile, "MQ2Srv", sha256(std::string_view("other bytes")), true));
         CHECK(server_addons(profile).back().consent == plugin::Consent::Unasked); // a yes for other bytes
     }
+}
+
+TEST_CASE("addon_install: file hashes are remembered by size and time, and read again when either changes") {
+    test::ScratchDir dir("addon_file_hash");
+    const fs::path file = dir.path() / "provider.bin";
+    const auto old_time = fs::file_time_type::clock::now() - std::chrono::hours(1);
+    put_file(file, "first bytes");
+    fs::last_write_time(file, old_time);
+    REQUIRE(addon_file_sha256(file) == sha256("first bytes"));
+    CHECK(addon_file_matches(file, 11, sha256("first bytes")));
+    CHECK_FALSE(addon_file_matches(file, 12, sha256("first bytes")));
+
+    // Same size and the same time put back: the remembered hash answers, so the file was not read again.
+    put_file(file, "other bytes");
+    fs::last_write_time(file, old_time);
+    CHECK(addon_file_sha256(file) == sha256("first bytes"));
+    // Another time, or another size: read again.
+    fs::last_write_time(file, old_time + std::chrono::minutes(1));
+    CHECK(addon_file_sha256(file) == sha256("other bytes"));
+    put_file(file, "longer other bytes");
+    fs::last_write_time(file, old_time + std::chrono::minutes(1));
+    CHECK(addon_file_sha256(file) == sha256("longer other bytes"));
+
+    // A file written just now is read each time: a rewrite of the same size within the clock's tick still shows.
+    const fs::path fresh = dir.path() / "fresh.bin";
+    put_file(fresh, "aaaa");
+    CHECK(addon_file_sha256(fresh) == sha256("aaaa"));
+    put_file(fresh, "bbbb");
+    CHECK(addon_file_sha256(fresh) == sha256("bbbb"));
+    CHECK_FALSE(addon_file_sha256(dir.path() / "missing.bin"));
 }

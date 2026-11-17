@@ -683,3 +683,127 @@ TEST_CASE("horizon: an atlas zone's ground colour tints the land over it, soften
     // A neighbour's ground with no colour known tints nothing.
     for (const glm::vec4& t : render::horizon_mesh(n.field, {n.source}).tint) CHECK(t.a == 0.0f);
 }
+
+TEST_CASE("horizon: the land's surface is the mesh's, between its vertices too") {
+    std::vector<HorizonTriangle> tris;
+    add_grid(tris, 0.0f, 0.0f, 2000.0f, 1500.0f, 100.0f, [](float, float) { return 50.0f; });
+    const auto land = render::horizon_land(tris, 3.0f);
+    const auto field = render::horizon_field(tris, land);
+    const auto mesh = render::horizon_mesh(field, {});
+    const std::size_t cols = field.xs.size();
+    int checked = 0;
+    for (std::size_t r = 10; r + 10 < field.ys.size(); r += 7)
+        for (std::size_t c = 10; c + 10 < cols; c += 7) {
+            const glm::vec3 v = mesh.positions[r * cols + c];
+            const auto z = render::horizon_surface(field, mesh, glm::vec2(v));
+            REQUIRE(z);
+            CHECK(*z == doctest::Approx(v.z).epsilon(1e-4));
+            // Half way to the next vertex: between the four corners' heights.
+            const glm::vec3 n = mesh.positions[(r + 1) * cols + c + 1];
+            const glm::vec3 e = mesh.positions[r * cols + c + 1], s = mesh.positions[(r + 1) * cols + c];
+            glm::vec3 normal(0.0f);
+            const auto mid = render::horizon_surface(field, mesh, 0.5f * (glm::vec2(v) + glm::vec2(n)) + 0.1f, &normal);
+            REQUIRE(mid);
+            CHECK(*mid >= std::min({v.z, n.z, e.z, s.z}) - 0.01f);
+            CHECK(*mid <= std::max({v.z, n.z, e.z, s.z}) + 0.01f);
+            CHECK(normal.z > 0.0f);
+            ++checked;
+        }
+    CHECK(checked > 20);
+    CHECK_FALSE(render::horizon_surface(field, mesh, {field.xs.front() - 10.0f, 0.0f}));
+}
+
+TEST_CASE("horizon: the land's trees stand on it past the zone's edge, off the sea, fewer far out") {
+    std::vector<HorizonTriangle> tris;
+    add_grid(tris, 0.0f, 0.0f, 2000.0f, 2000.0f, 100.0f, [](float, float) { return 20.0f; });
+    // A sea along the west, its surface at 0.
+    add_grid(tris, -1000.0f, 0.0f, 0.0f, 2000.0f, 100.0f, [](float, float) { return 0.0f; }, true);
+    const auto land = render::horizon_land(tris, 4.0f);
+    const auto field = render::horizon_field(tris, land);
+    const auto mesh = render::horizon_mesh(field, {});
+    const auto trees = render::horizon_trees(field, {}, mesh, 80.0f, 400.0f);
+    REQUIRE(trees.size() > 500);
+    std::size_t near_count = 0, far_count = 0;
+    for (const auto& t : trees) {
+        // Outside the zone's squares (the sea's too) by the trees' start, within their reach.
+        const float out = std::max({-1000.0f - t.foot.x, t.foot.x - 2000.0f, -t.foot.y, t.foot.y - 2000.0f});
+        CHECK(out >= render::kHorizonTreeFrom - render::kHorizonCell);
+        CHECK(out <= render::kHorizonTreeReach + render::kHorizonCell);
+        // On the land as its mesh draws it, sunk a little.
+        glm::vec3 n(0.0f);
+        const auto z = render::horizon_surface(field, mesh, glm::vec2(t.foot), &n);
+        REQUIRE(z);
+        CHECK(t.foot.z == doctest::Approx(*z - render::kHorizonTreeSink).epsilon(1e-4));
+        CHECK(n.z >= render::kHorizonTreeSlope);
+        // Not on the open sea straight off the shore, nor under its surface.
+        CHECK_FALSE((t.foot.x < -1500.0f && t.foot.y > 300.0f && t.foot.y < 1700.0f));
+        CHECK(t.scale >= 0.8f);
+        CHECK(t.scale <= 1.2f);
+        CHECK(t.pick >= 0.0f);
+        CHECK(t.pick < 1.0f);
+        if (out < 2000.0f) ++near_count;
+        if (out > 5000.0f) ++far_count;
+    }
+    // Per square unit, far fewer far out (the band 5000..7000 out is far larger than 256..2000).
+    const auto band = [](float a, float b) {
+        return (3000.0f + 2.0f * b) * (2000.0f + 2.0f * b) - (3000.0f + 2.0f * a) * (2000.0f + 2.0f * a);
+    };
+    CHECK(static_cast<float>(far_count) / band(5000.0f, 7000.0f) <
+          0.7f * static_cast<float>(near_count) / band(256.0f, 2000.0f));
+    // The same land, the same trees.
+    const auto again = render::horizon_trees(field, {}, mesh, 80.0f, 400.0f);
+    REQUIRE(again.size() == trees.size());
+    for (std::size_t i = 0; i < trees.size(); i += 97) CHECK(again[i].foot == trees[i].foot);
+    // Thinner spacing, more trees; none for a field that is not valid.
+    CHECK(render::horizon_trees(field, {}, mesh, 160.0f, 800.0f).size() < trees.size());
+    CHECK(render::horizon_trees(render::HorizonField{}, {}, mesh, 80.0f, 400.0f).empty());
+}
+
+TEST_CASE("horizon: no land's tree stands on a neighbour's ground") {
+    const Neighbour n = make_neighbour();
+    const render::HorizonSources sources{n.source};
+    const auto mesh = render::horizon_mesh(n.field, sources);
+    const auto trees = render::horizon_trees(n.field, sources, mesh, 80.0f, 400.0f);
+    REQUIRE_FALSE(trees.empty());
+    for (const auto& t : trees) CHECK(render::sample_source(*n.source, glm::vec2(t.foot)).cover < 0.5f);
+}
+
+TEST_CASE("horizon: over an atlas zone's ground the land's trees stand where its own do, as thick") {
+    std::vector<HorizonTriangle> tris;
+    add_grid(tris, 0.0f, 0.0f, 2000.0f, 1500.0f, 100.0f, [](float, float) { return 50.0f; });
+    const auto land = render::horizon_land(tris, 3.0f);
+    const auto field = render::horizon_field(tris, land);
+    // An atlas zone east of it, from x 2000 to 6000 at 50: trees thick in its north half (y >= 1000), none in the south.
+    const glm::vec2 lo(2000.0f, -1500.0f);
+    const float cell = render::kHorizonCell;
+    const int nx = 63, ny = 70;
+    std::vector<float> ground(static_cast<std::size_t>(nx * ny), 50.0f);
+    std::vector<std::uint8_t> trees(ground.size(), 0);
+    for (int y = 0; y < ny; ++y)
+        for (int x = 0; x < nx; ++x)
+            if (lo.y + (static_cast<float>(y) + 0.5f) * cell >= 1000.0f) trees[static_cast<std::size_t>(y * nx + x)] = 3;
+    auto source = std::make_shared<const render::HorizonSource>(
+        render::horizon_source("atlas", lo, cell, nx, ny, ground, {}, {}, {}, trees));
+    REQUIRE(source->trees.size() == source->height.size());
+    const render::HorizonSources sources{source};
+    const auto mesh = render::horizon_mesh(field, sources);
+    const auto placed = render::horizon_trees(field, sources, mesh, 80.0f, 400.0f);
+    std::size_t north = 0, south = 0;
+    for (const auto& t : placed) {
+        if (render::sample_source(*source, glm::vec2(t.foot)).cover < 0.5f) continue;
+        // On its ground only where its trees stand (its square's middle at y 1000 or more).
+        CHECK(t.foot.y >= 1000.0f - cell);
+        CHECK(t.sourced);
+        if (t.foot.x > 2500.0f && t.foot.x < 4500.0f && t.foot.y > 1100.0f && t.foot.y < 2400.0f) ++north;
+        if (t.foot.y < 900.0f) ++south;
+    }
+    CHECK(south == 0);
+    // 3 trees a square is thicker than one a spot (80 x 80 units): nearly every spot there has its tree, 2000 x 1300
+    // / 80^2 = 406.
+    CHECK(north > 340);
+    // A source with no trees layer keeps none on its ground (a neighbour's).
+    auto bare = std::make_shared<const render::HorizonSource>(render::horizon_source("atlas", lo, cell, nx, ny, ground));
+    const render::HorizonSources bare_sources{bare};
+    for (const auto& t : render::horizon_trees(field, bare_sources, render::horizon_mesh(field, bare_sources), 80.0f, 400.0f))
+        CHECK(render::sample_source(*bare, glm::vec2(t.foot)).cover < 0.5f);
+}

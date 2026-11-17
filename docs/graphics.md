@@ -212,7 +212,9 @@ links or ships any of them.
 
 - **Loading** (`render/upscaler_provider.*`): at the start, before the Vulkan instance, from a copy of its folder in
   `cache/upscalers/<name>-<key>/` (the key from its files' names, sizes and times; a box set's windows share one), so
-  the add-on manager can replace the folder while the copy is loaded. No server sends one or decides about one.
+  the add-on manager can replace the folder while the copy is loaded. No server sends one; a server's opted-in
+  add-on policy can require, allow or block one, checked against the loaded copy as the character enters
+  (docs/plugins.md "Opt-in add-on policies").
 - **The device**: the provider names the instance and device extensions and the Vulkan 1.0 to 1.3 features it needs,
   and may chain feature structs of extensions of its own (`gather_extra_features`); `VkContext` turns them on beside
   its own when the loader and the GPU have the extensions and the core features (`missing_names`,
@@ -1688,8 +1690,27 @@ puts it behind anything nearer. Scenery only: nothing collides with it.
   2500 units past the zone, which the neighbours' ground needs), culled with the zone's; no shadows (neither cast nor
   drawn into the sun's cascades or the cover and water maps). Looking out over it, 9,000 more triangles and 70 more
   draw calls; the frame time did not move.
+- **Its trees** (`render::horizon_trees`, `render/tree_impostor.h`): the zone's own trees stand on the land's woods.
+  The zone's commonest placed plants at least 20 units tall (`render::kLandTreeMinHeight`) are its trees, at most
+  three kinds, each placed at least a quarter as often as the commonest and at most twice its height (North Karana
+  walls its edges with RPINE1, 304 units tall by its 91-unit TREE5, which across the land stood as a wall of giants).
+  Each is drawn once at load, on the CPU, into a picture from two sides (its own textures, the far side of its crown
+  a little darker; 2 x 2 samples a texel, the cover in alpha) carried by two crossed cards, cut out and two-sided,
+  with their normals up so they take the light the land does; thousands of them are drawn instanced, 4 triangles
+  each, tinted by the median of the zone's light on that tree's placements. They stand from 256 units past the
+  zone's edge out to 7000, as far apart as the zone's own trees stand over its level ground (a third of that in the
+  land's woods, the darker patches its shade paints, and one and a half times it elsewhere), fewer past 2500 (as
+  2500 over the distance), on the land's surface as its mesh draws it, 2 units sunk; not on the sea, the mountains'
+  rock, slopes steeper than 0.85, a neighbour's ground (it draws its own trees there when drawn) or in the zone's
+  pockets; at most 40,000, the nearest kept. Over an atlas zone's ground (below, "World atlas") they stand only where
+  that zone's own trees stand, as thick, up to one a spot. They cast no shadows and go with the land (`set_distant`).
+  The trees are always the current zone's own, also on an atlas zone's ground. Seen in the zone viewer: Qeynos Hills
+  2,610 trees, Butcherblock 4,823, South Karana 13,949 (2,348 of them where the atlas zones' trees stand); placing
+  them takes 16 to 58 ms of the zone's build; in South Karana at 2560 x 1440 the frame took 1.29 ms with them and
+  1.22 without (178 more draw calls).
 
-`display.horizon_hills` (Options, Horizon Hills) turns it off; the viewer takes `--no-horizon`.
+`display.horizon_hills` (Options, Horizon Hills) turns it off, its trees with it; the viewer takes `--no-horizon`, and
+`--no-land-trees` for the land without its trees.
 
 ## World atlas
 
@@ -1708,7 +1729,9 @@ zone's own geometry. `game/world_atlas.h` holds the records and the walk, `app/w
   and its water (`app::measure_water`, as a neighbour's above, an EQG zone's level RegionWater surfaces too); its
   ground's colour (`app::measure_ground_color`: the average, in linear light, of the texture on the terrain whose
   height at the square's middle is nearest the ground there, within 24 units; not the water, what is not drawn, cut
-  out or glowing); the share of its ground under open sky (no surface
+  out or glowing); how many of its trees stand in each square (`app::measure_trees`: placed plants at least 20 units
+  tall at their placement's scale, up to 255; the land's trees stand as thick there, above, "Horizon hills"); the
+  share of its ground under open sky (no surface
   within 400 units over it); and its zone lines' cells with their targets (`game::ZoneLineCell`), so they are grouped
   again without its files. The neighbour zones' loader measures the records the atlas asks for, one at a time once
   nothing else is loading (15 to 60 ms a zone past loading it, in the modern lighting with display.neighbour_zones
@@ -2054,9 +2077,13 @@ before the actors.
 
 ## Name plates
 
-NPC names are drawn in the spawn's consider colour (`game::con_rgb` of `game::con_level`, the colour Hailstone's target plate already uses) instead of this client's yellow (255, 220, 120). Mercenaries keep their blue and corpses stay grey, while other players' names stay light blue. This is a deliberate difference (Hailstone option `con_name_colour`, Options > Display, `hailstone.ini` `display.con_name_colour`, default on); turning it off restores the yellow for NPC names. The target keeps its consider colour in both settings.
+NPC names are drawn in the spawn's consider colour (`game::con_rgb` of `game::con_level`, the colour Hailstone's target plate already uses) instead of this client's yellow (255, 220, 120). Mercenaries keep the original's amber (`#e1b511`, `game::mercenary_name_colour`) and corpses stay grey, while other players' names stay light blue. This is a deliberate difference (Hailstone option `con_name_colour`, Options > Display, `hailstone.ini` `display.con_name_colour`, default on); turning it off restores the yellow for NPC names. The target keeps its consider colour in both settings.
 
-Neither colour is the original's: PlayerClient::SetNameSpriteTint gives every NPC but a mercenary one fixed tint (0xad, 0xb8, 0x17) and only flashes the target's toward white; the con-coloured target plate is Hailstone's look too (`draw_nameplates`). Which name sprites are drawn, and their parts: docs/mechanics.md "Name sprites".
+GM names are green (`#1da64b`) as the original draws them (`game::gm_name_colour`, after PlayerClient::SetNameSpriteTint @0x58bf00): a spawn with the gm flag that is not a live NPC (type 1) and is neither anonymous nor roleplaying (the spawn's Anon field 0; `/anon` and `/roleplay` both drop it). It covers the player's own GM character. A corpse is never green, a deliberate difference: the original keeps the green on a corpse that carries the flag, where Hailstone shows the ordinary corpse colour (stock EQEmu sends corpses without the flag, so only a server that sends it would show the difference). A targeted GM keeps the green instead of taking the consider colour: the original fades the target's tint toward white, and keeping the green is this client's choice. There is no option; it is the original's colour.
+
+The other colours are not the original's: PlayerClient::SetNameSpriteTint gives every NPC but a mercenary one fixed tint, teal (`#17b8ad`), and only flashes the target's toward white; the con-coloured target plate is Hailstone's look too (`draw_nameplates`).
+
+SetNameSpriteTint's colour is three bytes that it hands to the actor's `SetStringSpriteTint(const RGB*)` (CActorInterface vtable +0x190, CHierarchicalActor::vf100 @0x10040f00 in EQGraphicsDX9.dll). The bytes are blue, green, red in that order. eqlib declares the slot with its `RGB` type, whose bytes are Blue, Green, Red, Alpha (a little-endian 0xAARRGGBB, the D3D colour). MacroQuest2's caption colours call the same slot with con colours written as 0xAARRGGBB values (red 0xFFFF0000), and those names show in their con colours. The original's own tints agree: PvP names, bytes 14 14 a6, come out red; the PvP-team scheme makes the evil races' names orange-red (00 80 ff) and the elves' yellow (00 ff ff). So the bytes 4b a6 1d are the green `#1da64b`, a mercenary's 11 b5 e1 are amber `#e1b511` (this client used to read them red first and drew mercenaries light blue), and the NPC tint ad b8 17 is teal `#17b8ad`. The rof2decomp rewrite's `set(r, g, b)` names the bytes in memory order and does not mean they are red first. Which name sprites are drawn, and their parts: docs/mechanics.md "Name sprites".
 
 The plates are a 2D overlay. Each name is drawn through a pipeline of ours (`app/nameplate_layer.h`, `shaders/plate_depth.*`) that compares its pixels with the current frame's scene depth (`VkContext::overlay_depth_view`, the depth the AO reads). Where a surface lies more than 3 units nearer than the plate's head, its text is occluded and not drawn. Walls, objects, doors and characters can occlude a name; a pole or wall edge affects only the covered pixels. The target's name is tested too, unless the option `target_plate_through_walls` (Options > Display "Target Name Through Walls", `display.target_plate_through_walls`, default off) is on: then it is shown behind any geometry, a sight of the target the original does not give. The depth test is Hailstone's own rendering rule. It replaces the earlier CPU test, a line of sight from the camera to the head point through the zone's collision mesh (terrain and placed objects only): that hid a name as a whole, the target's too, when the one point was blocked, and drew it over everything when it was not.
 
@@ -2178,7 +2205,7 @@ viewer (`--zone`, `--model`) takes `--msaa`, `--tonemap`, `--exposure`, `--rende
 | `display.window_mode` | windowed, borderless, fullscreen | windowed | borderless: a window over the whole display at the desktop's mode; fullscreen: exclusive at `display.resolution` |
 | `display.resolution` | WxH | the desktop's | the fullscreen mode (the closest the display has); in a window, the Options window's Resolution sets the window's size |
 | `display.vsync` | off, on, adaptive | on | the present mode: immediate (else mailbox), FIFO, FIFO relaxed; FIFO when the surface lacks one |
-| `display.max_fps` | 0, 10 .. 1000 | 0 | frame cap (0 none); `--max-fps` takes precedence |
+| `display.max_fps` | 0, 10 .. 1000 | 0 | frame cap (0 none); `--max-fps` takes precedence; on the login, server select, character select/creation and loading screens (including the last stretch of a zone-in) an unlimited cap counts as 240 fps (a set cap is followed exactly) |
 | `display.background_fps` | -1, 0, 1 .. 1000 | 0 | frame cap while another window has the focus (0: as `display.max_fps`; -1: nothing drawn, the Options window's "0"). Below 10 the loop runs on at 10 a second (the game clock catches up at most 250 ms a frame) and draws only that many frames, or none (`app/frame_pace.h`); a frame not drawn is run as a minimised window's is |
 | `display.flora_distance` | units, 400 .. 1200 | 400 | how far the flora is drawn (Radial flora) |
 | `display.grass_density` | percent, 25 .. 200 | 100 | how thick Hailstone's lawn grows (`render::lawn_lod_blades`) |

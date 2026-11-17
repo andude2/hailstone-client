@@ -1038,9 +1038,20 @@ struct ModuleFile {
     std::string text, chunk, msg;
 };
 
+// A typed path alias (needed/init.lua, ./needed/init) still belongs to the same top-level script folder.
+std::string script_identity(const ScriptHost::Impl& host, const fs::path& entry, std::string_view fallback) {
+    const fs::path normalized = entry.lexically_normal();
+    for (const auto& dir : host.dirs()) {
+        const fs::path relative = normalized.lexically_relative(dir.lexically_normal());
+        if (relative.empty() || *relative.begin() == "..") continue;
+        return lower(relative.parent_path().empty() ? relative.stem().string() : relative.begin()->string());
+    }
+    return lower(std::string(fallback));
+}
+
 // The module file `given` names, next to the script or in the script directories, allowed by the server's rules like
 // the script. Calls no Lua.
-void search_module(const Script& s, std::string_view given, ModuleFile& out) {
+void search_module(Script& s, std::string_view given, ModuleFile& out) {
     const std::string name(given);
     std::string rel = name;
     std::replace(rel.begin(), rel.end(), '.', '/');
@@ -1057,8 +1068,9 @@ void search_module(const Script& s, std::string_view given, ModuleFile& out) {
                 auto text = read_file(cand);
                 if (!text) continue;
                 Sha256Digest h = sha256(*text);
+                const std::string owner = script_identity(*s.host, cand, s.name);
                 const std::uint32_t module_caps =
-                    s.host->env.policy ? s.host->env.policy->caps(plugin::FileKind::Script, h) : 0;
+                    s.host->env.policy ? s.host->env.policy->caps(plugin::FileKind::Script, h, owner) : 0;
                 if (module_caps == 0) {
                     out.msg = std::format("module '{}' ({}) may not run: {}", name, cand.string(),
                                           s.host->env.policy ? s.host->env.policy->refusal(plugin::FileKind::Script)
@@ -1074,6 +1086,8 @@ void search_module(const Script& s, std::string_view given, ModuleFile& out) {
                         cand.string(), s.name, plugin::caps_text(module_caps), plugin::caps_text(s.caps));
                     return;
                 }
+                if (std::none_of(s.modules.begin(), s.modules.end(), [&](const auto& m) { return m.second == h && m.first == owner; }))
+                    s.modules.emplace_back(owner, h);
                 out.found = true;
                 out.text = std::move(*text);
                 out.chunk = "@" + cand.string();
@@ -1103,7 +1117,7 @@ int find_module(lua_State* L, const char* given) {
             lua_getglobal(L, global);
             return 2;
         }
-    const Script& s = Script::of(L);
+    Script& s = Script::of(L);
     ModuleFile& m = plugin::lua_keep<ModuleFile>(L);
     plugin::cxx_guard(L, [&] { search_module(s, given, m); });
     int found = 0;
@@ -1526,7 +1540,7 @@ bool ScriptHost::run(const std::string& name, const std::vector<std::string>& ar
     if (!text) return refuse("cannot read " + entry->string());
     Sha256Digest hash = sha256(*text);
     if (!m.env.policy) return refuse("scripts are off");
-    std::uint32_t caps = m.env.policy->caps(plugin::FileKind::Script, hash);
+    std::uint32_t caps = m.env.policy->caps(plugin::FileKind::Script, hash, script_identity(m, *entry, key));
     if (caps == 0) return refuse(std::format("{} may not run: {}", key, m.env.policy->refusal(plugin::FileKind::Script)));
     // A script another started (mq.cmd("/lua run"), a plugin, a plugin's window) gets no more than its starter may
     // do now; the player's own start gives it all its file allows.
@@ -1568,7 +1582,8 @@ bool ScriptHost::run(const std::string& name, const std::vector<std::string>& ar
 
 bool ScriptHost::Impl::kept(const Script& s) const {
     return env.policy && env.policy->current() && env.policy->current()->configured &&
-           env.policy->server_file(plugin::FileKind::Script, s.hash);
+           (env.policy->server_file(plugin::FileKind::Script, s.hash) ||
+            env.policy->required_file(plugin::FileKind::Script, s.hash));
 }
 
 void ScriptHost::Impl::end(Script& s, const std::string& why) {
@@ -1590,7 +1605,9 @@ bool ScriptHost::stop(std::string_view name) {
     Script* s = impl_->find(lower(name));
     if (!s || s->stop_requested) return false;
     if (impl_->kept(*s)) {
-        impl_->say("[Lua] " + s->name + " is this server's own script: it keeps running");
+        impl_->say("[Lua] " + s->name + (impl_->env.policy->server_file(plugin::FileKind::Script, s->hash)
+                                           ? " is this server's own script: it keeps running"
+                                           : " is required by this server: it keeps running"));
         return true;
     }
     if (impl_->refuse_control(*s)) return true;
@@ -1611,7 +1628,9 @@ bool ScriptHost::pause(std::string_view name, std::optional<bool> paused) {
     Script* s = impl_->find(lower(name));
     if (!s || s->stop_requested) return false;
     if (impl_->kept(*s)) {
-        impl_->say("[Lua] " + s->name + " is this server's own script: it keeps running");
+        impl_->say("[Lua] " + s->name + (impl_->env.policy->server_file(plugin::FileKind::Script, s->hash)
+                                           ? " is this server's own script: it keeps running"
+                                           : " is required by this server: it keeps running"));
         return true;
     }
     if (impl_->refuse_control(*s)) return true;
@@ -1844,7 +1863,14 @@ void ScriptHost::policy_changed(const std::vector<std::string>& autoload) {
     for (auto& sp : m.scripts) {
         Script& s = *sp;
         if (s.stop_requested) continue;
-        std::uint32_t caps = m.env.policy ? m.env.policy->caps(plugin::FileKind::Script, s.hash) : 0;
+        std::uint32_t caps = m.env.policy
+                                 ? m.env.policy->caps(plugin::FileKind::Script, s.hash, script_identity(m, s.entry, s.name))
+                                 : 0;
+        if (m.env.policy && m.env.policy->current() && m.env.policy->current()->addons.enabled)
+            for (const auto& module : s.modules) {
+                const auto allowed = m.env.policy->caps(plugin::FileKind::Script, module.second, module.first);
+                if ((allowed & caps) != caps) { caps = 0; break; }
+            }
         if (caps == 0) {
             m.end(s, "stopped: it may not run here");
         } else if (caps != s.caps) {
@@ -1867,9 +1893,71 @@ void ScriptHost::policy_changed(const std::vector<std::string>& autoload) {
     if (m.env.policy && m.env.policy->current())
         for (const auto& name : m.env.policy->current()->run_scripts)
             if (!running(name)) run(name, {});
+    // Required managed add-ons start independently of the player's autorun choices.
+    m.required.clear();
+    if (m.env.policy && m.env.policy->current() && !m.env.policy->current()->provisional) {
+        m.required = m.env.policy->required_entries(plugin::FileKind::Script);
+        for (auto& entry : m.required) {
+            entry.first = lower(entry.first);
+            if (running(entry.first)) continue;
+            const auto file = m.resolve(entry.first);
+            const auto text = file ? read_file(*file) : std::nullopt;
+            if (text && sha256(*text) == entry.second &&
+                m.env.policy->caps(plugin::FileKind::Script, entry.second, entry.first) != 0)
+                run(entry.first, {});
+        }
+    }
     // The player's own the settings and the character's autorun list name.
     m.start_allowed(autoload);
     m.start_allowed(m.autorun);
+}
+
+bool ScriptHost::required_addons_ready(std::string* problem) const {
+    if (problem) problem->clear();
+    Impl& m = *impl_;
+    if (!m.env.policy || !m.env.policy->current()) return true;
+    const auto& rules = *m.env.policy->current();
+    if (!rules.addons.enabled || rules.provisional) return true;
+    Impl::ReadyInputs inputs{m.env.policy->serial(), m.required, {}};
+    for (const auto& s : m.scripts)
+        inputs.scripts.push_back({s->name, s->error, s->hash, static_cast<int>(s->status), s->started,
+                                  s->stop_requested, s->modules});
+    if (m.ready_inputs != inputs) {
+        m.ready_inputs = std::move(inputs);
+        m.ready_problem.clear();
+        m.ready_answer = m.check_required_addons(&m.ready_problem);
+    }
+    if (problem) *problem = m.ready_problem;
+    return m.ready_answer;
+}
+
+bool ScriptHost::Impl::check_required_addons(std::string* problem) const {
+    const Impl& m = *this;
+    auto fail = [&](std::string text) {
+        if (problem) *problem = std::move(text);
+        return false;
+    };
+    for (const auto& s : m.scripts) {
+        if (s->stop_requested) continue;
+        if (m.env.policy->caps(plugin::FileKind::Script, s->hash, script_identity(m, s->entry, s->name)) == 0)
+            return fail(s->name + " is still running but is not allowed by this server");
+        for (const auto& module : s->modules)
+            if (m.env.policy->caps(plugin::FileKind::Script, module.second, module.first) == 0)
+                return fail(s->name + " is still running a module not allowed by this server");
+    }
+    for (const auto& entry : m.required) {
+        if (m.env.policy->caps(plugin::FileKind::Script, entry.second, entry.first) == 0)
+            return fail("Required add-on " + entry.first + " is not permitted by this server's rules");
+        const Script* s = m.find(entry.first);
+        if (s && s->hash != entry.second)
+            return fail("Required add-on " + entry.first + " is shadowed by a different script");
+        if (!s || s->stop_requested)
+            return fail("Required add-on " + entry.first + " did not remain running");
+        if (s->status != Script::Status::Running)
+            return fail("Required add-on " + entry.first + (s->error.empty() ? " is not running" : ": " + s->error));
+        if (!s->started) return false;
+    }
+    return true;
 }
 
 void ScriptHost::Impl::start_allowed(const std::vector<std::string>& names) {
@@ -1878,7 +1966,7 @@ void ScriptHost::Impl::start_allowed(const std::vector<std::string>& names) {
         if (name.empty() || self->running(name)) continue;
         auto entry = resolve(lower(name));
         auto text = entry ? read_file(*entry) : std::nullopt;
-        if (text && env.policy->caps(plugin::FileKind::Script, sha256(*text)) != 0) self->run(name, {});
+        if (text && env.policy->caps(plugin::FileKind::Script, sha256(*text), name) != 0) self->run(name, {});
     }
 }
 
@@ -1931,7 +2019,7 @@ std::vector<ScriptHost::Found> ScriptHost::found() const {
             if (!m.env.policy) {
                 f.why = "scripts are off";
             } else if (auto hash = m.file_hash(entry)) {
-                f.caps = m.env.policy->caps(plugin::FileKind::Script, *hash);
+                f.caps = m.env.policy->caps(plugin::FileKind::Script, *hash, name);
                 if (f.caps == 0) f.why = m.env.policy->refusal(plugin::FileKind::Script);
             } else {
                 f.why = "cannot read " + entry.string();

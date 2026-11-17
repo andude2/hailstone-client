@@ -882,9 +882,10 @@ void ClientApp::trace_spawn(float dt) {
 }
 
 std::optional<float> ClientApp::grounding_floor(const glm::vec3& p) const {
-    std::optional<float> floor = collision_ ? collision_->floor_below(p, 4.0f) : std::nullopt;
+    constexpr float reach = game::WorldState::kGroundingFloorReach;
+    std::optional<float> floor = collision_ ? collision_->floor_below(p, reach) : std::nullopt;
     if (world_objects_)
-        if (auto door = world_objects_->floor_below(p, 4.0f); door && (!floor || *door > *floor)) floor = door;
+        if (auto door = world_objects_->floor_below(p, reach); door && (!floor || *door > *floor)) floor = door;
     return floor;
 }
 

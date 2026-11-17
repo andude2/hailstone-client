@@ -2,6 +2,21 @@
 
 What the client does not implement yet, or implements with an approximation it cannot confirm. Entries are removed once settled.
 
+## Server add-on policy
+
+- The optional required/allow/block policy is covered by parser, package identity, admission, runtime and gate
+  regressions, not live. Live acceptance still needs a first visit and a return visit, a server fixing its policy,
+  installing missing requirements, native consent allowed/refused/closed, a required add-on failing in the world
+  (the chat warning), both UI packs and a physical controller, and an external upscaler allowed/blocked/updated
+  followed by restart. The server does not send its policy until the zone-in; it is a client extension, not a
+  server-side attestation or anti-cheat mechanism.
+- Texture packs (Texture Studio's output in `textures/`) are not add-ons and have no repository, so no list names
+  them; a server can block the Texture Studio tool, not the packs a player already built. A required tool is met by
+  its installation: the client does not start it and cannot tell whether it runs.
+- A script add-on whose name has capitals is not found by the script loader on a case-sensitive file system
+  (`ScriptHost::run` looks scripts up by their lower-cased name). Admission holds such a requirement unmet rather
+  than letting it pass and fail to start; the loader itself is unchanged.
+
 ## Evolving items
 
 - Final Result (action 4), progress updates (action 0) and the experience transfer's actions (1 open, 2 details,
@@ -319,7 +334,7 @@ The experimental texture broker (docs/graphics.md "Shared GPU textures", docs/re
 
 ## Chat
 
-- Spell Hit Modes is a Hailstone display extension, covered by packet, formatting and UI tests but not yet checked live. Critical-heal messages 427/1039 do not distinguish direct heals from HoT criticals, so both follow Healing. Some servers disagree on the caster/spell argument order in DoT messages 12954/13327; abbreviations keep only the unambiguous amount and victim. Raw custom server messages stay full. Live casts, DoT/HoT ticks and a log-parser session on a stock server would settle acceptance and identify any additional structured message ids needed.
+- Spell Hit Modes is a Hailstone display extension, covered by packet, formatting and UI tests but not yet checked live. Critical-heal messages 427/1039 and generic healing reports do not distinguish direct heals from HoT criticals or ticks, so both follow Healing. Some servers disagree on the caster/spell argument order in DoT messages 12954/13327; abbreviations keep only the unambiguous amount and victim. Recognised English generic/plain-text hit and heal reports follow the modes; unmatched or translated custom messages stay full. Their split into Damage Over Time and Healing by message type (376/377/399..401 as DoTs, 374/375/402..404 as heals) rests on the extended chat colours 355..408 below, which are themselves unconfirmed. Stock EQEmu's caster-less "You have been healed for N points of damage." follows Healing: it reads the heal-over-time filter but names no spell, so a tick cannot be told from a direct heal. Live casts, DoT/HoT ticks and a log-parser session on a stock server would settle acceptance and identify any additional structured message ids or plain-text forms needed.
 
 - The extended chat colours 355..408 and channels 57..107 (docs/mechanics.md "Extended chat routing"): their names, which colour goes to which channel, and the defaults' meanings were worked out by the contributor from packet captures of a later client (ToB), not from RoF2; nothing confirms them for RoF2 or for a server that sends them. Stock EQEmu sends none of them, so a stock server never reaches them. What RoF2 does with a colour above 354 is what the client did before the extension and does for 355, 381 and 384..387: channel 22 (Other), drawn in user colour 0's RGB (`GetUserDefinedColor` reads index 0 for an index past 98). That list also gives channels 82, 83, 86, 87, 90..94 and 96 colours below 355 (2, 4, 13, 15, 274, 283, 285, 286, 290, 348, 349), which keep RoF2's channels here; those channels are in no menu. A capture of an EQEmu server that sends these colours would settle it.
 

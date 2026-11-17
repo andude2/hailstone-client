@@ -97,7 +97,8 @@ void WorldState::smooth_vehicles(float dt, double now) {
 }
 
 void WorldState::smooth(float dt, double now, const FloorFn& floor, const RegionFn& region,
-                        const VehicleFn& vehicle_under, const FloorFn& ground_floor, const RemoteCollisionFn& collision) {
+                        const VehicleFn& vehicle_under, const FloorFn& ground_floor, const RemoteCollisionFn& collision,
+                        bool ground_floor_includes_zone) {
     const FloorFn& grounding = ground_floor ? ground_floor : floor;
     if (!vehicles_smoothed) smooth_vehicles(dt, now);
     vehicles_smoothed = false;
@@ -132,6 +133,10 @@ void WorldState::smooth(float dt, double now, const FloorFn& floor, const Region
         }
         // The original steps other spawns while their last update is at most 12 s old (AdvanceSpawn), but not the
         // local or the controlled player (the local player's mount, which the player's controls move).
+        // The zone floor the last physics step settled this spawn on (its position.z is then floor + AvatarHeight),
+        // NaN if none. The ground_npcs short-cut below uses it only when the grounding callback is known to include
+        // that floor; NaN fails its isfinite check.
+        float landed_floor = std::numeric_limits<float>::quiet_NaN();
         if (id != player_id && id != controlled_id && now - s.update_time <= mechanics::kSpawnStaleMs / 1000.0) {
             // Each step of the frame (core/step_clock.h) steps the body and lands it, as the original's frames do.
             mechanics::RemoteBody b{s.position, s.velocity, s.heading, s.speed_heading, s.speed_run};
@@ -158,11 +163,16 @@ void WorldState::smooth(float dt, double now, const FloorFn& floor, const Region
                 // in the air) it stays at the server's z, unless ground_npcs draws it lower.
                 if (floor) {
                     const bool moved = b.position != before;
+                    landed_floor = std::numeric_limits<float>::quiet_NaN(); // only the last step's landing counts
                     if (auto f = floor(b.position)) {
                         float z = *f + s.heights.avatar_height;
-                        if (moved) b.position.z = z;
-                        else if (s.fly_mode == 0 ? std::fabs(z - b.position.z) <= kRestSettleReach : z > b.position.z)
+                        if (moved) {
                             b.position.z = z;
+                            landed_floor = *f;
+                        } else if (s.fly_mode == 0 ? std::fabs(z - b.position.z) <= kRestSettleReach : z > b.position.z) {
+                            b.position.z = z;
+                            landed_floor = *f;
+                        }
                     }
                 }
             }
@@ -184,9 +194,24 @@ void WorldState::smooth(float dt, double now, const FloorFn& floor, const Region
         // a zone's floor is loaded (reground). With no floor under it yet, it is measured again next frame.
         if (id != player_id && id != controlled_id && ground_npcs && grounding) {
             if (s.ground_probe_at != s.position) {
-                const auto drop = ground_drop(s, grounding, region);
-                s.ground_drop = drop.value_or(0.0f);
-                s.ground_probe_at = drop ? s.position : glm::vec3(std::numeric_limits<float>::quiet_NaN());
+                // Hailstone: a landing on a zone floor f settles the spawn at f + AvatarHeight. If the grounding
+                // callback is known to include that same zone floor, it returns at least f here (a higher door or
+                // placed-object floor only raises it), so ground_drop's drop = f - grounding <= 0: never the
+                // positive drop over 0.25 that gets drawn. Its zone-mesh query is then redundant. Anything else -
+                // no landing, no floor, a stale or unstepped spawn, a floor outside the query's reach, bad numbers
+                // or a callback that does not promise inclusion - still takes the full query.
+                const bool skip = ground_floor_includes_zone && std::isfinite(landed_floor) &&
+                                  std::isfinite(s.position.z) && std::isfinite(s.heights.avatar_height) &&
+                                  landed_floor <= s.position.z + kGroundingFloorReach;
+                if (skip) {
+                    // A zero drop would have been measured here: remember the probe the same way ground_drop does.
+                    s.ground_drop = 0.0f;
+                    s.ground_probe_at = s.position;
+                } else {
+                    const auto drop = ground_drop(s, grounding, region);
+                    s.ground_drop = drop.value_or(0.0f);
+                    s.ground_probe_at = drop ? s.position : glm::vec3(std::numeric_limits<float>::quiet_NaN());
+                }
             }
             target.z -= s.ground_drop;
         } else {

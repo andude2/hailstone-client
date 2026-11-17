@@ -133,6 +133,60 @@ print('spell fields ok')
     CHECK(h.printed_line("spell fields ok"));
 }
 
+TEST_CASE("MQ Lua: hailstone.raid is a columnar roster") {
+    Host h;
+    using A = net::GameConnectionTestAccess;
+    auto& raid = A::raid(*h.world.conn);
+    raid.active = true;
+    raid.leader = "Groupie";
+    raid.locked = true;
+    raid.loot_type = 3;
+    raid.looters = {"Tester"};
+    raid.target = "Tester";
+    raid.members = {
+        mq_test::raid_member("Groupie", 0, 2, 48, true, true),
+        mq_test::raid_member("Tester", 0, 2, 50),
+        mq_test::raid_member("Third", 1, 1, 45, false, false, true),
+    };
+    auto& leadership = A::leadership(*h.world.conn);
+    leadership.raid_assist_names[0] = "Groupie";
+    leadership.raid_assist_names[1] = "Third";
+    h.write("raid.lua", R"(
+local hs = require('hailstone')
+local r = assert(hs.raid())
+print('raid', r.active, r.count, r.leader, r.target, r.locked, r.loot_type)
+print('m1', r.name[1], r.spawn_id[1], r.group[1], r.flags[1], r.pct_hp[1])
+print('m2', r.name[2], r.spawn_id[2], r.flags[2], r.pct_hp[2], r.pct_mana[2], r.pct_endurance[2])
+print('m3', r.name[3], r.spawn_id[3], r.group[3], r.flags[3], r.pct_hp[3])
+print('flags', hs.RAID_LEADER, hs.RAID_MAIN_ASSIST, hs.RAID_LOOTER, hs.RAID_ME, r.slot == nil)
+)");
+    REQUIRE(h.scripts->run("raid", {}));
+    h.pulses(1);
+    CHECK(h.printed_line("raid true 3 1 2 true 3"));
+    CHECK(h.printed_line("m1 Groupie 12 0 167 100"));
+    CHECK(h.printed_line("m2 Tester 1 416 75 25 50"));
+    CHECK(h.printed_line("m3 Third 0 1 12 -1"));
+    CHECK(h.printed_line("flags 1 4 32 256 true"));
+}
+
+TEST_CASE("MQ Lua: hailstone.raid outside the game and without read") {
+    Host h;
+    h.ctx.conn = nullptr;
+    h.write("raid_nil.lua", "print('nil', require('hailstone').raid() == nil)\n");
+    REQUIRE(h.scripts->run("raid_nil", {}));
+    h.pulses(1);
+    CHECK(h.printed_line("nil true"));
+
+    Host r(plugin::kCapCommands);
+    r.write("raid_denied.lua", "print(pcall(require('hailstone').raid))\n");
+    REQUIRE(r.scripts->run("raid_denied", {}));
+    r.pulses(1);
+    bool denied = false;
+    for (const auto& line : r.printed)
+        denied |= line.find("hailstone.raid needs the server's 'read' permission") != std::string::npos;
+    CHECK(denied);
+}
+
 TEST_CASE("MQ Lua: mq.TLO, print, mq.cmd, mq.parse and the script's arguments") {
     Host h;
     h.write("hello.lua", R"(
@@ -264,6 +318,137 @@ TEST_CASE("MQ Lua: a module must be allowed too") {
     REQUIRE(h.scripts->run("main", {}));
     h.pulses(1);
     CHECK(h.printed_line("got 42"));
+}
+
+TEST_CASE("MQ Lua: required managed scripts start without autorun and cannot be stopped or paused") {
+    Host h;
+    const std::string text = "while true do require('mq').delay(10) end\n";
+    h.write("needed/init.lua", text);
+    h.policy.set_ceilings({{plugin::FileKind::Script, sha256(text), plugin::kCapRead, "needed", "owner/needed"}});
+    h.policy.set(plugin::parse_server_cfg("[scripts]\nplayer = on\n[addons]\nenforce = on\ndefault = deny\n"
+                                          "required = owner/needed\n"));
+    h.scripts->policy_changed();
+    REQUIRE(h.scripts->running("needed"));
+    std::string problem;
+    CHECK_FALSE(h.scripts->required_addons_ready(&problem)); // the entry has not run yet
+    CHECK(problem.empty());
+    h.pulses(1);
+    CHECK(h.scripts->required_addons_ready(&problem));
+    CHECK(h.scripts->list().front().kept);
+    CHECK(h.scripts->stop("needed"));
+    CHECK(h.scripts->pause("needed", true));
+    h.run("/lua stop");
+    h.run("/lua pause");
+    CHECK(h.scripts->running("needed"));
+    CHECK(h.scripts->list().front().status == "RUNNING");
+    CHECK(h.printed_line("[Lua] needed is required by this server: it keeps running"));
+    h.policy.clear();
+    h.scripts->policy_changed();
+    CHECK_FALSE(h.scripts->running("needed"));
+}
+
+TEST_CASE("MQ Lua: required script startup failures prevent readiness") {
+    Host h;
+    const std::string text = "error('required startup failed')\n";
+    h.write("needed/init.lua", text);
+    h.policy.set_ceilings({{plugin::FileKind::Script, sha256(text), plugin::kCapRead, "needed", "owner/needed"}});
+    h.policy.set(plugin::parse_server_cfg("[scripts]\nplayer = on\n[addons]\nenforce = on\nrequired = owner/needed\n"));
+    h.scripts->policy_changed();
+    h.pulses(1);
+    std::string problem;
+    CHECK_FALSE(h.scripts->required_addons_ready(&problem));
+    CHECK(problem.find("Required add-on needed") != std::string::npos);
+}
+
+TEST_CASE("MQ Lua: a required hash also supplied by a blocked add-on refuses readiness") {
+    Host h;
+    const std::string text = "while true do require('mq').delay(10) end\n";
+    h.write("needed/init.lua", text);
+    h.policy.set_ceilings({{plugin::FileKind::Script, sha256(text), plugin::kCapRead, "needed", "owner/needed"},
+                          {plugin::FileKind::Script, sha256(text), plugin::kCapRead, "blocked", "owner/blocked"}});
+    h.policy.set(plugin::parse_server_cfg("[scripts]\nplayer = on\n[addons]\nenforce = on\ndefault = deny\n"
+                                          "required = owner/needed\nblock = owner/blocked\n"));
+    h.scripts->policy_changed();
+    CHECK_FALSE(h.scripts->running("needed"));
+    std::string problem;
+    CHECK_FALSE(h.scripts->required_addons_ready(&problem));
+    CHECK(problem.find("not permitted") != std::string::npos);
+}
+
+TEST_CASE("MQ Lua: missing or shadowed required entry points cannot disappear from readiness checks") {
+    Host h;
+    const std::string text = "while true do require('mq').delay(10) end\n";
+    h.write("needed/init.lua", text);
+    h.policy.set_ceilings({{plugin::FileKind::Script, sha256(text), plugin::kCapRead, "needed", "owner/needed"}});
+    auto rules = plugin::parse_server_cfg("[scripts]\nplayer = on\n[addons]\nenforce = on\ndefault = deny\n"
+                                          "required = owner/needed\n");
+    REQUIRE(rules.addons.error.empty());
+    SUBCASE("the managed entry is missing") {
+        fs::remove(h.lua_dir / "needed/init.lua");
+    }
+    SUBCASE("a different server script shadows the managed entry") {
+        const fs::path server = h.world.dir / "server/scripts";
+        fs::create_directories(server);
+        const std::string shadow = "while true do require('mq').delay(20) end\n";
+        std::ofstream(server / "needed.lua", std::ios::binary) << shadow;
+        h.scripts->set_server_dir(server);
+        rules.server_files.push_back({plugin::FileKind::Script, "scripts/needed.lua", sha256(shadow)});
+    }
+    h.policy.set(rules);
+    h.scripts->policy_changed();
+    CHECK_FALSE(h.scripts->running("needed"));
+    std::string problem;
+    CHECK_FALSE(h.scripts->required_addons_ready(&problem));
+    CHECK_FALSE(problem.empty());
+}
+
+TEST_CASE("MQ Lua: blocks apply to an installed add-on's entry, its paths and already-loaded modules") {
+    Host h;
+    const std::string entry = "print('blocked entry')\n", helper = "return {value = 42}\n";
+    h.write("blocked/init.lua", entry);
+    h.write("blocked/helper.lua", helper);
+    h.policy.set_ceilings({{plugin::FileKind::Script, sha256(entry), plugin::kCapAll, "blocked", "owner/blocked"},
+                          {plugin::FileKind::Script, sha256(helper), plugin::kCapAll, "blocked", "owner/blocked"}});
+    h.write("main.lua", "local helper = require('blocked.helper') while true do require('mq').delay(10) end\n");
+    auto rules = plugin::parse_server_cfg("[scripts]\nplayer = on\n[addons]\nenforce = on\ndefault = allow\n");
+    h.policy.set(rules);
+    REQUIRE(h.scripts->run("main", {}));
+    h.pulses(1);
+    REQUIRE(h.scripts->running("main"));
+    rules.addons.block = {"owner/blocked"};
+    h.policy.set(rules);
+    std::string problem;
+    CHECK_FALSE(h.scripts->required_addons_ready(&problem)); // before policy_changed retires the loaded module
+    CHECK(problem.find("module") != std::string::npos);
+    h.scripts->policy_changed();
+    CHECK_FALSE(h.scripts->running("main"));
+    CHECK(h.scripts->required_addons_ready());
+    CHECK_FALSE(h.scripts->run("blocked", {}));
+    CHECK_FALSE(h.scripts->run("blocked/init", {}));
+    CHECK_FALSE(h.scripts->run("blocked/init.lua", {}));
+    CHECK_FALSE(h.scripts->run("./blocked/init.lua", {}));
+    CHECK_FALSE(h.scripts->run("blocked/./init.lua", {}));
+    CHECK_FALSE(h.scripts->run("blocked\\init.lua", {}));
+    REQUIRE(h.scripts->run("main", {}));
+    h.pulses(1);
+    CHECK_FALSE(h.scripts->running("main")); // require cannot reopen the blocked module
+}
+
+TEST_CASE("MQ Lua: loaded module rechecks are confined to opted-in add-on rules") {
+    Host h(plugin::kCapRead);
+    const std::string helper = "return {}\n";
+    h.write("helper.lua", helper);
+    h.write("main.lua", "require('helper') while true do require('mq').delay(10) end\n");
+    h.policy.set_ceilings({{plugin::FileKind::Script, sha256(helper), plugin::kCapRead, "helper", "owner/helper"}});
+    REQUIRE(h.scripts->run("main", {}));
+    h.pulses(1);
+    h.allow_unlisted(plugin::kCapAll);
+    h.scripts->policy_changed();
+    CHECK(h.scripts->running("main"));
+    CHECK(h.scripts->caps_of("main") == plugin::kCapAll);
+    h.policy.set(plugin::parse_server_cfg("[scripts]\nplayer = on\n[addons]\nenforce = on\ndefault = allow\n"));
+    h.scripts->policy_changed();
+    CHECK_FALSE(h.scripts->running("main"));
 }
 
 TEST_CASE("MQ Lua: a module whose file may do less than the requiring script is refused") {

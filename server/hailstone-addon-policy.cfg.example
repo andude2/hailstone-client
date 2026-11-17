@@ -1,0 +1,40 @@
+; Optional server add-on policy (docs/plugins.md "Opt-in add-on policies"). Copy this file to client_files/ as
+; hailstone.cfg and fill in its lists. Without [addons] enforce = on the client keeps its usual behaviour.
+;
+; Add-ons are named by their GitHub repository, owner/repo (a GitHub link works too), never by a bare name: any
+; package with that name would match. Any add-on the add-on manager installs can be named: scripts, compiled
+; plugins, tools (Texture Studio) and upscalers (XeSS, FSR 4). Your server's own scripts and plugins are not add-ons;
+; no list names them.
+
+[scripts]
+player = off
+;player_caps = read,ui
+
+[plugins]
+player = off
+;player_caps = read
+
+[addons]
+enforce = on
+;required = owner/repo
+;allow = owner/repo
+;block = owner/repo
+;suggest = owner/repo
+default = allow
+
+; required: installed intact before the character enters, checked at each zone-in against this file. Required
+;   scripts and plugins start even when the player did not set them to, and cannot be stopped on this server. A
+;   required compiled plugin still asks the player first. Missing at the zone-in: entry is refused and the player is
+;   shown what to install. Failing once the character is in the world: a warning in chat, never a disconnect.
+; allow: permitted when default = deny. Naming an add-on does not turn on [scripts] or [plugins] player above, nor
+;   grant capabilities: enable the kind it is and choose its player_caps too.
+; block: refused, whatever else says; an add-on both required and blocked makes the policy invalid.
+; default = deny refuses every add-on not named by required or allow, including upscalers and tools.
+;
+; WARNING with default = deny: upscalers (XeSS, FSR 4 ...) are add-ons too. Name in allow each one you permit; the
+; client's built-in choices need no entry. An upscaler loads at start: a refused one keeps the player out until they
+; pick an allowed or built-in one and restart Hailstone.
+;
+; To block only some add-ons, keep default = allow and list them in block. To require some without excluding
+; others, use required with default = allow. A suggestion stays optional and grants nothing: under default = deny
+; also name it in allow.

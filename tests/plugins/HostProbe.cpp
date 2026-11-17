@@ -9,12 +9,13 @@
 //   get_spawns_data_bulk into n bytes (the whole buffer without n), read through the SDK's HS_Bulk_* structs cast
 //   onto the buffer
 //   /probextargets [n]  get_xtarget_data_bulk the same way, through HS_Bulk_XTargetData
-//   /probetargetbuffs [n]  get_target_buff_data_bulk the same way, through HS_Bulk_TargetBuffFixedRecord and the
-//   caster's name after each
+//   /probetargetbuffs [n]  get_target_buff_data_bulk the same way, through HS_Bulk_ListHeader,
+//   HS_Bulk_TargetBuffFixedRecord and the caster's name after each
 //   /probeaas [n], /probediscs [n]  get_avail_aa_data_bulk / get_avail_disc_data_bulk the same way, through
-//   the int32_t count and HAILSTONE_ID_NAME_RECORD
+//   HS_Bulk_ListHeader and HAILSTONE_ID_NAME_RECORD
 //   /probebuffnames [n]  get_buff_name_data_bulk the same way, through HS_Bulk_BuffNameFixedRecord and the caster's
 //   name after each
+//   /proberaid [n]  get_raid_data_bulk the same way, through HS_Bulk_RaidHeader / HS_Bulk_RaidData
 //   /probecursor   cursor_origin, when the host table has it
 // Built again with HAILSTONE_PROBE_THROW_INIT (HostProbeThrow): InitializePlugin registers a command and a TLO, then
 // throws.
@@ -223,8 +224,9 @@ static_assert(sizeof(HS_Bulk_TargetBuffFixedRecord) == HAILSTONE_TARGET_BUFF_REC
 
 // Each entry one line, by the buff slot the server sent (spell id, tics, spell type, caster's name); a slot number
 // skipped is one the server sent nothing for. An all-zero record (no spell, no name) is only counted as empty; the
-// host sends none, so the count shows one sent again. Then the bytes left over after the last whole record (0 when
-// every name is framed right). With n, also how many bytes past the first n the host
+// host sends none, so the count shows one sent again. Then the header's count and total, the records read after it
+// (at most the count; fewer only when the header and the bytes disagree) and the bytes left over after the last whole
+// record (0 when the count and every name are framed right). With n, also how many bytes past the first n the host
 // changed (guard bytes; 0 unless it wrote past the end).
 void probe_target_buffs(void*, const char* args) {
     unsigned char buf[2048];
@@ -238,11 +240,18 @@ void probe_target_buffs(void*, const char* args) {
         WriteChatf("[Probe] target buffs past the end %zu", changed);
     }
     const std::size_t size = r > 0 ? static_cast<std::size_t>(r) : 0;
-    std::size_t at = 0;
+    if (size < sizeof(HS_Bulk_ListHeader)) {
+        WriteChatf("[Probe] target buffs %d bytes", static_cast<int>(r));
+        return;
+    }
+    const auto* header = reinterpret_cast<const HS_Bulk_ListHeader*>(buf);
+    std::size_t at = sizeof(HS_Bulk_ListHeader);
     int count = 0;
     int empty = 0;
-    while (size - at >= sizeof(HS_Bulk_TargetBuffFixedRecord)) {
+    while (count < header->count && size - at >= sizeof(HS_Bulk_TargetBuffFixedRecord)) {
         const auto* rec = reinterpret_cast<const HS_Bulk_TargetBuffFixedRecord*>(buf + at);
+        const auto len = rec->casterNameLength > 0 ? static_cast<std::size_t>(rec->casterNameLength) : 0;
+        if (len > size - at - sizeof(HS_Bulk_TargetBuffFixedRecord)) break; // a name past the end: "left" shows it
         ++count;
         at += sizeof(HS_Bulk_TargetBuffFixedRecord);
         if (rec->spellID == 0 && rec->duration == 0 && rec->spellType == 0 && rec->slot == 0 &&
@@ -250,22 +259,22 @@ void probe_target_buffs(void*, const char* args) {
             ++empty; // an empty entry: every field 0 and no name follows
             continue;
         }
-        const auto len = rec->casterNameLength > 0 ? static_cast<std::size_t>(rec->casterNameLength) : 0;
-        if (len > size - at) break; // a name running past the end: the "left" count shows it
         const std::string caster(reinterpret_cast<const char*>(buf + at), len);
         at += len;
         WriteChatf("[Probe] target buff slot %d: spell %d, tics %d, spell type %d, caster %s", rec->slot, rec->spellID,
             rec->duration, rec->spellType, caster.empty() ? "-" : caster.c_str());
     }
-    WriteChatf("[Probe] target buffs %d bytes, %d records, %d empty, %zu bytes left", static_cast<int>(r), count,
-        empty, size - at);
+    WriteChatf("[Probe] target buffs count %d, total %d, %d bytes, %d records, %d empty, %zu bytes left",
+        static_cast<int>(header->count), static_cast<int>(header->total), static_cast<int>(r), count, empty,
+        size - at);
 }
 
 static_assert(sizeof(HAILSTONE_ID_NAME_RECORD) == HAILSTONE_ID_NAME_RECORD_SIZE);
+static_assert(sizeof(HS_Bulk_ListHeader) == HS_BULK_LIST_HEADER_SIZE);
 
 // get_avail_aa_data_bulk, the owned alternate abilities: each record one line by its position (id, name), then the
-// count, the bytes and the bytes left over after the records it counts (0 when the count and every name are framed
-// right). With n, also how many bytes past the first n the host changed (guard bytes; 0 unless it wrote past the end).
+// header's count and total, the bytes and the bytes left over after the records it counts (0 when the count and
+// every name are framed right). With n, also how many bytes past the first n the host changed (guard bytes; 0 unless it wrote past the end).
 void probe_aa(void*, const char* args) {
     unsigned char buf[8192];
     constexpr unsigned char guard = 0xA5;
@@ -278,14 +287,13 @@ void probe_aa(void*, const char* args) {
         WriteChatf("[Probe] aas past the end %zu", changed);
     }
     const std::size_t size = r > 0 ? static_cast<std::size_t>(r) : 0;
-    std::int32_t count = 0;
-    if (size < sizeof count) {
+    if (size < sizeof(HS_Bulk_ListHeader)) {
         WriteChatf("[Probe] aas %d bytes", static_cast<int>(r));
         return;
     }
-    std::memcpy(&count, buf, sizeof count); // a plain int32_t, unaligned in general
-    std::size_t at = sizeof count;
-    for (std::int32_t i = 0; i < count; ++i) {
+    const auto* header = reinterpret_cast<const HS_Bulk_ListHeader*>(buf);
+    std::size_t at = sizeof(HS_Bulk_ListHeader);
+    for (std::int32_t i = 0; i < header->count; ++i) {
         if (size - at < sizeof(HAILSTONE_ID_NAME_RECORD)) break; // a count past the bytes: the "left" count shows it
         const auto* rec = reinterpret_cast<const HAILSTONE_ID_NAME_RECORD*>(buf + at);
         const std::size_t len = rec->nameSize > 0 ? static_cast<std::size_t>(rec->nameSize) : 0;
@@ -296,13 +304,13 @@ void probe_aa(void*, const char* args) {
         WriteChatf("[Probe] aas %d: ability %d, name %s", static_cast<int>(i), rec->id,
             name.empty() ? "-" : name.c_str());
     }
-    WriteChatf("[Probe] aas count %d, %d bytes, %zu bytes left", static_cast<int>(count), static_cast<int>(r),
-        size - at);
+    WriteChatf("[Probe] aas count %d, total %d, %d bytes, %zu bytes left", static_cast<int>(header->count),
+        static_cast<int>(header->total), static_cast<int>(r), size - at);
 }
 
 // get_avail_disc_data_bulk, the combat abilities: each record one line by its position (id, name), then the
-// count, the bytes and the bytes left over after the records it counts (0 when the count and every name are framed
-// right). With n, also how many bytes past the first n the host changed (guard bytes; 0 unless it wrote past the end).
+// header's count and total, the bytes and the bytes left over after the records it counts (0 when the count and
+// every name are framed right). With n, also how many bytes past the first n the host changed (guard bytes; 0 unless it wrote past the end).
 void probe_disc(void*, const char* args) {
     unsigned char buf[8192];
     constexpr unsigned char guard = 0xA5;
@@ -315,14 +323,13 @@ void probe_disc(void*, const char* args) {
         WriteChatf("[Probe] discs past the end %zu", changed);
     }
     const std::size_t size = r > 0 ? static_cast<std::size_t>(r) : 0;
-    std::int32_t count = 0;
-    if (size < sizeof count) {
+    if (size < sizeof(HS_Bulk_ListHeader)) {
         WriteChatf("[Probe] discs %d bytes", static_cast<int>(r));
         return;
     }
-    std::memcpy(&count, buf, sizeof count); // a plain int32_t, unaligned in general
-    std::size_t at = sizeof count;
-    for (std::int32_t i = 0; i < count; ++i) {
+    const auto* header = reinterpret_cast<const HS_Bulk_ListHeader*>(buf);
+    std::size_t at = sizeof(HS_Bulk_ListHeader);
+    for (std::int32_t i = 0; i < header->count; ++i) {
         if (size - at < sizeof(HAILSTONE_ID_NAME_RECORD)) break; // a count past the bytes: the "left" count shows it
         const auto* rec = reinterpret_cast<const HAILSTONE_ID_NAME_RECORD*>(buf + at);
         const std::size_t len = rec->nameSize > 0 ? static_cast<std::size_t>(rec->nameSize) : 0;
@@ -333,8 +340,46 @@ void probe_disc(void*, const char* args) {
         WriteChatf("[Probe] discs %d: spell %d, name %s", static_cast<int>(i), rec->id,
             name.empty() ? "-" : name.c_str());
     }
-    WriteChatf("[Probe] discs count %d, %d bytes, %zu bytes left", static_cast<int>(count), static_cast<int>(r),
-        size - at);
+    WriteChatf("[Probe] discs count %d, total %d, %d bytes, %zu bytes left", static_cast<int>(header->count),
+        static_cast<int>(header->total), static_cast<int>(r), size - at);
+}
+
+static_assert(sizeof(HS_Bulk_RaidHeader) == HS_BULK_RAID_HEADER_SIZE);
+static_assert(sizeof(HS_Bulk_RaidData) == HS_BULK_RAID_RECORD_SIZE);
+
+// The header, then each member one line: slot, name, spawn id, group, flags, level, class, HP/mana/endurance
+// percent, pet spawn id and pet HP percent.
+void probe_raid(void*, const char* args) {
+    if (!HAILSTONE_HOST_HAS(host, get_raid_data_bulk)) {
+        WriteChatf("[Probe] raid: not in this client");
+        return;
+    }
+    unsigned char buf[16384];
+    const std::int32_t r = host->get_raid_data_bulk(host->host, buf, size_arg(args, sizeof buf));
+    if (r < static_cast<std::int32_t>(sizeof(HS_Bulk_RaidHeader))) {
+        WriteChatf("[Probe] raid %d bytes", r);
+        return;
+    }
+    const auto* header = reinterpret_cast<const HS_Bulk_RaidHeader*>(buf);
+    WriteChatf("[Probe] raid active %d, count %u, total %u, leader %u, target %u, locked %d, loot %d, %d bytes",
+        header->active, header->count, header->total, header->leaderIndex, header->targetIndex, header->locked,
+        header->lootType, r);
+    // The reference reader: records start at header.size and step by header.recordSize, so a later client that
+    // appends a record field is still read correctly.
+    std::size_t at = header->size >= sizeof(HS_Bulk_RaidHeader) ? header->size : sizeof(HS_Bulk_RaidHeader);
+    if (header->recordSize < sizeof(HS_Bulk_RaidData)) {
+        WriteChatf("[Probe] raid record size %u, smaller than this reader's %zu", header->recordSize,
+            sizeof(HS_Bulk_RaidData));
+        return;
+    }
+    for (std::uint32_t i = 0; i < header->count && at + header->recordSize <= static_cast<std::size_t>(r); ++i) {
+        const auto* rec = reinterpret_cast<const HS_Bulk_RaidData*>(buf + at);
+        WriteChatf("[Probe] raid %u: %s %u g%d f%u l%d c%d hp%d mp%d ep%d pet%u ph%d", i, rec->name, rec->spawnID,
+            rec->group, rec->flags, rec->level, rec->classID, rec->pctHPs, rec->pctMana, rec->pctEndurance,
+            rec->petSpawnID, rec->petPctHPs);
+        WriteChatf("[Probe] raid pos %u: %.2f %.2f %.2f %.2f", i, rec->x, rec->y, rec->z, rec->distance);
+        at += header->recordSize;
+    }
 }
 
 void probe_cursor(void*, const char*) {
@@ -369,6 +414,7 @@ HAILSTONE_API void InitializePlugin(void) {
     AddCommand("/probetargetbuffs", probe_target_buffs, nullptr);
     AddCommand("/probeaas", probe_aa, nullptr);
     AddCommand("/probediscs", probe_disc, nullptr);
+    AddCommand("/proberaid", probe_raid, nullptr);
     AddCommand("/probecursor", probe_cursor, nullptr);
     AddTopLevelObject("Probe", probe_tlo, nullptr);
 #ifdef HAILSTONE_PROBE_THROW_INIT
@@ -390,6 +436,7 @@ HAILSTONE_API void ShutdownPlugin(void) {
     RemoveCommand("/probetargetbuffs");
     RemoveCommand("/probeaas");
     RemoveCommand("/probediscs");
+    RemoveCommand("/proberaid");
     RemoveCommand("/probecursor");
     RemoveTopLevelObject("Probe");
 }

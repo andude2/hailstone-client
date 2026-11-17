@@ -197,9 +197,19 @@ typedef struct HS_Bulk_PetBuffData {
     int32_t duration;
     int32_t spellType;
 } HS_BulkPetBuffData;
-/* get_target_buff_data_bulk: one record per buff of the current target, HAILSTONE_TARGET_BUFF_RECORD_SIZE fixed bytes
- * each, immediately followed by casterNameLength bytes of the caster's name (no NUL); the next record starts after
- * them. */
+/* The header of a list-type bulk read (get_target_buff_data_bulk, get_avail_aa_data_bulk, get_avail_disc_data_bulk),
+ * HS_BULK_LIST_HEADER_SIZE bytes before the first record. Like HS_Bulk_RaidHeader's count and total, it states both
+ * how many records this buffer holds and how many the client has: count < total means out_size was too small to hold
+ * them all, so retry with a larger buffer. Below HS_BULK_LIST_HEADER_SIZE bytes nothing is written (0 returned); with
+ * nothing to list, the header alone goes out, count 0 and total 0. */
+typedef struct HS_Bulk_ListHeader {
+    int32_t count; /* records that follow in this buffer (as many whole records as fit) */
+    int32_t total; /* records the client holds, written or not */
+} HS_BulkListHeader;
+/* get_target_buff_data_bulk: an HS_Bulk_ListHeader for the current target's buffs, then one record per buff,
+ * HAILSTONE_TARGET_BUFF_RECORD_SIZE fixed bytes each, immediately followed by casterNameLength bytes of the caster's
+ * name (no NUL); the next record starts after them. As many whole records as fit follow the header, in order, none
+ * after the first that does not fit. */
 typedef struct HS_Bulk_TargetBuffFixedRecord {
     int32_t spellID;          /* the buff's spell; entries with no spell are not sent */
     int32_t duration;         /* tics left (the server's count less the 6 s ticks since); negative: permanent */
@@ -207,9 +217,9 @@ typedef struct HS_Bulk_TargetBuffFixedRecord {
     int32_t slot;             /* the target's buff slot, as the server sent it (EQEmu: the mob's own slot index) */
     int32_t casterNameLength; /* bytes of the caster's name that follow; 0 for none */
 } HS_BulkTargetBuffFixedRecord;
-/* get_avail_aa_data_bulk and get_avail_disc_data_bulk: an int32_t count, then `count` records, each an
+/* get_avail_aa_data_bulk and get_avail_disc_data_bulk: an HS_Bulk_ListHeader, then `count` records, each an
  * HAILSTONE_ID_NAME_RECORD (HAILSTONE_ID_NAME_RECORD_SIZE bytes) immediately followed by nameSize bytes of the name (no
- * NUL); the next record starts after them. */
+ * NUL); the next record starts after them. As many whole records as fit follow the header, in order. */
 typedef struct HAILSTONE_ID_NAME_RECORD {
     int32_t id;       /* an AA's ability (group) id, or a discipline's spell id */
     int32_t nameSize; /* bytes of the AA's or the discipline's name that follow; 0 when the client has none */
@@ -259,6 +269,62 @@ typedef struct HS_Bulk_XTargetData {
     int32_t pctHPs;     /* the spawn's HP percent; 0 without a spawn or for a corpse */
 } HS_BulkXTargetData;
 #pragma pack(pop)
+
+/* get_raid_data_bulk: the raid roster, its header and one record per member
+ * (HS_BULK_RAID_HEADER_SIZE and HS_BULK_RAID_RECORD_SIZE bytes today). The header is always written when out_size
+ * holds it, with count 0 and active 0 outside a raid; only whole records follow it.
+ *
+ * A reader steps from the first record at header.size by header.recordSize bytes, for header.count records. The
+ * record may grow at its end in a later client: read recordSize, never a fixed stride, and read only the fields the
+ * record's size covers. version changes only when an older reader can no longer read the header or a record at all.
+ * total is the roster's member count, so a caller whose buffer cut the roster short can see it from count < total
+ * and retry with a larger one (the rule every list-type bulk read follows, HS_Bulk_ListHeader).
+ *
+ * A member not in this zone has spawnID 0 and no HP, position or pet (the percentages are -1, the rest 0); the
+ * roster's level and class still answer. */
+#define HS_BULK_RAID_HEADER_SIZE 40
+#define HS_BULK_RAID_RECORD_SIZE 124
+#define HS_BULK_RAID_NO_INDEX 0xffffffffu
+#pragma pack(push, 1)
+typedef struct HS_Bulk_RaidHeader {
+    uint32_t size;        /* sizeof(HS_Bulk_RaidHeader); the first record starts here */
+    uint32_t version;     /* 1; changes only when an older reader cannot read the data */
+    uint32_t count;       /* member records that follow (what fit in out_size) */
+    uint32_t recordSize;  /* bytes between records; may grow, so step by it */
+    uint32_t leaderIndex; /* 0-based member, HS_BULK_RAID_NO_INDEX for none */
+    uint32_t targetIndex; /* the raid window's selected member, same encoding */
+    int32_t active;       /* in a raid */
+    int32_t locked;
+    int32_t lootType;     /* 1 Leader Only, 2 Leader and Group Leader, 3 Leader Selected, 4 Entire Raid */
+    uint32_t total;       /* the roster's member count, not only those written; count < total: buffer too small */
+} HS_BulkRaidHeader;
+
+typedef struct HS_Bulk_RaidData {
+    int32_t slot;         /* 0-based roster order */
+    uint32_t spawnID;     /* 0: not in this zone */
+    int32_t group;        /* 0..11; -1 ungrouped */
+    uint32_t flags;       /* HS_BULK_RAID_* */
+    int32_t level;        /* 0 when unknown */
+    int32_t classID;      /* 0 when unknown */
+    int32_t pctHPs;       /* -1 unknown */
+    int32_t pctMana;      /* -1 unknown; group members only */
+    int32_t pctEndurance; /* -1 unknown; group members only */
+    uint32_t petSpawnID;  /* 0 none; never a mercenary or a temporary pet */
+    int32_t petPctHPs;    /* -1 unknown or no pet */
+    float x, y, z;        /* the zone's coordinates, as HailstoneSpawn.x/y/z */
+    float distance;       /* 3D from the player; 0 when the member is not here */
+    char name[64];
+} HS_BulkRaidData;
+#pragma pack(pop)
+#define HS_BULK_RAID_LEADER 0x0001u
+#define HS_BULK_RAID_GROUP_LEADER 0x0002u
+#define HS_BULK_RAID_MAIN_ASSIST 0x0004u
+#define HS_BULK_RAID_MARKER 0x0008u /* the member holds the raid Marker role */
+#define HS_BULK_RAID_WAYPOINTER 0x0010u
+#define HS_BULK_RAID_LOOTER 0x0020u
+/* bit 0x0040 is reserved: this client keeps no offline flag for a raid member */
+#define HS_BULK_RAID_PRESENT 0x0080u
+#define HS_BULK_RAID_ME 0x0100u
 /* A TLO the plugin adds (AddTopLevelObject): asked for ${Name[index]} (member NULL: the TLO's own value) and for
  * ${Name[index].Member[member_index]}. Return nonzero when `out` was set; zero is NULL. */
 typedef int (*HailstoneTloFn)(void* user, const char* index, const char* member, const char* member_index,
@@ -735,7 +801,8 @@ typedef struct PluginHostApi {
     int (*web_view)(void* host, uint32_t tab, float width, float height);
 
     /* ---- added later in ABI 3: check HAILSTONE_HOST_HAS(field) before calling (an older client's table ends
-     * before) ----
+     * before; new entries go at the end, in order, never between these: a plugin built with an older header finds
+     * each by its position) ----
      * The bank window opens as a right click on a banker opens it (CBankWnd::Activate), here without that click's
      * class and range checks: `banker` a spawn id, 0 for the player itself (as the NMS patch's vault Bank button);
      * the window closes when that spawn is out of reach. 1 open (or already open), 0 not (HAILSTONE_CAP_ACTIONS). */
@@ -753,6 +820,10 @@ typedef struct PluginHostApi {
     int32_t (*get_avail_aa_data_bulk)(void* host, unsigned char* out, int32_t out_size);
     int32_t (*get_avail_disc_data_bulk)(void* host, unsigned char* out, int32_t out_size);
     int32_t (*get_buff_name_data_bulk)(void* host, unsigned char* out, int32_t out_size);
+    /* The raid roster: HS_Bulk_RaidHeader, then up to HS_Bulk_RaidData records, as many whole records as fit;
+     * bytes written, or 0 when out_size cannot hold the header. Outside a raid the header says active 0, count 0.
+     * Added later in ABI 3: test HAILSTONE_HOST_HAS(host, get_raid_data_bulk) first (HAILSTONE_CAP_READ). */
+    int32_t (*get_raid_data_bulk)(void* host, unsigned char* out, int32_t out_size);
 } PluginHostApi;
 /* Not known: it was on the cursor at zone-in, replaced a cursor item, or came by a path the client does not mark.
  * Treat it as the player's; never destroy it unattended. */
@@ -775,6 +846,7 @@ typedef struct PluginHostApi {
 #define HS_BULK_XTARGET_RECORD_SIZE 16
 #define HAILSTONE_TARGET_BUFF_RECORD_SIZE 20
 #define HAILSTONE_ID_NAME_RECORD_SIZE 8
+#define HS_BULK_LIST_HEADER_SIZE 8 /* HS_Bulk_ListHeader */
 /* Whether this client's host table has `field` (one added after the plugin's ABI) and it is set. */
 #define HAILSTONE_HOST_HAS(h, field)                                                                                   \
     ((h) && (h)->size >= offsetof(PluginHostApi, field) + sizeof((h)->field) && (h)->field)

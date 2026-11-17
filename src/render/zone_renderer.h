@@ -70,6 +70,15 @@ struct LandPatch {
     std::map<std::string, std::vector<std::byte>> files; // their textures' files, from the current zone
 };
 
+// Whether a placed object is a plant the wind moves (the modern look's sway): see-through leaves or blades (a masked
+// material) and a name, of its own or of one of its materials or textures, that says so.
+bool is_plant(std::string_view actor, const assets::Mesh& mesh);
+// How tall a mesh stands (its vertices' highest z less their lowest), 0 for none.
+float mesh_height(const assets::Mesh& mesh);
+// A placed plant at least this tall (its mesh's height times its placement's scale) is a tree: the land's trees are
+// the zone's own (render::horizon_trees), and the world atlas counts an atlas zone's (game::AtlasZone::trees).
+inline constexpr float kLandTreeMinHeight = 20.0f;
+
 struct ZoneRenderOptions {
     // eqclient.ini [Defaults] MultiPassLighting (render::read_multipass_lighting):
     // the zone's point lights shade zone geometry whose effect has a
@@ -102,6 +111,8 @@ struct ZoneRenderOptions {
     std::function<bool()> cancelled;
     // The current zone: the neighbours' ground its land is shaped by (the cache's, app/neighbour_zones.h).
     HorizonSources horizon_sources;
+    // The current zone: trees on its land's woods (render::horizon_trees), the zone's own drawn far.
+    bool land_trees = true;
     // A neighbour: its part of the land, drawn after its own geometry is moved and cut (not moved or cut itself).
     std::shared_ptr<const LandPatch> land;
 };
@@ -207,6 +218,8 @@ public:
         std::size_t water_triangles = 0;  // the land's sea
         bool water_two_sided = true;      // all of it drawn from both faces
         std::size_t tinted_triangles = 0; // the land's ground carried to an atlas zone's colour (kLandTint)
+        std::size_t trees = 0;            // the land's trees (Draw::land_trees' placements)
+        std::size_t tree_kinds = 0;       // of how many of the zone's trees
     };
     static PreparedLand prepared_land(const Prepared& prepared);
 
@@ -311,6 +324,9 @@ private:
         bool flame = false; // a placed object's flame mesh: set_hide_flames leaves it out
         bool distant = false; // the land round the zone: no shadows; set_distant, set_distant_hidden
         std::uint32_t distant_first = 0; // a distant draw's first index in the land's own index buffers
+        // The land's trees (render::horizon_trees, render/tree_impostor.h): an instanced model drawn as the land is,
+        // with no shadows and shown by set_distant, but from the shared index buffer.
+        bool land_trees = false;
         // A neighbour's part of the land (ZoneRenderOptions::land): 1 its own material, 2 the current zone's, each
         // showing where the other does not (zone.frag's land blend); 0 neither.
         std::uint8_t land_fade = 0;

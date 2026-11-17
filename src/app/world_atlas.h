@@ -63,6 +63,11 @@ std::vector<std::uint32_t> measure_ground_color(const assets::Zone& zone, glm::v
                                                 const std::vector<float>& ground,
                                                 const std::atomic<bool>* cancelled = nullptr);
 
+// How many of the zone's trees (render::is_plant, at least render::kLandTreeMinHeight tall at their placement's scale)
+// stand in each square of a grid as measure_water's, at most 255. The land's trees stand as thick over an atlas zone's
+// ground (render::HorizonSource::trees).
+std::vector<std::uint8_t> measure_trees(const assets::Zone& zone, glm::vec2 lo, float cell, int nx, int ny);
+
 // How far from the current zone's box a zone may lie and join, and how far the walk goes.
 inline constexpr float kAtlasReach = 12000.0f;
 inline constexpr int kAtlasMaxHops = 4;

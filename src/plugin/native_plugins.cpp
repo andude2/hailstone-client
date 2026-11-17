@@ -1,4 +1,5 @@
 #include "plugin/native_plugins.h"
+#include "plugin/raid_snapshot.h"
 
 #include <algorithm>
 #include <atomic>
@@ -6,10 +7,12 @@
 #include <cstring>
 #include <format>
 #include <fstream>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <system_error>
 #include <type_traits>
+#include <tuple>
 #include <utility>
 
 #include <SDL3/SDL_loadso.h>
@@ -124,6 +127,21 @@ struct NativePlugins::Impl {
     Hooks::Owner owner = 0;
     std::vector<std::unique_ptr<Loaded>> loaded;
     std::vector<Info> failures; // the last load error by name
+    std::vector<std::pair<std::string, Sha256Digest>> required; // files found at the last policy check
+    // What required_addons_ready answered, and what it answered from: it is asked each frame, and works it out again
+    // only when the rules, the answers or what is loaded change.
+    struct ReadyInputs {
+        std::uint32_t policy_serial = 0, approvals_generation = 0;
+        std::vector<std::pair<std::string, Sha256Digest>> required;
+        std::vector<std::tuple<std::string, Sha256Digest, std::uint32_t>> loaded;
+        std::vector<std::pair<std::string, std::string>> failures;
+        std::vector<Sha256Digest> pending;
+        std::vector<std::pair<Sha256Digest, bool>> session_answers;
+        bool operator==(const ReadyInputs&) const = default;
+    };
+    mutable std::optional<ReadyInputs> ready_inputs;
+    mutable bool ready_answer = true;
+    mutable std::string ready_problem;
 
     Loaded* find(std::string_view name) const;
     std::optional<fs::path> file_of(std::string_view name) const;
@@ -138,7 +156,7 @@ struct NativePlugins::Impl {
     // One of the server's own plugins under its hailstone.cfg: the player cannot unload it.
     bool kept(const Sha256Digest& hash) const {
         return env.policy && env.policy->current() && env.policy->current()->configured &&
-               env.policy->server_file(FileKind::Plugin, hash);
+               (env.policy->server_file(FileKind::Plugin, hash) || env.policy->required_file(FileKind::Plugin, hash));
     }
     void say(const std::string& text) const {
         if (env.print) env.print(text, 0);
@@ -151,14 +169,32 @@ struct NativePlugins::Impl {
     std::uint32_t consent_serial = 0;
     std::vector<PluginApproval> session_answers;
     // A file from the server's plugins/ folder (set_server_dir): it loads only with the player's word.
-    bool asks(const fs::path& file) const {
+    bool asks(const fs::path& file, const Sha256Digest& hash) const {
+        if (env.policy && env.policy->required_file(FileKind::Plugin, hash)) return true;
         if (server_dir.empty()) return false;
         const fs::path rel = file.lexically_relative(server_dir);
         return !rel.empty() && *rel.begin() != "..";
     }
-    fs::path profile_dir() const { return server_dir.parent_path(); }
+    fs::path profile_dir() const {
+        if (!server_dir.empty()) return server_dir.parent_path();
+        return env.policy && env.policy->current() ? env.policy->current()->dir : fs::path();
+    }
+    // plugin_approvals.txt as last read: consent_for is asked each frame (required_addons_ready), and reads the file
+    // again only when this process wrote one, the rules changed or the server is another.
+    struct ApprovalsRead {
+        fs::path dir;
+        std::uint32_t generation = 0, policy_serial = 0;
+        std::vector<PluginApproval> answers;
+    };
+    mutable std::optional<ApprovalsRead> approvals;
     Consent consent_for(const Sha256Digest& hash) const {
-        Consent c = plugin_consent(profile_dir(), hash);
+        const fs::path dir = profile_dir();
+        const std::uint32_t generation = plugin_approvals_generation();
+        const std::uint32_t serial = env.policy ? env.policy->serial() : 0;
+        if (!approvals || approvals->dir != dir || approvals->generation != generation ||
+            approvals->policy_serial != serial)
+            approvals = ApprovalsRead{dir, generation, serial, read_plugin_approvals(dir)};
+        Consent c = consent_in(approvals->answers, hash);
         if (c == Consent::Unasked)
             for (const auto& a : session_answers)
                 if (a.sha256 == hash) c = a.allowed ? Consent::Allowed : Consent::Denied;
@@ -1484,52 +1520,69 @@ int32_t h_get_pet_buff_data_bulk(void* h, unsigned char* data, int32_t datamax)
     return bufferSize;
 }
 /// <summary>
-/// The current target's buffs in one call, as OP_TargetBuffs last gave them (the target window's), in the order the
-/// client keeps them, each with the slot the server sent: an HS_Bulk_TargetBuffFixedRecord followed by its caster's
-/// name, casterNameLength bytes with no NUL. An entry with no spell is left out. Only whole records go out; as many
-/// as fit. Nothing without a target, or when the buffs the client holds are another spawn's (the server has not sent
-/// the new target's yet).
+/// The current target's buffs in one call, as OP_TargetBuffs last gave them, in the order the client keeps them, each
+/// with the slot the server sent: an int32_t count of the target's buffs the client holds, then one
+/// HS_Bulk_TargetBuffFixedRecord per buff followed by its caster's name, casterNameLength bytes with no NUL. An
+/// entry with no spell is neither counted nor written. Only whole records go out, as many as fit after the count; a
+/// plugin that reads fewer records than the count knows the buffer cut the list short. Nothing (0 bytes) when not
+/// even the count fits. The count alone (0) without a target, when the buffs the client holds are another spawn's
+/// (the server has not sent the new target's yet), or with no game connection.
 /// </summary>
 /// <param name="h">host</param>
 /// <param name="data">buffer to put data in</param>
-/// <param name="datamax">20 bytes per buff plus its caster's name; 2048 holds the target window's buffs</param>
-/// <returns>bytes written</returns>
+/// <param name="datamax">8 bytes for the HS_Bulk_ListHeader plus 20 per buff and its caster's name; the worst case
+/// (EQEmu: 60 buff slots on an NPC by default, Spells:MaxTotalSlotsNPC; a caster's name up to 63 bytes, Buffs_Struct)
+/// is 8 + 60 * 83 = 4988, so 8192 holds any on a stock server</param>
+/// <returns>bytes written; 0 below 8 bytes</returns>
 int32_t h_get_target_buff_data_bulk(void* h, unsigned char* data, int32_t datamax)
 {
-    const net::GameConnection* c = readable(Loaded::of(h), "get_target_buff_data_bulk");
-    if (!c || !data || datamax <= 0) return 0;
-    const auto& st = c->spell_state();
-    const std::uint32_t target = c->world().target_id;
+    Loaded& l = Loaded::of(h);
+    const net::GameConnection* c = readable(l, "get_target_buff_data_bulk");
+    if (!c && !l.can(kCapRead)) return 0;
+    static_assert(sizeof(HS_BulkListHeader) == HS_BULK_LIST_HEADER_SIZE);
+    const std::size_t headerBytes = sizeof(HS_BulkListHeader);
+    if (!data || datamax <= 0 || static_cast<std::size_t>(datamax) < headerBytes) return 0;
+    HS_BulkListHeader header{};
+    std::size_t bufferSize = headerBytes;
+    const std::uint32_t target = c ? c->world().target_id : 0;
     // The same check as the target window (lua_eq_hud.cpp, spell_ui.cpp): the list is only the target's while
     // target_buffs_entity says so.
-    if (target == 0 || st.target_buffs_entity != target) return 0;
-    unsigned char* pBuffer = data;
-    std::size_t bufferSize = 0;
-
-    static_assert(sizeof(HS_BulkTargetBuffFixedRecord) == HAILSTONE_TARGET_BUFF_RECORD_SIZE);
-    const std::size_t fixedBytes = sizeof(HS_BulkTargetBuffFixedRecord);
-    const game::SpellTable& spells = c->spell_table();
-    const std::int64_t now = net::GameConnection::now_ms(); // for the ticks left
-    for (const auto& [slot, b] : st.target_buffs) {
-        // The decoder drops removed entries (0xffffffff) and EQEmu sends only valid spells, so an entry with no
-        // spell is not expected; skip it, as spawn_buffs (tlo_game.cpp) and the target window do.
-        if (b.empty()) continue;
-        const std::size_t nameBytes = b.caster_name.size();
-        // Buffer is full: only whole records go out (the name is part of the record).
-        if (fixedBytes + nameBytes > static_cast<std::size_t>(datamax) - bufferSize) break;
-        // Written in place through the packed struct (the bulk reads may cast, docs/plugins.md).
-        HS_BulkTargetBuffFixedRecord* rec = reinterpret_cast<HS_BulkTargetBuffFixedRecord*>(pBuffer);
-        *rec = HS_BulkTargetBuffFixedRecord{};
-        rec->spellID = static_cast<int32_t>(b.spell);
-        rec->duration = game::buff_tics_left(b.tics, b.received_ms, now);
-        if (const auto* sp = spells.get(b.spell)) rec->spellType = sp->spell_type;
-        rec->slot = static_cast<int32_t>(slot);
-        rec->casterNameLength = static_cast<int32_t>(nameBytes);
-        pBuffer += fixedBytes;
-        if (nameBytes) std::memcpy(pBuffer, b.caster_name.data(), nameBytes);
-        pBuffer += nameBytes;
-        bufferSize += fixedBytes + nameBytes;
+    if (c && target != 0 && c->spell_state().target_buffs_entity == target) {
+        const auto& st = c->spell_state();
+        unsigned char* pBuffer = data + headerBytes;
+        static_assert(sizeof(HS_BulkTargetBuffFixedRecord) == HAILSTONE_TARGET_BUFF_RECORD_SIZE);
+        const std::size_t fixedBytes = sizeof(HS_BulkTargetBuffFixedRecord);
+        const game::SpellTable& spells = c->spell_table();
+        const std::int64_t now = net::GameConnection::now_ms(); // for the ticks left
+        bool full = false;
+        for (const auto& [slot, b] : st.target_buffs) {
+            // The decoder drops removed entries (0xffffffff) and EQEmu sends only valid spells, so an entry with no
+            // spell is not expected; skip it, as spawn_buffs (tlo_game.cpp) and the target window do.
+            if (b.empty()) continue;
+            ++header.total; // every buff held, written or not: count < total means the buffer was too small
+            if (full) continue;
+            const std::size_t nameBytes = b.caster_name.size();
+            // Buffer is full: only whole records go out (the name is part of the record), none after the first cut.
+            if (fixedBytes + nameBytes > static_cast<std::size_t>(datamax) - bufferSize) {
+                full = true;
+                continue;
+            }
+            // Written in place through the packed struct (the bulk reads may cast, docs/plugins.md).
+            HS_BulkTargetBuffFixedRecord* rec = reinterpret_cast<HS_BulkTargetBuffFixedRecord*>(pBuffer);
+            *rec = HS_BulkTargetBuffFixedRecord{};
+            rec->spellID = static_cast<int32_t>(b.spell);
+            rec->duration = game::buff_tics_left(b.tics, b.received_ms, now);
+            if (const auto* sp = spells.get(b.spell)) rec->spellType = sp->spell_type;
+            rec->slot = static_cast<int32_t>(slot);
+            rec->casterNameLength = static_cast<int32_t>(nameBytes);
+            pBuffer += fixedBytes;
+            if (nameBytes) std::memcpy(pBuffer, b.caster_name.data(), nameBytes);
+            pBuffer += nameBytes;
+            bufferSize += fixedBytes + nameBytes;
+            ++header.count;
+        }
     }
+    std::memcpy(data, &header, sizeof header); // in the machine's byte order, unaligned, as the records
     return static_cast<int32_t>(bufferSize);
 }
 /// <summary>
@@ -1595,20 +1648,22 @@ int32_t h_get_xtarget_data_bulk(void* h, unsigned char* data, int32_t datamax)
     return bufferSize;
 }
 
-// A count-prefixed list of named ids for the bulk reads: an int32_t count, then for each id that `each` gives
-// (each(emit) calls emit(id, name) for every one, in order) an HAILSTONE_ID_NAME_RECORD followed by the name's
-// nameSize bytes (no NUL), as many whole records as fit after the count. The count says how many follow. Nothing
-// (0 bytes) when not even the count fits.
+// A list of named ids for the bulk reads: an HS_Bulk_ListHeader, then for each id that `each` gives (each(emit)
+// calls emit(id, name) for every one, in order) an HAILSTONE_ID_NAME_RECORD followed by the name's nameSize bytes (no
+// NUL), as many whole records as fit after the header, none after the first that does not. The header's count says
+// how many follow, its total how many `each` gave. Nothing (0 bytes) when not even the header fits.
 template <typename Each> int32_t write_id_str_list(unsigned char* data, int32_t datamax, Each&& each) {
     static_assert(sizeof(HAILSTONE_ID_NAME_RECORD) == HAILSTONE_ID_NAME_RECORD_SIZE);
-    const std::size_t headerBytes = sizeof(int32_t); // the count
+    static_assert(sizeof(HS_BulkListHeader) == HS_BULK_LIST_HEADER_SIZE);
+    const std::size_t headerBytes = sizeof(HS_BulkListHeader);
     const std::size_t idBytes = sizeof(HAILSTONE_ID_NAME_RECORD);
     if (!data || datamax <= 0 || static_cast<std::size_t>(datamax) < headerBytes) return 0;
     const std::size_t room = static_cast<std::size_t>(datamax);
     std::size_t bufferSize = headerBytes;
-    int32_t count = 0;
+    HS_BulkListHeader header{};
     bool full = false;
     each([&](int32_t id, std::string_view name) {
+        ++header.total; // every one given, written or not: count < total means the buffer was too small
         if (full) return;
         if (idBytes + name.size() > room - bufferSize) { // buffer is full: only whole records, the rest left out
             full = true;
@@ -1621,33 +1676,33 @@ template <typename Each> int32_t write_id_str_list(unsigned char* data, int32_t 
         bufferSize += idBytes;
         if (!name.empty()) std::memcpy(data + bufferSize, name.data(), name.size());
         bufferSize += name.size();
-        ++count;
+        ++header.count;
     });
-    std::memcpy(data, &count, sizeof count); // in the machine's byte order, unaligned, as the records
+    std::memcpy(data, &header, sizeof header); // in the machine's byte order, unaligned, as the records
     return static_cast<int32_t>(bufferSize);
 }
 
 /// <summary>
 /// The alternate abilities the character owns, one ability (group) id each, as aa_value takes it, with its name (the
 /// rank's dbstr type 1 title, as the AA window shows it; empty when the game folder's dbstr_us.txt lacks it): an
-/// int32_t count then one HAILSTONE_ID_NAME_RECORD and its name per ability, in the order of the owned list (the
-/// profile's, then OP_RespondAA's). An owned rank the AA table does not hold (OP_SendAATable has not sent it) has no
-/// known group id and is left out, as aa_value finds nothing for it. Before the profile, or with no game
-/// connection, the count is 0.
+/// HS_Bulk_ListHeader then one HAILSTONE_ID_NAME_RECORD and its name per ability, in the order of the owned list
+/// (the profile's, then OP_RespondAA's). An owned rank the AA table does not hold (OP_SendAATable has not sent it) has
+/// no known group id and is left out, as aa_value finds nothing for it. Before the profile, or with no game
+/// connection, count and total are 0.
 /// </summary>
 /// <param name="h">host</param>
 /// <param name="data">buffer to put data in</param>
-/// <param name="datamax">4 bytes for the count plus 8 per ability and its name; 16384 holds RoF2's 300 owned</param>
-/// <returns>bytes written; 0 below 4 bytes</returns>
+/// <param name="datamax">8 bytes for the HS_Bulk_ListHeader plus 8 per ability and its name; 16384 holds RoF2's 300 owned</param>
+/// <returns>bytes written; 0 below 8 bytes</returns>
 int32_t h_get_avail_aa_data_bulk(void* h, unsigned char* data, int32_t datamax)
 {
     Loaded& l = Loaded::of(h);
     const net::GameConnection* c = readable(l, "get_avail_aa_data_bulk");
-    if (!c) return l.can(kCapRead) ? write_id_str_list(data, datamax, [](auto&&) {}) : 0; // no connection: count 0
+    if (!c) return l.can(kCapRead) ? write_id_str_list(data, datamax, [](auto&&) {}) : 0; // no connection: 0, 0
     const auto& aa = c->alt_adv();
     const bool haveProfile = c->profile().has_value();
     return write_id_str_list(data, datamax, [&](auto&& emit) {
-        if (!haveProfile) return; // before the profile: the count is 0
+        if (!haveProfile) return; // before the profile: count and total 0
         for (const auto& o : aa.owned) {
             if (o.id == 0) continue; // an empty slot
             if (const game::AltAbility* a = aa.get(o.id)) emit(a->group, c->aa_name(*a));
@@ -1658,28 +1713,78 @@ int32_t h_get_avail_aa_data_bulk(void* h, unsigned char* data, int32_t datamax)
 /// <summary>
 /// The character's combat abilities (disciplines), one spell id each with the spell's name (empty for a spell not in
 /// spells_us.txt): the profile's discipline list (PcBase::GetCombatAbility, as combat_ability reads it by index)
-/// without its empty entries, in list order, as an int32_t count then one HAILSTONE_ID_NAME_RECORD and its name per
-/// discipline. Before the profile, or with no game connection, the count is 0.
+/// without its empty entries, in list order, as an HS_Bulk_ListHeader then one HAILSTONE_ID_NAME_RECORD and its name
+/// per discipline. Before the profile, or with no game connection, count and total are 0.
 /// </summary>
 /// <param name="h">host</param>
 /// <param name="data">buffer to put data in</param>
-/// <param name="datamax">4 bytes for the count plus 8 per discipline and its name; 16384 holds RoF2's 300</param>
-/// <returns>bytes written; 0 below 4 bytes</returns>
+/// <param name="datamax">8 bytes for the HS_Bulk_ListHeader plus 8 per discipline and its name; 16384 holds RoF2's 300</param>
+/// <returns>bytes written; 0 below 8 bytes</returns>
 int32_t h_get_avail_disc_data_bulk(void* h, unsigned char* data, int32_t datamax)
 {
     Loaded& l = Loaded::of(h);
     const net::GameConnection* c = readable(l, "get_avail_disc_data_bulk");
-    if (!c) return l.can(kCapRead) ? write_id_str_list(data, datamax, [](auto&&) {}) : 0; // no connection: count 0
+    if (!c) return l.can(kCapRead) ? write_id_str_list(data, datamax, [](auto&&) {}) : 0; // no connection: 0, 0
     const auto& profile = c->profile();
     const game::SpellTable& spells = c->spell_table();
     return write_id_str_list(data, datamax, [&](auto&& emit) {
-        if (!profile) return; // before the profile: the count is 0
+        if (!profile) return; // before the profile: count and total 0
         for (std::uint32_t spell : profile->disciplines) {
             if (spell == 0) continue; // an empty entry
             const game::SpellData* sp = spells.get(spell);
             emit(static_cast<int32_t>(spell), sp ? std::string_view(sp->name) : std::string_view());
         }
     });
+}
+
+int32_t h_get_raid_data_bulk(void* h, unsigned char* data, int32_t datamax) {
+    const net::GameConnection* c = readable(Loaded::of(h), "get_raid_data_bulk");
+    if (!c || !data || datamax < static_cast<int32_t>(sizeof(HS_BulkRaidHeader))) return 0;
+
+    static_assert(sizeof(HS_BulkRaidHeader) == HS_BULK_RAID_HEADER_SIZE);
+    static_assert(sizeof(HS_BulkRaidData) == HS_BULK_RAID_RECORD_SIZE);
+    const plugin::RaidSnapshot raid = plugin::build_raid_snapshot(*c);
+
+    HS_BulkRaidHeader header{};
+    header.size = static_cast<std::uint32_t>(sizeof header);
+    header.version = 1;
+    header.recordSize = static_cast<std::uint32_t>(sizeof(HS_BulkRaidData));
+    header.leaderIndex = raid.leader ? static_cast<std::uint32_t>(*raid.leader) : HS_BULK_RAID_NO_INDEX;
+    header.targetIndex = raid.target ? static_cast<std::uint32_t>(*raid.target) : HS_BULK_RAID_NO_INDEX;
+    header.active = raid.active ? 1 : 0;
+    header.locked = raid.locked ? 1 : 0;
+    header.lootType = static_cast<int32_t>(raid.loot_type);
+    header.total = static_cast<std::uint32_t>(raid.members.size()); // count < total: the buffer was too small
+    header.count = 0;
+
+    int32_t written = static_cast<int32_t>(sizeof header);
+    unsigned char* pBuffer = data + sizeof header;
+    for (const plugin::RaidMemberSnapshot& m : raid.members) {
+        if (static_cast<int32_t>(sizeof(HS_BulkRaidData)) > datamax - written) break; // whole records only
+        HS_BulkRaidData* rec = reinterpret_cast<HS_BulkRaidData*>(pBuffer);
+        *rec = HS_BulkRaidData{};
+        rec->slot = static_cast<int32_t>(header.count);
+        rec->spawnID = m.spawn_id;
+        rec->group = m.group;
+        rec->flags = m.flags;
+        rec->level = m.level;
+        rec->classID = m.class_id;
+        rec->pctHPs = m.pct_hp;
+        rec->pctMana = m.pct_mana;
+        rec->pctEndurance = m.pct_endurance;
+        rec->petSpawnID = m.pet_spawn_id;
+        rec->petPctHPs = m.pet_pct_hp;
+        rec->x = m.x;
+        rec->y = m.y;
+        rec->z = m.z;
+        rec->distance = m.distance;
+        copy_name(rec->name, m.name);
+        pBuffer += sizeof(HS_BulkRaidData);
+        written += static_cast<int32_t>(sizeof(HS_BulkRaidData));
+        ++header.count;
+    }
+    std::memcpy(data, &header, sizeof header);
+    return written;
 }
 
 int h_get_xtarget(void* h, std::uint32_t index, HailstoneXTarget* out) {
@@ -2054,7 +2159,7 @@ NativePlugins::NativePlugins(NativeEnv env) : impl_(std::make_unique<Impl>()) {
         std::vector<std::string> pending;
         for (const auto& l : m->loaded)
             if (l->unload_pending && !l->busy) pending.push_back(l->name);
-        for (const auto& n : pending) m->self->unload(n);
+        for (const auto& n : pending) m->self->unload_file(n);
     });
 }
 
@@ -2074,10 +2179,10 @@ std::vector<NativePlugins::Info> NativePlugins::list() const {
         if (auto bytes = read_file(file)) {
             Sha256Digest h = sha256(*bytes);
             i.sha256 = to_hex(h);
-            i.caps = impl_->env.policy ? impl_->env.policy->caps(FileKind::Plugin, h) : 0;
+            i.caps = impl_->env.policy ? impl_->env.policy->caps(FileKind::Plugin, h, i.name) : 0;
             i.server = impl_->env.policy && impl_->env.policy->server_file(FileKind::Plugin, h);
             i.kept = impl_->kept(h);
-            i.asks = impl_->asks(file);
+            i.asks = impl_->asks(file, h);
             if (i.asks) i.consent = impl_->consent_for(h);
         }
         if (const Loaded* l = impl_->find(i.name)) {
@@ -2147,12 +2252,12 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
     if (!bytes) return refuse("cannot read " + file->string());
     Sha256Digest hash = sha256(*bytes);
     if (!m.env.policy) return refuse("plugins are off");
-    std::uint32_t caps = m.env.policy->caps(FileKind::Plugin, hash);
+    std::uint32_t caps = m.env.policy->caps(FileKind::Plugin, hash, name);
     if (caps == 0) return refuse(std::format("{} may not load: {}", name, m.env.policy->refusal(FileKind::Plugin)));
     // The server's own library is native code with the player's rights: it loads only once the player allowed these
     // bytes for this server. Until then it waits for the answer (the game goes on); a refused one is asked about
     // again only when the player loads it. A script or plugin never puts the question up: it could, at will.
-    if (m.asks(*file)) {
+    if (m.asks(*file, hash)) {
         const Consent c = m.consent_for(hash);
         if (c != Consent::Allowed) {
             if (asker == Asker::Script)
@@ -2302,6 +2407,7 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
     p.table.get_avail_aa_data_bulk = main_only<h_get_avail_aa_data_bulk>;
     p.table.get_avail_disc_data_bulk = main_only<h_get_avail_disc_data_bulk>;
     p.table.get_buff_name_data_bulk = main_only<h_get_buff_name_data_bulk>;
+    p.table.get_raid_data_bulk = main_only<h_get_raid_data_bulk>;
     p.table.cursor_origin = main_only<h_cursor_origin>;
     p.owner = m.env.hooks->new_guest("plugin:" + name);
 
@@ -2425,6 +2531,16 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
 
 bool NativePlugins::unload(std::string_view name) {
     Impl& m = *impl_;
+    if (const Loaded* l = m.find(name); l && m.env.policy &&
+        m.env.policy->required_file(FileKind::Plugin, l->hash)) {
+        m.say("[Plugin] " + l->name + " is required by this server: it stays loaded");
+        return false;
+    }
+    return unload_file(name);
+}
+
+bool NativePlugins::unload_file(std::string_view name) {
+    Impl& m = *impl_;
     auto it = std::find_if(m.loaded.begin(), m.loaded.end(), [&](const auto& l) { return iequal(l->name, name); });
     if (it == m.loaded.end()) return false;
     if ((*it)->busy) { // the plugin asked from its own code: not under its feet
@@ -2442,20 +2558,20 @@ bool NativePlugins::unload(std::string_view name) {
 void NativePlugins::unload_all() {
     std::vector<std::string> names;
     for (const auto& l : impl_->loaded) names.push_back(l->name);
-    for (auto it = names.rbegin(); it != names.rend(); ++it) unload(*it);
+    for (auto it = names.rbegin(); it != names.rend(); ++it) unload_file(*it);
 }
 
 void NativePlugins::policy_changed(const std::vector<std::string>& autoload) {
     Impl& m = *impl_;
     std::vector<std::string> drop, revoked;
     for (auto& l : m.loaded) {
-        std::uint32_t caps = m.env.policy ? m.env.policy->caps(FileKind::Plugin, l->hash) : 0;
+        std::uint32_t caps = m.env.policy ? m.env.policy->caps(FileKind::Plugin, l->hash, l->name) : 0;
         if (caps == 0) {
             drop.push_back(l->name);
             continue;
         }
         // The player took back the permission for the server's plugin.
-        if (m.asks(l->file) && m.consent_for(l->hash) != Consent::Allowed) {
+        if (m.asks(l->file, l->hash) && m.consent_for(l->hash) != Consent::Allowed) {
             revoked.push_back(l->name);
             continue;
         }
@@ -2473,13 +2589,14 @@ void NativePlugins::policy_changed(const std::vector<std::string>& autoload) {
     }
     for (const auto& n : drop) {
         m.say("[Plugin] " + n + ": it may not run here");
-        unload(n);
+        unload_file(n);
     }
     for (const auto& n : revoked) {
         m.say("[Plugin] " + n + ": you no longer allow it on this server");
-        unload(n);
+        unload_file(n);
     }
     if (!m.env.policy || !m.env.policy->received()) {
+        m.required.clear();
         if (!m.pending.empty()) ++m.consent_serial;
         m.pending.clear(); // nothing runs out of the world: no question either
         return;
@@ -2487,6 +2604,9 @@ void NativePlugins::policy_changed(const std::vector<std::string>& autoload) {
     // The server's own plugins always load; the player's those `autoload` names.
     bool all = std::find(autoload.begin(), autoload.end(), "*") != autoload.end();
     const auto found = list();
+    m.required.clear();
+    if (m.env.policy->current() && !m.env.policy->current()->provisional)
+        m.required = m.env.policy->required_entries(FileKind::Plugin);
     // A question about a plugin that may no longer run, or whose bytes changed, goes.
     const auto before = m.pending.size();
     std::erase_if(m.pending, [&](const ConsentFile& p) {
@@ -2498,10 +2618,66 @@ void NativePlugins::policy_changed(const std::vector<std::string>& autoload) {
     for (const Info& i : found) {
         if (i.loaded || i.caps == 0) continue;
         if (i.asks && i.consent == Consent::Denied) continue; // the player said no: not asked again at each zone-in
-        bool wanted = i.server || all ||
+        const auto hash = parse_sha256(i.sha256);
+        const bool required = hash && std::any_of(m.required.begin(), m.required.end(), [&](const auto& entry) {
+            return iequal(entry.first, i.name) && entry.second == *hash;
+        });
+        bool wanted = i.server || required || all ||
                       std::any_of(autoload.begin(), autoload.end(), [&](const std::string& a) { return iequal(a, i.name); });
         if (wanted) load_file(i.name, nullptr, Asker::Rules);
     }
+}
+
+bool NativePlugins::required_addons_ready(std::string* problem) const {
+    if (problem) problem->clear();
+    const Impl& m = *impl_;
+    if (!m.env.policy || !m.env.policy->current()) return true;
+    const auto& rules = *m.env.policy->current();
+    if (!rules.addons.enabled || rules.provisional) return true;
+    Impl::ReadyInputs inputs{m.env.policy->serial(), plugin_approvals_generation(), m.required, {}, {}, {}, {}};
+    for (const auto& l : m.loaded) inputs.loaded.emplace_back(l->name, l->hash, l->caps);
+    for (const auto& f : m.failures) inputs.failures.emplace_back(f.name, f.error);
+    for (const auto& p : m.pending) inputs.pending.push_back(p.sha256);
+    for (const auto& a : m.session_answers) inputs.session_answers.emplace_back(a.sha256, a.allowed);
+    if (m.ready_inputs != inputs) {
+        m.ready_inputs = std::move(inputs);
+        m.ready_problem.clear();
+        m.ready_answer = check_required_addons(&m.ready_problem);
+    }
+    if (problem) *problem = m.ready_problem;
+    return m.ready_answer;
+}
+
+bool NativePlugins::check_required_addons(std::string* problem) const {
+    const Impl& m = *impl_;
+    auto fail = [&](std::string text) {
+        if (problem) *problem = std::move(text);
+        return false;
+    };
+    for (const auto& l : m.loaded)
+        if (m.env.policy->caps(FileKind::Plugin, l->hash, l->name) == 0)
+            return fail(l->name + " is still loaded but is not allowed by this server");
+    for (const auto& entry : m.required) {
+        const auto& name = entry.first;
+        const auto& hash = entry.second;
+        if (m.env.policy->caps(FileKind::Plugin, hash, name) == 0)
+            return fail("Required add-on " + name + " is not permitted by this server's rules");
+        const Loaded* l = m.find(name);
+        if (l && l->hash != hash)
+            return fail("Required add-on " + name + " is shadowed by a different plugin");
+        const Consent consent = m.consent_for(hash);
+        if (consent == Consent::Denied) return fail("Required add-on " + name + " was not approved");
+        if (consent == Consent::Unasked) {
+            if (std::any_of(m.pending.begin(), m.pending.end(), [&](const ConsentFile& p) { return p.sha256 == hash; }))
+                return false;
+            return fail("Required add-on " + name + " needs your approval");
+        }
+        if (l && l->hash == hash && l->caps != 0) continue;
+        for (const auto& f : m.failures)
+            if (iequal(f.name, name)) return fail("Required add-on " + name + ": " + f.error);
+        return fail("Required add-on " + name + " did not load");
+    }
+    return true;
 }
 
 void NativePlugins::set_server_dir(const fs::path& dir) {

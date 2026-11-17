@@ -153,6 +153,7 @@ add_library(hailstone_engine STATIC
   src/render/atmosphere.cpp
   src/render/clouds.cpp
   src/render/horizon.cpp
+  src/render/tree_impostor.cpp
   src/render/ambient_probe.cpp
   src/render/shadows.cpp
   src/render/light_grid.cpp
@@ -324,6 +325,9 @@ add_library(hailstone_engine STATIC
   src/app/addon_install.cpp
   src/app/addon_manager.cpp
   src/app/addon_suggest.cpp
+  src/app/addon_requirements.cpp
+  src/app/connection_frontend.cpp
+  src/app/addon_upscaler_policy.cpp
   src/app/window_icon.cpp
   src/app/item_preview_view.cpp
   src/app/item_ui.cpp
@@ -862,7 +866,7 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/plugins/projecttriune/CMakeLists.txt)
   set(HAILSTONE_HAS_TRIUNE ON)
 endif()
 
-add_executable(hailstone src/app/main.cpp src/app/client_app.cpp src/app/client_app_ui.cpp src/app/client_app_draw.cpp src/app/target_ring.cpp src/app/client_app_input.cpp src/app/client_app_testdrive.cpp src/app/client_app_pick.cpp src/app/client_app_iso.cpp src/app/client_app_items.cpp src/app/client_app_player.cpp src/app/client_app_zone.cpp src/app/client_app_pregame.cpp src/app/client_app_options.cpp src/app/client_app_commands.cpp src/app/client_app_info.cpp src/app/client_app_web.cpp src/app/client_app_login.cpp src/app/client_app_gamepad.cpp src/app/client_app_bugreport.cpp src/app/client_app_update.cpp src/app/client_app_addons.cpp src/app/input_script.cpp src/app/model_viewer.cpp ${HAILSTONE_WIN_MANIFEST} ${HAILSTONE_WIN_CLIENT_RESOURCES})
+add_executable(hailstone src/app/main.cpp src/app/client_app.cpp src/app/client_app_ui.cpp src/app/client_app_draw.cpp src/app/target_ring.cpp src/app/client_app_input.cpp src/app/client_app_testdrive.cpp src/app/client_app_pick.cpp src/app/client_app_iso.cpp src/app/client_app_items.cpp src/app/client_app_player.cpp src/app/client_app_zone.cpp src/app/client_app_pregame.cpp src/app/client_app_options.cpp src/app/client_app_commands.cpp src/app/client_app_info.cpp src/app/client_app_web.cpp src/app/client_app_login.cpp src/app/client_app_gamepad.cpp src/app/client_app_bugreport.cpp src/app/client_app_update.cpp src/app/client_app_addons.cpp src/app/client_app_addon_upscaler.cpp src/app/input_script.cpp src/app/model_viewer.cpp ${HAILSTONE_WIN_MANIFEST} ${HAILSTONE_WIN_CLIENT_RESOURCES})
 target_compile_options(hailstone PRIVATE ${HAILSTONE_WARNINGS})
 # Windows: a Release (or MinSizeRel) client is a GUI program, so no console window opens beside it; main() stays the
 # entry point. Other builds keep the console for the log. Errors that stop a start are shown in a dialog either way
@@ -1049,6 +1053,9 @@ if(HAILSTONE_BUILD_TESTS)
     tests/addon_index_test.cpp
     tests/changelog_test.cpp
     tests/addon_install_test.cpp
+    tests/addon_requirements_test.cpp
+    tests/connection_frontend_test.cpp
+    tests/addon_upscaler_policy_test.cpp
     tests/addon_manager_test.cpp
     tests/bug_report_test.cpp
     tests/bug_report_window_test.cpp
@@ -1151,6 +1158,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/mounts_test.cpp
     tests/spawn_is_named_test.cpp
     tests/world_state_smooth_test.cpp
+    tests/floor_grounding_test.cpp
     tests/attack_check_test.cpp
     tests/attack_rules_vectors_test.cpp
     tests/ui_rules_vectors_test.cpp
@@ -1172,6 +1180,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/sky_colours_test.cpp
     tests/scene_light_test.cpp
     tests/horizon_test.cpp
+    tests/tree_impostor_test.cpp
     tests/collision_test.cpp
     tests/nav_test.cpp
     tests/map_data_test.cpp
@@ -1406,6 +1415,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/fuzz_alloc_guard.cpp
     tests/fuzz_net_test.cpp
     tests/fuzz_assets_test.cpp
+    tests/fuzz_server_cfg_test.cpp
     tests/movement_inputs_test.cpp
     tests/mock_server/profile_builder.cpp
     tests/mock_server/soe_endpoint.cpp
@@ -1517,7 +1527,7 @@ if(HAILSTONE_LIBFUZZER)
   if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     message(FATAL_ERROR "HAILSTONE_LIBFUZZER needs Clang")
   endif()
-  foreach(target pfs wld texture soe packets decoders zip gpucache models)
+  foreach(target pfs wld texture soe packets decoders zip gpucache models server_cfg)
     string(TOUPPER ${target} upper)
     add_executable(fuzz_${target} tests/fuzz_libfuzzer.cpp)
     target_compile_definitions(fuzz_${target} PRIVATE HAILSTONE_FUZZ_${upper})

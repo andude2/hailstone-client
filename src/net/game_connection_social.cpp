@@ -608,7 +608,14 @@ void GameConnection::handle_special_message(const SpecialMessage& m) {
     const game::Spawn* me = world_.player();
     bool at_me = me && m.target_spawn_id == me->id;
     std::uint32_t type = m.type == 0x157 && at_me ? 0x158 : m.type;
-    chat(ChatEvent::Kind::System, line, 0, type);
+    std::optional<std::string> display;
+    if (m.speak_mode == 0 && m.language == 0 && m.journal_mode == 0 && m.sayer.empty()) {
+        if (auto hit = game::spell_text_hit_report(line, type)) {
+            auto mode = spell_hit_modes_[static_cast<std::size_t>(hit->kind)];
+            display = game::report_spell_hit_line(*hit, line, mode);
+        }
+    }
+    chat(ChatEvent::Kind::System, line, 0, type, {}, std::move(display));
     if (!garbled && !m.sayer.empty() && (m.journal_mode == 2 || (m.journal_mode == 1 && at_me))) {
         if (journal_lines_.size() < 256)
             journal_lines_.push_back({m.sayer, zone_id(), static_cast<float>(static_cast<std::int32_t>(m.loc[0])),

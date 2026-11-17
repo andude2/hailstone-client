@@ -129,6 +129,9 @@ struct HorizonSource {
     // Its ground's colour in each square (sRGB, R in the low byte), 0 where none (or empty: none known): a zone of the
     // world atlas, whose own textures nothing else draws (app::measure_ground_color).
     std::vector<std::uint32_t> color;
+    // How many trees stand in each square (empty: none known): a zone of the world atlas, whose own trees nothing else
+    // draws; the land's trees stand as thick over its ground (horizon_trees).
+    std::vector<std::uint8_t> trees;
     // Whether the land draws its water on its ground (a zone of the world atlas, which nothing else draws); a
     // neighbour zone draws its own, and the land's sea starts past its ground.
     bool draws_water = false;
@@ -155,10 +158,10 @@ void sort_sources(HorizonSources& sources);
 // A source from the neighbour's ground sampled on `nx` x `ny` squares from `lo` (NaN: none): padded, opened, finished.
 // `top` (the same squares, or empty): its terrain's highest point in each, kept as it is (horizon_source_top).
 // `water` (the same squares, or empty): its water's surface in each, NaN where none. `color` (the same squares, or
-// empty): its ground's colour in each, 0 where none.
+// empty): its ground's colour in each, 0 where none. `trees` (the same squares, or empty): how many trees stand in each.
 HorizonSource horizon_source(std::string name, glm::vec2 lo, float cell, int nx, int ny, std::vector<float> ground,
                              std::vector<float> top = {}, std::vector<float> water = {},
-                             std::vector<std::uint32_t> color = {});
+                             std::vector<std::uint32_t> color = {}, std::vector<std::uint8_t> trees = {});
 inline constexpr int kHorizonColorBlur = 2;
 // Fills in the layers finish_horizon_source makes from `height` and `water` (a source read back from the cache).
 void finish_horizon_source(HorizonSource& source);
@@ -239,6 +242,37 @@ struct HorizonMesh {
 HorizonMesh horizon_mesh(const HorizonField& field, const HorizonSources& sources, int only = -1);
 // The land round the zone from its terrain alone.
 HorizonMesh horizon_mesh(std::span<const HorizonTriangle> triangles, const HorizonLand& land);
+
+// The land's trees (Hailstone's own): far trees (render/tree_impostor.h) standing on the land's woods, the darker
+// patches its shade paints (thick there, a lone one here and there elsewhere), from kHorizonTreeFrom past the zone's
+// edge out to kHorizonTreeReach, fewer past kHorizonTreeThin (as kHorizonTreeThin over the distance; the haze takes
+// them there). Not on the sea, the mountains' rock, slopes steeper than kHorizonTreeSlope (the normal's z) or a
+// neighbour's ground (half its cover or more: a neighbour drawn draws its own trees there), nor in the zone's pockets.
+// Over the ground of a source that says where its trees stand (an atlas zone's, HorizonSource::trees), as thick as
+// they stand in its square there, and only on its ground.
+// Each stands on the land's surface as its mesh draws it, a little sunk so a slope shows no gap under it. At most
+// kHorizonTreeMax, the nearest kept.
+inline constexpr float kHorizonTreeFrom = 256.0f;
+inline constexpr float kHorizonTreeReach = 7000.0f;
+inline constexpr float kHorizonTreeThin = 2500.0f;
+inline constexpr float kHorizonTreeSlope = 0.85f;
+inline constexpr std::size_t kHorizonTreeMax = 40000;
+inline constexpr float kHorizonTreeSink = 2.0f;
+struct HorizonTree {
+    glm::vec3 foot{0.0f};
+    float yaw = 0.0f;   // radians round z
+    float scale = 1.0f; // 0.8 .. 1.2 of the tree's own size
+    float pick = 0.0f;  // 0..1, the same for the same spot: which of the zone's trees stands there
+    bool sourced = false; // on a source's ground, where its own trees stand (HorizonSource::trees)
+};
+// `woods` and `open`: how far apart the trees stand in the woods and elsewhere (units; the zone's own trees' spacing
+// sets them). Empty when the field is not valid or `mesh` is not horizon_mesh(field, sources).
+std::vector<HorizonTree> horizon_trees(const HorizonField& field, const HorizonSources& sources,
+                                       const HorizonMesh& mesh, float woods, float open);
+// The land's surface at `p` as `mesh` (horizon_mesh(field, ...) without `only`) draws it: its height, and the normal
+// of the triangle there. nullopt outside its grid.
+std::optional<float> horizon_surface(const HorizonField& field, const HorizonMesh& mesh, glm::vec2 p,
+                                     glm::vec3* normal = nullptr);
 
 // A neighbour's source as the cache keeps it (app/neighbour_zones.h; cache/horizon/<server>/<zone>/<neighbour>.bin):
 // for which pair of zones, the files it was measured from (`key`: their sizes), the offset it was moved by.

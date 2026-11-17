@@ -1250,6 +1250,14 @@ lack). Higher than 50 the server more likely means it. A spawn is measured again
 collision loads and when a door comes, goes or moves (spawns come before it, while character select's scene is still loaded); with no floor under it, every
 frame until there is one. Only `display_position` is lowered, so the model, name, target ring, picking and the NPC
 walls follow the drawn body; `position`, which range, melee and the other rules use, keeps the server's z.
+When a physics step lands a spawn on the zone's floor, its `position` is already floor + AvatarHeight, so any floor
+this test could find is at least as high (a higher door or placed-object floor only shortens the drop, and only a
+positive drop over 0.25 is drawn). The client's grounding query probes that same zone mesh, so in that case the test
+reuses the landing and draws the spawn at its position without a second zone-mesh search. A query that does not
+include the zone floor (a bare door mesh), and any case with no landing - a floating or stale spawn, zero physics
+steps, no floor, a floor past the query's reach, or bad numbers - still takes the full query. A floor that cannot be
+found is measured again the next frame, as is every spawn after `reground()` (a zone's collision loaded, a door came
+or moved); a later landing applies the short-cut again.
 
 Riding while illusioned (a deliberate difference, Hailstone's option `illusion_mounts`: hailstone.ini
 `game.illusion_mounts`, Options > General "Ride While Illusioned", on by default): the original's
@@ -1280,7 +1288,12 @@ and `npc_owner_line`
   takes the title's place (`game::name_sprite_market_words`). An offline trader reads "Offline Trader Name". Only a
   player's (spawn type 0): an NPC the server marks as a trader keeps its plain name, as in the original. Stock EQEmu
   sets neither offline flag, so its traders and buyers show only "Trader " / "Buyer ".
-- Their colours are this client's, not the original's; NPC names in their consider colour are a Hailstone option
+- A GM's name is green (`#1da64b`) as in the original (PlayerClient::SetNameSpriteTint @0x58bf00,
+  `game::gm_name_colour`): the gm flag, not a live NPC (type 1), and Anon 0, so an anonymous or roleplaying GM shows
+  the ordinary colour. A deliberate difference: the original keeps the green on a corpse that carries the gm flag,
+  where Hailstone gives every corpse the ordinary corpse colour (stock EQEmu sends corpses with gm 0, so only a server
+  that does not would show the difference). A targeted GM keeps the green, where the original fades the target's tint toward white. The
+  other colours are this client's, not the original's; NPC names in their consider colour are a Hailstone option
   (`display.con_name_colour`, on by default): docs/graphics.md "Name plates".
 - Hailstone's own, not the original's: a plate's text is hidden wherever the scene (geometry, doors, characters) is
   nearer, pixel by pixel (not by a line of sight to one point above the head), and a name behind the scene is not drawn; of names that overlap on the screen
@@ -1765,16 +1778,29 @@ This is a deliberate display addition; it changes no spell rules, filters or cha
 original's six melee report helpers (`0x4f7d70..0x4f8270`) confirm modes 0/1/2 select the display while a separate
 `OutputTextToLog` call receives the original full input. The spell branch of `ReportSuccessfulHit` (`0x52ee40`)
 bypasses those mode helpers. Recognition of the new spell display forms uses
-OP_FormattedMessage's string id and validated numeric substitutions (`game::spell_message_hit_report`), never a
-scan of the rendered sentence. Direct damage uses ids 9073, 434 and 12481, critical blasts 428/1040; DoTs
+OP_FormattedMessage's string id and validated numeric substitutions (`game::spell_message_hit_report`). Direct
+damage uses ids 9073, 434 and 12481, critical blasts 428/1040; DoTs
 9072/12954/13327; heals 9068/419, critical heals 427/1039; HoTs 12976/12997/12998. The legacy non-melee messages
 434/12481 also include damage shields when the server sends them that way. Critical healing has no direct/tick
 discriminator in these messages, so both use **Healing**. A critical sends its own notice (428/1040, 427/1039) beside the hit line, so **Number Only** shows two bare numbers for one crit: the crit's amount and the hit's. Chat hooks (`OnIncomingChat`, `OnFilterChat`, `mq.event`) get the full sentence whatever the mode, unlike MQ's hook on `dsp_chat`, which sees the line as displayed (docs/plugins.md). Incoming/observer DoTs omit ambiguous caster/spell
 substitutions from the abbreviation rather than assigning the names incorrectly.
 
+Some servers send a complete English combat sentence in OP_FormattedMessage's generic string 6688 (`%1`) or an
+unnamed, unjournaled OP_SpecialMesg with speak mode and language zero. These also follow spell hit modes when the
+message type is a known combat type and the entire text matches a non-melee hit or healing report with a valid
+amount (`game::spell_text_hit_report`). An optional spell name in parentheses remains in Abbreviated display.
+Ordinary dialogue, unrelated message types, malformed amounts and unrecognised or translated sentences stay full.
+An explicit DoT message type selects Damage Over Time; generic healing has no direct/tick discriminator and
+follows Healing. No nearby casts, buffs or spell names are used to guess whether a report is periodic. The
+caster and target must look like names: a comma, double quote or colon, or a " says", " tells", " shouts",
+" auctions" or " whispers", marks a speaker's prefix and keeps the line full; spaces, apostrophes and backticks
+are allowed. Stock EQEmu sends its hit and heal reports as the typed ids above; its one plain-text report is
+`Mob::HealDamage`'s caster-less "You have been healed for N points of damage." (OP_SpecialMesg, NonMelee 283),
+which follows Healing and abbreviates to "You: N heal", as YOU_HEALED (419) does for a heal on the player.
+
 An OP_Damage spell landing on the player with nonzero signed damage also follows Direct Spell Damage or Healing.
 Another target's landing text contains no amount, and zero-damage landings, casts, buffs, resists, unknown ids,
-malformed numeric arguments and raw text messages retain their full sentence. No extra damage or heal is inferred.
+malformed numeric arguments and unmatched raw text retain their full sentence. No extra damage or heal is inferred.
 Both `/log` and the diagnostic log receive the full line, once, before its display form is queued, including for
 the existing melee hit and miss modes. Incoming-chat hooks also receive full text so parsers keep working; a hook
 that rewrites a line supplies its replacement for the display and log as before. Unit tests cover decoded packets,
@@ -1931,7 +1957,7 @@ Vectors in `tests/merc_vectors_test.cpp` (25 files, every handler and sender of 
 - Costs are gold: cost / 10 platinum and cost % 10 gold (signed). The upkeep reports print FormatDurationLong of the
   timer interval ("%d hours, %d minutes, and %d seconds" and shorter forms).
 - A mercenary spawn is an NPC with IsMercenary: it counts as a player for buff slots and the PC-only checks, its
-  nameplate is (0x11, 0xb5, 0xe1), and in the group window it goes after its owner (`game/group_rules.h`).
+  nameplate is amber (`#e1b511`; SetNameSpriteTint's bytes 11 b5 e1, blue first: docs/graphics.md "Name plates"), and in the group window it goes after its owner (`game/group_rules.h`).
 
 ## Inputs the client cannot provide yet
 

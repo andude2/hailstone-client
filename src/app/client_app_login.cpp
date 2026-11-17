@@ -3,6 +3,7 @@
 #include <cstdlib>
 
 #include "app/client_app_internal.h"
+#include "app/connection_frontend.h"
 #include "app/lua_eq.h"
 #include "core/asset_folder.h"
 #include "net/server_files.h"
@@ -698,6 +699,8 @@ void ClientApp::draw_kick_question() {
 }
 
 void ClientApp::start_game(const net::WorldTicket& ticket) {
+    // The add-on policy is decided against the rules this world session's zone-in brings, never the cached ones.
+    addon_admission_.reset();
     net::ConnectionOptions copts;
     if (automation_) {
         copts.hooks = &automation_->hooks();
@@ -906,15 +909,21 @@ void ClientApp::update_connection() {
         reload_server_files(false);
         overlay_loaded_ = true;
     }
-    // /loadskin's user interface, loaded between frames (its Lua state may have run the command).
-    if (pending_ui_pack_) use_ui_pack(*std::exchange(pending_ui_pack_, std::nullopt));
-    // /quit and /exit: the connection closes and the client unloads.
-    if (auto q = conn_->take_quit_request(); q != net::GameConnection::QuitRequest::None) {
-        log::info("{}: quitting", q == net::GameConnection::QuitRequest::Exit ? "/exit" : "/quit");
-        conn_->disconnect();
-        quit_ = true;
-        return;
-    }
+    // /loadskin's user interface (loaded between frames: its Lua state may have run the command), /quit and /exit,
+    // and a dropped connection, after the new rules' assets and before the add-on gate can hold the frame.
+    if (!connection_frontend(*conn_, pending_ui_pack_,
+        [this](const std::string& skin) { use_ui_pack(skin); },
+        [this](net::GameConnection::QuitRequest request) {
+            log::info("{}: quitting", request == net::GameConnection::QuitRequest::Exit ? "/exit" : "/quit");
+            conn_->disconnect();
+            quit_ = true;
+        },
+        [this] {
+            if (auto kind = conn_->camped_out()) camp_finished(*kind);
+            else if (conn_->link_death()) update_link_death();
+            else back_to_login(conn_->error(), true);
+        })) return;
+    if (!addon_world_allowed()) return;
     using S = net::ConnectionState;
     switch (conn_->state()) {
     case S::CharacterSelect: {
@@ -1032,18 +1041,7 @@ void ClientApp::update_connection() {
         }
         screen_ = Screen::InGame;
         break;
-    case S::Disconnected: {
-        if (auto kind = conn_->camped_out()) {
-            camp_finished(*kind);
-            return;
-        }
-        if (conn_->link_death()) {
-            update_link_death();
-            return;
-        }
-        back_to_login(conn_->error(), true);
-        return;
-    }
+    case S::Disconnected: // Handled before the required-addon gate, even while its consent prompt is open.
     case S::Idle:
         break;
     }

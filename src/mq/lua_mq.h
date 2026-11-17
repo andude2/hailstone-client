@@ -170,6 +170,8 @@ public:
     // and starts the server's scripts its hailstone.cfg names ([scripts] run) and the allowed ones `autoload` names
     // (hailstone.ini scripts.autoload) or the character's autorun list does.
     void policy_changed(const std::vector<std::string>& autoload = {});
+    // Required scripts are running, and no running script is forbidden by the current add-on policy.
+    bool required_addons_ready(std::string* problem = nullptr) const;
     // The server's scripts/ folder (servers/<profile>/scripts), looked in before env.dirs; empty for none.
     void set_server_dir(const std::filesystem::path& dir);
 

@@ -883,9 +883,11 @@ void GameConnection::smooth(float dt, const game::WorldState::FloorFn& floor,
                             const game::WorldState::RegionFn& region,
                             const game::WorldState::VehicleFn& vehicle_under,
                             const game::WorldState::FloorFn& ground_floor,
-                            const game::WorldState::RemoteCollisionFn& collision) {
+                            const game::WorldState::RemoteCollisionFn& collision,
+                            bool ground_floor_includes_zone) {
     mount_up(world_.make_actors(actor_model));
-    world_.smooth(dt, steady_seconds(), floor, region, vehicle_under, ground_floor, collision);
+    world_.smooth(dt, steady_seconds(), floor, region, vehicle_under, ground_floor, collision,
+                  ground_floor_includes_zone);
 }
 
 void GameConnection::smooth_vehicles(float dt) { world_.smooth_vehicles(dt, steady_seconds()); }
@@ -1943,7 +1945,10 @@ void GameConnection::handle_zone(const AppPacket& p) {
             if (m->string_id == 1383) duel_decline_message(m->args); // EQEmu's DUEL_DECLINE
             auto full = strings_.format(m->string_id, m->args);
             std::optional<std::string> display;
-            if (auto line = game::spell_message_hit_report(m->string_id, m->args)) {
+            auto line = game::spell_message_hit_report(m->string_id, m->args);
+            if (!line && m->string_id == 6688 && m->args.size() == 1)
+                line = game::spell_text_hit_report(m->args[0], m->type);
+            if (line) {
                 auto mode = spell_hit_modes_[static_cast<std::size_t>(line->kind)];
                 display = game::report_spell_hit_line(*line, full, mode);
             }

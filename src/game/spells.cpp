@@ -552,6 +552,106 @@ std::optional<SpellHitLine> spell_message_hit_report(std::uint32_t eqstr, std::s
     return line;
 }
 
+std::optional<SpellHitLine> spell_text_hit_report(std::string_view text, std::uint32_t color) {
+    // Some servers send complete combat sentences through GENERIC_STRING (6688, "%1") or OP_SpecialMesg. Stock
+    // EQEmu sends its hit and heal reports as the typed string ids spell_message_hit_report handles; its one
+    // plain-text case is Mob::HealDamage's caster-less "You have been healed for %d points of damage."
+    // (Client::Message, Chat::NonMelee). These have no typed amount: require a combat type and the entire known
+    // English grammar, including its terminator, before shortening. Never search arbitrary player chat for a
+    // number or infer a tick from a spell.
+    bool damage = true, healing = true;
+    SpellHitReport damage_kind = SpellHitReport::DirectDamage;
+    switch (color) {
+    case 283: case 302: break; // NonMelee / SpellCrit, including legacy healing reports
+    case 374: case 375: case 402: case 403: case 404: damage = false; break;
+    case 376: case 377: case 399: case 400: case 401:
+        healing = false;
+        damage_kind = SpellHitReport::DamageOverTime;
+        break;
+    case 379: case 397: case 398: healing = false; break;
+    default: return std::nullopt;
+    }
+    for (char ch : text) {
+        const auto c = static_cast<unsigned char>(ch);
+        if (c < 0x20 || c == 0x7f) return std::nullopt;
+    }
+
+    std::string_view spell;
+    if (text.ends_with(')')) {
+        const auto suffix = text.rfind(". (");
+        if (suffix == std::string_view::npos) return std::nullopt;
+        spell = text.substr(suffix + 3, text.size() - suffix - 4);
+        if (spell.empty() || spell.front() == ' ' || spell.back() == ' ') return std::nullopt;
+        int depth = 0;
+        for (char c : spell) {
+            if (c == '(') ++depth;
+            else if (c == ')' && --depth < 0) return std::nullopt;
+        }
+        if (depth != 0) return std::nullopt;
+        text = text.substr(0, suffix + 1);
+    }
+    std::string_view units;
+    bool heal = false;
+    for (auto candidate : {" points of non-melee damage.", " point of non-melee damage."}) {
+        if (text.ends_with(candidate)) { units = candidate; break; }
+    }
+    if (units.empty()) {
+        for (auto candidate : {" points of damage.", " point of damage."}) {
+            if (text.ends_with(candidate)) { units = candidate; heal = true; break; }
+        }
+    }
+    if (units.empty() || (heal ? !healing : !damage)) return std::nullopt;
+    const auto report = text.substr(0, text.size() - units.size());
+    const auto for_at = report.rfind(" for ");
+    if (for_at == std::string_view::npos) return std::nullopt;
+    const auto amount = report.substr(for_at + 5);
+    if (!hit_amount(amount)) return std::nullopt;
+
+    const auto actors = report.substr(0, for_at);
+    if (heal && actors == "You have been healed") {
+        // Stock EQEmu's caster-less heal (zone/attack.cpp Mob::HealDamage). It is filtered as a heal over time
+        // but names no healer or spell and cannot be told from a direct heal, so like YOU_HEALED (419) it
+        // follows Healing, abbreviated as a heal on the player.
+        SpellHitLine line;
+        line.kind = SpellHitReport::Healing;
+        line.amount = amount;
+        line.abbreviated = "You: " + line.amount + " heal";
+        if (!spell.empty()) line.abbreviated += " (" + std::string(spell) + ")";
+        return line;
+    }
+    const bool has = actors.find(" has healed ") != std::string_view::npos;
+    const bool have = actors.find(" have healed ") != std::string_view::npos;
+    if (heal ? actors.find(" hit ") != std::string_view::npos : has || have) return std::nullopt;
+    std::string_view verb = " hit ";
+    if (heal) {
+        if (has && have) return std::nullopt;
+        verb = has ? " has healed " : " have healed ";
+    }
+    const auto verb_at = actors.find(verb);
+    if (verb_at == std::string_view::npos || actors.find(verb, verb_at + verb.size()) != std::string_view::npos)
+        return std::nullopt;
+    const auto caster = actors.substr(0, verb_at), target = actors.substr(verb_at + verb.size());
+    // A name may hold spaces, apostrophes and backticks (NPC names such as "a gnoll`s pup"), but never a comma,
+    // a double quote or a colon, which mark a speaker's prefix ("Somebody says, ...", "Bob tells you: ...").
+    auto name = [](std::string_view value) {
+        if (value.empty() || value.front() == ' ' || value.back() == ' ') return false;
+        if (value.find_first_of(",\":") != std::string_view::npos) return false;
+        for (auto speech : {" says", " tells", " shouts", " auctions", " whispers"})
+            if (value.find(speech) != std::string_view::npos) return false;
+        return true;
+    };
+    if (!name(caster) || !name(target)) return std::nullopt;
+
+    SpellHitLine line;
+    // Generic heals carry no periodic/direct discriminator, even when the server used a HoT filter internally.
+    line.kind = heal ? SpellHitReport::Healing : damage_kind;
+    line.amount = amount;
+    const char* effect = heal ? " heal" : damage_kind == SpellHitReport::DamageOverTime ? " DoT" : " damage";
+    line.abbreviated = std::string(caster) + " -> " + std::string(target) + ": " + line.amount + effect;
+    if (!spell.empty()) line.abbreviated += " (" + std::string(spell) + ")";
+    return line;
+}
+
 std::optional<SpellHitLine> spell_damage_hit_report(const WorldState& world, const SpellData& spell,
                                                   std::uint32_t target, std::int32_t damage) {
     if (target != world.player_id || !world.spawns.contains(target) || damage == 0) return std::nullopt;

@@ -60,16 +60,18 @@ struct Session {
     app::EqHost host;
     app::EqApi api;
     ui::lua::LuaUi lua;
-    Session(const fs::path& dir, const std::string& pack, net::ConnectionOptions options = {})
+    Session(const fs::path& dir, const std::string& pack, net::ConnectionOptions options = {}, bool in_game = true)
         : game(dir / "game"), conn(game, std::move(options)), api(host), lua(dir / pack, dir / "ui.txt") {
         host.game = &game;
         host.conn = &conn;
         host.chat = &view;
-        host.in_game = host.ui_ready = true;
-        lua.add_eq_api([this](lua_State* L) {
+        host.in_game = host.ui_ready = in_game;
+        lua.add_eq_api([this, in_game](lua_State* L) {
             api.register_functions(L);
-            lua_pushcfunction(L, [](lua_State* S) { lua_pushboolean(S, 1); return 1; });
-            lua_setfield(L, -2, "InGame");
+            if (in_game) {
+                lua_pushcfunction(L, [](lua_State* S) { lua_pushboolean(S, 1); return 1; });
+                lua_setfield(L, -2, "InGame");
+            }
         });
         api.load_layout(dir / "defaults.ini", dir / "UI_Test_Server.ini", {});
     }
@@ -1380,6 +1382,14 @@ end
                 {"", "owner/extra", "Alpha suggests a Hailstone add-on: owner/extra.", true}};
             s.frames(2);
             CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
+            login.addons.suggestions.front().required = true;
+            login.addons.suggestions.front().text = "Required to play on this server: servplug.";
+            s.frames(2);
+            CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
+            REQUIRE(luaL_dostring(s.lua.state(), "assert(eq.LoginScreen().addons.suggestions[1].required); "
+                                 "assert(not eq.LoginDo('addonSuggestLater', 'owner/servplug')); "
+                                 "assert(not eq.LoginDo('addonSuggestNever', 'owner/servplug')); "
+                                 "assert(eq.LoginDo('addonSuggestLook', 'owner/servplug'))") == LUA_OK);
             login.addons = {};
             s.frames(2);
             ui::new_profile(login);
@@ -2969,10 +2979,14 @@ TEST_CASE("UI packs: each claims the achievement and reward windows while they a
 }
 
 TEST_CASE("UI packs: the server plugins' question draws in each pack in the client's place") {
+    // In the world, and on the loading screen, where a required plugin's question holds the zone-in (no game or
+    // character UI is ready there).
+    for (const bool in_game : {true, false})
     for (const char* pack : {"modern", "gamepad"}) {
         CAPTURE(pack);
+        CAPTURE(in_game);
         fs::path src = fs::path(__FILE__).parent_path().parent_path() / "ui" / pack;
-        hailstone::test::ScratchDir dir_scratch(std::string("ui_pack_consent_") + pack);
+        hailstone::test::ScratchDir dir_scratch(std::string("ui_pack_consent_") + pack + (in_game ? "_game" : "_load"));
         fs::path dir = dir_scratch.path();
         fs::create_directories(dir / "game");
         fs::copy(src, dir / pack, fs::copy_options::recursive);
@@ -2982,7 +2996,7 @@ TEST_CASE("UI packs: the server plugins' question draws in each pack in the clie
         int w = 0, h = 0;
         ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
         {
-            Session s(dir, pack);
+            Session s(dir, pack, {}, in_game);
             std::optional<plugin::ConsentPrompt> prompt;
             s.host.plugin_consent = [&] { return prompt; };
             s.host.answer_plugin_consent = [&](std::optional<bool>) { prompt.reset(); };

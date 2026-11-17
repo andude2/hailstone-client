@@ -11,7 +11,15 @@
 #include "game/bank_snapshot.h"
 #include "game/barter.h"
 #include "game/missiles.h"
+#include "game/spells.h"
 #include "game/zoning.h"
+
+namespace hailstone::game {
+
+// spell_text_hit_report over the bytes as text, on the NonMelee type (283) that takes both hit and heal forms.
+inline auto fuzz_spell_text_hit_report(std::string_view text) { return spell_text_hit_report(text, 283); }
+
+} // namespace hailstone::game
 
 namespace hailstone::fuzz_game {
 

@@ -42,6 +42,9 @@ struct Automation::Impl {
     std::shared_ptr<game::ExtensionChain> extensions = std::make_shared<game::ExtensionChain>();
     plugin::UiBridge plugin_ui;
     plugin::Policy policy;
+    std::vector<plugin::Ceiling> registry_ceilings;
+    bool enforcement_identities_ready = false;
+    fs::path enforcement_profile;
     mq::Registry registry;
     mq::Context ctx;
     std::unique_ptr<mq::Commands> commands;
@@ -113,6 +116,19 @@ struct Automation::Impl {
 
     // What runs, checked again against the policy (the server's rules, or the add-ons' ceilings, changed).
     void recheck() {
+        const auto& rules = policy.current();
+        if (!rules || !rules->addons.enabled) {
+            enforcement_identities_ready = false;
+        } else if (!enforcement_identities_ready || enforcement_profile != rules->dir) {
+            // Ordinary startup/install reads only the registry. Attribute changed/extra code before an opted-in
+            // policy is applied, and again after a managed install refreshes its baseline ceilings.
+            auto ceilings = registry_ceilings;
+            for (auto& c : addon_ceilings(env.data_dir, true))
+                if (!c.verified) ceilings.push_back(std::move(c));
+            policy.set_ceilings(std::move(ceilings));
+            enforcement_identities_ready = true;
+            enforcement_profile = rules->dir;
+        }
         std::vector<std::string> script_autoload;
         for (auto& s : mq::split_index(env.script_autoload)) script_autoload.push_back(s);
         scripts->policy_changed(script_autoload);
@@ -225,8 +241,18 @@ Automation::Automation(AutomationEnv env) : impl_(std::make_unique<Impl>()) {
 Automation::~Automation() { shutdown(); }
 
 void Automation::set_addon_ceilings(std::vector<plugin::Ceiling> ceilings) {
-    impl_->policy.set_ceilings(std::move(ceilings));
-    impl_->recheck();
+    Impl& m = *impl_;
+    m.registry_ceilings = std::move(ceilings);
+    m.enforcement_identities_ready = false;
+    if (!m.policy.current() || !m.policy.current()->addons.enabled)
+        m.policy.set_ceilings(m.registry_ceilings);
+    m.recheck();
+}
+
+bool Automation::required_addons_ready(std::string* problem) const {
+    if (problem) problem->clear();
+    if (!impl_->plugins->required_addons_ready(problem)) return false;
+    return impl_->scripts->required_addons_ready(problem);
 }
 
 plugin::Hooks& Automation::hooks() { return impl_->hooks; }

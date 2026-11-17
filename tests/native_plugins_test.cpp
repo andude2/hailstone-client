@@ -468,6 +468,163 @@ TEST_CASE("native plugins: the player's own plugins do not ask") {
     CHECK_FALSE(fs::exists(profile / plugin::kApprovalsName));
 }
 
+TEST_CASE("native plugins: required managed plugins autoload with consent and stay loaded") {
+    Host h;
+    const fs::path profile = h.world.dir / "servers" / "required";
+    fs::create_directories(profile / "plugins");
+    h.plugins->set_server_dir(profile / "plugins");
+    auto rules = plugin::parse_server_cfg("[plugins]\nplayer = on\n[addons]\nenforce = on\ndefault = deny\n"
+                                          "required = owner/example\n");
+    rules.dir = profile;
+    h.policy.set_ceilings({{plugin::FileKind::Plugin, h.hash(), plugin::kCapAll, "MQ2Example", "owner/example"}});
+    h.policy.set(rules);
+    h.plugins->policy_changed({}); // neither autoload nor a server-delivered file
+    REQUIRE(h.plugins->consent());
+    CHECK_FALSE(h.plugins->loaded("MQ2Example"));
+    std::string problem;
+    CHECK_FALSE(h.plugins->required_addons_ready(&problem));
+    CHECK(problem.empty());
+    h.plugins->answer_consent(false);
+    CHECK_FALSE(h.plugins->required_addons_ready(&problem));
+    CHECK(problem.find("not approved") != std::string::npos);
+    CHECK_FALSE(h.plugins->load("MQ2Example")); // the player's explicit retry asks again
+    REQUIRE(h.plugins->consent());
+    h.plugins->answer_consent(true);
+    REQUIRE(h.plugins->loaded("MQ2Example"));
+    CHECK(h.plugins->required_addons_ready(&problem));
+    CHECK(problem.empty());
+    CHECK_FALSE(h.plugins->unload("MQ2Example"));
+    h.run("/plugin MQ2Example unload");
+    CHECK(h.plugins->loaded("MQ2Example"));
+    rules.addons.required.clear();
+    rules.addons.block = {"owner/example"};
+    h.policy.set(rules);
+    CHECK_FALSE(h.plugins->required_addons_ready(&problem)); // the loaded plugin must retire first
+    h.plugins->policy_changed({});
+    CHECK_FALSE(h.plugins->loaded("MQ2Example"));
+    CHECK(h.plugins->required_addons_ready());
+}
+
+TEST_CASE("native plugins: required readiness is worked out again only when the rules, answers or plugins change") {
+    Host h;
+    const fs::path profile = h.world.dir / "servers" / "required";
+    fs::create_directories(profile / "plugins");
+    h.plugins->set_server_dir(profile / "plugins");
+    auto rules = plugin::parse_server_cfg("[plugins]\nplayer = on\n[addons]\nenforce = on\nrequired = owner/example\n");
+    rules.dir = profile;
+    h.policy.set_ceilings({{plugin::FileKind::Plugin, h.hash(), plugin::kCapAll, "MQ2Example", "owner/example"}});
+    h.policy.set(rules);
+    h.plugins->policy_changed({});
+    REQUIRE(h.plugins->consent());
+    h.plugins->answer_consent(true);
+    REQUIRE(h.plugins->loaded("MQ2Example"));
+    CHECK(h.plugins->required_addons_ready());
+    // The answers file is not read each frame: an edit from outside the client shows with the next rules.
+    std::ofstream(profile / plugin::kApprovalsName, std::ios::binary | std::ios::trunc)
+        << "hailstone-plugin-approvals 1\ndeny " << to_hex(h.hash()) << " MQ2Example\n";
+    CHECK(h.plugins->required_addons_ready());
+    h.policy.set(rules); // the next zone-in's rules
+    std::string problem;
+    CHECK_FALSE(h.plugins->required_addons_ready(&problem));
+    CHECK(problem.find("not approved") != std::string::npos);
+    // An answer the client writes shows at once.
+    REQUIRE(plugin::set_plugin_consent(profile, "MQ2Example", h.hash(), true));
+    CHECK(h.plugins->required_addons_ready());
+    // So does a plugin that goes.
+    h.plugins->unload_all();
+    CHECK_FALSE(h.plugins->required_addons_ready(&problem));
+    CHECK(problem.find("did not load") != std::string::npos);
+}
+
+TEST_CASE("native plugins: blocks name an installed plugin by its repository, not a hand-installed one") {
+    Host h;
+    h.policy.set(plugin::parse_server_cfg("[plugins]\nplayer = on\n[addons]\nenforce = on\ndefault = allow\n"
+                                          "block = owner/example\n"));
+    CHECK(h.plugins->list().front().caps != 0); // put in by hand: no repository for a list to name
+    h.policy.set_ceilings({{plugin::FileKind::Plugin, h.hash(), plugin::kCapAll, "MQ2Example", "owner/example"}});
+    CHECK(h.plugins->list().front().caps == 0);
+    CHECK_FALSE(h.plugins->load("mq2example"));
+    CHECK_FALSE(h.plugins->loaded("MQ2Example"));
+    CHECK_FALSE(h.plugins->consent());
+}
+
+TEST_CASE("native plugins: a required hash also supplied by a blocked add-on refuses readiness without consent") {
+    Host h;
+    h.policy.set_ceilings({{plugin::FileKind::Plugin, h.hash(), plugin::kCapAll, "MQ2Example", "owner/needed"},
+                          {plugin::FileKind::Plugin, h.hash(), plugin::kCapAll, "blocked", "owner/blocked"}});
+    h.policy.set(plugin::parse_server_cfg("[plugins]\nplayer = on\n[addons]\nenforce = on\ndefault = deny\n"
+                                         "required = owner/needed\nblock = owner/blocked\n"));
+    h.plugins->policy_changed({});
+    CHECK_FALSE(h.plugins->loaded("MQ2Example"));
+    CHECK_FALSE(h.plugins->consent());
+    std::string problem;
+    CHECK_FALSE(h.plugins->required_addons_ready(&problem));
+    CHECK(problem.find("not permitted") != std::string::npos);
+}
+
+TEST_CASE("native plugins: missing or shadowed required libraries cannot disappear from readiness checks") {
+    Host h;
+    const auto expected = h.hash();
+    const fs::path profile = h.world.dir / "servers/required";
+    fs::create_directories(profile / "plugins");
+    h.plugins->set_server_dir(profile / "plugins");
+    auto rules = plugin::parse_server_cfg("[plugins]\nplayer = on\n[addons]\nenforce = on\ndefault = deny\n"
+                                          "required = owner/example\n");
+    REQUIRE(rules.addons.error.empty());
+    h.policy.set_ceilings({{plugin::FileKind::Plugin, expected, plugin::kCapAll, "MQ2Example", "owner/example"}});
+    SUBCASE("the managed library is missing") {
+        fs::remove(h.file);
+    }
+    SUBCASE("a different server library shadows the managed entry") {
+        const fs::path shadow = profile / "plugins" / h.file.filename();
+        fs::copy_file(h.file, shadow);
+        std::ofstream(shadow, std::ios::binary | std::ios::app) << "different bytes";
+        std::ifstream f(shadow, std::ios::binary);
+        const auto hash = sha256(std::string(std::istreambuf_iterator<char>(f), {}));
+        rules.server_files.push_back({plugin::FileKind::Plugin, "plugins/" + shadow.filename().string(), hash});
+    }
+    h.policy.set(rules);
+    h.plugins->policy_changed({});
+    CHECK_FALSE(h.plugins->loaded("MQ2Example"));
+    std::string problem;
+    CHECK_FALSE(h.plugins->required_addons_ready(&problem));
+    CHECK_FALSE(problem.empty());
+}
+
+TEST_CASE("native plugins: dismissing required consent reports a failure instead of waiting without a prompt") {
+    Host h;
+    const fs::path profile = h.world.dir / "servers" / "required";
+    fs::create_directories(profile / "plugins");
+    h.plugins->set_server_dir(profile / "plugins");
+    auto rules = plugin::parse_server_cfg("[plugins]\nplayer = on\n[addons]\nenforce = on\nrequired = owner/example\n");
+    h.policy.set_ceilings({{plugin::FileKind::Plugin, h.hash(), plugin::kCapAll, "MQ2Example", "owner/example"}});
+    h.policy.set(rules);
+    h.plugins->policy_changed({});
+    REQUIRE(h.plugins->consent());
+    h.plugins->answer_consent(std::nullopt);
+    CHECK_FALSE(h.plugins->consent());
+    std::string problem;
+    CHECK_FALSE(h.plugins->required_addons_ready(&problem));
+    CHECK(problem.find("needs your approval") != std::string::npos);
+}
+
+TEST_CASE("native plugins: a required plugin initialization failure prevents readiness after consent") {
+    Host h(false, nullptr, HAILSTONE_PROBE_THROW_PLUGIN);
+    const fs::path profile = h.world.dir / "servers" / "required";
+    fs::create_directories(profile / "plugins");
+    h.plugins->set_server_dir(profile / "plugins");
+    auto rules = plugin::parse_server_cfg("[plugins]\nplayer = on\n[addons]\nenforce = on\nrequired = owner/throw\n");
+    h.policy.set_ceilings({{plugin::FileKind::Plugin, h.hash(), plugin::kCapAll, "HostProbeThrow", "owner/throw"}});
+    h.policy.set(rules);
+    h.plugins->policy_changed({});
+    REQUIRE(h.plugins->consent());
+    h.plugins->answer_consent(true);
+    CHECK_FALSE(h.plugins->loaded("HostProbeThrow"));
+    std::string problem;
+    CHECK_FALSE(h.plugins->required_addons_ready(&problem));
+    CHECK(problem.find("InitializePlugin failed") != std::string::npos);
+}
+
 TEST_CASE("native plugins: a binary in the plugin's own folder under plugins/") {
     Host h(true);
     auto all = h.plugins->list();
@@ -925,9 +1082,9 @@ TEST_CASE("native plugins: get_target_buff_data_bulk, laid out as docs/plugins.m
     auto& sp = A::spells(*h.world.conn);
     auto& w = A::world(*h.world.conn);
     REQUIRE(w.target_id == 10); // the test world targets a_rat01
-    // No OP_TargetBuffs yet: nothing.
+    // No OP_TargetBuffs yet: the header alone, count 0 and total 0.
     h.run("/probetargetbuffs");
-    CHECK(h.printed_line("[Probe] target buffs 0 bytes, 0 records, 0 empty, 0 bytes left"));
+    CHECK(h.printed_line("[Probe] target buffs count 0, total 0, 8 bytes, 0 records, 0 empty, 0 bytes left"));
     const std::int64_t now = net::GameConnection::now_ms();
     auto target_buff = [now](std::uint32_t spell, std::int32_t tics, std::string caster, std::int64_t ticks_ago = 0) {
         game::BuffSlot b;
@@ -938,8 +1095,8 @@ TEST_CASE("native plugins: get_target_buff_data_bulk, laid out as docs/plugins.m
         return b;
     };
     sp.target_buffs_entity = 10;
-    // An entry with no spell (index 2), with a caster's name, is left out. The duration is the ticks left: the
-    // first came three ticks ago, 8 sent, 5 left.
+    // An entry with no spell (index 2), with a caster's name, is left out and not counted. The duration is the ticks
+    // left: the first came three ticks ago, 8 sent, 5 left.
     sp.target_buffs = {{3, target_buff(3002, 8, "Tester", 3)}, {0, target_buff(11, 1, "Groupie")},
                        {5, target_buff(0, 6, "Nobody")}, {7, target_buff(99999, 4, "")}};
     // In the order the client keeps them (the slots are not sent); a spell not known has type 0, no caster no name.
@@ -947,50 +1104,73 @@ TEST_CASE("native plugins: get_target_buff_data_bulk, laid out as docs/plugins.m
     CHECK(h.printed_line("[Probe] target buff slot 3: spell 3002, tics 5, spell type 0, caster Tester"));
     CHECK(h.printed_line("[Probe] target buff slot 0: spell 11, tics 1, spell type 1, caster Groupie"));
     CHECK(h.printed_line("[Probe] target buff slot 7: spell 99999, tics 4, spell type 0, caster -"));
-    // 20+6, 20+7, 20+0: the entry with no spell is not sent
-    CHECK(h.printed_line("[Probe] target buffs 73 bytes, 3 records, 0 empty, 0 bytes left"));
-    // Only whole records, names included, go into a buffer too small for all, and nothing past its end.
+    // 8 for the header, then 20+6, 20+7, 20+0: the entry with no spell is not sent
+    CHECK(h.printed_line("[Probe] target buffs count 3, total 3, 81 bytes, 3 records, 0 empty, 0 bytes left"));
+    // Only whole records, names included, go into a buffer too small for all, and nothing past its end; the header's
+    // count says how many follow and its total how many the client holds, so the plugin sees it was cut short. The third record (20 bytes) would
+    // fit where the second (27) does not, but nothing follows the first cut: the records stay in order.
     h.printed.clear();
-    h.run("/probetargetbuffs 52");
+    h.run("/probetargetbuffs 60");
     CHECK(h.printed_line("[Probe] target buff slot 3: spell 3002, tics 5, spell type 0, caster Tester"));
     CHECK_FALSE(h.printed_line("[Probe] target buff slot 0: spell 11, tics 1, spell type 1, caster Groupie"));
-    CHECK(h.printed_line("[Probe] target buffs 26 bytes, 1 records, 0 empty, 0 bytes left"));
+    CHECK_FALSE(h.printed_line("[Probe] target buff slot 7: spell 99999, tics 4, spell type 0, caster -"));
+    CHECK(h.printed_line("[Probe] target buffs count 1, total 3, 34 bytes, 1 records, 0 empty, 0 bytes left"));
     CHECK(h.printed_line("[Probe] target buffs past the end 0"));
     h.printed.clear();
-    h.run("/probetargetbuffs 53");
-    CHECK(h.printed_line("[Probe] target buffs 53 bytes, 2 records, 0 empty, 0 bytes left"));
+    h.run("/probetargetbuffs 61");
+    CHECK(h.printed_line("[Probe] target buffs count 2, total 3, 61 bytes, 2 records, 0 empty, 0 bytes left"));
     CHECK(h.printed_line("[Probe] target buffs past the end 0"));
     // The last record needs its 20 bytes: one byte short, it is left out.
     h.printed.clear();
-    h.run("/probetargetbuffs 72");
+    h.run("/probetargetbuffs 80");
     CHECK_FALSE(h.printed_line("[Probe] target buff slot 7: spell 99999, tics 4, spell type 0, caster -"));
-    CHECK(h.printed_line("[Probe] target buffs 53 bytes, 2 records, 0 empty, 0 bytes left"));
+    CHECK(h.printed_line("[Probe] target buffs count 2, total 3, 61 bytes, 2 records, 0 empty, 0 bytes left"));
     CHECK(h.printed_line("[Probe] target buffs past the end 0"));
     h.printed.clear();
-    h.run("/probetargetbuffs 19"); // not even one fixed part
-    CHECK(h.printed_line("[Probe] target buffs 0 bytes, 0 records, 0 empty, 0 bytes left"));
+    h.run("/probetargetbuffs 27"); // the header and not even one fixed part
+    CHECK(h.printed_line("[Probe] target buffs count 0, total 3, 8 bytes, 0 records, 0 empty, 0 bytes left"));
+    CHECK(h.printed_line("[Probe] target buffs past the end 0"));
+    h.printed.clear();
+    h.run("/probetargetbuffs 7"); // not even the header: nothing
+    CHECK(h.printed_line("[Probe] target buffs 0 bytes"));
     CHECK(h.printed_line("[Probe] target buffs past the end 0"));
     // A new target whose buffs have not come yet: the old target's are not given as its.
     h.printed.clear();
     w.target_id = 11;
     h.run("/probetargetbuffs");
-    CHECK(h.printed_line("[Probe] target buffs 0 bytes, 0 records, 0 empty, 0 bytes left"));
+    CHECK(h.printed_line("[Probe] target buffs count 0, total 0, 8 bytes, 0 records, 0 empty, 0 bytes left"));
+    // The player itself targeted: the read does not hide the player's own list, though the client's target buff
+    // list draws nothing then (docs/plugins.md).
+    h.printed.clear();
+    w.target_id = w.player_id;
+    sp.target_buffs_entity = w.player_id;
+    sp.target_buffs = {{1, target_buff(11, 2, "Self")}};
+    h.run("/probetargetbuffs");
+    CHECK(h.printed_line("[Probe] target buff slot 1: spell 11, tics 2, spell type 1, caster Self"));
+    CHECK(h.printed_line("[Probe] target buffs count 1, total 1, 32 bytes, 1 records, 0 empty, 0 bytes left"));
     // No target at all.
+    h.printed.clear();
     w.target_id = 0;
     sp.target_buffs_entity = 0;
     h.run("/probetargetbuffs");
-    CHECK(h.printed_line("[Probe] target buffs 0 bytes, 0 records, 0 empty, 0 bytes left"));
+    CHECK(h.printed_line("[Probe] target buffs count 0, total 0, 8 bytes, 0 records, 0 empty, 0 bytes left"));
+    // No game connection at all (the login screen): count 0 and total 0 too, as the other list reads.
+    h.printed.clear();
+    auto conn = std::move(h.world.conn);
+    h.run("/probetargetbuffs");
+    CHECK(h.printed_line("[Probe] target buffs count 0, total 0, 8 bytes, 0 records, 0 empty, 0 bytes left"));
+    h.world.conn = std::move(conn);
 }
 TEST_CASE("native plugins: get_avail_aa_data_bulk and get_avail_disc_data_bulk, laid out as docs/plugins.md says") {
     Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
     h.approve(plugin::kCapAll);
     REQUIRE(h.plugins->load("HostProbe"));
     using A = net::GameConnectionTestAccess;
-    // Nothing owned, no disciplines: the header alone, its count 0.
+    // Nothing owned, no disciplines: the header alone, count 0 and total 0.
     h.run("/probeaas");
-    CHECK(h.printed_line("[Probe] aas count 0, 4 bytes, 0 bytes left"));
+    CHECK(h.printed_line("[Probe] aas count 0, total 0, 8 bytes, 0 bytes left"));
     h.run("/probediscs");
-    CHECK(h.printed_line("[Probe] discs count 0, 4 bytes, 0 bytes left"));
+    CHECK(h.printed_line("[Probe] discs count 0, total 0, 8 bytes, 0 bytes left"));
 
     // Owned ranks by their ability (group) id with the rank's name (dbstr type 1), in the owned list's order: an empty
     // slot and a rank the AA table does not hold (no group id known) are left out. A title the game folder's
@@ -1010,17 +1190,20 @@ TEST_CASE("native plugins: get_avail_aa_data_bulk and get_avail_disc_data_bulk, 
     h.run("/probeaas");
     CHECK(h.printed_line("[Probe] aas 0: ability 5, name Innate Strength"));
     CHECK(h.printed_line("[Probe] aas 1: ability 77, name -"));
-    CHECK(h.printed_line("[Probe] aas count 2, 35 bytes, 0 bytes left")); // 4, 8+15, 8+0
-    // As many whole records, names included, as fit after the count; below the count's 4 bytes nothing, and nothing
-    // past the end.
+    CHECK(h.printed_line("[Probe] aas count 2, total 2, 39 bytes, 0 bytes left")); // 8, 8+15, 8+0
+    // As many whole records, names included, as fit after the header, whose total still says how many the client
+    // holds; below the header's 8 bytes nothing, and nothing past the end.
     h.printed.clear();
-    h.run("/probeaas 34");
+    h.run("/probeaas 38");
     CHECK(h.printed_line("[Probe] aas 0: ability 5, name Innate Strength"));
     CHECK_FALSE(h.printed_line("[Probe] aas 1: ability 77, name -"));
-    CHECK(h.printed_line("[Probe] aas count 1, 27 bytes, 0 bytes left"));
+    CHECK(h.printed_line("[Probe] aas count 1, total 2, 31 bytes, 0 bytes left"));
     CHECK(h.printed_line("[Probe] aas past the end 0"));
     h.printed.clear();
-    h.run("/probeaas 3");
+    h.run("/probeaas 8"); // the header alone: no record fits
+    CHECK(h.printed_line("[Probe] aas count 0, total 2, 8 bytes, 0 bytes left"));
+    h.printed.clear();
+    h.run("/probeaas 7");
     CHECK(h.printed_line("[Probe] aas 0 bytes"));
     CHECK(h.printed_line("[Probe] aas past the end 0"));
 
@@ -1030,28 +1213,184 @@ TEST_CASE("native plugins: get_avail_aa_data_bulk and get_avail_disc_data_bulk, 
     h.run("/probediscs");
     CHECK(h.printed_line("[Probe] discs 0: spell 4498, name Test Discipline"));
     CHECK(h.printed_line("[Probe] discs 1: spell 99999, name -"));
-    CHECK(h.printed_line("[Probe] discs count 2, 35 bytes, 0 bytes left")); // 4, 8+15, 8+0
+    CHECK(h.printed_line("[Probe] discs count 2, total 2, 39 bytes, 0 bytes left")); // 8, 8+15, 8+0
     h.printed.clear();
-    h.run("/probediscs 34");
+    h.run("/probediscs 38");
     CHECK(h.printed_line("[Probe] discs 0: spell 4498, name Test Discipline"));
     CHECK_FALSE(h.printed_line("[Probe] discs 1: spell 99999, name -"));
-    CHECK(h.printed_line("[Probe] discs count 1, 27 bytes, 0 bytes left"));
+    CHECK(h.printed_line("[Probe] discs count 1, total 2, 31 bytes, 0 bytes left"));
     CHECK(h.printed_line("[Probe] discs past the end 0"));
-    // Before the profile: the header, count 0.
+    h.printed.clear();
+    h.run("/probediscs 7");
+    CHECK(h.printed_line("[Probe] discs 0 bytes"));
+    CHECK(h.printed_line("[Probe] discs past the end 0"));
+    // Before the profile: the header, count 0 and total 0.
     h.printed.clear();
     A::profile(*h.world.conn).reset();
     h.run("/probediscs");
-    CHECK(h.printed_line("[Probe] discs count 0, 4 bytes, 0 bytes left"));
+    CHECK(h.printed_line("[Probe] discs count 0, total 0, 8 bytes, 0 bytes left"));
     h.run("/probeaas"); // the owned list is still there, but goes out only with the profile
-    CHECK(h.printed_line("[Probe] aas count 0, 4 bytes, 0 bytes left"));
-    // No game connection at all (the login screen): the count 0 too.
+    CHECK(h.printed_line("[Probe] aas count 0, total 0, 8 bytes, 0 bytes left"));
+    // No game connection at all (the login screen): count 0 and total 0 too.
     h.printed.clear();
     auto conn = std::move(h.world.conn);
     h.run("/probeaas");
-    CHECK(h.printed_line("[Probe] aas count 0, 4 bytes, 0 bytes left"));
+    CHECK(h.printed_line("[Probe] aas count 0, total 0, 8 bytes, 0 bytes left"));
     h.run("/probediscs");
-    CHECK(h.printed_line("[Probe] discs count 0, 4 bytes, 0 bytes left"));
+    CHECK(h.printed_line("[Probe] discs count 0, total 0, 8 bytes, 0 bytes left"));
     h.world.conn = std::move(conn);
+}
+TEST_CASE("native plugins: get_raid_data_bulk roster, pets, positions and edge cases") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll);
+    REQUIRE(h.plugins->load("HostProbe"));
+    using A = net::GameConnectionTestAccess;
+    auto& raid = A::raid(*h.world.conn);
+    raid.active = true;
+    raid.leader = "Groupie";
+    raid.locked = true;
+    raid.loot_type = 3;
+    raid.looters = {"Tester"};
+    raid.target = "Tester";
+    raid.members = {
+        mq_test::raid_member("Groupie", 0, 2, 48, true, true),
+        mq_test::raid_member("Tester", 0, 2, 50),
+        mq_test::raid_member("Third", 1, 1, 45, false, false, true),
+    };
+    auto& leadership = A::leadership(*h.world.conn);
+    leadership.raid_assist_names[0] = "Groupie";
+    leadership.raid_assist_names[1] = "Third";
+
+    h.run("/proberaid");
+    CHECK(h.printed_line("[Probe] raid active 1, count 3, total 3, leader 0, target 1, locked 1, loot 3, 412 bytes"));
+    // Leader, group leader, main assist, looter (the leader) and present; 100% HP from the test spawn.
+    CHECK(h.printed_line("[Probe] raid 0: Groupie 12 g0 f167 l48 c2 hp100 mp-1 ep-1 pet0 ph-1"));
+    // The listed looter, in the zone and the player: own HP 75%, mana 25%, endurance 50%.
+    CHECK(h.printed_line("[Probe] raid 1: Tester 1 g0 f416 l50 c2 hp75 mp25 ep50 pet0 ph-1"));
+    // No spawn in this zone: the roster's level and class, the marker flag, and no percentages.
+    CHECK(h.printed_line("[Probe] raid 2: Third 0 g1 f12 l45 c1 hp-1 mp-1 ep-1 pet0 ph-1"));
+
+    h.printed.clear();
+    h.run("/proberaid 39"); // not even the header: nothing
+    CHECK(h.printed_line("[Probe] raid 0 bytes"));
+    h.run("/proberaid 40"); // the header alone; count < total says the buffer was too small
+    CHECK(h.printed_line("[Probe] raid active 1, count 0, total 3, leader 0, target 1, locked 1, loot 3, 40 bytes"));
+    h.run("/proberaid 164"); // header + one whole record
+    CHECK(h.printed_line("[Probe] raid active 1, count 1, total 3, leader 0, target 1, locked 1, loot 3, 164 bytes"));
+    CHECK(h.printed_line("[Probe] raid 0: Groupie 12 g0 f167 l48 c2 hp100 mp-1 ep-1 pet0 ph-1"));
+    CHECK_FALSE(h.printed_line("[Probe] raid 1: Tester 1 g0 f416 l50 c2 hp75 mp25 ep50 pet0 ph-1"));
+
+    // 4 Entire Raid: every member may loot, so the unlisted third member gains the looter flag too.
+    h.printed.clear();
+    raid.loot_type = 4;
+    h.run("/proberaid");
+    CHECK(h.printed_line("[Probe] raid active 1, count 3, total 3, leader 0, target 1, locked 1, loot 4, 412 bytes"));
+    CHECK(h.printed_line("[Probe] raid 0: Groupie 12 g0 f167 l48 c2 hp100 mp-1 ep-1 pet0 ph-1"));
+    CHECK(h.printed_line("[Probe] raid 1: Tester 1 g0 f416 l50 c2 hp75 mp25 ep50 pet0 ph-1"));
+    CHECK(h.printed_line("[Probe] raid 2: Third 0 g1 f44 l45 c1 hp-1 mp-1 ep-1 pet0 ph-1"));
+
+    raid.clear();
+    h.printed.clear();
+    h.run("/proberaid");
+    CHECK(h.printed_line("[Probe] raid active 0, count 0, total 0, leader 4294967295, target 4294967295, locked 0, loot 1, 40 bytes"));
+
+    // Pets, position and distance, group mana/endurance, an ungrouped member, a mercenary's clean-name fallback
+    // and an ordinary NPC of the same name. One Host for the whole test: the reference reader is loaded once.
+    auto& w = A::world(*h.world.conn);
+    h.world.add(50, "Pin", false, 10, {3, 4, 0});
+    h.world.add(51, "Pin`s_pet", true, 5, {3, 4, 0});
+    h.world.add(52, "Mercenary001", true, 20, {1, 2, 3});
+    h.world.add(53, "Guard", true, 30, {0, 0, 0});
+    w.spawns[51].pet_owner_id = 50;
+    w.spawns[51].hp_percent = 55;
+    w.spawns[52].mercenary = true;
+    auto& group = A::group(*h.world.conn);
+    group.mana_percent[50] = 40;
+    group.endurance_percent[50] = 60;
+    raid.active = true;
+    raid.locked = false;
+    raid.leader.clear();
+    raid.target.clear();
+    raid.looters.clear();
+    raid.loot_type = 1;
+    raid.members = {
+        mq_test::raid_member("Pin", 0, 1, 10),
+        mq_test::raid_member("Mercenary"), // the cleaned-name fallback, for a mercenary
+        mq_test::raid_member("Guard", 0),  // an ordinary NPC with that name is not a raid member
+    };
+    h.printed.clear();
+    h.run("/proberaid");
+    CHECK(h.printed_line("[Probe] raid active 1, count 3, total 3, leader 4294967295, target 4294967295, locked 0, loot 1, 412 bytes"));
+    CHECK(h.printed_line("[Probe] raid 0: Pin 50 g0 f128 l10 c1 hp100 mp40 ep60 pet51 ph55"));
+    CHECK(h.printed_line("[Probe] raid pos 0: 3.00 4.00 0.00 5.00"));
+    CHECK(h.printed_line("[Probe] raid 1: Mercenary 52 g-1 f128 l20 c1 hp80 mp-1 ep-1 pet0 ph-1"));
+    CHECK(h.printed_line("[Probe] raid pos 1: 1.00 2.00 3.00 3.74"));
+    CHECK(h.printed_line("[Probe] raid 2: Guard 0 g0 f0 l0 c0 hp-1 mp-1 ep-1 pet0 ph-1"));
+    CHECK(h.printed_line("[Probe] raid pos 2: 0.00 0.00 0.00 0.00"));
+
+    // A mercenary and a temporary pet carry their owner in pet_owner_id too (EQEmu's FillSpawnStruct), but neither is
+    // the member's pet: with a real pet up that one answers, and with only a mercenary and a swarm pet there is none.
+    h.world.add(54, "Pinmerc001", true, 20, {3, 4, 0});
+    h.world.add(55, "Solo", false, 30, {0, 0, 0});
+    h.world.add(56, "Solomerc001", true, 30, {0, 0, 0});
+    h.world.add(57, "Solo`s_swarm", true, 30, {0, 0, 0});
+    w.spawns[54].mercenary = true;
+    w.spawns[54].pet_owner_id = 50;
+    w.spawns[56].mercenary = true;
+    w.spawns[56].pet_owner_id = 55;
+    w.spawns[57].temp_pet = true;
+    w.spawns[57].pet_owner_id = 55;
+    raid.members = {mq_test::raid_member("Pin", 0, 1, 10), mq_test::raid_member("Solo", 1, 2, 30)};
+    h.printed.clear();
+    h.run("/proberaid");
+    CHECK(h.printed_line("[Probe] raid 0: Pin 50 g0 f128 l10 c1 hp100 mp40 ep60 pet51 ph55"));
+    CHECK(h.printed_line("[Probe] raid 1: Solo 55 g1 f128 l30 c2 hp100 mp-1 ep-1 pet0 ph-1"));
+    for (std::uint32_t id : {54u, 55u, 56u, 57u}) w.spawns.erase(id);
+
+    // The player's own record with no spawn and max HP 0: HP is unknown, not 0, but the roster's level and class
+    // and the player's own mana and endurance still answer.
+    auto& ps = A::status(*h.world.conn);
+    ps.hp = 0;
+    ps.max_hp = 0;
+    w.spawns.erase(1);
+    raid.members = {mq_test::raid_member("Tester", 0, 2, 50)};
+    h.printed.clear();
+    h.run("/proberaid");
+    CHECK(h.printed_line("[Probe] raid active 1, count 1, total 1, leader 4294967295, target 4294967295, locked 0, loot 1, 164 bytes"));
+    CHECK(h.printed_line("[Probe] raid 0: Tester 0 g0 f256 l50 c2 hp-1 mp25 ep50 pet0 ph-1"));
+    CHECK(h.printed_line("[Probe] raid pos 0: 0.00 0.00 0.00 0.00"));
+
+    // Mana and endurance past RoF2's limits: cur * 100 does not fit 32 bits, and the percent is still right.
+    ps.mana = 30'000'000;
+    ps.max_mana = 40'000'000;
+    ps.endurance = 25'000'000;
+    ps.max_endurance = 50'000'000;
+    h.printed.clear();
+    h.run("/proberaid");
+    CHECK(h.printed_line("[Probe] raid 0: Tester 0 g0 f256 l50 c2 hp-1 mp75 ep50 pet0 ph-1"));
+
+    // The player's spawn is in the world but world.player_id is not known yet: the character name says which member
+    // is the player, and the distance is measured from that spawn.
+    h.world.add(1, "Tester", false, 50, {0, 0, 0});
+    h.world.add(58, "Farther", false, 20, {0, 0, 7});
+    w.player_id = 0;
+    raid.members = {mq_test::raid_member("Tester", 0, 2, 50), mq_test::raid_member("Farther", 0, 2, 20)};
+    h.printed.clear();
+    h.run("/proberaid");
+    CHECK(h.printed_line("[Probe] raid 0: Tester 1 g0 f384 l50 c2 hp-1 mp75 ep50 pet0 ph-1"));
+    CHECK(h.printed_line("[Probe] raid 1: Farther 58 g0 f128 l20 c2 hp100 mp-1 ep-1 pet0 ph-1"));
+    CHECK(h.printed_line("[Probe] raid pos 1: 0.00 0.00 7.00 7.00"));
+    w.player_id = 1;
+    w.spawns.erase(58);
+
+    // No 72-member cap: every whole record fits, and reserved says how many the roster has.
+    raid.members.clear();
+    for (int i = 0; i < 73; ++i)
+        raid.members.push_back(mq_test::raid_member("M" + std::to_string(i), static_cast<std::uint32_t>(i % 12), 1, 50));
+    h.printed.clear();
+    h.run("/proberaid");
+    CHECK(h.printed_line("[Probe] raid active 1, count 73, total 73, leader 4294967295, target 4294967295, locked 0, loot 1, 9092 bytes"));
+    CHECK(h.printed_line("[Probe] raid 72: M72 0 g0 f0 l50 c1 hp-1 mp-1 ep-1 pet0 ph-1"));
 }
 TEST_CASE("native plugins: cursor_origin gives the cursor item's origin, and needs 'read'") {
     using A = net::GameConnectionTestAccess;
@@ -1098,8 +1437,10 @@ TEST_CASE("native plugins: the buff bulk reads need 'read'") {
     CHECK(h.printed_line("[Probe] spawns 0 bytes")); // the denial is said once per plugin, above
     h.run("/probextargets 512");
     CHECK(h.printed_line("[Probe] xtargets 0 bytes"));
+    h.run("/proberaid 512");
+    CHECK(h.printed_line("[Probe] raid 0 bytes"));
     h.run("/probetargetbuffs 2048");
-    CHECK(h.printed_line("[Probe] target buffs 0 bytes, 0 records, 0 empty, 0 bytes left"));
+    CHECK(h.printed_line("[Probe] target buffs 0 bytes"));
     h.run("/probeaas 2048");
     CHECK(h.printed_line("[Probe] aas 0 bytes"));
     h.run("/probediscs 2048");

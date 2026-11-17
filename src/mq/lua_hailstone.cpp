@@ -36,6 +36,7 @@
 #include "plugin/lua_keep.h"
 #include "plugin/lua_value.h"
 #include "plugin/policy.h"
+#include "plugin/raid_snapshot.h"
 #include "plugin/ui_bridge.h"
 
 #define HAILSTONE_HOST
@@ -909,6 +910,65 @@ int l_spawns(lua_State* L) {
     return 1;
 }
 
+// hailstone.raid(): the raid roster as columnar tables (the members are 1-based; leader and target are 1-based
+// indexes, 0 for none). One table, no table per member.
+int l_raid(lua_State* L) {
+    need_cap(L, plugin::kCapRead, "hailstone.raid");
+    const net::GameConnection* c = readable(Script::of(L));
+    if (!c) return 0;
+    const plugin::RaidSnapshot raid = plugin::build_raid_snapshot(*c);
+    lua_createtable(L, 0, 21);
+    set_bool(L, "active", raid.active);
+    set_bool(L, "locked", raid.locked);
+    set_int(L, "loot_type", raid.loot_type);
+    set_int(L, "count", static_cast<lua_Integer>(raid.members.size()));
+    set_int(L, "leader", raid.leader ? static_cast<lua_Integer>(*raid.leader) + 1 : 0);
+    set_int(L, "target", raid.target ? static_cast<lua_Integer>(*raid.target) + 1 : 0);
+
+    const lua_Integer n = static_cast<lua_Integer>(raid.members.size());
+    auto column_int = [&](const char* key, auto value) {
+        lua_createtable(L, static_cast<int>(n), 0);
+        for (lua_Integer i = 0; i < n; ++i) {
+            lua_pushinteger(L, static_cast<lua_Integer>(value(raid.members[static_cast<std::size_t>(i)])));
+            lua_rawseti(L, -2, i + 1);
+        }
+        lua_setfield(L, -2, key);
+    };
+    auto column_num = [&](const char* key, auto value) {
+        lua_createtable(L, static_cast<int>(n), 0);
+        for (lua_Integer i = 0; i < n; ++i) {
+            lua_pushnumber(L, static_cast<lua_Number>(value(raid.members[static_cast<std::size_t>(i)])));
+            lua_rawseti(L, -2, i + 1);
+        }
+        lua_setfield(L, -2, key);
+    };
+    auto column_str = [&](const char* key, auto value) {
+        lua_createtable(L, static_cast<int>(n), 0);
+        for (lua_Integer i = 0; i < n; ++i) {
+            const std::string& text = value(raid.members[static_cast<std::size_t>(i)]);
+            lua_pushlstring(L, text.data(), text.size());
+            lua_rawseti(L, -2, i + 1);
+        }
+        lua_setfield(L, -2, key);
+    };
+    column_int("spawn_id", [](const plugin::RaidMemberSnapshot& m) { return m.spawn_id; });
+    column_str("name", [](const plugin::RaidMemberSnapshot& m) -> const std::string& { return m.name; });
+    column_int("group", [](const plugin::RaidMemberSnapshot& m) { return m.group; });
+    column_int("flags", [](const plugin::RaidMemberSnapshot& m) { return m.flags; });
+    column_int("level", [](const plugin::RaidMemberSnapshot& m) { return m.level; });
+    column_int("class", [](const plugin::RaidMemberSnapshot& m) { return m.class_id; });
+    column_int("pct_hp", [](const plugin::RaidMemberSnapshot& m) { return m.pct_hp; });
+    column_int("pct_mana", [](const plugin::RaidMemberSnapshot& m) { return m.pct_mana; });
+    column_int("pct_endurance", [](const plugin::RaidMemberSnapshot& m) { return m.pct_endurance; });
+    column_int("pet_spawn_id", [](const plugin::RaidMemberSnapshot& m) { return m.pet_spawn_id; });
+    column_int("pet_pct_hp", [](const plugin::RaidMemberSnapshot& m) { return m.pet_pct_hp; });
+    column_num("x", [](const plugin::RaidMemberSnapshot& m) { return m.x; });
+    column_num("y", [](const plugin::RaidMemberSnapshot& m) { return m.y; });
+    column_num("z", [](const plugin::RaidMemberSnapshot& m) { return m.z; });
+    column_num("distance", [](const plugin::RaidMemberSnapshot& m) { return m.distance; });
+    return 1;
+}
+
 int l_spell(lua_State* L) {
     need_cap(L, plugin::kCapRead, "hailstone.spell");
     const net::GameConnection* c = readable(Script::of(L));
@@ -1367,6 +1427,7 @@ void register_hailstone(lua_State* L) {
              {"item", l_item},
              {"buff", l_buff},
              {"xtarget", l_xtarget},
+             {"raid", l_raid},
              {"eqstr", l_eqstr},
              {"zone_name", l_zone_name},
              {"server", l_server},
@@ -1389,6 +1450,15 @@ void register_hailstone(lua_State* L) {
         lua_pushcfunction(L, fn);
         lua_setfield(L, -2, n);
     }
+    // The raid flag bits, so a script does not have to copy HS_BULK_RAID_* by hand.
+    set_int(L, "RAID_LEADER", HS_BULK_RAID_LEADER);
+    set_int(L, "RAID_GROUP_LEADER", HS_BULK_RAID_GROUP_LEADER);
+    set_int(L, "RAID_MAIN_ASSIST", HS_BULK_RAID_MAIN_ASSIST);
+    set_int(L, "RAID_MARKER", HS_BULK_RAID_MARKER);
+    set_int(L, "RAID_WAYPOINTER", HS_BULK_RAID_WAYPOINTER);
+    set_int(L, "RAID_LOOTER", HS_BULK_RAID_LOOTER);
+    set_int(L, "RAID_PRESENT", HS_BULK_RAID_PRESENT);
+    set_int(L, "RAID_ME", HS_BULK_RAID_ME);
     lua_setglobal(L, "hailstone");
     // A plugin script in its own folder (lua/<name>/init.lua) with a ui/ there: its windows for each UI pack.
     Script& s = Script::of(L);

@@ -63,13 +63,17 @@ struct AtlasZone {
     // Per square, its ground's colour (the average of the texture on the terrain at the ground there, sRGB, R in the
     // low byte; alpha 255), 0 where none is known.
     std::vector<std::uint32_t> color;
+    // Per square, how many of its trees stand in it (placed plants at least render::kLandTreeMinHeight tall; at most
+    // 255): the land's trees over it stand as thick (render::horizon_trees).
+    std::vector<std::uint8_t> trees;
     // The share of its squares with ground that have open sky over it (no surface within kOpenSkyHeight): a dungeon
     // the server gives a sky still has its roof, and does not join (kAtlasMinOpenSky).
     float open_sky = 1.0f;
     std::vector<ZoneLineCell> lines;
     bool valid() const {
         const auto n = static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny);
-        return nx > 0 && ny > 0 && ground.size() == n && top.size() == n && water.size() == n && color.size() == n;
+        return nx > 0 && ny > 0 && ground.size() == n && top.size() == n && water.size() == n && color.size() == n &&
+               trees.size() == n;
     }
     // The ground in the square holding p; nullopt outside the grid or where it has none.
     std::optional<float> ground_at(glm::vec2 p) const;

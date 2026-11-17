@@ -1,0 +1,143 @@
+#include "app/addon_requirements.h"
+
+#include <algorithm>
+#include <utility>
+
+#include "ui/dev_screens.h"
+
+namespace hailstone::app {
+
+bool required_script_found(const std::filesystem::path& data_dir, std::string_view name) {
+    std::string key(name);
+    for (char& c : key)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    std::error_code ec;
+    return std::filesystem::is_regular_file(addon_folder(data_dir, AddonKind::Script, key) / "init.lua", ec);
+}
+
+std::vector<AddonRequirementProblem> addon_requirement_problems(
+    const plugin::Rules& rules, const std::vector<RequiredAddonCandidate>& candidates) {
+    std::vector<AddonRequirementProblem> out;
+    if (!rules.addons.enabled) return out;
+    if (!rules.addons.error.empty()) {
+        out.push_back({{}, "This server's add-on policy is invalid: " + rules.addons.error});
+        return out;
+    }
+    for (const auto& required : rules.addons.required) {
+        std::string problem = "Required add-on " + required + " is not installed. Open Add-ons to install it.";
+        bool found = false;
+        for (const auto& a : candidates) {
+            if (!plugin::addon_identity_matches(required, a.source)) continue;
+            const auto allowed_caps = a.kind == AddonKind::Script ? rules.player_script_caps : rules.player_plugin_caps;
+            if (!plugin::addon_allowed(rules.addons, a.source)) {
+                problem = "Required add-on " + required + " is blocked by this server's add-on policy.";
+            } else if (!a.intact) {
+                problem = "Required add-on " + required + " has missing or changed files. Reinstall it in Add-ons.";
+            } else if (a.kind == AddonKind::Script && !a.startable) {
+                problem = "Required add-on " + required + " cannot be started here: Hailstone finds scripts by their "
+                          "lower-case name, and its folder scripts/" + a.name + " has capitals.";
+            } else if ((a.kind == AddonKind::Script || a.kind == AddonKind::Plugin) &&
+                       (a.caps == 0 || (a.caps & ~allowed_caps))) {
+                problem = "Required add-on " + required + " needs capabilities this server does not allow.";
+            } else if (a.kind == AddonKind::Plugin && a.consent == plugin::Consent::Denied) {
+                problem = "Required plugin " + required + " was not allowed to run. Open Add-ons to review your answer.";
+            } else {
+                found = true;
+                break;
+            }
+        }
+        if (!found) out.push_back({required, std::move(problem)});
+    }
+    return out;
+}
+
+std::vector<AddonSuggestion> required_addon_suggestions(
+    const std::vector<AddonRequirementProblem>& problems, const AddonIndex* index) {
+    std::vector<AddonSuggestion> out;
+    for (const auto& p : problems) {
+        if (p.identity.empty()) continue;
+        const AddonIndexAddon* listed = nullptr;
+        if (index)
+            for (const auto& a : index->addons)
+                if (plugin::addon_identity_matches(p.identity, a.source)) { listed = &a; break; }
+        AddonSuggestion sg;
+        sg.from_server = true;
+        if (listed) {
+            sg.name = listed->name;
+            sg.source = listed->source;
+            sg.key = listed->key;
+        } else {
+            sg.source = addon_repo_key(p.identity);
+        }
+        if (sg.source.empty()) continue;
+        const bool seen = std::any_of(out.begin(), out.end(), [&](const AddonSuggestion& a) {
+            return addon_repo_key(a.source) == addon_repo_key(sg.source);
+        });
+        if (!seen) out.push_back(std::move(sg));
+    }
+    return out;
+}
+
+void present_addon_requirement(ui::LoginView& view, const std::vector<AddonRequirementProblem>& problems,
+                               const AddonIndex* index, std::string message) {
+    view.busy = false;
+    view.status = {message, true};
+    view.addons.open = true;
+    view.addons.status = {std::move(message), true};
+    const auto offers = required_addon_suggestions(problems, index);
+    if (!offers.empty()) view.addons.link = offers.front().source;
+}
+
+AddonAdmission::Result AddonAdmission::warn(std::string problem) {
+    Result out;
+    if (problem == warned_) return out;
+    warned_ = problem;
+    out.warning = std::move(problem);
+    return out;
+}
+
+void AddonAdmission::reset() {
+    serial_.reset();
+    admitted_ = wait_frame_ = false;
+    zone_problem_.clear();
+    warned_.clear();
+}
+
+AddonAdmission::Result AddonAdmission::update(const plugin::Rules* rules, std::uint32_t serial, bool in_world,
+                                              const std::function<std::string()>& zone_problem,
+                                              const std::function<std::optional<std::string>()>& ready) {
+    if (!rules || rules->provisional) {
+        // Out of the world (character select, a login): the next zone-in decides again, with its own rules.
+        reset();
+        return {};
+    }
+    if (serial_ != serial) {
+        serial_ = serial;
+        zone_problem_ = rules->addons.enabled ? zone_problem() : std::string();
+        if (!admitted_ && !zone_problem_.empty()) return {Step::Refuse, zone_problem_, {}};
+        // Automation applies new rules after the connection's frame: let required autostart and the consent prompt
+        // run before asking whether the add-ons are ready.
+        wait_frame_ = rules->addons.enabled;
+    }
+    if (admitted_) {
+        std::string problem = zone_problem_;
+        if (problem.empty()) {
+            if (std::exchange(wait_frame_, false)) return {};
+            if (rules->addons.enabled) problem = ready().value_or(std::string());
+        }
+        return warn(std::move(problem));
+    }
+    if (!in_world) return {};
+    if (!rules->addons.enabled) {
+        admitted_ = true;
+        return {};
+    }
+    if (std::exchange(wait_frame_, false)) return {Step::Start, {}, {}};
+    const auto state = ready();
+    if (!state) return {Step::Consent, {}, {}};
+    if (!state->empty()) return {Step::Refuse, *state, {}};
+    admitted_ = true;
+    return {};
+}
+
+} // namespace hailstone::app

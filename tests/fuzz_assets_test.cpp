@@ -836,6 +836,7 @@ TEST_CASE("fuzz: the world atlas's records") {
     z.top.assign(40, 2.0f);
     z.water.assign(40, std::numeric_limits<float>::quiet_NaN());
     z.color.assign(40, 0xff204060u);
+    z.trees.assign(40, 2);
     game::ZoneLineCell c;
     c.region = 1;
     c.hi = {50.0f, 50.0f, 50.0f};

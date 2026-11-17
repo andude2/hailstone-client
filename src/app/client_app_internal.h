@@ -10,6 +10,7 @@
 #include "platform/process.h"
 #include "core/step_clock.h"
 #include "app/addon_manager.h"
+#include "app/addon_requirements.h"
 #include "app/addon_suggest.h"
 #include "app/window_icon.h"
 #include "app/automation.h"
@@ -634,6 +635,14 @@ private:
     void start_addons();
     void update_addons();
     void addons_login_action(ui::LoginAction action);
+    std::vector<RequiredAddonCandidate> addon_requirement_candidates(const plugin::Rules& rules,
+                                                                     bool verify_files = true) const;
+    // The opted-in add-on policy (docs/plugins.md "Opt-in add-on policies"), each frame of a connection
+    // (AddonAdmission): the cached rules only inform the login screen. No code is installed here.
+    bool addon_world_allowed();
+    void show_addon_requirement(const std::vector<AddonRequirementProblem>& problems, std::string message);
+    // The upscaler loaded at startup must be allowed, and a required provider must be selected and loaded.
+    std::string upscaler_addon_problem(const plugin::Rules& rules) const;
     // Starts the installed tool add-on `name` (tools/<name>/, docs/addons.md), told the data folder; false with
     // *error why not (not installed, its program gone, or the system would not start it).
     bool start_addon_tool(std::string_view name, std::string* error);
@@ -1136,6 +1145,8 @@ private:
     std::vector<ServerAddon> server_addons_;
     std::vector<ManualAddon> manual_addons_;
     plugin::Rules addons_rules_;
+    AddonAdmission addon_admission_;
+    std::vector<AddonRequirementProblem> addon_problems_; // the zone-in's, for the install card
     // Suggested add-ons (app/addon_suggest.h): the picked server's, as the login screen shows them, and those put
     // away for this run (by profile and addon_repo_key).
     std::vector<AddonSuggestion> suggestions_;

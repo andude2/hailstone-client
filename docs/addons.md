@@ -100,7 +100,9 @@ loads or runs anything of it itself:
 - **Start** on its row (My add-ons; the gamepad pack's row menu; the client's own add-ons window) starts its program,
   `tools/<name>/<name>` (`<name>.exe` on Windows), with `--data-dir <the data folder>`, so it reads and writes the
   player's Hailstone folder (`hailstone.ini`, `textures/`, its own settings) wherever it was started from. It runs as a
-  program of its own and is left running when Hailstone quits (`ClientApp::start_addon_tool`).
+  program of its own and is left running when Hailstone quits (`ClientApp::start_addon_tool`). A server whose
+  opted-in add-on policy refuses the tool (docs/plugins.md "Opt-in add-on policies") refuses Start while that server
+  is picked or played on; a tool already running is its own program and goes on.
 - **Options** start the one tool it knows of: Graphics, Textures, **Texture Studio...** once the add-on `texstudio`
   is installed; until then that row says to install it from Add-ons. The button starts it only when it is the real
   one: installed from projecthailstone/hailstone-texstudio and signed with the project's add-on key (the key the
@@ -130,7 +132,9 @@ next start (docs/graphics.md "Upscaler providers"):
 
 - **Its card** asks for no permissions (an upscaler sees only the frames it upscales, so its manifest says
   `caps none` and one that asks for any is refused), and warns that it is still a program running inside Hailstone
-  with the player's rights. No server sends one, rules on one or is told of one.
+  with the player's rights. Servers do not send providers or receive a provider report. A server's opted-in add-on
+  policy can require, allow or block one by its repository; one it refuses keeps the character out of that server
+  until another is picked and the client restarted (docs/plugins.md "Opt-in add-on policies").
 - **What its package holds** (`unpack_upscaler`): at its top its provider, a library for this platform named after it
   (`xess.dll`, `xess.so`), and the libraries it loads beside it (`libxess.dll`, `libnvidia-ngx-dlss.so.310.9.16`);
   data anywhere (the vendor's licence and notices). No library in a folder or for another platform, and nothing that
@@ -162,6 +166,12 @@ the store, so an add-on reaches it by a pull request to the index's repository, 
 record with no `world` record is for any server and is listed but never suggested.
 
 ## Suggested add-ons
+
+A server can also require, allow or block add-ons by their GitHub repository (docs/plugins.md "Opt-in add-on
+policies"), off unless its `hailstone.cfg` says `[addons] enforce = on`. A required add-on the player does not have
+shows on the login screen as "Required to play on this server", with one button, Review required add-on (no Not now
+or Don't ask again), and goes through the usual card and approvals. Missing at the zone-in, it keeps the character
+out, with the panel open on it. Suggestions below stay optional and grant nothing by themselves.
 
 Some servers have an add-on of their own: a plugin with the server's windows and features, say Project Triune's. A
 player who logs in to such a server for the first time does not know it exists, so the login screen tells them.

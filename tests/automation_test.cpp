@@ -9,6 +9,7 @@
 #include <string>
 
 #include "app/automation.h"
+#include "app/addon_install.h"
 #include "mq/lua_mq.h"
 #include "mq_test_world.h"
 #include "core/sha256.h"
@@ -86,6 +87,66 @@ TEST_CASE("Automation: a script holds autoskill off while it runs; stopping it l
     }
     CHECK(released);
     CHECK(h.automation->scripts().running("brief"));
+}
+
+TEST_CASE("Automation: enforcement lazily attributes current code and refreshes identities after managed installs") {
+    AutomationHost h;
+    const fs::path data = h.world.dir / "data";
+    const std::string original = "local tag = 0 while true do require('mq').delay(10) end\n";
+    app::InstalledAddon addon;
+    addon.name = "managed";
+    addon.source = "owner/managed";
+    addon.version = "1.0.0";
+    addon.caps = plugin::kCapRead;
+    addon.files = {{"init.lua", original.size(), sha256(original)}};
+    fs::create_directories(app::addons_dir(data));
+    REQUIRE(app::write_installed_addons(data, {addon}));
+    h.write("managed/init.lua", original);
+    auto change = [&](int tag) {
+        const std::string code = "local tag = " + std::to_string(tag) +
+                                 " while true do require('mq').delay(10) end\n";
+        h.write("managed/extra.lua", code);
+        h.write("copy.lua", code); // a renamed copy needs the scanned hash's source, not a runtime name match
+    };
+    change(1);
+    h.automation->set_addon_ceilings(app::addon_ceilings(data));
+    h.automation->frame();
+    REQUIRE(h.automation->scripts().run("copy", {}));
+    h.automation->frame();
+    REQUIRE(h.automation->scripts().running("copy"));
+
+    auto enforced = plugin::parse_server_cfg("[scripts]\nplayer = on\n[addons]\nenforce = on\ndefault = allow\n"
+                                             "block = owner/managed\n");
+    enforced.dir = h.world.dir / "profile";
+    net::GameConnectionTestAccess::set_server_rules(*h.world.conn, enforced);
+    h.automation->frame();
+    CHECK_FALSE(h.automation->scripts().running("copy"));
+    CHECK_FALSE(h.automation->scripts().run("copy", {}));
+
+    // The normal install/update call passes registry ceilings; an enforced server must refresh current identities.
+    change(2);
+    h.automation->set_addon_ceilings(app::addon_ceilings(data));
+    CHECK_FALSE(h.automation->scripts().run("copy", {}));
+
+    net::GameConnectionTestAccess::set_server_rules(*h.world.conn, plugin::Rules{});
+    h.automation->frame();
+    REQUIRE(h.automation->scripts().run("copy", {}));
+    h.automation->frame();
+    CHECK(h.automation->scripts().running("copy"));
+    REQUIRE(h.automation->scripts().stop("copy"));
+    change(3);
+    net::GameConnectionTestAccess::set_server_rules(*h.world.conn, enforced);
+    h.automation->frame();
+    CHECK_FALSE(h.automation->scripts().run("copy", {})); // re-enabling scans current bytes again
+
+    auto closed = plugin::parse_server_cfg("[scripts]\nplayer = on\n[addons]\nenforce = on\ndefault = deny\n"
+                                          "required = owner/managed\n");
+    closed.dir = enforced.dir;
+    net::GameConnectionTestAccess::set_server_rules(*h.world.conn, closed);
+    h.automation->frame();
+    CHECK(h.automation->scripts().running("managed"));
+    CHECK(h.automation->scripts().caps_of("managed") == plugin::kCapRead);
+    CHECK_FALSE(h.automation->scripts().run("copy", {}));
 }
 
 TEST_CASE("Automation: hailstone.autoskill_list gives the player's list with names and conditions") {

@@ -1,0 +1,89 @@
+#pragma once
+
+// The opt-in server add-on policy's login check. Files are inspected by the caller; this evaluation neither
+// downloads nor executes anything, so a missing requirement still goes through the manager's install card.
+
+#include <cstdint>
+#include <functional>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "app/addon_install.h"
+#include "app/addon_suggest.h"
+#include "plugin/consent.h"
+
+namespace hailstone::ui { struct LoginView; }
+
+namespace hailstone::app {
+
+struct RequiredAddonCandidate {
+    std::string name, source;
+    AddonKind kind = AddonKind::Script;
+    std::uint32_t caps = 0;
+    bool intact = false; // readable registry and every shipped file unchanged
+    bool startable = true; // a script: where the script loader looks for it (required_script_found)
+    plugin::Consent consent = plugin::Consent::Unasked;
+};
+
+struct AddonRequirementProblem {
+    std::string identity;
+    std::string message;
+};
+
+// Whether the script loader finds the installed script add-on `name` to start it. ScriptHost looks a script up by
+// its lower-cased name (mq/lua_mq.cpp, ScriptHost::run and Impl::resolve), so on a case-sensitive file system a
+// folder with capitals (scripts/AutoLoot) is not found: admission holds such a requirement unmet rather than
+// passing it and failing to start it.
+bool required_script_found(const std::filesystem::path& data_dir, std::string_view name);
+
+// Unasked native-code consent is handled by the existing prompt after connecting. A refusal blocks joining.
+// Upscaler selection and activation are checked separately against the provider loaded at process startup. A tool
+// is a program of its own: a required one is met by its intact installation (the client does not start it, and
+// cannot tell whether it runs).
+std::vector<AddonRequirementProblem> addon_requirement_problems(
+    const plugin::Rules& rules, const std::vector<RequiredAddonCandidate>& candidates);
+
+// Required offers ignore optional-suggestion preferences and dismissals, retaining an index entry's name/key.
+std::vector<AddonSuggestion> required_addon_suggestions(
+    const std::vector<AddonRequirementProblem>& problems, const AddonIndex* index);
+
+// Opens the local review panel and prefills a required source. Fetching its manifest still needs the player's
+// Review action, just like any other add-on link; presenting a failed login never contacts that repository.
+void present_addon_requirement(ui::LoginView& view, const std::vector<AddonRequirementProblem>& problems,
+                               const AddonIndex* index, std::string message);
+
+// The opted-in policy's gate on a world session, each frame (ClientApp::addon_world_allowed). Decided against the
+// rules the zone-in brought, never the cached ones. Before the world is first shown in the session (admission), a
+// problem refuses entry and a pending consent or autostart holds the loading screen; once admitted, a problem
+// (a later zone's rules, a required add-on that failed) is a warning, once for each failure, and play goes on.
+class AddonAdmission {
+public:
+    enum class Step : std::uint8_t {
+        Play,    // go on (the world shows)
+        Start,   // hold the loading screen a frame: the new rules' autostart and consent prompt run first
+        Consent, // hold the loading screen: a required plugin's permission question is open
+        Refuse,  // back to login with `message`
+    };
+    struct Result {
+        Step step = Step::Play;
+        std::string message; // Refuse: why
+        std::string warning; // non-empty: say it to the player (in the world, once for each failure)
+    };
+    // `rules`: the connection's, nullptr none (out of the world). `zone_problem` runs once for each new rules serial
+    // of an enforcing server (the installed add-ons against them: "" none); `ready` asks the running add-ons
+    // (nullopt: waiting for consent or a start, "" ready, else the failure).
+    Result update(const plugin::Rules* rules, std::uint32_t serial, bool in_world,
+                  const std::function<std::string()>& zone_problem,
+                  const std::function<std::optional<std::string>()>& ready);
+    void reset(); // a new world session
+    bool admitted() const { return admitted_; }
+
+private:
+    Result warn(std::string problem);
+    std::optional<std::uint32_t> serial_;
+    bool admitted_ = false, wait_frame_ = false;
+    std::string zone_problem_, warned_;
+};
+
+} // namespace hailstone::app

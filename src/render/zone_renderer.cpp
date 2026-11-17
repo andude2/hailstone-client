@@ -10,11 +10,14 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <memory>
 #include <span>
 #include <stdexcept>
 #include <system_error>
 #include <unordered_map>
 #include <utility>
+
+#include <glm/gtc/matrix_transform.hpp>
 
 #include "assets/texture.h"
 #include "assets/texture_overrides.h"
@@ -32,6 +35,7 @@
 #include "render/light_grid.h"
 #include "render/material_state.h"
 #include "render/shadow_chunks.h"
+#include "render/tree_impostor.h"
 #include "render/vk_util.h"
 #include "platform/process.h"
 
@@ -47,8 +51,6 @@ void mark(const char* phase, std::chrono::steady_clock::time_point start) {
                    std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
 }
 } // namespace
-
-namespace {
 
 // Whether a placed object is a plant the wind moves (the modern look's sway, zone.vert): it has see-through leaves or
 // blades (a masked material) and its name, or one of its materials' or textures', says what it is.
@@ -75,6 +77,17 @@ bool is_plant(std::string_view actor, const assets::Mesh& mesh) {
     }
     return masked && match;
 }
+
+float mesh_height(const assets::Mesh& mesh) {
+    float lo = std::numeric_limits<float>::max(), hi = -lo;
+    for (const auto& v : mesh.vertices) {
+        lo = std::min(lo, v.position.z);
+        hi = std::max(hi, v.position.z);
+    }
+    return hi > lo ? hi - lo : 0.0f;
+}
+
+namespace {
 
 struct GpuVertex {
     glm::vec3 position;
@@ -374,7 +387,13 @@ ZoneRenderer::PreparedLand ZoneRenderer::prepared_land(const Prepared& p) {
     PreparedLand out;
     out.build = p.horizon_build;
     out.footprint = p.footprint.size();
+    std::vector<std::uint32_t> tree_models;
     for (const Draw& d : p.draws) {
+        if (d.land_trees) {
+            out.trees += d.chunk_count;
+            if (std::find(tree_models.begin(), tree_models.end(), d.instanced) == tree_models.end())
+                tree_models.push_back(d.instanced);
+        }
         if (!d.distant) continue;
         if (d.liquid == Liquid::Water) {
             out.water_triangles += d.index_count / 3;
@@ -389,6 +408,7 @@ ZoneRenderer::PreparedLand ZoneRenderer::prepared_land(const Prepared& p) {
             out.tinted_triangles += tinted ? 1 : 0;
         }
     }
+    out.tree_kinds = tree_models.size();
     return out;
 }
 
@@ -787,6 +807,7 @@ ZoneRenderer::PreparedPtr ZoneRenderer::prepare(const assets::Zone& zone, const 
         // An animated object's moving triangles: how far they get from the object's origin over the animation (the
         // instances' boxes are that far round their placement); 0 for a replacement model.
         float reach = 0.0f;
+        bool land_trees = false; // the land's trees (Draw::land_trees)
     };
     std::vector<InstancedModel> models;
     std::unordered_map<const assets::Mesh*, std::uint32_t> model_numbers; // mesh -> its number in models + 1
@@ -1205,6 +1226,153 @@ ZoneRenderer::PreparedPtr ZoneRenderer::prepare(const assets::Zone& zone, const 
         return tris.size() / 3;
     };
 
+    // Pictures made here rather than read from the zone's files (the land's trees'), by texture name.
+    std::unordered_map<std::string, assets::Image> generated_textures;
+    // The land's trees (render::horizon_trees): the zone's own commonest trees (placed plants at least
+    // kLandTreeMinHeight tall and at most kLandTreeMaxHeight times the commonest's, at most kLandTreeKinds of them,
+    // each placed at least a quarter as often as the most), each drawn far as two crossed cards with its picture
+    // (render/tree_impostor.h), instanced, standing where the land's woods are; as far apart as the zone's own trees
+    // stand, a third of that in the woods and one and a half times it elsewhere. Tinted by the median of the zone's
+    // light on its placements, as a replacement model is.
+    constexpr std::size_t kLandTreeKinds = 3;
+    constexpr float kLandTreeMaxHeight = 2.0f; // times the commonest tree's
+    std::size_t land_trees = 0, land_tree_kinds = 0;
+    auto add_land_trees = [&](const HorizonField& field, const HorizonSources& sources, const HorizonMesh& land) {
+        const auto started = std::chrono::steady_clock::now();
+        struct Kind {
+            const assets::Mesh* mesh = nullptr;
+            std::size_t count = 0;
+            std::vector<float> scales;
+            std::vector<std::uint32_t> colors;
+        };
+        std::map<std::string, Kind> kinds;
+        std::unordered_map<std::string, bool> plant;
+        for (const auto& p : zone.placements) {
+            auto it = zone.objects.find(p.actor);
+            if (it == zone.objects.end()) continue;
+            auto [known, fresh] = plant.try_emplace(p.actor, false);
+            if (fresh) known->second = is_plant(p.actor, it->second);
+            if (!known->second) continue;
+            Kind& k = kinds[p.actor];
+            k.mesh = &it->second;
+            ++k.count;
+            k.scales.push_back(glm::length(glm::vec3(p.transform[2])));
+            if (k.colors.size() < 4096) k.colors.insert(k.colors.end(), p.vertex_colors.begin(), p.vertex_colors.end());
+        }
+        struct Chosen {
+            const Kind* kind;
+            float scale;  // the median placement's
+            float height; // at that scale
+        };
+        std::vector<Chosen> chosen;
+        for (auto& [actor, k] : kinds) {
+            std::nth_element(k.scales.begin(), k.scales.begin() + static_cast<std::ptrdiff_t>(k.scales.size() / 2),
+                             k.scales.end());
+            const float scale = k.scales[k.scales.size() / 2];
+            const float height = mesh_height(*k.mesh) * scale;
+            if (height >= kLandTreeMinHeight) chosen.push_back({&k, scale, height});
+        }
+        std::sort(chosen.begin(), chosen.end(), [](const Chosen& a, const Chosen& b) { return a.kind->count > b.kind->count; });
+        if (chosen.empty()) {
+            log::info("zone renderer: no trees on the land ({} kinds of placed plants, none {:.0f} units tall)",
+                      kinds.size(), kLandTreeMinHeight);
+            return;
+        }
+        const std::size_t most = chosen.front().kind->count;
+        const float usual = chosen.front().height;
+        // Nor the giants: a zone walls its edges with trees several times its usual one's height (North Karana's
+        // RPINE1, 304 units, by its 91-unit TREE5), which across the land would stand as a wall of their own.
+        std::erase_if(chosen, [&](const Chosen& c) {
+            return c.kind->count * 4 < most || c.height > kLandTreeMaxHeight * usual;
+        });
+        if (chosen.size() > kLandTreeKinds) chosen.resize(kLandTreeKinds);
+        // The pictures from the game's own textures (a texture pack's replacement is not read: the far trees take the
+        // zone's look).
+        std::vector<std::unique_ptr<assets::Image>> decoded;
+        std::unordered_map<std::string, const assets::Image*> by_name;
+        auto lookup = [&](const assets::Material& m) -> const assets::Image* {
+            if (m.frames.empty()) return nullptr;
+            const std::string key = m.frames.front() + (m.blend == assets::BlendMode::Masked ? "#m" : "");
+            if (auto f = by_name.find(key); f != by_name.end()) return f->second;
+            const assets::Image* image = nullptr;
+            if (auto data = zone.read_file(m.frames.front())) {
+                auto decoded_image = assets::decode_texture(
+                    *data, {.palette_index0_transparent = m.blend == assets::BlendMode::Masked, .wld_bmp_rows = true});
+                if (decoded_image && decoded_image->format != assets::PixelFormat::RGBA8)
+                    decoded_image = assets::to_rgba8(*decoded_image); // a DDS's blocks
+                if (decoded_image && decoded_image->format == assets::PixelFormat::RGBA8 && !decoded_image->mips.empty()) {
+                    decoded.push_back(std::make_unique<assets::Image>(std::move(*decoded_image)));
+                    image = decoded.back().get();
+                }
+            }
+            by_name.emplace(key, image);
+            return image;
+        };
+        struct Made {
+            std::uint32_t number;
+            glm::mat4 base; // the impostor's foot to its origin, at the median scale
+            glm::vec4 tint;
+            float share;    // where its part of [0, 1) ends
+        };
+        std::vector<Made> made;
+        std::size_t total = 0;
+        for (const Chosen& c : chosen) total += c.kind->count;
+        std::size_t placed = 0;
+        for (const Chosen& c : chosen) {
+            const std::string name = "hs_land_tree_" + std::to_string(made.size()) + ".bmp";
+            auto impostor = tree_impostor(*c.kind->mesh, lookup, name);
+            placed += c.kind->count;
+            if (!impostor) continue;
+            generated_textures[name] = std::move(impostor->image);
+            models.emplace_back();
+            models.back().land_trees = true;
+            const auto number = static_cast<std::uint32_t>(models.size());
+            append(impostor->mesh, glm::mat4(1.0f), kNoColors, false, false, nullptr, number);
+            glm::vec4 tint(1.0f);
+            if (!c.kind->colors.empty()) {
+                const std::uint32_t m = median_color(c.kind->colors);
+                for (int k = 0; k < 4; ++k) tint[k] = static_cast<float>((m >> (8 * k)) & 0xffu) / 255.0f;
+            }
+            const glm::vec3 mid = 0.5f * (impostor->lo + impostor->hi);
+            const glm::mat4 base = glm::scale(glm::mat4(1.0f), glm::vec3(c.scale)) *
+                                   glm::translate(glm::mat4(1.0f), -glm::vec3(mid.x, mid.y, impostor->lo.z));
+            made.push_back({number, base, tint, static_cast<float>(placed) / static_cast<float>(total)});
+            log::info("zone renderer: the land's trees: {} ({} placed, {:.0f} units tall)", c.kind->mesh->name,
+                      c.kind->count, c.height);
+        }
+        if (made.empty()) {
+            log::info("zone renderer: no trees on the land (no picture drawn of {} trees)", chosen.size());
+            return;
+        }
+        made.back().share = 1.0f;
+        // How far apart the zone's own trees stand, over its level ground.
+        const glm::vec2 extent = prep.horizon.hi - prep.horizon.lo;
+        const float spacing = std::sqrt(std::max(extent.x * extent.y, 1.0f) / static_cast<float>(total));
+        const float woods = std::clamp(spacing / 3.0f, 40.0f, 400.0f);
+        const float open = std::clamp(spacing * 1.5f, woods, 1600.0f);
+        std::size_t sourced = 0;
+        for (const HorizonTree& t : horizon_trees(field, sources, land, woods, open)) {
+            sourced += t.sourced ? 1 : 0;
+            const Made* m = &made.back();
+            for (const Made& k : made)
+                if (t.pick < k.share) {
+                    m = &k;
+                    break;
+                }
+            const glm::mat4 transform = glm::translate(glm::mat4(1.0f), t.foot) *
+                                        glm::rotate(glm::mat4(1.0f), t.yaw, glm::vec3(0.0f, 0.0f, 1.0f)) *
+                                        glm::scale(glm::mat4(1.0f), glm::vec3(t.scale)) * m->base;
+            InstancedModel& model = models[m->number - 1];
+            model.instances.push_back(make_instance(transform, m->tint));
+            model.transforms.push_back(transform);
+            ++land_trees;
+        }
+        land_tree_kinds = made.size();
+        log::info("zone renderer: the land's trees, {} of {} kinds of the zone's (spacing {:.0f}: {:.0f} in the woods, "
+                  "{:.0f} elsewhere), {} where an atlas zone's own stand, in {:.0f} ms", land_trees, land_tree_kinds,
+                  spacing, woods, open, sourced,
+                  std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
+    };
     // The land round the zone (render/horizon.h): a mesh past its edges, shaped by the neighbours' ground the cache
     // holds, drawn with the zone's own plain materials that cover the most level ground, slopes and water (their
     // texture scale, their winding, the level ground's median baked light), so it is shaded, lit and hazed as the zone
@@ -1232,6 +1400,7 @@ ZoneRenderer::PreparedPtr ZoneRenderer::prepare(const assets::Zone& zone, const 
                 water_key.two_sided = true;
                 land_triangles += add_land(water_key, looks.at(*pick.water), water, land, land.water, 0);
             }
+            if (options.land_trees) add_land_trees(field, sources, land);
             build->field = std::move(field);
             build->sources = std::move(sources);
             prep.horizon_build = std::move(build);
@@ -1439,6 +1608,14 @@ ZoneRenderer::PreparedPtr ZoneRenderer::prepare(const assets::Zone& zone, const 
         std::string key = name + (masked ? "#m" : "") + (use == TextureUse::Data ? "#d" : "") + (reads_alpha ? "#a" : "");
         if (auto it = slots.find(key); it != slots.end()) return it->second;
         std::uint32_t slot = 0;
+        if (auto g = generated_textures.find(name); g != generated_textures.end()) {
+            if (prep.images.size() < max_images) {
+                slot = static_cast<std::uint32_t>(prep.images.size());
+                keep_image(g->second, use);
+            }
+            slots.emplace(std::move(key), slot);
+            return slot;
+        }
         auto data = zone.read_file(name);
         // A neighbour's part of the land borrows the current zone's ground, whose texture its own files may lack.
         if (!data && options.land)
@@ -1502,6 +1679,7 @@ ZoneRenderer::PreparedPtr ZoneRenderer::prepare(const assets::Zone& zone, const 
         d.front_ccw = key.front_ccw;
         d.lod = key.lod;
         d.instanced = key.instanced;
+        d.land_trees = key.instanced != 0 && models[key.instanced - 1].land_trees;
         MaterialState st = material_state(look);
         for (const auto& name : key.frames) d.frame_slots.push_back(slot_for(name, st.masked_texture, TextureUse::Color, !st.alpha_unused()));
         const auto& e = look.effect;
@@ -2240,7 +2418,7 @@ void ZoneRenderer::draw(const FrameInfo& frame, const glm::mat4& view_proj, cons
     bool distant_bound = false;
     for (const Draw* draw : order) {
         const Draw& d = *draw;
-        if (d.distant && !show_distant_) continue;
+        if ((d.distant || d.land_trees) && !show_distant_) continue;
         auto seen = [&](const Chunk& c) { return box_in_frustum(frustum, Box{c.box_min, c.box_max}); };
         draw_chunks(cmd, d, Counted::Scene, seen, [&] {
             if (d.distant != distant_bound) {
@@ -2277,7 +2455,7 @@ void ZoneRenderer::draw_depth(const FrameInfo& frame, const glm::mat4& view_proj
         if (d.flame && hide_flames_) continue;
         if (!in_depth_prepass(d)) continue;
         // The colour pass tests equal: it must draw the same.
-        if (d.distant && !show_distant_) continue;
+        if ((d.distant || d.land_trees) && !show_distant_) continue;
         auto seen = [&](const Chunk& c) { return box_in_frustum(frustum, Box{c.box_min, c.box_max}); };
         draw_chunks(cmd, d, Counted::None, seen, [&] {
             if (!bound) vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, depth_pipeline_);
@@ -2459,7 +2637,7 @@ void ZoneRenderer::draw_shadow(const FrameInfo& frame, std::uint32_t cascade) {
                                &pc);
         });
     for (const auto& d : draws_) {
-        if (d.distant) continue; // far past the shadows' reach and the maps' square
+        if (d.distant || d.land_trees) continue; // far past the shadows' reach and the maps' square
         // The water map: the water surfaces alone.
         if (cascade == kWaterLayer) {
             if (d.liquid != Liquid::Water) continue;
@@ -2496,7 +2674,7 @@ void ZoneRenderer::point_reach(const glm::vec3& light, float radius, PointReach&
     };
     add(solid_);
     for (const Draw& d : draws_)
-        if (d.pass == Pass::Opaque && !d.flame && !d.distant && !casts_untextured(d)) add(d);
+        if (d.pass == Pass::Opaque && !d.flame && !d.distant && !d.land_trees && !casts_untextured(d)) add(d);
 }
 
 void ZoneRenderer::draw_point_shadow(const FrameInfo& frame, const PointReach& reach, std::uint32_t face) {

@@ -787,3 +787,63 @@ TEST_CASE("npc_name_colour: an NPC's name takes its consider colour, and only wi
     corpse.is_corpse = true;
     CHECK_FALSE(game::npc_name_colour(corpse, 1, 0, true).has_value());
 }
+
+TEST_CASE("gm_name_colour: a GM's name is green unless anonymous or roleplaying, as SetNameSpriteTint gives it") {
+    game::Spawn gm;
+    gm.id = 7;
+    gm.name = "Guide";
+    gm.race = 1;
+    gm.level = 50;
+    gm.gm = true;
+    CHECK(game::gm_name_colour(gm) == 0x1da64bu);
+    // Without the flag: no GM colour, the caller keeps the stock ones.
+    game::Spawn player = gm;
+    player.gm = false;
+    CHECK_FALSE(game::gm_name_colour(player).has_value());
+    // Anon is checked whole: anonymous (1) and roleplaying (2) both drop the green.
+    game::Spawn anon = gm;
+    anon.anon = 1;
+    CHECK_FALSE(game::gm_name_colour(anon).has_value());
+    game::Spawn roleplay = gm;
+    roleplay.anon = 2;
+    CHECK_FALSE(game::gm_name_colour(roleplay).has_value());
+    // Type 1 (a live NPC) never takes it, even with the gm byte set.
+    game::Spawn npc = gm;
+    npc.is_npc = true;
+    CHECK_FALSE(game::gm_name_colour(npc).has_value());
+    // A deliberate difference: the original keeps the green on a corpse (type 2) that carries the gm byte; here a
+    // corpse never takes it and shows the ordinary corpse colour.
+    game::Spawn corpse = gm;
+    corpse.is_corpse = true;
+    CHECK_FALSE(game::gm_name_colour(corpse).has_value());
+    game::Spawn npc_corpse = npc;
+    npc_corpse.is_corpse = true;
+    CHECK_FALSE(game::gm_name_colour(npc_corpse).has_value());
+    // Races from 0x8cd up take their own tint before the GM test.
+    game::Spawn high_race = gm;
+    high_race.race = 0x8cd;
+    CHECK_FALSE(game::gm_name_colour(high_race).has_value());
+    // The player's own GM character is a spawn like any other: green, and anonymous drops it.
+    game::WorldState world;
+    world.player_id = gm.id;
+    world.spawns[gm.id] = gm;
+    CHECK(game::gm_name_colour(world.spawns.at(world.player_id)) == 0x1da64bu);
+    world.spawns.at(world.player_id).anon = 1;
+    CHECK_FALSE(game::gm_name_colour(world.spawns.at(world.player_id)).has_value());
+}
+
+TEST_CASE("mercenary_name_colour: the tint bytes 11 b5 e1 read blue first, an amber name") {
+    game::Spawn merc;
+    merc.id = 9;
+    merc.name = "Hireling";
+    merc.is_npc = true;
+    merc.mercenary = true;
+    // SetNameSpriteTint's bytes go to SetStringSpriteTint(const RGB*), eqlib's RGB being blue, green, red in memory.
+    CHECK(game::mercenary_name_colour(merc) == 0xe1b511u);
+    game::Spawn npc = merc;
+    npc.mercenary = false;
+    CHECK_FALSE(game::mercenary_name_colour(npc).has_value());
+    game::Spawn corpse = merc;
+    corpse.is_corpse = true;
+    CHECK_FALSE(game::mercenary_name_colour(corpse).has_value());
+}
