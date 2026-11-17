@@ -748,6 +748,8 @@ local function graphicsTab()
       "How thick Hailstone's grass on the classic zones grows. Lower is sparser and faster; higher is thicker and slower.")
     check("ao", "Ambient Occlusion", "Soft contact shadows where surfaces meet (modern lighting).")
     check("distance_blur", "Distance Blur", "Softens the far distance a little (modern lighting).")
+    check("depth_prepass", "Depth Pre-pass",
+      "Draws the zone's shapes once without lighting first, then lights only what is in front, so surfaces hidden behind others are not lit (modern lighting). Applies at once, so you can compare.")
     check("neighbour_zones", "Neighbour Zones",
       "Draws the next zone past an outdoor zone line in the distance (modern lighting; scenery only).")
     check("horizon_hills", "Horizon Hills",
