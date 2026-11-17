@@ -23,6 +23,7 @@
 // Built again with HAILSTONE_PROBE_THROW_INIT (HostProbeThrow): InitializePlugin registers a command and a TLO, then
 // throws.
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -30,13 +31,25 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "hailstone_byte_io.h"
 #include "hailstone_plugin.h"
 
 HAILSTONE_PLUGIN
 
+// Pin the released prefix (0.7.1 ends at get_xtarget_data_bulk) and the entries after it: the table only grows at its
+// end. All supported targets use one function-pointer size.
+static_assert(offsetof(PluginHostApi, get_xtarget_data_bulk) == offsetof(PluginHostApi, caps) + 80 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, get_target_buff_data_bulk) == offsetof(PluginHostApi, caps) + 81 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, get_buff_name_data_bulk) == offsetof(PluginHostApi, caps) + 84 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, get_raid_data_bulk) == offsetof(PluginHostApi, caps) + 85 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, get_ability_data_bulk) == offsetof(PluginHostApi, caps) + 88 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, select_raid_member) == offsetof(PluginHostApi, caps) + 89 * sizeof(PluginHostApi::caps));
+
 namespace {
+
+std::vector<unsigned char> received_item_bytes;
 
 void nothing(void*, const char*) {}
 
@@ -401,6 +414,148 @@ void probe_cursor(void*, const char*) {
     WriteChatf("[Probe] cursor origin %u", static_cast<unsigned>(host->cursor_origin(host->host)));
 }
 
+void probe_binary(void*, const char* arguments) {
+    char* end = nullptr;
+    const auto kind = static_cast<std::uint32_t>(std::strtoul(arguments, &end, 10));
+    HailstoneBinaryMeasurement measured;
+    std::memset(&measured, 0x5a, sizeof(measured));
+    measured.size = sizeof(measured);
+    while (*end == ' ') ++end;
+    if (*end) measured.size = static_cast<std::uint32_t>(std::strtoul(end, nullptr, 10));
+    const auto result = HAILSTONE_HOST_HAS(host, measure_binary) ? host->measure_binary(host->host, kind, &measured) : 0;
+    if (!result || measured.size < sizeof(measured)) {
+        WriteChatf("[Probe] binary result %d untouched %d", result,
+                   measured.kind == 0x5a5a5a5au && measured.sha256[0] == 0x5a ? 1 : 0);
+        return;
+    }
+    char digest[65]{};
+    constexpr char hex[] = "0123456789abcdef";
+    for (std::size_t i = 0; i < 32; ++i) {
+        digest[i * 2] = hex[measured.sha256[i] >> 4];
+        digest[i * 2 + 1] = hex[measured.sha256[i] & 15];
+    }
+    WriteChatf("[Probe] binary kind %u bytes %llu fnv %llu sha %s", measured.kind,
+               static_cast<unsigned long long>(measured.byte_count), static_cast<unsigned long long>(measured.fnv1a63), digest);
+}
+void probe_binary_thread(void*, const char*) {
+    int answer = -1;
+    HailstoneBinaryMeasurement measured{}; measured.size = sizeof(measured);
+    std::thread thread([&] { answer = host->measure_binary(host->host, HAILSTONE_BINARY_CALLING_PLUGIN, &measured); });
+    thread.join();
+    WriteChatf("[Probe] binary thread %d", answer);
+}
+
+void probe_decode(void*, const char* arguments) {
+    HailstoneItem item;
+    HailstoneItemSlot slot;
+    std::memset(&item, 0x5a, sizeof(item));
+    std::memset(&slot, 0x5a, sizeof(slot));
+    item.size = *arguments ? static_cast<std::uint32_t>(std::strtoul(arguments, nullptr, 10)) : static_cast<std::uint32_t>(sizeof(item));
+    std::array<unsigned char, sizeof(item)> old_item;
+    std::array<unsigned char, sizeof(slot)> old_slot;
+    std::memcpy(old_item.data(), &item, sizeof(item));
+    std::memcpy(old_slot.data(), &slot, sizeof(slot));
+    const auto result = host->decode_item_packet(host->host, received_item_bytes.data(), received_item_bytes.size(), &slot, &item);
+    WriteChatf("[Probe] decode %d slot_unchanged %d item_unchanged %d id %u", result,
+        std::memcmp(old_slot.data(), &slot, sizeof(slot)) == 0,
+        std::memcmp(old_item.data(), &item, sizeof(item)) == 0, item.id);
+}
+
+HailstoneSpawn saved_spawn{};
+void probe_services(void*, const char*) {
+    saved_spawn = {}; saved_spawn.size = sizeof(saved_spawn);
+    const auto found = host->get_spawn(host->host, 12, &saved_spawn);
+    WriteChatf("[Probe] services spawn %d token %llu flags %u mana %u", found,
+        static_cast<unsigned long long>(saved_spawn.incarnation), saved_spawn.observation_flags, saved_spawn.mana_percent);
+}
+// /probeselectraid [stale]: select_raid_member on the spawn /probeservices read, with its incarnation or a later one.
+void probe_select(void*, const char* args) {
+    const auto incarnation = saved_spawn.incarnation + (args && *args ? 1u : 0u);
+    const auto result = host->select_raid_member(host->host, saved_spawn.id, incarnation);
+    WriteChatf("[Probe] raid selection %d", result);
+}
+// /proberaidmove <name> <group>: raid_action HAILSTONE_RAID_MOVE.
+void probe_raid_move(void*, const char* args) {
+    char name[64] = {};
+    int group = 0;
+    if (!args || std::sscanf(args, "%63s %d", name, &group) != 2) return;
+    WriteChatf("[Probe] raid move %d", host->raid_action(host->host, name, HAILSTONE_RAID_MOVE, group));
+}
+
+std::uint32_t map_flags = 0;
+std::uint64_t map_revision = 0;
+int map_format = 0;
+struct OldMapPolicy72 { std::uint32_t size, flags; char name[64]; };
+struct OldMapPolicy80 { OldMapPolicy72 prefix; std::uint64_t revision; };
+static_assert(sizeof(OldMapPolicy72)==72 && alignof(OldMapPolicy72)==4);
+static_assert(sizeof(OldMapPolicy80)==80 && offsetof(HailstoneMapPolicy,revision)==72 && offsetof(HailstoneMapPolicy,context)==80);
+int old_map_policy(void* destination, bool with_revision) {
+    OldMapPolicy80 old{};
+    old.prefix.size=with_revision?80:72;old.prefix.flags=map_flags;
+    std::memcpy(old.prefix.name,"Probe map",sizeof("Probe map"));old.revision=map_revision;
+    std::memcpy(destination,&old,old.prefix.size);
+    return 1;
+}
+int map_policy(HailstoneMapPolicy* out) {
+    if (!map_flags && !map_format) return 0;
+    if (map_format==7 || map_format==8) return old_map_policy(out,map_format==8);
+    out->flags = map_flags;
+    out->revision = map_revision;
+    out->context = UINT64_MAX; // provider answers cannot choose the host context
+    std::memcpy(out->name, "Probe map", sizeof("Probe map"));
+    if (map_format == 1) out->size = 71;
+    if (map_format == 2) out->flags |= 128;
+    if (map_format == 3) std::memset(out->name, 'X', sizeof(out->name));
+    if (map_format == 4) out->name[0] = '\n';
+    if (map_format == 5) {
+        HailstoneMapPolicy nested{}; nested.size = sizeof(nested);
+        WriteChatf("[Probe] nested map %d", host->get_map_policy(host->host, &nested));
+    }
+    if (map_format == 6) host->set_active(host->host, 0);
+    return 1;
+}
+void probe_map_set(void*, const char* args) {
+    char* rest = nullptr;
+    map_flags = static_cast<std::uint32_t>(std::strtoul(args, &rest, 10));
+    map_format = rest ? static_cast<int>(std::strtol(rest, &rest, 10)) : 0;
+    map_revision = rest ? std::strtoull(rest,nullptr,10) : 0;
+    host->set_active(host->host, 1);
+}
+void probe_map_prefix(void*, const char* args) {
+    const auto size=static_cast<std::uint32_t>(std::strtoul(args,nullptr,10));
+    if(size!=72 && size!=80 && size!=88)return;
+    alignas(8) std::array<unsigned char,104> storage;
+    storage.fill(0x5a);
+    auto* bytes=storage.data()+4; // a real old record may be aligned to four, not eight
+    std::memcpy(bytes,&size,sizeof(size));
+    const int result=host->get_map_policy(host->host,reinterpret_cast<HailstoneMapPolicy*>(bytes));
+    OldMapPolicy72 old{};std::memcpy(&old,bytes,sizeof(old));
+    bool canary=true;
+    for(std::size_t i=0;i<4;++i)canary=canary&&storage[i]==0x5a;
+    for(std::size_t i=4+size;i<storage.size();++i)canary=canary&&storage[i]==0x5a;
+    std::uint64_t revision=0,context=0;
+    if(size>=80)std::memcpy(&revision,bytes+72,sizeof(revision));
+    if(size>=88)std::memcpy(&context,bytes+80,sizeof(context));
+    WriteChatf("[Probe] map prefix %u result %d flags %u canary %d revision %d context %d",size,result,old.flags,
+        canary?1:0,revision?1:0,context&&context!=UINT64_MAX?1:0);
+}
+void probe_map_cycle(void*,const char*) { host->set_active(host->host,0);host->set_active(host->host,1); }
+void probe_map(void*, const char* args) {
+    HailstoneMapPolicy policy;
+    std::memset(&policy, 0x5a, sizeof(policy));
+    policy.size = *args ? static_cast<std::uint32_t>(std::strtoul(args, nullptr, 10)) : sizeof(policy);
+    const int result = host->get_map_policy(host->host, &policy);
+    WriteChatf("[Probe] map result %d flags %u untouched %d name %s", result, policy.flags,
+        static_cast<unsigned char>(policy.name[0]) == 0x5a,
+        result && policy.size > offsetof(HailstoneMapPolicy, name) ? policy.name : "-");
+}
+void probe_map_thread(void*, const char*) {
+    HailstoneMapPolicy policy{}; policy.size = sizeof(policy);
+    int result = -1;
+    std::thread thread([&] { result = host->get_map_policy(host->host, &policy); }); thread.join();
+    WriteChatf("[Probe] map thread %d", result);
+}
+
 // /probeability <kind> <name>: ability_state then use_ability, both added later in ABI 3.
 void probe_ability(void*, const char* args) {
     if (!HAILSTONE_HOST_HAS(host, ability_state) || !HAILSTONE_HOST_HAS(host, use_ability)) {
@@ -490,6 +645,17 @@ HAILSTONE_API void InitializePlugin(void) {
     AddCommand("/probediscs", probe_disc, nullptr);
     AddCommand("/proberaid", probe_raid, nullptr);
     AddCommand("/probecursor", probe_cursor, nullptr);
+    AddCommand("/probebinary", probe_binary, nullptr);
+    AddCommand("/probebinarythread", probe_binary_thread, nullptr);
+    AddCommand("/probedecode", probe_decode, nullptr);
+    AddCommand("/probeservices", probe_services, nullptr);
+    AddCommand("/probeselectraid", probe_select, nullptr);
+    AddCommand("/proberaidmove", probe_raid_move, nullptr);
+    AddCommand("/probemapset", probe_map_set, nullptr);
+    AddCommand("/probemappolicy", probe_map, nullptr);
+    AddCommand("/probemapthread", probe_map_thread, nullptr);
+    AddCommand("/probemapprefix", probe_map_prefix, nullptr);
+    AddCommand("/probemapcycle", probe_map_cycle, nullptr);
     AddCommand("/probeability", probe_ability, nullptr);
     AddCommand("/probeabilities", probe_abilities, nullptr);
     AddTopLevelObject("Probe", probe_tlo, nullptr);
@@ -514,8 +680,33 @@ HAILSTONE_API void ShutdownPlugin(void) {
     RemoveCommand("/probediscs");
     RemoveCommand("/proberaid");
     RemoveCommand("/probecursor");
+    RemoveCommand("/probebinary");
+    RemoveCommand("/probebinarythread");
+    RemoveCommand("/probedecode");
+    RemoveCommand("/probeservices");
+    RemoveCommand("/probeselectraid");
+    RemoveCommand("/proberaidmove");
+    RemoveCommand("/probemapset");
+    RemoveCommand("/probemappolicy");
+    RemoveCommand("/probemapthread");
+    RemoveCommand("/probemapprefix");
+    RemoveCommand("/probemapcycle");
     RemoveCommand("/probeability");
     RemoveCommand("/probeabilities");
     RemoveTopLevelObject("Probe");
 }
 HAILSTONE_API void OnUpdateImGui(void) { throw std::runtime_error("OnUpdateImGui threw"); }
+HAILSTONE_API int OnPacket(int, int, HailstonePacket* packet) {
+    received_item_bytes.clear();
+    if (packet && packet->data && packet->size && packet->size <= 262144) {
+        received_item_bytes.resize(packet->size);
+        std::memcpy(received_item_bytes.data(), packet->data, packet->size);
+    }
+    return 0;
+}
+HAILSTONE_API const HailstoneHooks* hailstone_plugin_hooks(void) {
+    static HailstoneHooks hooks{};
+    hooks.size = sizeof(hooks);
+    hooks.map_policy = map_policy;
+    return &hooks;
+}

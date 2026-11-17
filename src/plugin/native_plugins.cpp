@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <array>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -20,11 +21,16 @@
 
 #include "core/ascii_case.h"
 #include "core/atomic_file.h"
+#include "core/binary_measurement.h"
 #include "core/log.h"
+#include "core/process_serial.h"
+#include "game/targeting.h"
+#include "net/item_packets.h"
 #include "core/sha256.h"
 #include "game/chat_text.h"
 #include "game/combat.h"
 #include "game/item_links.h"
+#include "game/merchant.h"
 #include "game/server_ext_chain.h"
 #include "game/spa_ids.h"
 #include "game/spells.h"
@@ -52,6 +58,19 @@ static_assert(HAILSTONE_CAP_READ == kCapRead && HAILSTONE_CAP_COMMANDS == kCapCo
               HAILSTONE_CAP_EVENTS == kCapEvents && HAILSTONE_CAP_UI == kCapUi && HAILSTONE_CAP_PACKETS == kCapPackets &&
               HAILSTONE_CAP_EXTEND == kCapExtend && HAILSTONE_CAP_LOGIN == kCapLogin && HAILSTONE_CAP_NET == kCapNet &&
               HAILSTONE_CAP_WEB == kCapWeb);
+static_assert(offsetof(HailstoneMapPolicy, revision)==72 && offsetof(HailstoneMapPolicy, context)==80 && sizeof(HailstoneMapPolicy)==88);
+// The add-on service records' sizes as released (docs/plugins.md "Server add-on services"): a field moved or added
+// anywhere but the end breaks a plugin built against an earlier header. The submission holds a pointer and a size_t.
+static_assert(sizeof(HailstoneFollowProfile) == 56 && sizeof(HailstoneMountProfile) == 8);
+static_assert(sizeof(HailstoneFollowStatus) == 24 && offsetof(HailstoneFollowStatus, target_incarnation) == 16);
+static_assert(sizeof(HailstoneBinaryMeasurement) == 56 && offsetof(HailstoneBinaryMeasurement, sha256) == 24);
+static_assert(sizeof(HailstoneMerchantSellContext) == 32);
+static_assert(sizeof(HailstoneWorldFrame) == 136 && offsetof(HailstoneWorldFrame, now_ms) == 24);
+static_assert(sizeof(HailstoneWorldAnchor) == 32 && sizeof(HailstoneWorldVertex) == 28);
+static_assert(sizeof(HailstoneWorldSurfacePatch) == 64 && sizeof(HailstoneWorldSurfacePatchResult) == 576 &&
+              offsetof(HailstoneWorldSurfacePatchResult, region_xy) == 64);
+static_assert(sizeof(HailstoneWorldReceipt) == 48);
+static_assert(sizeof(void*) != 8 || (sizeof(HailstoneWorldSubmission) == 56 && offsetof(HailstoneWorldSubmission, vertices) == 40));
 
 #if defined(_WIN32)
 constexpr const char* kExt = ".dll";
@@ -127,6 +146,8 @@ struct NativePlugins::Impl {
     NativePlugins* self = nullptr;
     Hooks::Owner owner = 0;
     std::vector<std::unique_ptr<Loaded>> loaded;
+    WorldGeometryHost world_geometry;
+    std::vector<Hooks::Owner> world_owners;
     std::vector<Info> failures; // the last load error by name
     std::vector<std::pair<std::string, Sha256Digest>> required; // files found at the last policy check
     // What required_addons_ready answered, and what it answered from: it is asked each frame, and works it out again
@@ -244,6 +265,7 @@ struct Loaded {
     // and its member of env.extensions.
     HailstoneHooks hooks{};
     bool active = true;
+    bool world_ready = false;
     std::uint32_t flags = 0;
     std::optional<HailstoneVitals> vitals;
     std::shared_ptr<NativeExtension> extension;
@@ -265,6 +287,10 @@ struct Loaded {
     net::AppPacket* current_packet = nullptr;
     int busy = 0;              // inside one of its callbacks
     bool unload_pending = false; // unload asked for while busy: done at the next pulse
+    bool host_threw_warned = false; // (host_threw)
+    bool map_policy_running = false; // get_map_policy cannot recursively invoke its caller's policy hook
+    std::uint64_t policy_generation = core::next_process_identity(), map_content_revision = 0;
+    std::uint64_t lifecycle_generation = core::next_process_identity();
 
     // Its TCP connections (tcp_open ...), closed with it.
     struct Tcp {
@@ -345,7 +371,64 @@ public:
     void detach() { l_ = nullptr; }
     bool active() const { return l_ && l_->active; }
     const char* name() const override { return l_ ? l_->name.c_str() : "unloaded plugin"; }
+    std::uint64_t lifecycle_revision(const net::GameConnection&) const override {
+        return l_ ? l_->lifecycle_generation : 0;
+    }
 
+    std::optional<game::FollowProfile> follow_profile(const net::GameConnection&) const override {
+        if (!l_ || !active() || !l_->can(kCapExtend) || !h().follow_profile) return std::nullopt;
+        HailstoneFollowProfile raw{}; raw.size = sizeof(raw);
+        if (!run(h().follow_profile, &raw) || !l_ || !active() || l_->unload_pending || !l_->can(kCapExtend) || raw.size < sizeof(raw)) return std::nullopt;
+        const game::FollowProfile out{raw.flags, raw.stop_distance, raw.restart_margin, raw.start_range,
+            raw.turn_snap, raw.turn_slow, raw.turn_fast, raw.turn_fast_angle, raw.move_angle,
+            raw.move_far_margin, raw.pitch_gain, raw.pitch_down_scale, raw.pitch_limit};
+        return game::valid_follow_profile(out) ? std::optional{out} : std::nullopt;
+    }
+    std::optional<game::MountProfile> mount_profile(const net::GameConnection&) const override {
+        if (!l_ || !active() || !l_->can(kCapExtend) || !h().mount_profile) return std::nullopt;
+        HailstoneMountProfile raw{}; raw.size = sizeof(raw);
+        if (!run(h().mount_profile, &raw) || !l_ || !active() || l_->unload_pending || !l_->can(kCapExtend) || raw.size < sizeof(raw) || raw.instant_acceleration > 1) return std::nullopt;
+        return game::MountProfile{raw.instant_acceleration != 0};
+    }
+    bool map_visible(const net::GameConnection& c, const game::Spawn& s, std::uint32_t purpose) const override {
+        if (!l_ || !active() || !l_->can(kCapUi | kCapExtend) || !h().map_visible) return true;
+        const auto value = spawn_struct(c, s);
+        return run(h().map_visible, &value, purpose) != 0;
+    }
+    game::MapPolicy map_policy(const net::GameConnection&) const override {
+        if (!l_) return {};
+        const auto neutral = [&] { return game::MapPolicy{0, {}, l_ ? l_->policy_generation : 0}; };
+        if (!active() || !l_->can(kCapUi | kCapExtend) || !h().map_policy || l_->map_policy_running) return neutral();
+        struct Reset { bool& running; ~Reset() { running = false; } } reset{l_->map_policy_running};
+        l_->map_policy_running = true;
+        HailstoneMapPolicy raw{};
+        raw.size = sizeof(raw);
+        constexpr auto known_flags = HAILSTONE_MAP_POLICY_CUSTOM_SPAWNS |
+            HAILSTONE_MAP_POLICY_HIDE_STOCK_NPCS | HAILSTONE_MAP_POLICY_DISABLE_NPC_FIND;
+        if (!run(h().map_policy, &raw) || !l_ || !active() || l_->unload_pending ||
+            !l_->can(kCapUi | kCapExtend) || raw.size < offsetof(HailstoneMapPolicy, revision) || (raw.flags & ~known_flags)) return neutral();
+        const auto end = std::find(std::begin(raw.name), std::end(raw.name), '\0');
+        if (end == std::end(raw.name) || std::any_of(std::begin(raw.name), end, [](unsigned char ch) {
+                return ch < 32 || ch == 127;
+            })) return neutral();
+        const auto content = raw.size >= offsetof(HailstoneMapPolicy, context) ? raw.revision : 0;
+        if (l_->map_content_revision != content) {
+            l_->map_content_revision = content;
+            l_->policy_generation = core::next_process_identity();
+        }
+        return {raw.flags, std::string(std::begin(raw.name), end), l_->policy_generation};
+    }
+    bool merchant_right_click(net::GameConnection& c, std::uint32_t merchant, const net::ItemSlot& slot,
+                              std::uint32_t item, std::uint32_t quantity) override {
+        if (!l_ || !active() || !l_->can(kCapPackets | kCapExtend) || !h().merchant_right_click) return false;
+        HailstoneMerchantSellContext context{sizeof(HailstoneMerchantSellContext), merchant,
+            static_cast<std::uint32_t>(slot.slot), item, quantity, {slot.type, slot.slot, slot.sub, slot.aug}, 0};
+        if (c.inventory().cursor()) context.flags |= HAILSTONE_MERCHANT_CURSOR_OCCUPIED;
+        const auto* received = c.inventory().at(slot);
+        if (!received || game::sell_refusal(*received)) context.flags |= HAILSTONE_MERCHANT_SELL_REFUSED;
+        if (received && c.kept_items().holds_kept(*received)) context.flags |= HAILSTONE_MERCHANT_KEPT;
+        return run(h().merchant_right_click, &context) != 0;
+    }
     bool retry_zone_entry(net::GameConnection&) override {
         return l_ && h().zone_entry_retry && run(h().zone_entry_retry) != 0;
     }
@@ -515,6 +598,23 @@ public:
         return run(h().item_right_click, static_cast<const HailstoneItemSlot*>(&s)) != 0;
     }
     std::optional<std::string> merchant_level(const net::GameConnection&, const net::Item& item) const override;
+    std::optional<std::string> item_flags(const net::GameConnection&, const net::Item&,
+                                         std::string_view) const override;
+    std::optional<std::string> item_description_append(const net::GameConnection&, const net::Item&) const override;
+    std::uint64_t item_presentation_revision(const net::GameConnection&) const override {
+        return l_ && h().item_presentation_revision ? run(h().item_presentation_revision) : 0;
+    }
+    std::optional<std::string> loot_confirmation(const net::GameConnection&, const net::Item&,
+                                                std::span<const std::uint32_t>, bool) const override;
+    std::optional<std::string> zone_display_name(const net::GameConnection&, std::uint32_t zone, std::uint32_t instance) const override {
+        if (!l_ || !active() || !h().zone_display_name) return {};
+        const auto* result = run(h().zone_display_name, zone, instance);
+        if (!result) return {};
+        std::size_t length = 0; while (length < 128 && result[length]) ++length;
+        if (!length || length == 128) return {};
+        return std::string(result, length);
+    }
+
 
 private:
     const HailstoneHooks& h() const { return l_->hooks; }
@@ -718,10 +818,12 @@ void* h_imgui_context(void* h) {
 // (HailstoneWebState's size is a size_t, the others' a uint32_t: each keeps its own.)
 template <typename T> int give(T* out, const T& full) {
     using Size = decltype(T::size);
-    if (!out || out->size < sizeof(Size)) return 0;
-    const Size size = out->size;
+    if (!out) return 0;
+    Size size{};
+    std::memcpy(&size, out, sizeof(size)); // an older prefix may have a smaller alignment than the current record
+    if (size < sizeof(Size)) return 0;
     std::memcpy(out, &full, std::min<std::size_t>(size, sizeof(T)));
-    out->size = size;
+    std::memcpy(out, &size, sizeof(size));
     return 1;
 }
 
@@ -735,6 +837,8 @@ HailstoneItem item_struct(const net::Item& it) {
     HailstoneItem v{};
     v.size = sizeof v;
     v.id = it.id;
+    copy_name(v.serial, it.serial);
+    v.instance_id = it.instance_id;
     copy_name(v.name, it.name);
     v.item_type = it.item_type;
     v.item_class = it.item_class;
@@ -746,6 +850,26 @@ HailstoneItem item_struct(const net::Item& it) {
     auto spell = [](std::int32_t id) { return id > 0 ? static_cast<std::uint32_t>(id) : 0u; };
     v.click_spell = spell(it.effects[net::kEffectClick].effect);
     v.scroll_spell = spell(it.effects[net::kEffectScroll].effect);
+    // The serialized record is decoded completely or rejected. Missing
+    // children therefore mean known empty positions, not unreadable sockets.
+    // A bag's children are inventory items and never an augment configuration.
+    v.configuration_complete = it.id != 0 && it.item_class <= 2 ? 1u : 0u;
+    copy_name(v.serial, it.serial);
+    v.instance_id = it.instance_id;
+    if (it.item_class != 1 && v.configuration_complete) {
+        std::array<bool, 6> seen{};
+        if (it.contents.size() > seen.size()) v.configuration_complete = 0;
+        else for (const auto& child : it.contents) {
+            if (child.index >= seen.size() || !child.item.id || seen[child.index]) {
+                v.configuration_complete = 0;
+                break;
+            }
+            seen[child.index] = true;
+            v.augment_ids[child.index] = child.item.id;
+        }
+        if (!v.configuration_complete) std::fill(std::begin(v.augment_ids), std::end(v.augment_ids), 0u);
+    }
+
     return v;
 }
 
@@ -772,6 +896,27 @@ HailstoneSpawn spawn_struct(const net::GameConnection& c, const game::Spawn& s) 
     v.z = s.position.z;
     v.heading = s.heading;
     v.hp_percent = s.hp_percent;
+    v.incarnation = s.incarnation;
+    if (s.hp_known && s.hp_percent <= 100) v.observation_flags |= HAILSTONE_SPAWN_HP_KNOWN;
+    const auto resource = [&](const auto& values, std::uint32_t bit, std::uint32_t& value) {
+        const auto it = values.find(s.id);
+        if (it != values.end() && it->second <= 100) {
+            value = it->second;
+            v.observation_flags |= bit;
+        }
+    };
+    resource(c.group().mana_percent, HAILSTONE_SPAWN_MANA_KNOWN, v.mana_percent);
+    resource(c.group().endurance_percent, HAILSTONE_SPAWN_ENDURANCE_KNOWN, v.endurance_percent);
+    if (s.trader) v.social_flags |= HAILSTONE_SOCIAL_TRADER;
+    if (s.buyer) v.social_flags |= HAILSTONE_SOCIAL_BUYER;
+    if (s.linkdead) v.social_flags |= HAILSTONE_SOCIAL_LINKDEAD;
+    if (s.lfg) v.social_flags |= HAILSTONE_SOCIAL_LFG;
+    if (s.afk) v.social_flags |= HAILSTONE_SOCIAL_AFK;
+    v.anon = s.anon;
+    copy_name(v.last_name, s.last_name);
+    copy_name(v.guild_name, c.guild().name_of(s.guild_id));
+    copy_name(v.display_name, game::display_name(s.name));
+
     v.rider_id = s.rider_id;
     v.is_mercenary = s.mercenary ? 1 : 0;
     v.is_gm = s.gm ? 1 : 0;
@@ -802,7 +947,14 @@ net::GameConnection* connection_of(const Loaded& l) {
 
 void h_set_active(void* h, int active) {
     Loaded& l = Loaded::of(h);
-    if (may_extend(l, "set_active")) l.active = active != 0;
+    if (may_extend(l, "set_active")) {
+        if (l.active != (active != 0)) {
+            l.policy_generation = core::next_process_identity();
+            l.lifecycle_generation = core::next_process_identity();
+        }
+        l.active = active != 0;
+        if (!l.active) { l.world_ready = false; l.host->world_geometry.retire(l.owner); }
+    }
 }
 
 void h_set_flag(void* h, std::uint32_t flag, int on) {
@@ -1040,6 +1192,7 @@ int h_get_player(void* h, HailstonePlayer* out) {
     v.max_endurance = ps.max_endurance;
     v.target_id = w.target_id;
     v.zone_id = c->zone_id();
+    v.zone_instance = c->zone_instance();
     v.game_state = c->hook_game_state();
     v.in_group = c->group().active ? 1 : 0;
     v.in_raid = c->raid().active ? 1 : 0;
@@ -1052,7 +1205,18 @@ int h_get_player(void* h, HailstonePlayer* out) {
     v.stand_state = ps.stand_state;
     v.pet_id = c->pets().focused;
     v.filter_pc_spells = c->chat_filters().settings[game::kFilterPcSpells];
-    v.in_zone = c->in_zone() ? 1 : 0; // camping too: the plugins' windows stay up through the camp's 30 s
+    v.in_zone = c->in_zone() ? 1 : 0;
+    if (w.player() && w.player()->incarnation && c->profile() && c->in_zone() && !c->in_combat() && !c->rest_downtime_left() && !c->stunned() &&
+        !ps.dead && (ps.stand_state == 100 || ps.stand_state == 110) && !spells.casting.casting() &&
+        !spells.scribing && c->player_stationary()) {
+        bool debuffed = false;
+        for (const auto& buff : spells.buffs) {
+            const auto* spell = buff.empty() ? nullptr : c->spell_table().get(buff.spell);
+            if (!buff.empty() && (!spell || !spell->beneficial())) { debuffed = true; break; }
+        }
+        if (!debuffed) v.observation_flags |= HAILSTONE_PLAYER_PROMPT_SAFE;
+    }
+ // camping too: the plugins' windows stay up through the camp's 30 s
     return give(out, v);
 }
 
@@ -1219,6 +1383,180 @@ int h_get_spawn(void* h, std::uint32_t id, HailstoneSpawn* out) {
     if (!c) return 0;
     auto it = c->world().spawns.find(id);
     return it == c->world().spawns.end() ? 0 : give(out, spawn_struct(*c, it->second));
+}
+
+// A current roster member's in-zone actor: a player (never an NPC or corpse) of a roster name.
+const game::RaidMember* raid_member_of(const net::GameConnection& c, const game::Spawn& actor) {
+    if (actor.is_npc || actor.is_corpse) return nullptr;
+    const auto& members = c.raid().members;
+    const auto it = std::find_if(members.begin(), members.end(), [&](const auto& m) { return iequal(m.name, actor.name); });
+    return it == members.end() ? nullptr : &*it;
+}
+int h_select_raid_member(void* h, std::uint32_t id, std::uint64_t incarnation) {
+    auto& l = Loaded::of(h);
+    if (!l.active || !l.can(kCapRead | kCapTarget) || !id || !incarnation) return 0;
+    auto* c = connection_of(l);
+    if (!c || !c->in_zone() || !c->raid().active || c->player_status().dead || c->interface_locked()) return 0;
+    const auto& spawns = c->world().spawns;
+    const auto actor = spawns.find(id);
+    if (actor == spawns.end() || actor->second.incarnation != incarnation || !game::is_targetable(actor->second) ||
+        c->market_hidden(actor->second)) return 0;
+    if (!raid_member_of(*c, actor->second)) {
+        // A member's pet: an NPC whose owner is a member in the zone.
+        if (!actor->second.is_npc || actor->second.is_corpse || !actor->second.pet_owner_id) return 0;
+        const auto owner = spawns.find(actor->second.pet_owner_id);
+        if (owner == spawns.end() || !raid_member_of(*c, owner->second)) return 0;
+    }
+    c->set_target(id);
+    return 1;
+}
+std::optional<net::ItemPacket> received_item(const void* data, std::size_t size) {
+    if (!data || size < 4 || size > 262144) return std::nullopt;
+    net::AppPacket packet; packet.data.resize(size); std::memcpy(packet.data.data(), data, size);
+    return net::decode_item_packet(packet);
+}
+int h_decode_item_packet(void* h, const void* data, std::size_t size, HailstoneItemSlot* slot, HailstoneItem* out) {
+    auto& l = Loaded::of(h);
+    if (!slot || !out || !readable(l, "decode_item_packet")) return 0;
+    const auto item = received_item(data, size);
+    if (!item || !item->item.id) return 0;
+    const auto& s = item->item.slot;
+    if (!give(out, item_struct(item->item))) return 0;
+    *slot = {s.type, s.slot, s.sub, s.aug};
+    return 1;
+}
+int h_inspect_item_packet(void* h, const void* data, std::size_t size) {
+    auto& l = Loaded::of(h);
+    if (!l.active || !l.can(kCapRead | kCapUi)) return 0;
+    auto* c = connection_of(l);
+    const auto item = received_item(data, size);
+    if (!c || !c->in_zone() || !item || !item->item.id) return 0;
+    c->inspect_received_item(item->item); return 1;
+}
+int h_manual_follow(void* h, const char* action) {
+    auto& l = Loaded::of(h);
+    if (!l.active || !l.can(kCapMove | kCapExtend) || !action) return 0;
+    auto* c = connection_of(l);
+    if (!c || !c->in_zone()) return 0;
+    std::size_t length = 0; while (length < 8 && action[length]) ++length;
+    if (length == 8) return 0;
+    const std::string_view value(action, length);
+    if (value != "start" && value != "stop" && value != "toggle") return 0;
+    if (value != "stop" && (c->interface_locked() || c->player_status().dead)) return 0;
+    return c->manual_follow(value) ? 1 : 0;
+}
+int h_get_follow_status(void* h, HailstoneFollowStatus* out) {
+    auto& l = Loaded::of(h);
+    const auto* c = readable(l, "get_follow_status");
+    if (!c || !c->in_zone()) return 0;
+    HailstoneFollowStatus status{}; status.size = sizeof(status);
+    if (c->enhanced_follow_active() && !c->enhanced_follow_current()) return give(out, status);
+    status.target_id = c->follow_target(); status.active = status.target_id ? 1u : 0u;
+    status.enhanced = c->enhanced_follow_active() ? 1u : 0u;
+    const auto actor = c->world().spawns.find(status.target_id);
+    if (actor != c->world().spawns.end()) status.target_incarnation = actor->second.incarnation;
+    return give(out, status);
+}
+std::uint32_t h_get_memorized_spell(void* h, std::uint32_t index) {
+    const auto* c = readable(Loaded::of(h), "get_memorized_spell");
+    if (!c || !c->in_zone() || index >= static_cast<std::uint32_t>(std::max(0,c->usable_gems())) ||
+        index >= c->spell_state().gems.size()) return 0;
+    const auto id = c->spell_state().gems[index].spell;
+    return id == 0xffffffffu ? 0 : id;
+}
+bool world_allowed(const Loaded& l) {
+    const auto* c = connection_of(l);
+    return l.active && !l.unload_pending && l.can(kCapUi | kCapExtend) && c && c->in_zone();
+}
+
+std::uint32_t h_world_capabilities(void* h) {
+    const auto& l = Loaded::of(h);
+    return world_allowed(l) && l.world_ready ? l.host->world_geometry.capabilities() : 0;
+}
+
+int h_world_floor_below(void* h, std::uint64_t frame, std::uint32_t epoch,
+                         float x, float y, float z, float* out) {
+    auto& l = Loaded::of(h);
+    return world_allowed(l) ? l.host->world_geometry.floor(frame, epoch, x, y, z, out)
+                            : HAILSTONE_WORLD_DEFERRED;
+}
+
+int h_world_anchor(void* h, std::uint64_t frame, std::uint32_t epoch,
+                    std::uint32_t id, HailstoneWorldAnchor* out) {
+    auto& l = Loaded::of(h);
+    return world_allowed(l) ? l.host->world_geometry.anchor(frame, epoch, id, out)
+                            : HAILSTONE_WORLD_DEFERRED;
+}
+
+int h_world_submit(void* h, const HailstoneWorldSubmission* submission) {
+    auto& l = Loaded::of(h);
+    return world_allowed(l) && l.host->world_geometry.submit(l.owner, submission) ? 1 : 0;
+}
+
+int h_world_surface_patch(void* h, const HailstoneWorldSurfacePatch* query,
+                           HailstoneWorldSurfacePatchResult* out) {
+    auto& l = Loaded::of(h);
+    return world_allowed(l) ? l.host->world_geometry.surface_patch(query, out)
+                            : HAILSTONE_WORLD_PATCH_DEFERRED;
+}
+
+int h_measure_binary(void* h, std::uint32_t kind, HailstoneBinaryMeasurement* out) {
+    const auto& l = Loaded::of(h);
+    if (!l.can(kCapRead) || !out || out->size < sizeof(out->size)) return 0;
+    std::optional<BinaryMeasurement> measured;
+    if (kind == HAILSTONE_BINARY_EXECUTABLE) measured = measure_process_executable();
+    else if (kind == HAILSTONE_BINARY_CALLING_PLUGIN) {
+        measured = measure_binary_file_cached(l.copy);
+        if (measured && measured->sha256 != l.hash) return 0;
+    } else return 0;
+    if (!measured) return 0;
+    HailstoneBinaryMeasurement value{};
+    value.size = sizeof(value);
+    value.kind = kind;
+    value.byte_count = measured->byte_count;
+    value.fnv1a63 = measured->fnv1a63;
+    std::copy(measured->sha256.begin(), measured->sha256.end(), value.sha256);
+    return give(out, value);
+}
+
+int h_get_map_policy(void* h, HailstoneMapPolicy* out) {
+    const auto& l = Loaded::of(h);
+    std::uint32_t size = 0;
+    if (out) std::memcpy(&size, out, sizeof(size));
+    if (!l.can(kCapRead) || l.map_policy_running || size < sizeof(size)) return 0;
+    const auto* connection = connection_of(l);
+    const auto policy = connection ? connection->server_ext().map_policy(*connection) : game::MapPolicy{};
+    HailstoneMapPolicy value{};
+    value.size = sizeof(value);
+    value.flags = policy.flags;
+    value.revision = policy.revision;
+    value.context = connection ? connection->interaction_context() : 0;
+    const auto length = std::min(policy.name.size(), sizeof(value.name) - 1);
+    std::copy_n(policy.name.begin(), length, value.name);
+    return give(out, value);
+}
+
+std::uint64_t h_monotonic_ms(void* h) {
+    return Loaded::of(h).can(kCapRead) ? static_cast<std::uint64_t>(net::GameConnection::now_ms()) : 0;
+}
+int h_raid_action(void* h, const char* name, std::uint32_t action, std::int32_t group) {
+    auto& l = Loaded::of(h);
+    if (!l.active || !l.can(kCapRead | kCapActions) || !name) return 0;
+    std::size_t length = 0; while (length < 64 && name[length]) ++length;
+    if (!length || length == 64) return 0;
+    const std::string n(name, length);
+    auto* c = connection_of(l);
+    if (!c || !c->in_zone() || c->player_status().dead || c->interface_locked()) return 0;
+    const auto& raid = c->raid();
+    const auto member = std::find_if(raid.members.begin(), raid.members.end(), [&](const auto& m) { return iequal(m.name, n); });
+    if (!raid.active || !raid.locked || member == raid.members.end() || !iequal(raid.leader, c->character_name())) return 0;
+    if (action != HAILSTONE_RAID_MOVE || group < -1 || group > 11) return 0;
+    const std::int32_t target = group;
+    if (target >= 0 && std::count_if(raid.members.begin(), raid.members.end(), [&](const auto& m) {
+            return m.group == static_cast<std::uint32_t>(target) && !iequal(m.name, n);
+        }) >= 6) return 0;
+    c->raid_move_group(member->name, target);
+    return 1;
 }
 
 int h_next_spawn(void* h, std::uint32_t after_id, HailstoneSpawn* out) {
@@ -1523,12 +1861,12 @@ int32_t h_get_pet_buff_data_bulk(void* h, unsigned char* data, int32_t datamax)
 }
 /// <summary>
 /// The current target's buffs in one call, as OP_TargetBuffs last gave them, in the order the client keeps them, each
-/// with the slot the server sent: an int32_t count of the target's buffs the client holds, then one
-/// HS_Bulk_TargetBuffFixedRecord per buff followed by its caster's name, casterNameLength bytes with no NUL. An
-/// entry with no spell is neither counted nor written. Only whole records go out, as many as fit after the count; a
-/// plugin that reads fewer records than the count knows the buffer cut the list short. Nothing (0 bytes) when not
-/// even the count fits. The count alone (0) without a target, when the buffs the client holds are another spawn's
-/// (the server has not sent the new target's yet), or with no game connection.
+/// with the slot the server sent: an HS_Bulk_ListHeader (count, total), then one HS_Bulk_TargetBuffFixedRecord per
+/// buff followed by its caster's name, casterNameLength bytes with no NUL. An entry with no spell is neither counted
+/// nor written. Only whole records go out, as many as fit after the header; count < total means the buffer cut the
+/// list short. Nothing (0 bytes) when not even the header fits. The header alone (0, 0) without a target, when the
+/// buffs the client holds are another spawn's (the server has not sent the new target's yet), or with no game
+/// connection.
 /// </summary>
 /// <param name="h">host</param>
 /// <param name="data">buffer to put data in</param>
@@ -1547,7 +1885,7 @@ int32_t h_get_target_buff_data_bulk(void* h, unsigned char* data, int32_t datama
     HS_BulkListHeader header{};
     std::size_t bufferSize = headerBytes;
     const std::uint32_t target = c ? c->world().target_id : 0;
-    // The same check as the target window (lua_eq_hud.cpp, spell_ui.cpp): the list is only the target's while
+    // The same check as the target window (lua_ui_hud.cpp, spell_ui.cpp): the list is only the target's while
     // target_buffs_entity says so.
     if (c && target != 0 && c->spell_state().target_buffs_entity == target) {
         const auto& st = c->spell_state();
@@ -1632,7 +1970,7 @@ int32_t h_get_xtarget_data_bulk(void* h, unsigned char* data, int32_t datamax)
         // has, has no entry.
         const std::size_t entry = static_cast<std::size_t>(net::kAggroXTarget1) + n;
         if (in_zone && entry < aggro.size()) rec->aggroPct = aggro[entry];
-        // The HP percent as the extended target window's gauges take it (lua_eq_values.cpp spawn_hp_percent):
+        // The HP percent as the extended target window's gauges take it (lua_ui_values.cpp spawn_hp_percent):
         // the player's own points (items' HP included), anyone else's percent from the server; 0 for a corpse.
         // EQEmu sends a mob's OP_MobHealth to every client holding it on its list (Mob::SendHPUpdate,
         // QueueClientsByXTarget), not only to those targeting it, so the spawn's percent is kept current.
@@ -2198,15 +2536,35 @@ void off_thread(void* h) {
         log::warn("plugin {}: host function called from another thread, ignored (host functions are for the "
                   "client's thread, inside a callback)", l.name);
 }
+// A host function that threw (out of memory, a provider's exception): the log says so once per plugin.
+void host_threw(void* h) noexcept {
+    if (!h) return;
+    Loaded& l = Loaded::of(h);
+    if (!l.host_threw_warned) {
+        l.host_threw_warned = true;
+        try {
+            log::warn("plugin {}: a host function failed with an error and returned nothing", l.name);
+        } catch (...) {
+        }
+    }
+}
 template <auto F> struct MainOnly;
 template <typename R, typename... A, R (*F)(void*, A...)> struct MainOnly<F> {
     static R call(void* h, A... a) {
-        if (!on_main_thread()) {
-            off_thread(h);
+        try {
+            if (!on_main_thread()) {
+                off_thread(h);
+                if constexpr (std::is_void_v<R>) return;
+                else return R{};
+            }
+            return F(h, a...);
+        } catch (...) {
+            // Host allocations/provider callbacks must never unwind through a plugin's C or foreign-runtime frames.
+            // The call fails as an unanswered one does; the log says so, once per plugin.
+            host_threw(h);
             if constexpr (std::is_void_v<R>) return;
             else return R{};
         }
-        return F(h, a...);
     }
 };
 template <auto F> constexpr auto main_only = &MainOnly<F>::call;
@@ -2239,6 +2597,32 @@ std::optional<std::string> NativeExtension::merchant_level(const net::GameConnec
     const HailstoneItem v = item_struct(item);
     const char* t = run(h().list_level, &v);
     return t ? std::optional<std::string>(t) : std::nullopt;
+}
+
+std::optional<std::string> NativeExtension::item_flags(const net::GameConnection&, const net::Item& item,
+                                                       std::string_view stock) const {
+    if (!l_ || !h().item_flags) return std::nullopt;
+    const HailstoneItem value = item_struct(item);
+    const std::string text(stock);
+    const char* result = run(h().item_flags, &value, text.c_str());
+    return result ? std::optional<std::string>(result) : std::nullopt;
+}
+
+std::optional<std::string> NativeExtension::item_description_append(const net::GameConnection&,
+                                                                   const net::Item& item) const {
+    if (!l_ || !h().item_description_append) return std::nullopt;
+    const HailstoneItem value = item_struct(item);
+    const char* result = run(h().item_description_append, &value);
+    return result ? std::optional<std::string>(result) : std::nullopt;
+}
+
+std::optional<std::string> NativeExtension::loot_confirmation(const net::GameConnection&, const net::Item& item,
+                                                            std::span<const std::uint32_t> descendants,
+                                                            bool complete) const {
+    if (!l_ || !h().loot_confirmation) return std::nullopt;
+    const HailstoneItem value = item_struct(item);
+    const char* result = run(h().loot_confirmation, &value, descendants.data(), descendants.size(), complete ? 1 : 0);
+    return result ? std::optional<std::string>(result) : std::nullopt;
 }
 
 NativePlugins::NativePlugins(NativeEnv env) : impl_(std::make_unique<Impl>()) {
@@ -2290,6 +2674,107 @@ std::vector<NativePlugins::Info> NativePlugins::list() const {
     return out;
 }
 
+bool NativePlugins::world_wanted() const {
+    const auto& m = *impl_;
+    return m.world_geometry.active() || !m.world_owners.empty() ||
+           std::any_of(m.loaded.begin(), m.loaded.end(), [](const auto& l) { return l->hooks.world_frame && world_allowed(*l); });
+}
+
+void NativePlugins::world_frame(HailstoneWorldFrame frame, WorldQueries queries) {
+    auto& m = *impl_;
+    if (m.world_geometry.active()) world_unavailable();
+    m.world_owners.clear();
+    m.world_geometry.begin(frame, std::move(queries));
+    if (!m.world_geometry.active()) return;
+    std::vector<Hooks::Owner> candidates;
+    for (const auto& l : m.loaded)
+        if (world_allowed(*l) && l->hooks.world_frame) candidates.push_back(l->owner);
+    for (const auto owner : candidates) {
+        const auto it = std::find_if(m.loaded.begin(), m.loaded.end(), [&](const auto& l) { return l->owner == owner; });
+        if (it == m.loaded.end() || !world_allowed(**it)) continue;
+        auto* l = it->get();
+        const auto context = m.world_geometry.frame();
+        l->world_ready = true;
+        const bool ok = guarded(*l, "world_frame", [&] {
+            l->hooks.world_frame(&context);
+            return true;
+        });
+        if (ok && world_allowed(*l)) m.world_owners.push_back(owner);
+        else {
+            l->world_ready = false;
+            m.world_geometry.retire(owner);
+        }
+    }
+    m.world_geometry.seal();
+}
+
+const std::vector<OwnedWorldBatch>& NativePlugins::world_batches() const {
+    return impl_->world_geometry.batches();
+}
+
+void NativePlugins::world_recorded(std::size_t batch, std::uint32_t vertices) {
+    impl_->world_geometry.recorded(batch, vertices);
+}
+
+void NativePlugins::world_finish(bool submitted, bool presented) {
+    auto& m = *impl_;
+    if (!m.world_geometry.active()) return;
+    const auto frame = m.world_geometry.frame();
+    auto results = m.world_geometry.finish(submitted, presented);
+    const auto owners = std::move(m.world_owners);
+    m.world_owners.clear();
+    if (!submitted || !presented) m.world_geometry.cancel();
+    // Dispatch copied receipts: a callback may retire another owner without
+    // invalidating this walk or giving that owner a stale completion later.
+    for (const auto& result : results) {
+        const auto it = std::find_if(m.loaded.begin(), m.loaded.end(), [&](const auto& l) {
+            return l->owner == result.owner;
+        });
+        if (it == m.loaded.end() || !world_allowed(**it) || !(**it).hooks.world_frame_result) continue;
+        auto& l = **it;
+        guarded(l, "world_frame_result", [&] { l.hooks.world_frame_result(&result.receipt); });
+    }
+    for (const auto owner : owners) {
+        const auto it = std::find_if(m.loaded.begin(), m.loaded.end(), [&](const auto& l) { return l->owner == owner; });
+        if (it == m.loaded.end()) continue;
+        auto& l = **it;
+        l.world_ready = submitted && presented && world_allowed(l);
+        if (!world_allowed(l) || !l.hooks.world_frame_result) continue;
+        HailstoneWorldReceipt receipt{};
+        receipt.size = sizeof(receipt);
+        receipt.status = HAILSTONE_WORLD_FRAME_FINISHED;
+        receipt.frame = frame.frame;
+        receipt.epoch = frame.epoch;
+        if (submitted) receipt.flags |= HAILSTONE_WORLD_SUBMITTED;
+        if (submitted && presented) receipt.flags |= HAILSTONE_WORLD_PRESENTED;
+        guarded(l, "world_frame_result", [&] { l.hooks.world_frame_result(&receipt); });
+    }
+}
+
+void NativePlugins::world_unavailable() {
+    auto& m = *impl_;
+    const auto frame = m.world_geometry.frame();
+    std::vector<Hooks::Owner> owners;
+    for (auto& l : m.loaded) {
+        if (l->world_ready || std::find(m.world_owners.begin(), m.world_owners.end(), l->owner) != m.world_owners.end())
+            owners.push_back(l->owner);
+        l->world_ready = false;
+    }
+    m.world_geometry.cancel();
+    m.world_owners.clear();
+    for (const auto owner : owners) {
+        const auto it = std::find_if(m.loaded.begin(), m.loaded.end(), [&](const auto& l) { return l->owner == owner; });
+        if (it == m.loaded.end() || !world_allowed(**it) || !(**it).hooks.world_frame_result) continue;
+        auto& l = **it;
+        HailstoneWorldReceipt receipt{};
+        receipt.size = sizeof(receipt);
+        receipt.status = HAILSTONE_WORLD_FRAME_UNAVAILABLE;
+        receipt.frame = frame.frame;
+        receipt.epoch = frame.epoch;
+        guarded(l, "world_frame_result", [&] { l.hooks.world_frame_result(&receipt); });
+    }
+}
+
 bool NativePlugins::loaded(std::string_view name) const { return impl_->find(name) != nullptr; }
 
 bool NativePlugins::has_plugin(std::string_view name) const {
@@ -2306,6 +2791,9 @@ std::uint32_t NativePlugins::loaded_caps(std::string_view name) const {
 namespace {
 // Takes a plugin out of the client: its ShutdownPlugin (when `shutdown`), everything it registered, then its library.
 void discard(NativePlugins::Impl& m, std::unique_ptr<Loaded> l, bool shutdown) {
+    l->unload_pending = true; l->active = false;
+    m.world_geometry.retire(l->owner);
+    std::erase(m.world_owners, l->owner);
     if (shutdown && l->shutdown) guarded(*l, "ShutdownPlugin", [&] { l->shutdown(); });
     m.env.hooks->remove(l->owner);
     if (m.env.web) m.env.web->close_owner(web_owner(*l));
@@ -2394,7 +2882,12 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
                       " is not a Hailstone plugin (no hailstone_plugin_abi / hailstone_plugin_set_host; use HAILSTONE_PLUGIN)");
     }
     // Older ABIs load (the tables only grow at their end); a newer one needs a newer client.
-    if (std::uint32_t got = abi(); got < 1 || got > HAILSTONE_PLUGIN_ABI) {
+    std::uint32_t got = 0;
+    if (!guarded(p, "hailstone_plugin_abi", [&] { got = abi(); return true; })) {
+        SDL_UnloadObject(p.lib);
+        return refuse(name + " failed while reporting its SDK ABI");
+    }
+    if (got < 1 || got > HAILSTONE_PLUGIN_ABI) {
         SDL_UnloadObject(p.lib);
         return refuse(std::format("{} was built for plugin ABI {}, this client has {}", name, got, HAILSTONE_PLUGIN_ABI));
     }
@@ -2507,6 +3000,21 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
     p.table.cursor_origin = main_only<h_cursor_origin>;
     p.owner = m.env.hooks->new_guest("plugin:" + name);
 
+    p.table.select_raid_member = main_only<h_select_raid_member>;
+    p.table.decode_item_packet = main_only<h_decode_item_packet>;
+    p.table.inspect_item_packet = main_only<h_inspect_item_packet>;
+    p.table.manual_follow = main_only<h_manual_follow>;
+    p.table.get_follow_status = main_only<h_get_follow_status>;
+    p.table.get_memorized_spell = main_only<h_get_memorized_spell>;
+    p.table.monotonic_ms = main_only<h_monotonic_ms>;
+    p.table.raid_action = main_only<h_raid_action>;
+    p.table.world_capabilities = main_only<h_world_capabilities>;
+    p.table.world_floor_below = main_only<h_world_floor_below>;
+    p.table.world_anchor = main_only<h_world_anchor>;
+    p.table.world_submit = main_only<h_world_submit>;
+    p.table.world_surface_patch = main_only<h_world_surface_patch>;
+    p.table.measure_binary = main_only<h_measure_binary>;
+    p.table.get_map_policy = main_only<h_get_map_policy>;
     Hooks& hooks = *m.env.hooks;
     Loaded* lp = &p;
     // Each callback runs with the plugin's capabilities and counts as the plugin being busy (no unloading under it).
@@ -2574,7 +3082,13 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
     // Its Lua windows (<folder>/ui/<pack>/), with the UI capability.
     if (p.can(kCapUi) && m.env.ui) m.env.ui->set_folder(name, plugin_folder(*file, name));
 
-    set_host(&p.table);
+    if (!guarded(p, "hailstone_plugin_set_host", [&] {
+            set_host(&p.table);
+            return true;
+        })) {
+        discard(m, std::move(l), false);
+        return refuse(name + " failed while taking its host table; InitializePlugin was not called");
+    }
     m.loaded.push_back(std::move(l));
     std::erase_if(m.failures, [&](const Info& f) { return iequal(f.name, name); });
     // A plugin whose start lets an exception out is taken out again with all it registered so far.
@@ -2671,7 +3185,14 @@ void NativePlugins::policy_changed(const std::vector<std::string>& autoload) {
             revoked.push_back(l->name);
             continue;
         }
+        if (l->caps != caps) {
+            l->policy_generation = core::next_process_identity();
+            l->lifecycle_generation = core::next_process_identity();
+        }
         l->caps = caps;
+        if (!l->can(kCapUi | kCapExtend)) {
+            l->world_ready = false; m.world_geometry.retire(l->owner); std::erase(m.world_owners, l->owner);
+        }
         // No longer allowed to extend the client: out of the chain (a plugin that gains it needs a reload).
         if (l->extension && !l->can(kCapExtend)) {
             l->extension->detach();

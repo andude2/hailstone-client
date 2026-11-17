@@ -10,6 +10,7 @@
 
 #include "app/automation.h"
 #include "app/addon_install.h"
+#include "app/addon_requirements.h"
 #include "mq/lua_mq.h"
 #include "mq_test_world.h"
 #include "core/sha256.h"
@@ -147,6 +148,57 @@ TEST_CASE("Automation: enforcement lazily attributes current code and refreshes 
     CHECK(h.automation->scripts().running("managed"));
     CHECK(h.automation->scripts().caps_of("managed") == plugin::kCapRead);
     CHECK_FALSE(h.automation->scripts().run("copy", {}));
+}
+
+TEST_CASE("Automation: required managed scripts preserve activation and UI packages never become autorun scripts") {
+    AutomationHost h;
+    const auto data = h.world.dir / "data";
+    const std::string code = "while true do require('mq').delay(10) end\n";
+    app::InstalledAddon script;
+    script.name = "managed"; script.source = "maker/managed"; script.version = "1.0.0";
+    script.caps = plugin::kCapRead | plugin::kCapUi;
+    script.autoload = script.enabled = true;
+    script.files = {{"init.lua", code.size(), sha256(code)}};
+    h.write("managed/init.lua", code);
+    app::InstalledAddon interface;
+    interface.name = "interface"; interface.source = "maker/interface"; interface.version = "1.0.0";
+    interface.kind = AddonKind::Ui;
+    const std::string descriptor = "name=Interface\nbase=builtin:modern\n";
+    const auto folder = app::addon_folder(data, AddonKind::Ui, interface.name) / "ui/skin";
+    fs::create_directories(folder);
+    std::ofstream(folder / "ui.ini", std::ios::binary) << descriptor;
+    interface.files = {{"ui/skin/ui.ini", descriptor.size(), sha256(descriptor)}};
+    fs::create_directories(app::addons_dir(data));
+    REQUIRE(app::write_installed_addons(data, {script, interface}));
+    CHECK(app::modified_addon_files(data, interface).empty());
+    h.automation->set_addon_ceilings(app::addon_ceilings(data));
+    h.automation->refresh_managed_addons();
+    auto rules = plugin::parse_server_cfg("[scripts]\nplayer=on\n[addons]\nenforce=on\ndefault=deny\n"
+                                          "required=maker/managed,maker/interface\n");
+    rules.dir = h.world.dir / "profile";
+    net::GameConnectionTestAccess::set_server_rules(*h.world.conn, rules);
+    h.automation->frame();
+    CHECK(h.automation->scripts().running("managed"));
+    CHECK(h.automation->plugin_caps("script:managed") == (plugin::kCapRead | plugin::kCapUi));
+    std::string problem;
+    CHECK(h.automation->required_addons_ready(&problem));
+    CHECK(problem.empty());
+    CHECK_FALSE(h.automation->scripts().running("interface"));
+    CHECK_FALSE(h.automation->scripts().run("interface", {}));
+    const auto managed = app::managed_addon_scripts(data);
+    REQUIRE(managed.size() == 1);
+    CHECK(managed.front().name == "managed");
+    CHECK(app::addon_requirement_problems(rules,
+        {{interface.name, interface.source, AddonKind::Ui, 0, true, false}}).size() == 1); // only script is missing
+    REQUIRE(app::set_addon_enabled(data, "managed", false));
+    h.automation->refresh_managed_addons();
+    h.automation->frame();
+    CHECK_FALSE(h.automation->scripts().running("managed"));
+    CHECK_FALSE(h.automation->required_addons_ready(&problem));
+    CHECK_FALSE(problem.empty());
+    const auto registry = app::read_installed_addons(data);
+    REQUIRE(app::find_addon(registry, "managed"));
+    CHECK_FALSE(app::find_addon(registry, "managed")->enabled); // server requirements do not rewrite player activation
 }
 
 TEST_CASE("Automation: hailstone.autoskill_list gives the player's list with names and conditions") {
@@ -316,7 +368,7 @@ while true do require('mq').delay(10) end
     CHECK(ui.folders()[0].first == "plugin:MQ2Example");
     CHECK(ui.folders()[0].second == plugin_dir);
     CHECK(ui.folders()[1].first == "script:mq2example");
-    // eq.Plugin("MQ2Example") is the compiled plugin's; the script's by its tag.
+    // hs.Plugin("MQ2Example") is the compiled plugin's; the script's by its tag.
     CHECK(ui.call("MQ2Example", "secret", {})->s == "plugin");
     CHECK(ui.call("script:mq2example", "secret", {})->s == "script");
     REQUIRE(ui.menu().size() == 1);

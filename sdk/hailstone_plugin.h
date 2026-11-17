@@ -45,6 +45,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "hailstone_follow.h"
+#include "hailstone_world_geometry.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -437,6 +439,18 @@ typedef struct HailstoneServer {
     char world_host[128];
 } HailstoneServer;
 
+enum HailstoneBinaryKind {
+    HAILSTONE_BINARY_EXECUTABLE = 1,
+    HAILSTONE_BINARY_CALLING_PLUGIN = 2
+};
+typedef struct HailstoneBinaryMeasurement {
+    uint32_t size;
+    uint32_t kind;
+    uint64_t byte_count;
+    uint64_t fnv1a63;       /* FNV-1a64 of all file bytes, with the sign bit cleared */
+    uint8_t sha256[32];
+} HailstoneBinaryMeasurement;
+
 typedef struct HailstonePlayer {
     uint32_t size;
     uint32_t spawn_id; /* 0 before the player is in a zone */
@@ -459,7 +473,10 @@ typedef struct HailstonePlayer {
     uint32_t pet_id;            /* the pet the pet window shows, 0 none */
     int32_t filter_pc_spells;   /* the Options window's "PC Spells" chat filter setting, as the client keeps it */
     int32_t in_zone;            /* 1 while in a zone, camping included: not while zoning or at character select */
+    uint32_t zone_instance;
+    uint32_t observation_flags; /* HAILSTONE_PLAYER_* flags */
 } HailstonePlayer;
+#define HAILSTONE_PLAYER_PROMPT_SAFE 16u
 
 typedef struct HailstoneSpawn {
     uint32_t size;
@@ -481,7 +498,38 @@ typedef struct HailstoneSpawn {
                              * 13 red, 6 grey), 0 none (the player, corpses) */
     uint32_t body_types[4]; /* the spawn record's properties ([0] is the body type) */
     uint32_t body_type_count;
+    /* -- appended in ABI 3; check size before reading -- */
+    uint64_t incarnation;      /* nonzero full-spawn identity; never reuse metadata on a different token */
+    uint32_t observation_flags; /* HAILSTONE_SPAWN_*_KNOWN; absence means unknown, not zero */
+    uint32_t mana_percent, endurance_percent;
+    uint32_t social_flags;     /* HAILSTONE_SOCIAL_* */
+    uint32_t anon;             /* 0 ordinary, 1 anonymous, 2 roleplaying */
+    char last_name[64];
+    char guild_name[64];       /* resolved from the received guild-name cache; empty when unknown */
+    char display_name[64];     /* client's ordinary display name, before title/last-name/leadership decorations */
 } HailstoneSpawn;
+
+#define HAILSTONE_SPAWN_HP_KNOWN 1u
+#define HAILSTONE_SPAWN_MANA_KNOWN 2u
+#define HAILSTONE_SPAWN_ENDURANCE_KNOWN 4u
+#define HAILSTONE_SOCIAL_TRADER 1u
+#define HAILSTONE_SOCIAL_BUYER 2u
+#define HAILSTONE_SOCIAL_LINKDEAD 4u
+#define HAILSTONE_SOCIAL_LFG 8u
+#define HAILSTONE_SOCIAL_AFK 16u
+#define HAILSTONE_RELATION_FRIEND 1u
+#define HAILSTONE_RELATION_GUILD 2u
+
+#define HAILSTONE_MAP_MARKER 0u
+#define HAILSTONE_MAP_FIND 1u
+#define HAILSTONE_MERCHANT_CURSOR_OCCUPIED 1u
+#define HAILSTONE_MERCHANT_SELL_REFUSED 2u
+#define HAILSTONE_MERCHANT_KEPT 4u
+typedef struct HailstoneMerchantSellContext {
+    uint32_t size, merchant_id, inventory_slot, item_id, quantity;
+    HailstoneItemSlot item_slot; /* lossless carried slot; scalar inventory_slot is its top-level slot */
+    uint32_t flags; /* blocked sale reasons, HAILSTONE_MERCHANT_*; consume without sending when nonzero */
+} HailstoneMerchantSellContext;
 
 /* How a spawn shows on the game's maps (HailstoneHooks.map_spawn). */
 typedef struct HailstoneMapSpawn {
@@ -490,6 +538,23 @@ typedef struct HailstoneMapSpawn {
     int32_t layer;  /* the map's layer 0..3: its layer switches hide it */
     char label[64]; /* shown as the map shows its labels; "" the dot alone */
 } HailstoneMapSpawn;
+
+/* Optional map presentation ownership. No provider/zero flags keeps stock behavior.
+ * Restrictive flags combine across active providers. The first CUSTOM_SPAWNS
+ * provider exclusively supplies extension spawn marks; map_visible still denies. */
+#define HAILSTONE_MAP_POLICY_CUSTOM_SPAWNS 1u
+#define HAILSTONE_MAP_POLICY_HIDE_STOCK_NPCS 2u
+#define HAILSTONE_MAP_POLICY_DISABLE_NPC_FIND 4u
+typedef struct HailstoneMapPolicy {
+    uint32_t size;
+    uint32_t flags;
+    char name[64]; /* optional plain display name, NUL terminated */
+    /* Optional tails: the original 72-byte prefix remains valid. Providers advance revision when their
+     * policy content changes; readers receive a host-effective revision including provider lifetimes.
+     * context is host-issued connection/zone/player lifetime, ignored in provider answers. */
+    uint64_t revision;
+    uint64_t context;
+} HailstoneMapPolicy;
 
 typedef struct HailstoneSpell {
     uint32_t size;
@@ -512,6 +577,10 @@ typedef struct HailstoneItem {
     uint32_t classes, races;        /* bit masks */
     uint32_t icon, stack_count, charges;
     uint32_t click_spell, scroll_spell; /* the effects' spell ids, 0 none */
+    char serial[17]; /* received instance identity, empty when unavailable */
+    uint32_t instance_id;
+    uint32_t augment_ids[6]; /* zero for known empty sockets; bags never report their contents as augments */
+    uint32_t configuration_complete; /* zero when installed configuration cannot be represented */
 } HailstoneItem;
 
 typedef struct HailstoneBuff {
@@ -531,7 +600,7 @@ typedef struct HailstoneXTarget {
 
 /* ---- the plugin's Lua windows (ABI 2, HAILSTONE_CAP_UI; docs/plugins.md "Plugin windows") ----
  * A plugin's windows are Lua files in its folder's ui/<pack>/ (plugins/<name>/ui/modern/, ui/gamepad/ ...), loaded
- * with the player's UI pack while the plugin is loaded. They reach the plugin through eq.Plugin("<name>"): its
+ * with the player's UI pack while the plugin is loaded. They reach the plugin through hs.UI.plugins.Get("<name>"): its
  * functions take Lua values and give one back. A function reads its arguments with arg / arg_field and builds its
  * result with the out_* functions: a value, or an array or table opened with out_begin_*, filled (in a table:
  * out_key before each value; a whole-number key, "12", is the Lua integer 12) and closed with out_end. Returning 0
@@ -632,6 +701,22 @@ typedef struct HailstoneHooks {
      * shows the spawn as *out says (filled with the defaults first). Asked for every spawn but the player's, each
      * time a map is drawn. */
     int (*map_spawn)(const HailstoneSpawn* spawn, HailstoneMapSpawn* out);
+    HailstoneFollowProfileFn follow_profile;
+    HailstoneMountProfileFn mount_profile;
+    /* UI + EXTEND. -1 abstains, 0 denies, 1 allows. Deny wins across extensions. */
+    int (*map_visible)(const HailstoneSpawn* spawn, uint32_t purpose);
+    /* PACKETS + EXTEND. A validated carried-item right click while a merchant is open.
+     * Nonzero consumes the click. The extension implements its own wire protocol. */
+    int (*merchant_right_click)(const HailstoneMerchantSellContext* context);
+    const char* (*item_flags)(const HailstoneItem* item, const char* stock_flags);
+    const char* (*item_description_append)(const HailstoneItem* item);
+    uint64_t (*item_presentation_revision)(void);
+    const char* (*loot_confirmation)(const HailstoneItem* root, const uint32_t* descendants, size_t count, int complete);
+    void (*world_frame)(const HailstoneWorldFrame* frame);
+    void (*world_frame_result)(const HailstoneWorldReceipt* receipt);
+    const char* (*zone_display_name)(uint32_t zone_id, uint32_t instance_id);
+    /* UI + EXTEND. Nonzero supplies a validated map policy; zero abstains. */
+    int (*map_policy)(HailstoneMapPolicy* out);
 } HailstoneHooks;
 
 
@@ -708,7 +793,7 @@ typedef struct PluginHostApi {
     int (*right_click_item)(void* host, const HailstoneItemSlot* slot, uint32_t class_id);
 
     /* ---- ABI 2: the plugin's Lua windows (HAILSTONE_CAP_UI) ---- */
-    /* A function its windows call as eq.Plugin("<plugin>").<name>(...) (or .call("<name>", ...)). */
+    /* A function its windows call as hs.UI.plugins.Get("<plugin>").<name>(...) (or .call("<name>", ...)). */
     int (*add_ui_function)(void* host, const char* name, HailstoneUiFn fn, void* user);
     void (*remove_ui_function)(void* host, const char* name);
     /* The arguments: their count; one as a value (a table gives HAILSTONE_TABLE); a table argument's field by key.
@@ -856,6 +941,45 @@ typedef struct PluginHostApi {
      * is written; count < total means out_size was too small. Added later in ABI 3: test
      * HAILSTONE_HOST_HAS(host, get_ability_data_bulk) first. */
     int32_t (*get_ability_data_bulk)(void* host, unsigned char* out, int32_t out_size);
+    /* Targets a raid member in the zone, or a member's pet (HAILSTONE_CAP_READ and HAILSTONE_CAP_TARGET): spawn_id
+     * as get_raid_data_bulk's spawnID, incarnation as get_spawn's HailstoneSpawn.incarnation for it, so a spawn id
+     * reused since is refused. 1 targeted, 0 not. Added later in ABI 3: test HAILSTONE_HOST_HAS first. */
+    int (*select_raid_member)(void* host, uint32_t spawn_id, uint64_t incarnation);
+    /* READ: local decoder, at most 256 KiB. READ + UI: local item inspector. */
+    int (*decode_item_packet)(void* host, const void* data, size_t size, HailstoneItemSlot* slot, HailstoneItem* item);
+    int (*inspect_item_packet)(void* host, const void* data, size_t size);
+    /* MOVE + EXTEND: literal start/stop/toggle, no command evaluation. */
+    int (*manual_follow)(void* host, const char* action);
+    int (*get_follow_status)(void* host, HailstoneFollowStatus* out);
+    uint32_t (*get_memorized_spell)(void* host, uint32_t index);
+    /* Asks the server to change the raid (HAILSTONE_CAP_READ and HAILSTONE_CAP_ACTIONS), as the raid window's
+     * leader does: HAILSTONE_RAID_MOVE puts the member `name` in `group`, as get_raid_data_bulk numbers groups (0..11,
+     * -1 ungrouped). Only the raid's leader, in a locked raid, to a group with room; 1 sent, 0 refused. The server
+     * decides; the roster changes when it says so. Added later in ABI 3: test HAILSTONE_HOST_HAS first. */
+    int (*raid_action)(void* host, const char* name, uint32_t action, int32_t group);
+    uint64_t (*monotonic_ms)(void* host);
+    uint32_t (*world_capabilities)(void* host);
+    /* Highest upward drawn opaque/masked surface at or below seed_z (the caller's
+     * bounded ceiling): terrain, static/passable props, current animated scenery,
+     * doors and placed objects. Excludes invisible collision, undersides,
+     * transparent surfaces, creatures, dropped items, ghosts and missiles.
+     * Masked triangles use their footprint; the CPU does not sample texture alpha. */
+    int (*world_floor_below)(void* host, uint64_t frame, uint32_t epoch, float x, float y, float seed_z, float* out_z);
+    int (*world_anchor)(void* host, uint64_t frame, uint32_t epoch, uint32_t spawn_id, HailstoneWorldAnchor* out);
+    int (*world_submit)(void* host, const HailstoneWorldSubmission* submission);
+    /* UI + EXTEND, current frame only. PLANAR certifies complete drawn-surface
+     * coverage, including current props/animation, rather than sampled flatness.
+     * MISMATCH/MISSING supplies an interior witness or its rounded float value
+     * with validated source face and positive-area interior region. Budget exhaustion
+     * or incomplete scene proof returns DEFERRED and leaves out unchanged. */
+    int (*world_surface_patch)(void* host, const HailstoneWorldSurfacePatch* query,
+                               HailstoneWorldSurfacePatchResult* out);
+    /* READ: measures the running executable file or this caller's admitted loaded library copy.
+     * No arbitrary paths or hardware identifiers. File measurement is not remote memory attestation.
+     * Unreadable/changed files, a changed plugin-copy digest or unknown kind fail without changing out. */
+    int (*measure_binary)(void* host, uint32_t kind, HailstoneBinaryMeasurement* out);
+    /* READ. Current aggregate map policy. Initialize out->size; zero flags is stock. */
+    int (*get_map_policy)(void* host, HailstoneMapPolicy* out);
 } PluginHostApi;
 /* What use_ability and ability_state take: the kinds of ability the Ability Book lists. The values are stable. */
 enum HS_AbilityKinds {
@@ -886,6 +1010,8 @@ enum HS_AbilityKinds {
 #define HAILSTONE_ID_NAME_RECORD_SIZE 8
 #define HAILSTONE_ABILITY_RECORD_SIZE 32 /* get_ability_data_bulk's fixed part, before the name */
 #define HS_BULK_LIST_HEADER_SIZE 8 /* HS_Bulk_ListHeader */
+/* raid_action's actions. */
+#define HAILSTONE_RAID_MOVE 1u /* move a member to another group, or out of every group */
 /* Whether this client's host table has `field` (one added after the plugin's ABI) and it is set. */
 #define HAILSTONE_HOST_HAS(h, field)                                                                                   \
     ((h) && (h)->size >= offsetof(PluginHostApi, field) + sizeof((h)->field) && (h)->field)

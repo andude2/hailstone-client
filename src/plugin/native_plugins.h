@@ -12,6 +12,7 @@
 // then it does not load, and consent() holds the question for the UI; answer_consent() takes the answer.
 
 #include <cstdint>
+#include "plugin/world_geometry.h"
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -22,6 +23,7 @@
 
 #include "mq/tlo.h"
 #include "net/packet.h"
+#include "core/sha256.h"
 #include "plugin/ability_bulk.h"
 #include "plugin/consent.h"
 #include "plugin/hooks.h"
@@ -63,7 +65,7 @@ struct NativeEnv {
     std::function<int(int bar)> hot_bar_page;
     std::function<void(int bar, int page)> set_hot_bar_page;
     // ABI 3: the player's abilities by name (use_ability, ability_state), as the Ability Book's rows use and check
-    // them (app/lua_eq_abilitybook.cpp, shared with the scripts and the TLOs). Empty: none known.
+    // them (app/lua_ui_abilitybook.cpp, shared with the scripts and the TLOs). Empty: none known.
     std::function<bool(mq::AbilityKind, std::string_view)> use_ability;
     std::function<std::optional<mq::AbilityState>(mq::AbilityKind, std::string_view)> ability;
     // ABI 3: the Ability Book's usable entries for get_ability_data_bulk (app/ability_bulk.h), in its list order.
@@ -80,6 +82,14 @@ class NativePlugins {
 public:
     explicit NativePlugins(NativeEnv env);
     ~NativePlugins(); // unloads everything (ShutdownPlugin)
+    // Whether a loaded plugin may take a world frame (it has the world_frame hook and its permissions): without one,
+    // the client builds no frame (a stock server's case).
+    bool world_wanted() const;
+    void world_frame(HailstoneWorldFrame frame, WorldQueries queries);
+    const std::vector<OwnedWorldBatch>& world_batches() const;
+    void world_recorded(std::size_t batch, std::uint32_t vertices);
+    void world_finish(bool submitted, bool presented);
+    void world_unavailable();
     NativePlugins(const NativePlugins&) = delete;
     NativePlugins& operator=(const NativePlugins&) = delete;
 

@@ -6,6 +6,7 @@
 #include "mq/spawn_search.h"
 #include "mq/tlo.h"
 #include "mq_test_world.h"
+#include "game/server_ext.h"
 
 using namespace hailstone;
 using mq::Value;
@@ -27,6 +28,26 @@ struct Fixture {
 };
 
 } // namespace
+
+// A server extension's zone_display_name changes the label the HUD and map show, not the zone's name: Zone and
+// Zone.Name stay the zone's long name, as scripts store and compare it.
+TEST_CASE("TLO: Zone.Name is the zone's own name whatever a server extension displays") {
+    struct Renamer final : game::ServerExtension {
+        std::optional<std::string> zone_display_name(const net::GameConnection&, std::uint32_t, std::uint32_t) const override {
+            return "Shown Elsewhere";
+        }
+    };
+    net::ConnectionOptions options;
+    options.plugins = std::make_shared<Renamer>();
+    mq_test::World world("hailstone_mq_tlo_zone_name", options);
+    mq::Registry reg;
+    mq::register_game_tlos(reg);
+    mq::Context ctx;
+    ctx.registry = &reg;
+    ctx.conn = world.conn.get();
+    REQUIRE(world.conn->zone_display_name() == "Shown Elsewhere");
+    CHECK(mq::parse_macro_data(ctx, "${Zone.Name} / ${Zone}") == "North Qeynos / North Qeynos");
+}
 
 TEST_CASE("TLO: Me's HP is Cur_HP / Max_HP, the items' HP EQEmu's HP update leaves out included") {
     Fixture f;

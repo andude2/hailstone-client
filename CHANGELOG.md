@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Interfaces: Modern and Gamepad are now built on one shared UI API (`hs.UI`). An interface of your own can build on either (`base=modern` in its `ui.ini`) and change only the windows it wants, and interfaces can be installed as add-ons from the login screen's Add-ons. An add-on interface draws the game and acts in it as the built-in ones do, but the login and server screens, your password, your add-ons and the server's compiled-plugin question stay with the built-in interface under it
+- Options > Interface: picking another interface in game switches at once, without logging in again, and the page shows the interface in use, what it builds on and any errors in it
+- For UI and add-on authors: the UI's Lua table is now named `hs`; `eq` stays another name for the same table for good, so existing add-ons and your own files keep working
+- F10 (Toggle UI Display, which can be moved under Options > Keys > Windows) hides the interface in the world and brings it back without changing any window's setting; a server's compiled-plugin question still shows while it waits for your answer
+- Gamepad interface: windows fit narrow and short screens, keeping their title bars and close buttons on screen
+- Map and Raid window: add-ons can offer actions there; the maps show a Map controls button when one does
+- Find and Tracking against a stock server: a request the server never answers (a /find of a Bazaar trader) no longer switches /find, the Find window's paths or Tracking off until you zone; a /find and a walk's path asked together each get their own answer again
+- `/stick` and walks to a spawn stop when that spawn is replaced by another under the same id, when you die and when you zone
+- Servers with a client add-on of their own can now own the map's NPC marks, switch off NPC Find and Tracking there, rename the zone shown on the HUD and the map (a script's `${Zone.Name}` stays the zone's own name), change follow and mount movement, sell an item at a merchant with a right click, add item notes and loot questions, draw in the world and replace name plates. Against any other server nothing changes
+- Add-ons: a script add-on can ask to start by itself (`autoload` in its manifest), and every installed add-on has an Enabled switch in Add-ons
+- Lua UI: colour swatches and pickers for interfaces and add-on settings, and every ImGui window flag
+- Add-on policies: a server's `[addons]` rules cover interfaces too; under `default = deny` an interface put in `ui/` by hand is refused as any unlisted add-on is, and the built-in one is used instead
+- For plugin authors: new host functions and hooks for server add-ons (docs/plugins.md "Server add-on services"): `raid_action` and `select_raid_member`, item decoding and the item inspector, manual follow and its status, the memorised spells, world geometry, `measure_binary` (the client's executable or the plugin's own file) and the map policy, all added later in ABI 3. A plugin built with this SDK still loads in 0.7.0 and 0.7.1
 - Environmental particles: legacy server-placed effects now draw from invisible particle switches, restoring missing waterfall cascades
 - `/doability` takes the name of any of your abilities as well as the Actions window's button (`/doability Bash`, `/doability fury`, in any case): a skill, a discipline or an activated AA, used as its Ability Book row is; a name that is more than one kind's is the skill's first, then the discipline's, then the AA's. A number still means button 1-10
 - For plugin authors: `use_ability` uses one of the player's skills, disciplines or activated AAs by name as the Ability Book's row does, and `ability_state` says whether it is ready (its remaining and reuse time); both are added later in ABI 3, so test `HAILSTONE_HOST_HAS` first (docs/plugins.md)

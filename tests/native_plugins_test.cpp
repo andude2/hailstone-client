@@ -7,8 +7,12 @@
 #include <deque>
 #include <fstream>
 #include <thread>
+#include <stdexcept>
 
 #include "core/sha256.h"
+#include "core/binary_measurement.h"
+#include "net/item_packets.h"
+#include "game/server_ext_chain.h"
 #include "mq/commands.h"
 #include "mq/parse.h"
 #include "platform/tcp_socket.h"
@@ -29,7 +33,10 @@ namespace fs = std::filesystem;
 namespace {
 
 struct Host {
-    mq_test::World world{"hailstone_native_plugins_test"};
+    std::shared_ptr<game::ExtensionChain> extensions = std::make_shared<game::ExtensionChain>();
+    mq_test::World world{"hailstone_native_plugins_test", [this] {
+        net::ConnectionOptions options; options.plugins = extensions; return options;
+    }()};
     fs::path plugin_dir = world.dir / "plugins";
     plugin::Hooks hooks;
     plugin::Policy policy;
@@ -74,6 +81,7 @@ struct Host {
         ne.config_dir = world.dir / "config";
         ne.web = web;
         ne.connection = [this] { return world.conn.get(); };
+        ne.extensions = extensions.get();
         ne.use_ability = [this](mq::AbilityKind kind, std::string_view name) {
             used.emplace_back(static_cast<int>(kind), std::string(name));
             return true;
@@ -123,6 +131,219 @@ struct Host {
 
 } // namespace
 
+TEST_CASE("native plugins: received item decode commits both outputs only for an accepted prefix") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll);
+    REQUIRE(h.plugins->load("HostProbe"));
+    net::ItemPacket item;
+    item.type = net::kItemPacketTrade;
+    item.item.id = 7001;
+    item.item.name = "Decoder fixture";
+    item.item.slot = net::ItemSlot::possessions(net::kSlotGeneral1, 2);
+    auto packet = net::encode_item_packet(false, item);
+    REQUIRE(h.hooks.packet(plugin::Stream::Zone, plugin::Direction::In, packet) == plugin::Flow::Continue);
+    h.run("/probedecode 3");
+    CHECK(h.printed_line("[Probe] decode 0 slot_unchanged 1 item_unchanged 1 id 1515870810"));
+    h.run("/probedecode");
+    CHECK(h.printed_line("[Probe] decode 1 slot_unchanged 0 item_unchanged 0 id 7001"));
+    h.approve(plugin::kCapAll & ~plugin::kCapRead); h.plugins->policy_changed({});
+    h.printed.clear();
+    h.run("/probedecode");
+    CHECK(h.printed_line("[Probe] decode 0 slot_unchanged 1 item_unchanged 1 id 1515870810"));
+    h.approve(plugin::kCapAll); h.plugins->policy_changed({});
+    packet.data.clear();
+    REQUIRE(h.hooks.packet(plugin::Stream::Zone, plugin::Direction::In, packet) == plugin::Flow::Continue);
+    h.printed.clear();
+    h.run("/probedecode");
+    CHECK(h.printed_line("[Probe] decode 0 slot_unchanged 1 item_unchanged 1 id 1515870810"));
+}
+
+TEST_CASE("native plugins: a raid member is targeted by spawn id and incarnation, a reused id refused") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll);
+    auto& w = net::GameConnectionTestAccess::world(*h.world.conn);
+    w.spawns.at(1).incarnation = 100;
+    auto& actor = w.spawns.at(12); actor.incarnation = 200; actor.hp_known = true;
+    net::GameConnectionTestAccess::group(*h.world.conn).mana_percent[12] = 42;
+    auto& raid = net::GameConnectionTestAccess::raid(*h.world.conn);
+    raid.active = true; raid.leader = "Tester";
+    game::RaidMember member; member.name = "Groupie"; member.group = 0;
+    raid.members.push_back(member);
+    REQUIRE(h.plugins->load("HostProbe"));
+    h.run("/probeservices");
+    CHECK(h.printed_line("[Probe] services spawn 1 token 200 flags 3 mana 42"));
+    h.run("/probeselectraid stale");
+    CHECK(h.printed_line("[Probe] raid selection 0")); CHECK(w.target_id == 10);
+    h.run("/probeselectraid");
+    CHECK(h.printed_line("[Probe] raid selection 1")); CHECK(w.target_id == 12);
+    // Not in the roster any more: refused, though the spawn is the same.
+    raid.members.clear(); w.target_id = 10; h.printed.clear();
+    h.run("/probeselectraid");
+    CHECK(h.printed_line("[Probe] raid selection 0")); CHECK(w.target_id == 10);
+}
+
+TEST_CASE("native plugins: raid actor selection requires target permission") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll & ~plugin::kCapTarget);
+    auto& w = net::GameConnectionTestAccess::world(*h.world.conn);
+    w.spawns.at(1).incarnation = 100; w.spawns.at(12).incarnation = 200;
+    auto& raid = net::GameConnectionTestAccess::raid(*h.world.conn);
+    raid.active = true;
+    game::RaidMember member; member.name = "Groupie"; raid.members.push_back(member);
+    REQUIRE(h.plugins->load("HostProbe"));
+    h.run("/probeservices"); h.run("/probeselectraid");
+    CHECK(h.printed_line("[Probe] raid selection 0")); CHECK(w.target_id == 10);
+}
+
+// raid_action numbers groups as get_raid_data_bulk does (0..11, -1 none) and is the raid leader's, in a locked raid.
+TEST_CASE("native plugins: raid_action moves a member only as the locked raid's leader, to a group with room") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll);
+    auto& raid = net::GameConnectionTestAccess::raid(*h.world.conn);
+    raid.active = true; raid.leader = "Someone"; raid.locked = true;
+    game::RaidMember member; member.name = "Groupie"; member.group = 0;
+    raid.members.push_back(member);
+    for (int i = 0; i < 6; ++i) {
+        game::RaidMember full; full.name = "Full" + std::to_string(i); full.group = 3;
+        raid.members.push_back(full);
+    }
+    REQUIRE(h.plugins->load("HostProbe"));
+    auto move = [&](const std::string& args) {
+        h.printed.clear();
+        h.run("/proberaidmove " + args);
+        return h.printed.empty() ? std::string{} : h.printed.back();
+    };
+    CHECK(move("Groupie 2") == "[Probe] raid move 0"); // not the leader
+    raid.leader = h.world.conn->character_name();
+    CHECK(move("Groupie 2") == "[Probe] raid move 1");
+    CHECK(move("Groupie -1") == "[Probe] raid move 1");
+    CHECK(move("Groupie 3") == "[Probe] raid move 0");  // six there already
+    CHECK(move("Groupie 12") == "[Probe] raid move 0"); // no such group
+    CHECK(move("Nobody 2") == "[Probe] raid move 0");
+    raid.locked = false;
+    CHECK(move("Groupie 2") == "[Probe] raid move 0");
+}
+
+TEST_CASE("native plugins: binary measurement uses the admitted library copy and preserves failures") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll);
+    const auto measured = measure_binary_file(h.file);
+    REQUIRE(measured);
+    REQUIRE(h.plugins->load("HostProbe"));
+    const auto expected = "[Probe] binary kind 2 bytes " + std::to_string(measured->byte_count) +
+                          " fnv " + std::to_string(measured->fnv1a63) + " sha " + to_hex(measured->sha256);
+    h.run("/probebinary 2");
+    CHECK(h.printed_line(expected));
+    h.printed.clear();
+    { std::ofstream replacement(h.file, std::ios::binary | std::ios::trunc); replacement << "new source file"; }
+    h.run("/probebinary 2");
+    CHECK(h.printed_line(expected)); // updating the installed file does not change the loaded module's identity
+    h.run("/probebinary 99");
+    CHECK(h.printed_line("[Probe] binary result 0 untouched 1"));
+    h.printed.clear(); h.run("/probebinary 2 3");
+    CHECK(h.printed_line("[Probe] binary result 0 untouched 1"));
+    h.printed.clear(); h.run("/probebinary 2 4");
+    CHECK(h.printed_line("[Probe] binary result 1 untouched 1"));
+    h.run("/probebinarythread");
+    CHECK(h.printed_line("[Probe] binary thread 0"));
+}
+
+TEST_CASE("native plugins: map policy validates copied hooks, prefixes, capabilities and callback recursion") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll); REQUIRE(h.plugins->load("HostProbe"));
+    CHECK(h.world.conn->server_ext().map_policy(*h.world.conn).flags == 0);
+    h.run("/probemapset 7");
+    auto policy = h.world.conn->server_ext().map_policy(*h.world.conn);
+    CHECK(policy.flags == 7); CHECK(policy.name == "Probe map");
+    h.run("/probemappolicy");
+    CHECK(h.printed_line("[Probe] map result 1 flags 7 untouched 0 name Probe map"));
+    h.run("/probemappolicy 3");
+    CHECK(h.printed_line("[Probe] map result 0 flags 1515870810 untouched 1 name -"));
+    h.run("/probemappolicy 4");
+    CHECK(h.printed_line("[Probe] map result 1 flags 1515870810 untouched 1 name -"));
+    h.run("/probemapthread"); CHECK(h.printed_line("[Probe] map thread 0"));
+    for (int malformed = 1; malformed <= 4; ++malformed) {
+        h.run("/probemapset 7 " + std::to_string(malformed));
+        CHECK(h.world.conn->server_ext().map_policy(*h.world.conn).flags == 0);
+    }
+    h.run("/probemapset 7 5");
+    CHECK(h.world.conn->server_ext().map_policy(*h.world.conn).flags == 7);
+    CHECK(h.printed_line("[Probe] nested map 0"));
+    h.run("/probemapset 7 6");
+    CHECK(h.world.conn->server_ext().map_policy(*h.world.conn).flags == 0); // retires inside its callback
+    CHECK(h.world.conn->server_ext().map_policy(*h.world.conn).flags == 0);
+    h.run("/probemapset 7");
+    h.approve(plugin::kCapAll & ~plugin::kCapUi); h.plugins->policy_changed({});
+    CHECK(h.world.conn->server_ext().map_policy(*h.world.conn).flags == 0);
+}
+
+TEST_CASE("native plugins: host provider exceptions return failure before crossing SDK frames") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll); REQUIRE(h.plugins->load("HostProbe"));
+    struct Provider final : game::ServerExtension {
+        bool fail = true;
+        game::MapPolicy map_policy(const net::GameConnection&) const override {
+            if (fail) throw std::runtime_error("host policy failed");
+            return {game::MapPolicyCustomSpawns, "Host provider", 1};
+        }
+    };
+    auto provider = std::make_shared<Provider>(); h.extensions->add(provider);
+    CHECK_NOTHROW(h.run("/probemappolicy"));
+    CHECK(h.printed_line("[Probe] map result 0 flags 1515870810 untouched 1 name -"));
+    CHECK(h.plugins->loaded("HostProbe"));
+    provider->fail = false;
+    h.run("/probemappolicy");
+    CHECK(h.printed_line("[Probe] map result 1 flags 1 untouched 0 name Host provider"));
+}
+
+TEST_CASE("native plugins: map policy reads need READ and old hook tables keep stock defaults") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll & ~plugin::kCapRead); REQUIRE(h.plugins->load("HostProbe"));
+    h.run("/probemappolicy");
+    CHECK(h.printed_line("[Probe] map result 0 flags 1515870810 untouched 1 name -"));
+    Host old;
+    old.approve(plugin::kCapAll); REQUIRE(old.plugins->load("MQ2Example"));
+    CHECK(old.world.conn->server_ext().map_policy(*old.world.conn).flags == 0);
+}
+
+TEST_CASE("native plugins: map policy accepts old aligned prefixes and changes across unseen owner transitions") {
+    Host h(false,nullptr,HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll);REQUIRE(h.plugins->load("HostProbe"));
+    const auto current=[&]{return h.world.conn->server_ext().map_policy(*h.world.conn);};
+    const auto lifecycle=[&]{return h.world.conn->server_ext().lifecycle_revision(*h.world.conn);};
+    const auto initial_lifecycle=lifecycle();
+    for(const int format:{7,8,0}) {
+        h.run("/probemapset 7 "+std::to_string(format)+" 42");
+        const auto policy=current();CHECK(policy.flags==7);CHECK(policy.name=="Probe map");CHECK(policy.revision!=0);
+        CHECK(lifecycle()==initial_lifecycle); // map-only content and optional record format do not retire Tracking
+        for(const int size:{72,80,88}) {
+            h.run("/probemapprefix "+std::to_string(size));
+            CHECK(h.printed_line("[Probe] map prefix "+std::to_string(size)+" result 1 flags 7 canary 1 revision "+
+                (size>=80?"1":"0")+" context "+(size>=88?"1":"0")));
+        }
+    }
+    auto before=current().revision;CHECK(current().revision==before);
+    h.run("/probemapset 7 0 43");CHECK(current().revision!=before);CHECK(lifecycle()==initial_lifecycle);
+    before=current().revision;h.run("/probemapcycle");CHECK(current().revision!=before);CHECK(lifecycle()!=initial_lifecycle);
+    before=current().revision;
+    const auto before_caps=lifecycle();
+    h.approve(plugin::kCapAll&~plugin::kCapUi);h.plugins->policy_changed({});
+    h.approve(plugin::kCapAll);h.plugins->policy_changed({});
+    CHECK(current().revision!=before); // no policy query observed the revoked interval
+    CHECK(lifecycle()!=before_caps);
+    before=current().revision;
+    REQUIRE(h.plugins->unload("HostProbe"));REQUIRE(h.plugins->load("HostProbe"));
+    h.run("/probemapset 7 0 43");CHECK(current().revision!=before);
+}
+
+TEST_CASE("native plugins: binary measurement requires read permission") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll & ~plugin::kCapRead);
+    REQUIRE(h.plugins->load("HostProbe"));
+    h.run("/probebinary 2");
+    CHECK(h.printed_line("[Probe] binary result 0 untouched 1"));
+}
+
 TEST_CASE("native plugins: off before the zone-in; free without a hailstone.cfg; the player's only when it says") {
     Host h;
     auto all = h.plugins->list();
@@ -145,6 +366,20 @@ TEST_CASE("native plugins: off before the zone-in; free without a hailstone.cfg;
     REQUIRE(h.plugins->load("MQ2Example"));
     CHECK(h.plugins->list()[0].caps == plugin::kCapAll);
     h.plugins->unload("MQ2Example");
+}
+
+// A plugin built against the 0.7.1-beta SDK (tests/plugins/Sdk071Plugin.c, its frozen header): it exports
+// hailstone_plugin_set_host and nmsc_plugin_set_host only, and reads the host table by the released positions. The
+// table grows at its end, so it loads and its calls land where its header put them.
+TEST_CASE("native plugins: a plugin built against the 0.7.1 SDK loads and finds its released host entries") {
+    Host h(false, nullptr, HAILSTONE_SDK071_PLUGIN);
+    h.approve(plugin::kCapAll);
+    std::string why;
+    REQUIRE_MESSAGE(h.plugins->load("Sdk071Plugin", &why), why);
+    CHECK(h.printed_line("[Sdk071] loaded"));
+    h.run("/sdk071");
+    // Whole 16-byte xtarget records (remainder 0): the call reached get_xtarget_data_bulk, not a later entry.
+    CHECK(h.printed_line("[Sdk071] abi 3 table 1 name Sdk071Plugin xtarget 0"));
 }
 
 TEST_CASE("native plugins: MQ callbacks, commands and TLOs, then unloaded cleanly") {

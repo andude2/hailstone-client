@@ -12,6 +12,7 @@
 
 #include "app/addon_install.h"
 #include "core/log.h"
+#include "game/nameplate_canvas.h"
 #include "mq/commands.h"
 #include "mq/lua_mq.h"
 #include "mq/tlo.h"
@@ -40,6 +41,7 @@ struct Automation::Impl {
     AutomationEnv env;
     plugin::Hooks hooks;
     std::shared_ptr<game::ExtensionChain> extensions = std::make_shared<game::ExtensionChain>();
+    game::NameplateCanvasRegistry nameplates;
     plugin::UiBridge plugin_ui;
     plugin::Policy policy;
     std::vector<plugin::Ceiling> registry_ceilings;
@@ -180,6 +182,7 @@ Automation::Automation(AutomationEnv env) : impl_(std::make_unique<Impl>()) {
     se.config_dir = m.env.data_dir / "scripts" / "config";
     // Scripts as plugins (mq/lua_hailstone.cpp): the same chain, UI bridge and packets as the compiled plugins.
     se.extensions = m.extensions.get();
+    se.nameplates = &m.nameplates;
     se.ui = &m.plugin_ui;
     se.web = m.env.web;
     se.connection = [&m] { return m.conn(); };
@@ -258,8 +261,13 @@ bool Automation::required_addons_ready(std::string* problem) const {
     return impl_->scripts->required_addons_ready(problem);
 }
 
+void Automation::refresh_managed_addons() {
+    impl_->scripts->set_managed_addons(managed_addon_scripts(impl_->env.data_dir));
+}
+
 plugin::Hooks& Automation::hooks() { return impl_->hooks; }
 std::shared_ptr<game::ExtensionChain> Automation::extensions() { return impl_->extensions; }
+game::NameplateCanvasRegistry& Automation::nameplates() { return impl_->nameplates; }
 plugin::UiBridge& Automation::plugin_ui() { return impl_->plugin_ui; }
 mq::ScriptHost& Automation::scripts() { return *impl_->scripts; }
 
@@ -324,8 +332,32 @@ void Automation::imgui(bool dev) {
     ui::lua::raise_guarded_windows(); // the question above every window drawn this frame
 }
 
+bool Automation::world_wanted() const { return impl_->plugins && impl_->plugins->world_wanted(); }
+
+void Automation::world_frame(HailstoneWorldFrame frame, plugin::WorldQueries queries) {
+    if (impl_->plugins) impl_->plugins->world_frame(frame, std::move(queries));
+}
+
+const std::vector<plugin::OwnedWorldBatch>& Automation::world_batches() const {
+    static const std::vector<plugin::OwnedWorldBatch> empty;
+    return impl_->plugins ? impl_->plugins->world_batches() : empty;
+}
+
+void Automation::world_recorded(std::size_t batch, std::uint32_t vertices) {
+    if (impl_->plugins) impl_->plugins->world_recorded(batch, vertices);
+}
+
+void Automation::world_finish(bool submitted, bool presented) {
+    if (impl_->plugins) impl_->plugins->world_finish(submitted, presented);
+}
+
+void Automation::world_unavailable() {
+    if (impl_->plugins) impl_->plugins->world_unavailable();
+}
+
 void Automation::shutdown() {
     Impl& m = *impl_;
+    world_unavailable();
     if (m.scripts) m.scripts->stop_all();
     if (m.plugins) m.plugins->unload_all();
 }

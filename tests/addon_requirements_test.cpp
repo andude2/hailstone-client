@@ -4,6 +4,7 @@
 #include "addon_test_util.h"
 #include "scratch_dir.h"
 #include "ui/dev_screens.h"
+#include "ui/ui_packs.h"
 
 using namespace hailstone;
 using namespace hailstone::app;
@@ -107,6 +108,86 @@ TEST_CASE("addon requirements: installed upscalers require integrity and defer a
     CHECK(addon_requirement_problems(r, {a}).empty());
     a.intact = false;
     CHECK(addon_requirement_problems(r, {a}).size() == 1);
+}
+
+TEST_CASE("addon requirements: required interfaces need intact installation without script startup or selection") {
+    auto addon = helper();
+    addon.kind = AddonKind::Ui;
+    addon.caps = 0;
+    addon.startable = false; // interface packages intentionally have no /lua entrypoint
+    auto rules = required_rules();
+    rules.player_script_caps = rules.player_plugin_caps = 0;
+    CHECK(addon_requirement_problems(rules, {addon}).empty());
+    addon.intact = false;
+    REQUIRE(addon_requirement_problems(rules, {addon}).size() == 1);
+    CHECK(addon_requirement_problems(rules, {addon})[0].message.find("missing or changed files") != std::string::npos);
+}
+
+TEST_CASE("addon requirements: UI repository policy blocks owners and inherited code while retaining builtin fallback") {
+    ui::UiPack builtin; builtin.id = "modern";
+    ui::UiPack owner; owner.id = "addon.interfaces.skin"; owner.source = "addon"; owner.addon = "interfaces";
+    ui::UiPack child; child.id = "addon.child.skin"; child.source = "addon"; child.addon = "child";
+    child.base_ids = {owner.id, builtin.id};
+    ui::UiPack grandchild; grandchild.id = "addon.other.skin"; grandchild.source = "addon"; grandchild.addon = "other";
+    grandchild.base_ids = {child.id};
+    const std::vector<ui::UiPack> fresh{grandchild, child, owner, builtin};
+    InstalledAddon installed; installed.name = "INTERFACES"; installed.kind = AddonKind::Ui;
+    installed.source = "maker/interfaces";
+    auto rules = required_rules(); rules.addons.required.clear(); rules.addons.block = {"maker/interfaces"};
+    auto packs = fresh;
+    apply_ui_addon_policy(packs, &rules, {installed});
+    for (const auto& id : {owner.id, child.id, grandchild.id}) {
+        const auto* pack = ui::find_ui_pack_exact(packs, id);
+        REQUIRE(pack); CHECK_FALSE(pack->available); CHECK_FALSE(pack->unavailable_reason.empty());
+        REQUIRE(ui::find_ui_pack(packs, id)); CHECK(ui::find_ui_pack(packs, id)->id == "modern");
+    }
+    REQUIRE(ui::find_ui_pack_exact(packs, "modern")); CHECK(ui::find_ui_pack_exact(packs, "modern")->available);
+    for (int context = 0; context < 3; ++context) {
+        auto unruled = fresh;
+        auto local = rules;
+        if (context == 0) local.addons.enabled = false;
+        if (context == 1) local.provisional = true;
+        apply_ui_addon_policy(unruled, context == 2 ? nullptr : &local, {installed});
+        CHECK(unruled == fresh); // cached/absent/opted-out policy restores through fresh registry metadata
+    }
+    rules.addons.block.clear();
+    packs = fresh;
+    apply_ui_addon_policy(packs, &rules, {installed});
+    CHECK(packs == fresh);
+}
+
+// A pack put in ui/ by hand (source builtin, but not one Hailstone ships) has no repository: under a server's
+// default = deny it is refused as any unlisted add-on is, and so is an interface built on it; modern and gamepad stay.
+TEST_CASE("addon requirements: a hand-placed ui/ pack is refused under default deny, built-in packs never") {
+    ui::UiPack modern; modern.id = "modern";
+    ui::UiPack gamepad; gamepad.id = "gamepad";
+    ui::UiPack hand; hand.id = "myskin"; hand.base_ids = {"modern"};
+    ui::UiPack derived; derived.id = "addon.maker.skin"; derived.source = "addon"; derived.addon = "maker";
+    derived.base_ids = {"myskin", "modern"};
+    InstalledAddon installed; installed.name = "maker"; installed.kind = AddonKind::Ui; installed.source = "maker/skin";
+    auto rules = required_rules(); rules.addons.required.clear();
+    rules.addons.allow = {"maker/skin"};
+    const std::vector<ui::UiPack> fresh{modern, gamepad, hand, derived};
+    auto packs = fresh;
+    rules.addons.default_allow = true;
+    apply_ui_addon_policy(packs, &rules, {installed});
+    CHECK(packs == fresh);
+    rules.addons.default_allow = false;
+    apply_ui_addon_policy(packs, &rules, {installed});
+    CHECK(ui::find_ui_pack_exact(packs, "modern")->available);
+    CHECK(ui::find_ui_pack_exact(packs, "gamepad")->available);
+    CHECK_FALSE(ui::find_ui_pack_exact(packs, "myskin")->available);
+    CHECK(ui::find_ui_pack_exact(packs, "myskin")->unavailable_reason.find("by hand") != std::string::npos);
+    CHECK_FALSE(ui::find_ui_pack_exact(packs, "addon.maker.skin")->available); // it inherits the refused pack's code
+    CHECK(ui::find_ui_pack(packs, "myskin")->id == "modern");
+}
+
+TEST_CASE("ui packs: only the shipped modern and gamepad packs are trusted") {
+    ui::UiPack pack; pack.id = "modern";
+    CHECK(ui::trusted_ui_pack(pack));
+    pack.id = "gamepad"; CHECK(ui::trusted_ui_pack(pack));
+    pack.id = "myskin"; CHECK_FALSE(ui::trusted_ui_pack(pack)); // put in ui/ by hand
+    pack.id = "modern"; pack.source = "addon"; CHECK_FALSE(ui::trusted_ui_pack(pack));
 }
 
 TEST_CASE("addon requirements: required offers keep index identity and key without optional dismissals") {

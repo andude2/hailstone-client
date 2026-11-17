@@ -255,6 +255,9 @@ public:
     // The actor's own world matrix as last drawn (its place, turn and scale; the actor's vtable +0x2c4 matrix that
     // spell emitters on it take their axes from); false when it was not drawn.
     bool drawn_transform(std::uint32_t id, glm::mat4& world) const;
+    // This render attempt's model pose, also for intentionally hidden/clipped actors; not visibility evidence.
+    bool current_render_transform(std::uint32_t id, std::uint64_t frame, glm::mat4& world) const;
+    static ActorDraw render_pose(const game::Spawn& spawn, const assets::CharacterModel& model, const game::HeightTables* tables);
     // Actor vfFC(0): the authored head/name role's posed world translation.
     // Missing role metadata leaves the output alone and returns false.
     bool drawn_name_position(std::uint32_t id, glm::vec3& position) const;
@@ -512,6 +515,8 @@ private:
     std::unordered_map<std::uint32_t, SpawnState> spawns_;
     std::unordered_set<std::uint32_t> drawn_;
     std::unordered_map<std::uint32_t, ActorDraw> last_draws_; // the spawns drawn last frame, for spawn_pose
+    std::unordered_map<std::uint32_t, glm::mat4> current_render_transforms_;
+    std::uint64_t current_render_frame_ = 0;
     // drawn_bone's poses of last_draws_, by spawn. An entry is marked stale when its spawn's last_draws_ entry is
     // written, and keeps its storage for the next pose.
     mutable std::unordered_map<std::uint32_t, BonePoseCache> bone_cache_;
