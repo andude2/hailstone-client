@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "core/sha256.h"
+#include "core/version.h"
 
 namespace hailstone::game { class EqStrings; }
 
@@ -110,6 +111,9 @@ struct AddonRules {
     bool enabled = false;
     bool default_allow = true;
     std::vector<std::string> required, allow, block; // in normalize_addon_identity's form
+    // `required = owner/repo:1.0.0`: the oldest installed manifest version that meets that requirement (SemVer
+    // order, core/version.h). A repository named more than once keeps the highest. Absent: any version.
+    std::map<std::string, Version> minimum_versions;
     std::string error; // an invalid enabled policy refuses every add-on until the server fixes it
 };
 

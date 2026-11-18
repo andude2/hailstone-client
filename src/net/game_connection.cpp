@@ -662,6 +662,7 @@ void GameConnection::handle_world(const AppPacket& p) {
         save_ticks_ = save_tick_ms_ = 0; // SavePCForce on the way out (MoveToZone)
         motion_known_ = false;
         new_zone_.reset();
+        spells_.zone_suspends_buffs = false;
         profile_.reset();
         drunkenness_ = 0;
         invis_state_ = 0;
@@ -1436,6 +1437,7 @@ void GameConnection::handle_zone(const AppPacket& p) {
             world_.zone_long_name = new_zone_->zone_long_name;
             zone_to_load_ = new_zone_->zone_short_name;
             world_.set_old_model_scale(new_zone_->old_model_scale != 0); // 0xddfba4 (NewZone +0x2b4)
+            spells_.zone_suspends_buffs = new_zone_->suspend_buffs != 0; // 0xddfc5c (NewZone +0x36c)
         }
         break;
     case Op::SendExpZonein:

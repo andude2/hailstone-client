@@ -1097,21 +1097,3 @@ TEST_CASE("An sRGB blit chain of an opaque texture matches assets::build_color_m
         CHECK(worst_gamma > 8); // the difference the sRGB view is there to avoid
     }
 }
-
-TEST_CASE("A capped texture gets its chain on the CPU and loses the levels above the cap, opaque or not") {
-    using hailstone::render::prepare_capped_texture;
-    auto image = opaque_image(64, 32, 5);
-    auto use = TextureUse::Color;
-    prepare_capped_texture(image, use, 16);
-    CHECK(use == TextureUse::Data);
-    CHECK(image.width == 16);
-    CHECK(image.height == 8);
-    CHECK(image.mips.size() == 5); // 16x8 .. 1x1
-    // No cap: left as it is, for the upload to build the chain.
-    auto plain = opaque_image(64, 32, 5);
-    auto plain_use = TextureUse::Color;
-    prepare_capped_texture(plain, plain_use, 0);
-    CHECK(plain_use == TextureUse::Color);
-    CHECK(plain.mips.size() == 1);
-    CHECK(plain.width == 64);
-}

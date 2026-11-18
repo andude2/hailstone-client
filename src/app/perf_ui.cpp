@@ -222,6 +222,15 @@ void PerfUi::draw(const PerfInputs& in) {
     if (!ImGui::GetIO().WantTextInput && ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_P))
         toggle();
     if (!open_) return;
+    if (in.gpu && in.gpu->gpu_sections_serial() != gpu_serial_) {
+        gpu_serial_ = in.gpu->gpu_sections_serial();
+        if (!paused_) {
+            gpu_taken_.clear();
+            for (const auto& s : in.gpu->gpu_sections()) gpu_taken_.emplace_back(s.name, s.ms);
+            gpu_no_bytes_.clear();
+            gpu_sections_.add_swap(gpu_taken_, gpu_no_bytes_);
+        }
+    }
 
     ImGui::SetNextWindowSize(ImVec2(460, 640), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(480, 80), ImGuiCond_FirstUseEver);
@@ -404,6 +413,37 @@ void PerfUi::draw(const PerfInputs& in) {
         ImGui::TextDisabled("Updated twice a second.");
         ImGui::TextDisabled("Sections nest: \"Lua UI frame\" holds every \"Lua window\" row and the Lua collector.");
         ImGui::TextDisabled("KB/frame: what the Lua state allocated in it, most of it garbage for the collector.");
+    }
+
+    // The GPU's time in each pass (VkContext::gpu_mark), a frame or two behind: where a GPU-bound Wait goes.
+    if (ImGui::CollapsingHeader("GPU passes (avg of the last 60 frames, and the slowest)")) {
+        if (gpu_sections_.frames() == 0) {
+            ImGui::TextDisabled(in.gpu && in.gpu->timestamp_capable() ? "No frames timed yet."
+                                                                      : "This GPU cannot time its passes.");
+        } else if (ImGui::BeginTable("gpu passes", 3, kTable)) {
+            ImGui::TableSetupColumn("Pass");
+            ImGui::TableSetupColumn("avg ms", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+            ImGui::TableSetupColumn("slowest", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+            ImGui::TableHeadersRow();
+            float total = 0.0f;
+            for (const auto& r : gpu_sections_.rows()) {
+                total += r.avg_ms;
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextUnformatted(r.name);
+                ImGui::TableSetColumnIndex(1);
+                ImGui::Text("%.3f", static_cast<double>(r.avg_ms));
+                ImGui::TableSetColumnIndex(2);
+                ImGui::Text("%.3f", static_cast<double>(r.max_ms));
+            }
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextDisabled("total");
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextDisabled("%.3f", static_cast<double>(total));
+            ImGui::EndTable();
+        }
+        ImGui::TextDisabled("Each pass is the GPU time since the one before it; the first holds the frame's uploads.");
     }
 
     if (ImGui::CollapsingHeader("Rendering", ImGuiTreeNodeFlags_DefaultOpen) && ImGui::BeginTable("render", 2, kTable)) {

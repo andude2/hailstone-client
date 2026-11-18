@@ -832,7 +832,7 @@ size nothing is written and 0 comes back; with nothing to list the header alone 
   | Offset | Type | Field |
   |---|---|---|
   | 0 | i32 | spell id (never 0: entries with no spell are left out) |
-  | 4 | i32 | tics left: the server's count less the 6 s ticks since it came; a permanent buff negative, as above |
+  | 4 | i32 | tics left: the server's count less the 6 s ticks since it came, or the count as sent while its countdown is held as the target window holds it (a suspendable spell in a zone that suspends buffs; with the player its own target, also the player's buff-timer hold, docs/mechanics.md); a permanent buff negative, as above |
   | 8 | i32 | the spell's type: 0 detrimental, 1 beneficial, 2 beneficial group-only (0 for a spell not in spells_us.txt) |
   | 12 | i32 | the target's buff slot, as the server sent it (EQEmu: the mob's own slot index, not mapped to RoF2's) |
   | 16 | i32 | `casterNameLength`: the bytes of the caster's name that follow; 0 when the server sent none |
@@ -1372,9 +1372,19 @@ default = allow
   the add-on manager recorded when it installed the package, not a folder or manifest name. A bare name
   (`dpsmeter`) is refused: any package of that name, from anyone, would satisfy it. A refused or malformed entry
   makes the policy invalid (below), and the client's log names it (`hailstone.cfg: [addons] required: "dpsmeter" is a
-  bare name; add-ons are named by their GitHub repository (owner/repo)`). These are not version pins: the manager's
+  bare name; add-ons are named by their GitHub repository (owner/repo)`). They are not version pins: the manager's
   usual update rules still apply.
-- **`allow`, `block` and `default`.** `default = deny` refuses every add-on not named by `allow` or `required`,
+- **A minimum version** (`required` only): `required = owner/repo:1.0.0-preview.4` is met by that installed version or
+  any newer one, in semantic version order (`preview.10` is newer than `preview.4`, and `1.0.0` newer than its
+  previews; build metadata after `+` is ignored, prerelease letters keep their case). It is the manifest's `version`
+  the manager recorded at install; an installed add-on without a valid one does not meet it. A repository named more
+  than once keeps the highest minimum, and without the suffix any version does. A malformed version
+  (`owner/repo:1.2`), or a suffix on `allow` or `block`, makes the policy invalid. The login screen's review and
+  install links name the plain repository. **Older clients refuse such a server:** a Hailstone before this
+  release reads `owner/repo:version` as a malformed entry, so its invalid policy keeps every player on it out of the
+  world. Use the versioned form only once your players run a client that has it.
+- **`allow`, `block` and `default`.** `default = deny` refuses every add-on not named by `allow`, `required` or
+  `suggest` (a repository the server suggests is one it permits, so it need not be named in `allow` too),
   so a closed list can shut out every add-on, visual ones included; `default = allow` (the default) admits the rest.
   `block` wins over everything; an identity both required and blocked makes the policy invalid. An add-on put in by
   hand (not by the manager) has no repository: no list names it, so it runs under `default = allow` (unless it uses
@@ -1392,8 +1402,12 @@ default = allow
   requirement; the client neither starts it nor can tell whether it runs.
 - **Permission is not capability.** Naming an add-on in `allow` or `required` does not turn on `[scripts] player` or
   `[plugins] player`, nor grant more than `player_caps` and the add-on's manifest. A required script or plugin that
-  needs capabilities the server does not give is a requirement not met. A `suggest` stays optional and grants nothing;
-  under `default = deny`, also name it in `allow` if it should run.
+  needs capabilities the server does not give is a requirement not met. A `suggest` stays optional: it allows the
+  add-on as `allow` does, but never requires or starts it and grants no capability.
+  This holds for `required` too, on purpose: `addons/installed.txt` is the player's file, and nothing kept on disk
+  lets the client check at load time that a record's files are the ones a signed manifest named (the manifest is not
+  kept, and its signature covers package archives, not the files unpacked from them). Letting a named repository lift
+  capabilities would let an edited record give the player's own code everything `player = off` refuses.
 - **The server's own files** (its `scripts/` and `plugins/`, listed by hash at the zone-in) are not add-ons: no
   list names them and the policy never refuses them. The server decides by sending them or not.
 
@@ -1413,6 +1427,14 @@ When it is decided:
   installed add-ons do not meet, is a warning in chat (`[Add-ons] Required add-on owner/repo did not remain
   running. You can keep playing on this server.`), said once for each failure. Leaving to character select starts the
   check over for the next entry.
+- **Server add-ons warning and Retry.** While such a failure lasts, a small Server add-ons window (Modern, Gamepad,
+  and the client's own when the interface has none) says what failed and that the player can keep playing. When the
+  running add-ons reported it (a required plugin that let an exception out or did not load, a required script that
+  failed or ended), it offers **Retry**: each such plugin is unloaded and loaded again once, and each such script
+  started again, under every usual check (rules, approval of native code). Required add-ons still cannot be
+  stopped. The window shows nothing while all is well, takes no action by itself, and its close box puts it away
+  until the next failure. Only the client's own interfaces show it or press Retry (`hs.AddonPolicy`,
+  `hs.AddonPolicyAction`, docs/ui-api.md); an add-on interface gets the client's window instead.
 
 **When blocking upscalers.** An upscaler loads at start, before any server is known, and Vulkan cannot change it
 while the client runs. An active upscaler the policy refuses (or whose loaded files no longer match its installed

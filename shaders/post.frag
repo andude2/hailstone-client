@@ -11,7 +11,7 @@ layout(set = 0, binding = 3) uniform sampler2D bloom_map; // shaders/bloom_up.fr
 
 layout(push_constant) uniform Push {
     float exposure; // linear scale
-    uint tonemap;   // 0 none, 1 AgX, 2 ACES
+    uint tonemap;   // 0 none, 1 AgX, 2 ACES, 3 soft (render::Tonemap)
     uint flags;
     uint frame;
     vec4 depth;     // view depth = y / (d + x); z: the AO's strength; w: the far plane
@@ -30,6 +30,7 @@ const uint kAo = 8u;
 const uint kBlur = 16u;
 
 #include "ao_blur.glsl"
+#include "classic_light.glsl"
 
 float view_depth(float d) { return ao_view_depth(d, pc.depth.xy); }
 
@@ -136,6 +137,7 @@ void main() {
     c *= pc.exposure * pc.mood.rgb;
     if (pc.tonemap == 1u) c = agx(c);
     else if (pc.tonemap == 2u) c = aces(c);
+    else if (pc.tonemap == 3u) c = soft_highlights(c);
     c = linear_to_srgb(c);
     // The grade's saturation, round the pixel's own grey.
     c = clamp(mix(vec3(dot(c, vec3(0.2126, 0.7152, 0.0722))), c, pc.mood.w), 0.0, 1.0);

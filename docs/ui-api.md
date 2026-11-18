@@ -315,6 +315,15 @@ is applicable; `windows.Replace` claims the window too. Follow the current
 as a side-effect-free getter. `requiredCaps = 0` means no outer capability gate;
 individual functions can still check caller identity or screen state themselves.
 
+## Server add-ons warning
+
+API 1.6 adds `addons.Policy()` and `addons.PolicyAction(action, serial)` (flat `hs.AddonPolicy`,
+`hs.AddonPolicyAction`). `Policy()` is nil unless a server's required add-on has failed once the character is in the
+world; then it is `{serial, message, can_retry}`, the same table until the failure changes (read it, do not change
+it). `PolicyAction("retry", serial)` tries the failed required add-ons again once and returns whether it did. Both
+are the client's own interfaces' alone: an add-on or hand-placed interface, and plugin or script code, get nil and
+false, and cannot replace the client's "AddonPolicy" window (docs/plugins.md "Opt-in add-on policies").
+
 ## Discovering optional features
 
 ```lua

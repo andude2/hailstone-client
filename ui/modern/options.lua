@@ -750,10 +750,10 @@ local function graphicsTab()
     check("distance_blur", "Distance Blur", "Softens the far distance a little (modern lighting).")
     check("depth_prepass", "Depth Pre-pass",
       "Draws the zone's shapes once without lighting first, then lights only what is in front, so surfaces hidden behind others are not lit (modern lighting). Applies at once, so you can compare.")
-    check("neighbour_zones", "Neighbour Zones",
-      "Draws the next zone past an outdoor zone line in the distance (modern lighting; scenery only).")
     check("horizon_hills", "Horizon Hills",
       "Land, hills and mountains past the edges of outdoor zones, in the zone's own ground, so the world does not end in haze (modern lighting; scenery only).")
+    check("zone_fog", "Zone Edge Fog",
+      "A fog bank on the ground past the edges of outdoor zones, so the world fades into mist at a zone line instead of ending; the far mountains rise out of it (modern lighting).")
     check("volumetric_clouds", "Volumetric Clouds",
       "Clouds with depth that drift with the wind, light with the sun and close over in a storm, in place of the painted cloud layer (modern lighting, open skies). Turn off if the frame rate drops outdoors.")
     slider("tree_detail", "Tree Detail Distance", 50, 200, pct,
@@ -767,10 +767,10 @@ local function graphicsTab()
       "The original's view distance setting (the classic lighting draws this far; modern multiplies it).")
   end)
   section("Lighting", function()
-    combo("lighting", "Lighting", { "Modern", "Classic" },
-      "Modern: per-pixel sun, shadows and haze. Classic: the original game's look.")
+    combo("lighting", "Lighting", { "Classic (Low)", "Smooth Classic (Medium)", "Modern (High)" },
+      "Classic: the original game's look. Smooth Classic: the same light worked out per pixel, with soft highlights in flames. Modern: per-pixel sun, shadows and haze.")
     combo("tonemap", "Tone Map", { "Automatic", "None", "AgX", "ACES" },
-      "How bright light is fitted to the screen. Automatic: AgX with modern lighting, none with classic.")
+      "How bright light is fitted to the screen. Automatic: none with classic lighting, soft highlights with smooth classic, AgX with modern.")
     ticks("exposure", "Exposure", function(t) return string.format("%+.1f EV", -2 + t * 0.2) end,
       "The overall scene brightness before the tone map, in stops.")
     check("color_grade", "Colour Grade",

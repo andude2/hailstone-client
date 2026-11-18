@@ -779,7 +779,8 @@ void ClientApp::detect_graphics_at_first_start() {
 }
 
 void ClientApp::apply_settings() {
-    // display.lighting = modern (docs/graphics.md) | classic (the original's look); /lighting switches.
+    // display.lighting = modern (docs/graphics.md) | smooth (the classic, per pixel) | classic (the original's look);
+    // /lighting switches.
     lighting_mode_ = render::parse_lighting_mode(config_.get_string("display.lighting", "modern"))
                          .value_or(render::LightingMode::Modern);
     apply_scene_options();
@@ -809,10 +810,9 @@ void ClientApp::apply_settings() {
     flora_reach_ = std::clamp(static_cast<float>(config_.get_int("display.flora_distance", static_cast<int>(render::kFloraReach))),
                               render::kFloraReach, render::kMaxFloraReach);
     grass_density_ = render::grass_density_percent(config_.get_int("display.grass_density", 100));
-    neighbour_zones_ = config_.get_bool("display.neighbour_zones", true);
     horizon_hills_ = config_.get_bool("display.horizon_hills", true);
     volumetric_clouds_ = config_.get_bool("display.volumetric_clouds", true);
-    neighbour_tint_ = config_.get_bool("display.neighbour_tint", false);
+    edge_fog_ = config_.get_bool("display.zone_fog", true);
     tree_detail_ = std::clamp(config_.get_int("display.tree_detail", 100), 50, 200);
     ring_cues_ = config_.get_bool("display.target_ring_cues", true);
     ring_xray_ = config_.get_bool("display.target_ring_xray", false);

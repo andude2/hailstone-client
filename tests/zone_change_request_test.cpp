@@ -62,6 +62,26 @@ TEST_CASE("The zone dword carries the player profile's instance: a summon inside
     CHECK(c.current_zone_dword() == 89u);
 }
 
+TEST_CASE("OP_NewZone's suspend_buffs (+876) says whether the zone holds the suspendable buffs") {
+    mq_test::World w("hailstone_zone_suspend_buffs_test");
+    net::GameConnection& c = *w.conn;
+    auto new_zone = [](std::uint32_t suspend) {
+        ByteWriter nz;
+        for (std::size_t i = 0; i < 852; ++i) nz.le<std::uint8_t>(0);
+        nz.le<std::uint16_t>(202); // zone id
+        nz.le<std::uint16_t>(0);
+        while (nz.data().size() < 876) nz.le<std::uint8_t>(0);
+        nz.le<std::uint32_t>(suspend);
+        while (nz.data().size() < net::kNewZoneSize) nz.le<std::uint8_t>(0);
+        return net::make_packet(net::Op::NewZone, std::move(nz));
+    };
+    CHECK_FALSE(c.spell_state().zone_suspends_buffs);
+    c.receive_zone_packet_for_test(new_zone(1));
+    CHECK(c.spell_state().zone_suspends_buffs);
+    c.receive_zone_packet_for_test(new_zone(0));
+    CHECK_FALSE(c.spell_state().zone_suspends_buffs);
+}
+
 TEST_CASE("A new connection has none of the app's hooks, even where the freed one was allocated") {
     // The app gives each connection its line of sight, teleport and slash-command hooks once, when the connection
     // has none (client_app_player.cpp): a test on the connection's address skipped a new one put where the old was.

@@ -266,3 +266,83 @@ TEST_CASE("smooth: spawns stepped on the worker threads come out as they do step
     }
     CHECK(pooled_world.spawns.at(20).display_position == pooled_world.spawns.at(21).display_position);
 }
+
+TEST_CASE("smooth: a spawn that stays in one place for a second is stalled, whatever its speeds say") {
+    WorldState w;
+    w.player_id = 1;
+    Spawn& local = add(w, 1, {0, 0, 0});
+    Spawn& s = add(w, 5, {0, 0, 0});
+    s.update_time = 0.0;
+    s.speed_run = 0.5f; // a walk: stepped (and moving) for 12 s after the update
+    s.velocity = {0.3f, 0.0f, 0.0f};
+    auto at = [](int frame) { return frame * 0.05; };
+    int frame = 0;
+    for (; at(frame) <= 12.0; ++frame) {
+        w.smooth(0.05f, at(frame));
+        REQUIRE_FALSE(s.stalled);
+    }
+    CHECK(glm::length(s.position) > 10.0f);
+    // No longer stepped: it stays put with its speeds as they were, and stands once a second has gone by.
+    for (; at(frame) < 12.9; ++frame) w.smooth(0.05f, at(frame));
+    CHECK_FALSE(s.stalled);
+    for (; at(frame) < 13.2; ++frame) w.smooth(0.05f, at(frame));
+    CHECK(s.stalled);
+    CHECK(s.speed_run == 0.5f);
+    CHECK(s.velocity != glm::vec3(0.0f));
+    CHECK_FALSE(local.stalled); // the local player never is
+    // An update that moves it walks it again at once.
+    s.position += glm::vec3(5.0f, 0.0f, 0.0f);
+    s.update_time = at(frame);
+    w.smooth(0.05f, at(frame));
+    CHECK_FALSE(s.stalled);
+}
+
+TEST_CASE("smooth: a spawn is not stalled on its first frame, only after a second in one place") {
+    WorldState w;
+    Spawn& s = add(w, 5, {0, 0, 0}); // at rest where a zeroed anchor would be: the NaN anchor still restarts it
+    w.smooth(0.05f, 100.0);
+    CHECK_FALSE(s.stalled);
+    w.smooth(0.05f, 100.9);
+    CHECK_FALSE(s.stalled);
+    w.smooth(0.05f, 101.0);
+    CHECK(s.stalled);
+}
+
+TEST_CASE("smooth: a rider stalls with its mount and walks again with it") {
+    WorldState w;
+    Spawn& mount = add(w, 6, {0, 0, 0});
+    mount.update_time = 0.0;
+    mount.speed_run = 0.5f;
+    Spawn& rider = add(w, 7, {0, 0, 0});
+    rider.mount_id = 6;
+    auto at = [](int frame) { return frame * 0.05; };
+    int frame = 0;
+    for (; at(frame) <= 12.0; ++frame) {
+        w.smooth(0.05f, at(frame));
+        REQUIRE_FALSE(mount.stalled);
+        REQUIRE_FALSE(rider.stalled);
+    }
+    CHECK(rider.position == mount.position);
+    for (; at(frame) < 13.2; ++frame) w.smooth(0.05f, at(frame));
+    CHECK(mount.stalled);
+    CHECK(rider.stalled);
+    // An update that moves the mount moves the rider with it, and neither is stalled.
+    mount.position += glm::vec3(5.0f, 0.0f, 0.0f);
+    mount.update_time = at(frame);
+    w.smooth(0.05f, at(frame));
+    CHECK_FALSE(mount.stalled);
+    CHECK_FALSE(rider.stalled);
+}
+
+TEST_CASE("smooth: the mount the local player rides is never stalled") {
+    WorldState w;
+    w.player_id = 1;
+    w.controlled_id = 2;
+    Spawn& local = add(w, 1, {0, 0, 0});
+    local.mount_id = 2;
+    Spawn& controlled = add(w, 2, {0, 0, 0});
+    controlled.speed_run = 0.5f; // the player's controls, not smooth, move it: here it stays put
+    for (int frame = 0; frame <= 100; ++frame) w.smooth(0.05f, frame * 0.05);
+    CHECK_FALSE(controlled.stalled);
+    CHECK_FALSE(local.stalled);
+}

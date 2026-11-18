@@ -28,6 +28,12 @@ inline void check_rules(const plugin::Rules& rules) {
             const auto normalized = plugin::normalize_addon_identity(identity);
             require(normalized && *normalized == identity, "server cfg retained a non-normalized add-on identity");
         }
+    for (const auto& [identity, minimum] : addons.minimum_versions) {
+        require(std::find(addons.required.begin(), addons.required.end(), identity) != addons.required.end(),
+                "minimum version retained without its required repository");
+        const auto parsed = parse_version(minimum.to_string());
+        require(parsed && compare_versions(*parsed, minimum) == 0, "server cfg retained an invalid minimum version");
+    }
 
     if (!addons.enabled) {
         require(plugin::addon_allowed(addons, "maker/helper"), "disabled add-on policy refused an identity");

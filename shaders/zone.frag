@@ -59,7 +59,7 @@ layout(location = 5) in vec4 v_color2;
 layout(location = 6) in vec3 v_normal;
 layout(location = 7) in float v_fog; // oFog (zone.vert)
 layout(location = 8) in vec3 v_point;
-layout(location = 9) in vec3 v_rest; // the plants at rest, as the lights' shadow cubes hold them (point_shadow)
+layout(location = 9) in vec3 v_rest; // the plants at rest, as the lights' shadow cubes hold them (point_shadow_at)
 layout(location = 10) flat in float v_lod_distance; // zone.vert: a level of detail's fades
 
 layout(location = 11) in vec4 v_now;
@@ -84,12 +84,10 @@ const uint kMolten = 512u;     // RegionLava whose texture's name says lava or m
 const uint kEnergy = 1024u;    // RegionLavaH (harbingers' towers): drawn as lava (modern)
 const uint kEnvMap = 2048u;    // water: slot 2 is its own environment, an octahedral map (a "noswap" cube)
 const uint kFlagLodFade = 4096u; // a level of detail: extra3 its band (coverage.glsl lod_fade_samples)
-const uint kTintNeighbour = 32768u; // render/zone_renderer.h set_debug_tint: a neighbour's own geometry
-const uint kTintLand = 65536u;      // its own ground in its part of the land
 const uint kPackedNormal = 131072u; // CBGG1/CBSG1: RG normal, B glow, A gloss
 const uint kGlow = 262144u;         // blue channel of slot 1
 const uint kAdditiveGlow = 524288u; // AddAlpha surfaces emit into modern HDR
-const uint kLandTint = 1048576u;    // render/zone_renderer.cpp: the land's ground moved toward color2 (an atlas zone's)
+const uint kLandSplat = 2097152u;   // render/zone_renderer.cpp: the land's rock (slot 1) and sand (slot 2) by v_uv2
 
 vec4 tex(uint i, vec2 uv) { return texture(textures[nonuniformEXT(i)], uv); }
 
@@ -114,7 +112,7 @@ float flicker(uint index, vec3 color) {
 // The zone's lights at a pixel, in two parts: `display`, half the MPL passes' sum (game::point_light_term, colour x
 // 0.5, each saturating on its own) as the base the zone's builders balanced their interiors with, and `pools`, the
 // modern lights' bright centres (light_pool, linear), so a torch lights a round pool around it. Both stop
-// where something stands between the light and the pixel (the lights with a shadow cube, point_shadow). `counted` is
+// where something stands between the light and the pixel (the lights with a shadow cube, point_shadow_at). `counted` is
 // what all the lights give the pixel as game::point_light_term weighs them (display values), the share of the baked
 // colour that is theirs; `blocked` is the part of it that stops where something stands in the way, for the baked
 // colour, which counts the light without what stands in its way, to give back.
@@ -139,8 +137,10 @@ void zone_point_lights(vec3 p, vec3 n, float wrap, out vec3 display, out vec3 po
         float falloff = 1.0 - min(d2 / (r * r), 1.0);
         if (falloff <= 0.0) continue;
         float facing = clamp((dot(n, d * inversesqrt(max(d2, 1e-6))) + wrap) / (1.0 + wrap), 0.0, 1.0);
-        float shadow = point_shadow(point_map, scene.point_shadow_light, scene.point_shadow_slot,
-                                    scene.point_shadow_params, l.position_radius, v_rest, n);
+        if (facing <= 0.0) continue; // every term below is x facing: its shadow need not be looked up
+        int entry = point_shadow_keyed(scene.point_shadow_slot, scene.point_shadow_params, l.color.w);
+        float shadow = point_shadow_at(point_map, scene.point_shadow_light, scene.point_shadow_slot,
+                                       scene.point_shadow_params, entry, l.position_radius, v_rest, n);
         float f = flicker(index, l.color.rgb) * shadow;
         counted += l.color.rgb * facing * falloff;
         blocked += l.color.rgb * facing * falloff * (1.0 - shadow);
@@ -190,10 +190,13 @@ vec3 modern_light(vec3 n, vec3 sn, bool foliage) {
     // The dynamic lights, stopped where something stands in their way (the carried light and the brightest spells
     // have shadow cubes of their own; render/point_shadows.h set_dynamic).
     int count = int(scene.params.z + 0.5);
-    for (int i = 0; i < count; ++i)
-        light += point_light_modern(scene.lights[i], v_world, sn, foliage ? 0.5 : 0.0) *
-                 point_shadow(point_map, scene.point_shadow_light, scene.point_shadow_slot, scene.point_shadow_params,
-                              scene.lights[i].position_radius, v_rest, n);
+    for (int i = 0; i < count; ++i) {
+        vec3 c = point_light_modern(scene.lights[i], v_world, sn, foliage ? 0.5 : 0.0);
+        // Out of reach or facing away: nothing to shadow (the product is 0 either way).
+        if (c != vec3(0.0))
+            light += c * scene_light_shadow(point_map, scene.point_shadow_light, scene.point_shadow_slot,
+                                            scene.point_shadow_params, scene.lights[i], v_rest, n);
+    }
     return light;
 }
 
@@ -575,8 +578,6 @@ void main() {
     // is combined with the alpha test below, as in zone_depth.frag.
     int lod_samples = lod_fade_samples((pc.tex2.z & kFlagLodFade) != 0u, v_lod_distance, pc.extra3, gl_FragCoord.xy);
     if (lod_samples == 0) discard;
-    // A neighbour's part of the land: this draw's ground or the other's (coverage.glsl land_blend_discard).
-    if (land_blend_discard(pc.tex2.z, v_color2.a, v_world)) discard;
     uint mode = pc.tex2.y;
     uint flags = pc.tex2.z;
     bool unlit = (flags & kUnlit) != 0u;
@@ -595,7 +596,14 @@ void main() {
     vec3 sn = mapped && normal_slot != 0u ? PACK_NORMAL(n, v_world, v_uv, tex(normal_slot, v_uv).rg * 2.0 - 1.0) : n;
     if (unlit) g_light = vec3(1.0);
     else if (g_modern) g_light = modern_light(n, sn, pc.params.x > 0.0);
-    else g_light = v_light.rgb; // the lit vertex colour (zone.vert)
+    else if (scene.ambient.w > 0.5) {
+        // The smooth classic lighting: the region light per pixel, so the sun shades a large triangle evenly and its
+        // saturation follows the pixel, not the corners. A mesh without normals (none to light) takes none here too.
+        float a = mode == 6u ? 1.0 : v_color.a;
+        g_light = classic_region_light(v_color.rgb, a, len > 1e-6 ? n : vec3(0.0), scene.ambient.rgb,
+                                       scene.special_ambient.rgb, scene.bounce.rgb, scene.directional.rgb,
+                                       scene.direction.xyz) + v_point;
+    } else g_light = v_light.rgb; // the lit vertex colour (zone.vert)
     float k = scene.fog.z;
     vec3 color;
     float alpha;
@@ -710,11 +718,52 @@ void main() {
         alpha = v_color2.a;
     } else {
         vec4 t = tex(pc.tex.x, v_uv);
-        // The land over a zone of the world atlas: the zone's ground texture, its detail kept, carried to that zone's
-        // own ground colour (its texture's average over the colour the atlas measured there).
-        if ((flags & kLandTint) != 0u && v_color2.a > 0.0) {
-            vec3 average = max(textureLod(textures[nonuniformEXT(pc.tex.x)], v_uv, 14.0).rgb, vec3(0.02));
-            t.rgb = mix(t.rgb, clamp(t.rgb / average * v_color2.rgb, 0.0, 1.0), v_color2.a);
+        // The land's generated terrain (render/horizon.h): rock on the steep and the high, sand by the water, the edges
+        // between broken up by the textures' own light and dark so they do not follow the triangles.
+        if ((flags & kLandSplat) != 0u) {
+            // The ground's repeat broken up: the texture over itself at a fifteenth of its scale, as a light and dark.
+            vec3 ground_average = max(textureLod(textures[nonuniformEXT(pc.tex.x)], v_uv, 14.0).rgb, vec3(0.02));
+            t.rgb *= mix(vec3(1.0), clamp(tex(pc.tex.x, v_uv * 0.067).rgb / ground_average, 0.6, 1.5), 0.55);
+            // The rock at its own scale (params.z), mapped from all three axes and blended by how the surface faces each
+            // (not switched between them: a switch drew a seam along every slope that turned past 45 degrees), twice, the
+            // second turned and at another scale, blended by a slow pattern over the world (one repeat of a rock texture
+            // with bands in it drew the same bands down every slope), then pulled half way to its own average colour:
+            // from afar a slope is its rock's colour more than its pattern. Only where the vertices say some rock or sand
+            // may show, with the gradients taken first, so the branch does not upset the mip chosen.
+            vec3 rock = t.rgb;
+            vec3 sand = t.rgb;
+            const vec3 dwx = dFdx(v_world), dwy = dFdy(v_world);
+            if (v_uv2.x > 0.1) {
+                float scale = pc.params.z > 0.0 ? pc.params.z : 0.01;
+                vec3 an = abs(normalize(v_normal));
+                vec3 tw = pow(an, vec3(4.0));
+                tw /= max(tw.x + tw.y + tw.z, 1e-4);
+                const mat2 turn = mat2(0.799, 0.602, -0.602, 0.799);
+                vec3 w2 = vec3(turn * v_world.xy, v_world.z) * 0.63 + vec3(311.0, 173.0, 0.0);
+                vec3 w2x = vec3(turn * dwx.xy, dwx.z) * 0.63, w2y = vec3(turn * dwy.xy, dwy.z) * 0.63;
+                #define ROCK(w, gx, gy) \
+                    (textureGrad(textures[nonuniformEXT(pc.tex.y)], (w).yz * scale, (gx).yz * scale, (gy).yz * scale).rgb * tw.x + \
+                     textureGrad(textures[nonuniformEXT(pc.tex.y)], (w).xz * scale, (gx).xz * scale, (gy).xz * scale).rgb * tw.y + \
+                     textureGrad(textures[nonuniformEXT(pc.tex.y)], (w).xy * scale, (gx).xy * scale, (gy).xy * scale).rgb * tw.z)
+                vec3 rock_a = ROCK(v_world, dwx, dwy);
+                vec3 rock_b = ROCK(w2, w2x, w2y);
+                #undef ROCK
+                float swirl = 0.5 + 0.5 * sin(v_world.x * 0.0017 + 1.3 * sin(v_world.y * 0.0011)) *
+                                        sin(v_world.y * 0.0013 + 1.1 * sin(v_world.x * 0.0009));
+                rock = mix(rock_a, rock_b, smoothstep(0.25, 0.75, swirl));
+                vec3 rock_average = max(textureLod(textures[nonuniformEXT(pc.tex.y)], vec2(0.5), 14.0).rgb, vec3(0.02));
+                rock = mix(rock_average, rock, 0.55);
+            }
+            if (v_uv2.y > 0.05) {
+                sand = textureGrad(textures[nonuniformEXT(pc.tex.z)], v_uv, dFdx(v_uv), dFdy(v_uv)).rgb;
+                if (pc.tex.z == pc.tex.x) sand = vec3(dot(sand, vec3(0.33))) * vec3(1.55, 1.42, 1.15);
+            }
+            // The edges broken up by the light and dark between the ground and the rock (none where no rock was taken).
+            float grain = v_uv2.x > 0.1 ? dot(t.rgb - rock, vec3(0.33)) : 0.0;
+            if (v_uv2.x > 0.1)
+                t.rgb = mix(t.rgb, rock, smoothstep(0.35, 0.65, clamp(v_uv2.x + grain * 0.6, 0.0, 1.0)) *
+                                             smoothstep(0.1, 0.25, v_uv2.x));
+            if (v_uv2.y > 0.05) t.rgb = mix(t.rgb, sand, smoothstep(0.2, 0.8, clamp(v_uv2.y + grain * 0.4, 0.0, 1.0)));
         }
         color = lit(t.rgb);
         alpha = t.a;
@@ -750,9 +799,6 @@ void main() {
     gl_SampleMask[0] = lod_samples & alpha_coverage_samples(out_alpha, gl_FragCoord.xy);
     // The modern water over the copies is the whole result (it blends the floor itself).
     if (g_modern && (flags & kWaterCopies) != 0u) out_alpha = 1.0;
-    // The neighbour zones' debugging view: what comes from where.
-    if ((flags & kTintNeighbour) != 0u) color = mix(color, vec3(dot(color, vec3(0.3, 0.6, 0.1))) * vec3(1.6, 0.2, 1.4), 0.75);
-    if ((flags & kTintLand) != 0u) color = mix(color, vec3(dot(color, vec3(0.3, 0.6, 0.1))) * vec3(0.2, 1.6, 0.3), 0.6);
     if (g_modern) {
         if ((flags & kNoFog) == 0u)
             color = apply_haze(color, v_world, scene.camera, scene.haze, scene.haze_color, scene.to_light, scene.light);

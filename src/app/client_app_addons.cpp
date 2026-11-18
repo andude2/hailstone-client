@@ -109,6 +109,7 @@ std::vector<RequiredAddonCandidate> ClientApp::addon_requirement_candidates(cons
         RequiredAddonCandidate c{a.name, a.source, a.kind, a.caps,
                                  !registry.newer && !a.files.empty() &&
                                      (!verify_files || modified_addon_files(data, a).empty())};
+        c.version = a.version;
         if (a.kind == AddonKind::Script) c.startable = required_script_found(data, a.name);
         if (a.kind == AddonKind::Plugin)
             for (const auto& f : a.files)
@@ -152,6 +153,7 @@ bool ClientApp::addon_world_allowed() {
         if (text.back() != '.') text += '.';
         game_view_.chat.add(ui::ChatChannel::Error, "[Add-ons] " + text + " You can keep playing on this server.");
     }
+    update_addon_policy_view();
     using Step = AddonAdmission::Step;
     switch (r.step) {
     case Step::Play: return true;
@@ -172,6 +174,44 @@ bool ClientApp::addon_world_allowed() {
     }
     }
     return true;
+}
+
+void ClientApp::update_addon_policy_view() {
+    const bool failed = addon_admission_.admitted() && !addon_admission_.failure().empty();
+    if (failed == addon_policy_view_.failed && addon_admission_.failure_serial() == addon_policy_failure_serial_) return;
+    addon_policy_failure_serial_ = addon_admission_.failure_serial();
+    auto& v = addon_policy_view_;
+    v.failed = failed;
+    v.can_retry = failed && addon_admission_.failure_retriable();
+    v.message = failed ? addon_admission_.failure() : std::string();
+    ++v.serial; // (never reused: a closed warning, and the packs' cached table, go by it)
+}
+
+void ClientApp::retry_required_addons() {
+    if (!automation_ || !addon_policy_view_.failed || !addon_policy_view_.can_retry) return;
+    const std::size_t tried = automation_->retry_required_addons();
+    log::info("Add-ons: the player retried the required add-ons ({} tried again)", tried);
+    if (tried == 0)
+        game_view_.chat.add(ui::ChatChannel::Error,
+                            "[Add-ons] Retry found nothing it could start again.");
+}
+
+void ClientApp::addon_policy_window() {
+    const auto& v = addon_policy_view_;
+    if (!v.failed || screen_ != Screen::InGame || addon_policy_closed_ == v.serial || ui::lua::replaces("AddonPolicy"))
+        return;
+    bool open = true;
+    ImGui::SetNextWindowSize(ImVec2(400, 0), ImGuiCond_FirstUseEver);
+    constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing;
+    if (ImGui::Begin("Server add-ons", &open, kFlags)) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 26.0f);
+        ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.25f, 1.0f), "%s", v.message.c_str());
+        ImGui::TextUnformatted("You can keep playing on this server.");
+        ImGui::PopTextWrapPos();
+        if (v.can_retry && ImGui::Button("Retry")) retry_required_addons();
+    }
+    ImGui::End();
+    if (!open) addon_policy_closed_ = v.serial;
 }
 
 void ClientApp::start_addons() {

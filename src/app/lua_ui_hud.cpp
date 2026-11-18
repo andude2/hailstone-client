@@ -213,15 +213,21 @@ void buff_button(UiHost& host, const game::BuffSlot& b, Child& out) {
     out.decal = host.textures ? image(host.textures->spell_icon(s->spell_icon)) : none();
 }
 
-std::optional<BuffInfo> buff_info(UiHost& host, const game::BuffSlot& b) {
+// `own`: one of the player's buffs (the target's too while the player is its own target), which the player's
+// buff-timer hold (SPA 436) also stops; the zone's buff suspension stops anyone's suspendable buffs, as EQEmu's
+// BuffProcess does for every mob.
+std::optional<BuffInfo> buff_info(UiHost& host, const game::BuffSlot& b, bool own) {
     const auto* s = b.empty() ? nullptr : host.conn->spell_table().get(b.spell);
     if (!s) return std::nullopt;
     BuffInfo info;
     info.spell = b.spell;
     info.name = s->name;
     info.beneficial = s->beneficial();
-    info.ms_left = game::buff_is_permanent(b.tics, s) ? -1
-                                                       : static_cast<std::int64_t>(game::buff_ms_left(b.tics, b.received_ms, now_ms()));
+    const auto& st = host.conn->spell_state();
+    info.ms_left = game::buff_is_permanent(b.tics, s)
+                       ? -1
+                       : static_cast<std::int64_t>(game::buff_ms_left(b, s, own && st.buff_timers_on_hold,
+                                                                      st.zone_suspends_buffs, now_ms()));
     return info;
 }
 
@@ -356,7 +362,7 @@ public:
         int i = index_after(id, "Buff");
         if (!host.conn || i < 0) return std::nullopt;
         const auto* b = target_buff(*host.conn, i);
-        return b ? buff_info(host, *b) : std::nullopt;
+        return b ? buff_info(host, *b, host.conn->target_buffs_are_own()) : std::nullopt;
     }
 
 private:
@@ -504,7 +510,7 @@ public:
         const auto& c = *host.conn;
         const auto& buffs = c.spell_state().buffs;
         const auto& b = buffs[static_cast<std::size_t>(first_ + i)];
-        auto info = buff_info(host, b);
+        auto info = buff_info(host, b, true);
         const auto* s = info ? c.spell_table().get(b.spell) : nullptr;
         if (!s) return info;
         // CBuffWindow::PostDraw @0x6426a0: the buff window (type 0) by CSpellDisplayManager +0x40..+0x42, the

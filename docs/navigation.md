@@ -459,7 +459,7 @@ limits only its content shows every zone until it runs the script. The finder's 
 A route has the fewest zone changes (the lowest zone ids first among equals). When the links in their own direction
 give none, a learned link may be used backwards (a zone line seen only from its far side); most zone lines go both
 ways, but not all, so the card says so. The exits on the map come from the zone's zone-line regions and the zone
-points they name (`game::collect_neighbour_lines`, as the neighbour zones use), worked out once the zone points are
+points they name (`game::collect_zone_exits`, `game/zone_exits.h`), worked out once the zone points are
 in; a zone point reached some other way (a teleporter NPC, a boat, a door) has no line, so **Walk there** is off for
 it.
 

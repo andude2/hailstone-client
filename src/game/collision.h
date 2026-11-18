@@ -59,8 +59,8 @@ public:
     };
     std::vector<SurfaceHit> surfaces_above(const glm::vec3& p) const;
 
-    // What is seen rather than what is stood on (the neighbour zones' seam tests, game/neighbour_zones.h): the
-    // highest surface at (x, y) at or below z that faces up (normal z > 0) and is drawn (not BlendMode::Invisible),
+    // What is seen rather than what is stood on (the spell particles' ground, app/spell_particles.cpp): the highest
+    // surface at (x, y) at or below z that faces up (normal z > 0) and is drawn (not BlendMode::Invisible),
     // and the lowest drawn surface above z, facing either way. A tunnel roof's underside is not ground, and an
     // invisible lid over a zone line is not a roof.
     std::optional<float> ground_below(const glm::vec3& p) const;

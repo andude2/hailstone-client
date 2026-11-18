@@ -919,6 +919,85 @@ TEST_CASE("native plugins: a required plugin that throws in the world is a warni
     CHECK(admission.admitted());
 }
 
+// Retry (the Server add-ons warning): the required plugin that threw is unloaded and loaded again once; the warning
+// clears, and a later throw is warned about again.
+TEST_CASE("native plugins: Retry reloads a required plugin that threw, once, and the warning clears") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    const fs::path profile = h.world.dir / "servers" / "required";
+    fs::create_directories(profile / "plugins");
+    h.plugins->set_server_dir(profile / "plugins");
+    auto rules = plugin::parse_server_cfg("[plugins]\nplayer = on\n[addons]\nenforce = on\nrequired = owner/probe\n");
+    h.policy.set_ceilings({{plugin::FileKind::Plugin, h.hash(), plugin::kCapAll, "HostProbe", "owner/probe"}});
+    h.policy.set(rules);
+    h.plugins->policy_changed({});
+    REQUIRE(h.plugins->consent());
+    h.plugins->answer_consent(true);
+    REQUIRE(h.plugins->loaded("HostProbe"));
+    CHECK(h.plugins->retry_required_addons() == 0); // running fine: left alone
+
+    app::AddonAdmission admission;
+    auto frame = [&] {
+        return admission.update(&rules, 1, true, [] { return std::string(); }, [&]() -> std::optional<std::string> {
+            std::string problem;
+            if (h.plugins->required_addons_ready(&problem)) return std::string();
+            if (problem.empty()) return std::nullopt;
+            return problem;
+        });
+    };
+    frame();
+    REQUIRE(frame().step == app::AddonAdmission::Step::Play);
+    REQUIRE(admission.admitted());
+    CHECK(admission.failure().empty());
+    const auto quiet = admission.failure_serial();
+
+    h.run("/probethrow");
+    CHECK_FALSE(frame().warning.empty());
+    CHECK(admission.failure() == "Required add-on hostprobe failed with an error in a command");
+    CHECK(admission.failure_retriable()); // the running add-ons said so: Retry may help
+    CHECK(admission.failure_serial() != quiet);
+    const auto failed = admission.failure_serial();
+    frame();
+    CHECK(admission.failure_serial() == failed); // the same failure keeps its serial
+
+    CHECK(h.plugins->retry_required_addons() == 1);
+    CHECK(h.plugins->loaded("HostProbe")); // loaded again (approved bytes: no new question)
+    CHECK_FALSE(h.plugins->consent());
+    std::string problem;
+    CHECK(h.plugins->required_addons_ready(&problem));
+    CHECK(frame().warning.empty());
+    CHECK(admission.failure().empty());
+    CHECK(admission.failure_serial() != failed);
+    CHECK(h.plugins->retry_required_addons() == 0); // once: nothing failed now
+
+    h.run("/probethrow"); // a new failure after the retry is warned about again
+    CHECK(frame().warning == "Required add-on hostprobe failed with an error in a command");
+    CHECK(admission.admitted());
+}
+
+// A failure the zone's rules give (an add-on missing for this zone's policy), not the running add-ons, is not one
+// Retry can help with.
+TEST_CASE("addon admission: a failure from the zone's rules is not retriable, and leaving clears it") {
+    auto rules = plugin::parse_server_cfg("[addons]\nenforce = on\nrequired = owner/probe\n");
+    app::AddonAdmission admission;
+    std::string zone;
+    auto frame = [&](std::uint32_t serial) {
+        return admission.update(&rules, serial, true, [&] { return zone; },
+                                [] { return std::optional<std::string>(std::string()); });
+    };
+    frame(1);
+    frame(1);
+    REQUIRE(admission.admitted());
+    zone = "Required add-on owner/probe is not installed. Open Add-ons to install it.";
+    CHECK(frame(2).warning == zone);
+    CHECK(admission.failure() == zone);
+    CHECK_FALSE(admission.failure_retriable());
+    const auto serial = admission.failure_serial();
+    admission.update(nullptr, 0, false, [] { return std::string(); },
+                     [] { return std::optional<std::string>(std::string()); }); // character select
+    CHECK(admission.failure().empty());
+    CHECK(admission.failure_serial() != serial);
+}
+
 TEST_CASE("native plugins: a binary in the plugin's own folder under plugins/") {
     Host h(true);
     auto all = h.plugins->list();
@@ -1459,6 +1538,66 @@ TEST_CASE("native plugins: get_target_buff_data_bulk, laid out as docs/plugins.m
     CHECK(h.printed_line("[Probe] target buffs count 0, total 0, 8 bytes, 0 records, 0 empty, 0 bytes left"));
     h.world.conn = std::move(conn);
 }
+TEST_CASE("native plugins: get_target_buff_data_bulk holds the countdowns the target window holds") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll);
+    REQUIRE(h.plugins->load("HostProbe"));
+    using A = net::GameConnectionTestAccess;
+    net::GameConnection& conn = *h.world.conn;
+    auto& sp = A::spells(conn);
+    auto& w = A::world(conn);
+    // 3010 suspendable, 3011 not, 3012 suspendable with SPA 0x1b4 (excused from the player's hold only).
+    auto table = std::make_shared<game::SpellTable>();
+    REQUIRE(table->parse(mq_test::spell_line({{0, "3010"}, {1, "Test Ward"}, {83, "1"}, {200, "1"}}) + "\n" +
+                         mq_test::spell_line({{0, "3011"}, {1, "Test Plain"}, {83, "1"}}) + "\n" +
+                         mq_test::spell_line({{0, "3012"}, {1, "Test Stasis"}, {83, "1"}, {86, "436"}, {200, "1"}})) ==
+            3);
+    conn.set_spell_table_for_test(table);
+    const std::int64_t now = net::GameConnection::now_ms();
+    auto target_buff = [now](std::uint32_t spell) {
+        game::BuffSlot b;
+        b.spell = spell;
+        b.tics = 10;
+        b.received_ms = now - 3 * game::kBuffTickMs; // three ticks ago
+        return b;
+    };
+    REQUIRE(w.target_id == 10);
+    sp.target_buffs_entity = 10;
+    sp.target_buffs = {{0, target_buff(3010)}, {1, target_buff(3011)}, {2, target_buff(3012)}};
+    auto read = [&h] {
+        h.printed.clear();
+        h.run("/probetargetbuffs");
+    };
+    // Stock: everything counts down.
+    read();
+    CHECK(h.printed_line("[Probe] target buff slot 0: spell 3010, tics 7, spell type 1, caster -"));
+    CHECK(h.printed_line("[Probe] target buff slot 1: spell 3011, tics 7, spell type 1, caster -"));
+    CHECK(h.printed_line("[Probe] target buff slot 2: spell 3012, tics 7, spell type 1, caster -"));
+    // The player's hold does not reach another spawn's buffs.
+    sp.buff_timers_on_hold = true;
+    read();
+    CHECK(h.printed_line("[Probe] target buff slot 0: spell 3010, tics 7, spell type 1, caster -"));
+    // A zone that suspends buffs holds anyone's suspendable ones, SPA 0x1b4 or not.
+    sp.buff_timers_on_hold = false;
+    sp.zone_suspends_buffs = true;
+    read();
+    CHECK(h.printed_line("[Probe] target buff slot 0: spell 3010, tics 10, spell type 1, caster -"));
+    CHECK(h.printed_line("[Probe] target buff slot 1: spell 3011, tics 7, spell type 1, caster -"));
+    CHECK(h.printed_line("[Probe] target buff slot 2: spell 3012, tics 10, spell type 1, caster -"));
+    // The player its own target: its hold holds the list, but not the spell with SPA 0x1b4 (@0x4dcf20).
+    sp.zone_suspends_buffs = false;
+    sp.buff_timers_on_hold = true;
+    w.target_id = w.player_id;
+    sp.target_buffs_entity = w.player_id;
+    CHECK(conn.target_buffs_are_own());
+    read();
+    CHECK(h.printed_line("[Probe] target buff slot 0: spell 3010, tics 10, spell type 1, caster -"));
+    CHECK(h.printed_line("[Probe] target buff slot 1: spell 3011, tics 7, spell type 1, caster -"));
+    CHECK(h.printed_line("[Probe] target buff slot 2: spell 3012, tics 7, spell type 1, caster -"));
+    sp.target_buffs_entity = 10;
+    CHECK_FALSE(conn.target_buffs_are_own());
+}
+
 TEST_CASE("native plugins: get_avail_aa_data_bulk and get_avail_disc_data_bulk, laid out as docs/plugins.md says") {
     Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
     h.approve(plugin::kCapAll);

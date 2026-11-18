@@ -178,7 +178,8 @@ A server can also require, allow or block add-ons by their GitHub repository (do
 policies"), off unless its `hailstone.cfg` says `[addons] enforce = on`. A required add-on the player does not have
 shows on the login screen as "Required to play on this server", with one button, Review required add-on (no Not now
 or Don't ask again), and goes through the usual card and approvals. Missing at the zone-in, it keeps the character
-out, with the panel open on it. Suggestions below stay optional and grant nothing by themselves.
+out, with the panel open on it. Suggestions below stay optional; under an enforced `default = deny` a suggested
+repository is also allowed (as if named in `allow`), but a suggestion never installs, starts or grants a capability.
 
 Some servers have an add-on of their own: a plugin with the server's windows and features, say Project Triune's. A
 player who logs in to such a server for the first time does not know it exists, so the login screen tells them.

@@ -15,8 +15,27 @@ namespace hailstone::render {
 
 std::optional<LightingMode> parse_lighting_mode(std::string_view name) {
     if (name == "classic") return LightingMode::Classic;
+    if (name == "smooth") return LightingMode::SmoothClassic;
     if (name == "modern" || name == "enhanced") return LightingMode::Modern;
     return std::nullopt;
+}
+
+std::string_view lighting_mode_name(LightingMode mode) {
+    switch (mode) {
+    case LightingMode::Classic: return "classic";
+    case LightingMode::SmoothClassic: return "smooth";
+    case LightingMode::Modern: break;
+    }
+    return "modern";
+}
+
+Tonemap automatic_tonemap(LightingMode mode) {
+    switch (mode) {
+    case LightingMode::Classic: return Tonemap::None;
+    case LightingMode::SmoothClassic: return Tonemap::Soft;
+    case LightingMode::Modern: break;
+    }
+    return Tonemap::AgX;
 }
 
 namespace {
@@ -166,6 +185,21 @@ SceneLighting make_scene_lighting(const game::SceneLight& scene, std::span<const
     out.sky = glm::vec4(daylight.sky, daylight.baked);
     out.ground = glm::vec4(daylight.ground, daylight.baked_lamps);
     return out;
+}
+
+void tag_shadowed_lights(SceneLighting& lighting) {
+    const auto shadowed = static_cast<std::size_t>(std::clamp(lighting.point_shadow_params.x, 0.0f,
+                                                              static_cast<float>(kMaxPointShadows)));
+    const auto count = static_cast<std::size_t>(std::clamp(lighting.params.y, 0.0f, static_cast<float>(kMaxSceneLights)));
+    for (std::size_t i = 0; i < count; ++i) {
+        GpuPointLight& l = lighting.lights[i];
+        l.color.w = 0.0f;
+        for (std::size_t e = 0; e < shadowed; ++e)
+            if (same_shadow_light(lighting.point_shadow_light[e], l.position_radius)) {
+                l.color.w = static_cast<float>(e + 1);
+                break;
+            }
+    }
 }
 
 void set_shadows(SceneLighting& lighting, const ShadowCascades& cascades, std::uint32_t map_size,

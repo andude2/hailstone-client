@@ -357,7 +357,7 @@ void Character::cache_buff_slot(EffectCache& c, int slot) const {
     if (!sp) return;
     const SpellData& s = *sp;
     // A held countdown (Spell_IsBuffCountdownHeld @0x4dcf20, game::buff_countdown_held) costs no upkeep.
-    if (!buff_countdown_held(&s, sheet_.buff_timers_on_hold))
+    if (!buff_countdown_held(&s, sheet_.buff_timers_on_hold, sheet_.zone_suspends_buffs))
         c.endurance_upkeep = add(c.endurance_upkeep, s.endurance_upkeep);
     for (int i = 0; i < 12; ++i) {
         const auto k = static_cast<std::size_t>(i);

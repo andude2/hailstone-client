@@ -205,7 +205,11 @@ public:
         const auto& b = buffs[static_cast<std::size_t>(n)].second;
         const auto* s = host.conn->spell_table().get(b.spell);
         if (!s) return std::nullopt;
-        BuffInfo info{b.spell, game::buff_is_permanent(b.tics, s) ? -1 : static_cast<std::int64_t>(game::buff_ms_left(b.tics, b.received_ms, net::GameConnection::now_ms())), s->name, s->beneficial()};
+        // The pet's suspendable buffs wait in a zone that suspends buffs, as the server's do.
+        const auto ms = game::buff_ms_left(b, s, false, host.conn->spell_state().zone_suspends_buffs,
+                                           net::GameConnection::now_ms());
+        BuffInfo info{b.spell, game::buff_is_permanent(b.tics, s) ? -1 : static_cast<std::int64_t>(ms), s->name,
+                      s->beneficial()};
         return info;
     }
 

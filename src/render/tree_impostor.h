@@ -37,6 +37,9 @@ struct TreeImpostor {
     glm::vec3 lo{0.0f}, hi{0.0f}; // the tree's box, in its own space
 };
 
+// The two crossed cards over the box `lo`..`hi` (TreeImpostor::mesh), carrying the picture named `texture_name`.
+assets::Mesh impostor_cards(glm::vec3 lo, glm::vec3 hi, const std::string& texture_name);
+
 // nullopt when nothing of `tree` is drawn (no triangle of a material the lookup gives a picture for).
 std::optional<TreeImpostor> tree_impostor(const assets::Mesh& tree, const ImpostorTextureLookup& texture,
                                           const std::string& texture_name);

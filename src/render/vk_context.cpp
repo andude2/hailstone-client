@@ -23,6 +23,7 @@
 #include "render/gpu_shared_cache.h"
 #include "render/swapchain_size.h"
 #include "render/vk_util.h"
+#include "assets/texture.h"
 
 namespace hailstone::render {
 
@@ -106,10 +107,24 @@ struct AoPush {
     glm::vec4 params{0.0f};     // radius (world units), intensity, max radius in pixels, frame
 };
 
+// shaders/zone_fog.frag's (render/zone_fog.h ZoneFogView).
+struct ZoneFogPush {
+    glm::vec4 right{0.0f};   // xyz right x tan(half fov x); w depth term x
+    glm::vec4 up{0.0f};      // xyz up x tan(half fov y); w depth term y
+    glm::vec4 forward{0.0f}; // w the sky's march
+    glm::vec4 camera{0.0f};  // w the lowest floor
+    glm::vec4 color{0.0f};   // w the floors' range
+    glm::vec4 glow{0.0f};
+    glm::vec4 to_sun{0.0f};
+    glm::vec4 grid{0.0f};    // the field's corner, 1 / its size
+};
+static_assert(sizeof(ZoneFogPush) == 128, "within the push constants every device has");
+
 // A full-screen triangle into colour attachments of `formats` (shaders/post.vert with `fragment`), added onto what
 // is there when `additive`.
 VkPipeline fullscreen_pipeline(VkDevice device, VkPipelineCache cache, VkPipelineLayout layout, VkShaderModule vertex,
-                               VkShaderModule fragment, std::span<const VkFormat> formats, bool additive = false) {
+                               VkShaderModule fragment, std::span<const VkFormat> formats, bool additive = false,
+                               const VkPipelineColorBlendAttachmentState* blend = nullptr) {
     VkPipelineShaderStageCreateInfo stages[2] = {
         {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vertex, "main", nullptr},
         {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fragment, "main", nullptr},
@@ -135,6 +150,7 @@ VkPipeline fullscreen_pipeline(VkDevice device, VkPipelineCache cache, VkPipelin
         ba.srcAlphaBlendFactor = ba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
         ba.colorBlendOp = ba.alphaBlendOp = VK_BLEND_OP_ADD;
     }
+    if (blend) ba = *blend;
     const std::vector<VkPipelineColorBlendAttachmentState> blends(formats.size(), ba);
     VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
     cb.attachmentCount = static_cast<std::uint32_t>(blends.size());
@@ -251,6 +267,7 @@ SceneBlends make_scene_blends(const VkPipelineColorBlendAttachmentState& color, 
 Tonemap parse_tonemap(std::string_view name) {
     if (name == "agx") return Tonemap::AgX;
     if (name == "aces") return Tonemap::Aces;
+    if (name == "soft") return Tonemap::Soft;
     return Tonemap::None;
 }
 
@@ -395,6 +412,7 @@ VkContext::~VkContext() {
     }
     // Imported owners retired by the renderers are released before the importing device.
     gpu_shared_cache_.reset();
+    if (gpu_queries_) vkDestroyQueryPool(device_, gpu_queries_, nullptr);
     for (VkFence f : free_fences_) vkDestroyFence(device_, f, nullptr);
     free_fences_.clear();
     if (upload_pool_) vkDestroyCommandPool(device_, upload_pool_, nullptr);
@@ -586,6 +604,14 @@ void VkContext::pick_physical_device() {
     caps_.max_anisotropy = features.samplerAnisotropy ? props.limits.maxSamplerAnisotropy : 0.0f;
     // Frame generation's GPU time (the performance window): every graphics queue can time where this is set.
     timestamp_period_ns_ = props.limits.timestampComputeAndGraphics ? props.limits.timestampPeriod : 0.0f;
+    {
+        std::uint32_t qcount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(physical_, &qcount, nullptr);
+        std::vector<VkQueueFamilyProperties> families(qcount);
+        vkGetPhysicalDeviceQueueFamilyProperties(physical_, &qcount, families.data());
+        timestamp_bits_ = queue_family_ < qcount ? families[queue_family_].timestampValidBits : 0u;
+        if (timestamp_bits_ == 0) timestamp_period_ns_ = 0.0f;
+    }
     caps_.msaa_counts = props.limits.framebufferColorSampleCounts & props.limits.framebufferDepthSampleCounts;
     caps_.fsr3 = Fsr3Upscaler::supported(physical_);
     VkPhysicalDeviceDriverProperties driver{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
@@ -1209,6 +1235,49 @@ void VkContext::create_post_pipeline(const std::filesystem::path& shader_dir) {
     prep_pipeline_ = fullscreen_pipeline(device_, pipeline_cache_, prep_layout_, vs, prep, prep_formats);
     resolve_pipeline_ = fullscreen_pipeline(device_, pipeline_cache_, resolve_layout_, vs, resolve, kSceneFormat);
     for (VkShaderModule m : {vs, fs, ao, down, up, easu, rcas, prep, resolve}) vkDestroyShaderModule(device_, m, nullptr);
+
+    // The zone's fog: two samplers (the depth, the field), a set per field from a pool of its own.
+    VkDescriptorSetLayoutBinding fb[2] = {
+        {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+        {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+    };
+    VkDescriptorSetLayoutCreateInfo fli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    fli.bindingCount = 2;
+    fli.pBindings = fb;
+    vk_check(vkCreateDescriptorSetLayout(device_, &fli, nullptr, &zone_fog_set_layout_),
+             "vkCreateDescriptorSetLayout (zone fog)");
+    // A field's set is retired with it while the next one is in use: a few at once.
+    constexpr std::uint32_t kFogSets = 4;
+    VkDescriptorPoolSize fsize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * kFogSets};
+    VkDescriptorPoolCreateInfo fpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    fpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    fpi.maxSets = kFogSets;
+    fpi.poolSizeCount = 1;
+    fpi.pPoolSizes = &fsize;
+    vk_check(vkCreateDescriptorPool(device_, &fpi, nullptr, &zone_fog_pool_), "vkCreateDescriptorPool (zone fog)");
+    VkPushConstantRange fpc{VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(ZoneFogPush)};
+    VkPipelineLayoutCreateInfo fpli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    fpli.setLayoutCount = 1;
+    fpli.pSetLayouts = &zone_fog_set_layout_;
+    fpli.pushConstantRangeCount = 1;
+    fpli.pPushConstantRanges = &fpc;
+    vk_check(vkCreatePipelineLayout(device_, &fpli, nullptr, &zone_fog_layout_), "vkCreatePipelineLayout (zone fog)");
+    // Over the scene: rgb the fog's light + the scene x what shows through (the shader's alpha); the alpha kept.
+    VkPipelineColorBlendAttachmentState over{};
+    over.blendEnable = VK_TRUE;
+    over.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+    over.dstColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    over.colorBlendOp = VK_BLEND_OP_ADD;
+    over.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    over.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    over.alphaBlendOp = VK_BLEND_OP_ADD;
+    over.colorWriteMask = 0xf;
+    VkShaderModule fvs = load_module(device_, shader_dir / "post.vert.spv");
+    VkShaderModule fog = load_module(device_, shader_dir / "zone_fog.frag.spv");
+    zone_fog_pipeline_ = fullscreen_pipeline(device_, pipeline_cache_, zone_fog_layout_, fvs, fog,
+                                             std::span<const VkFormat>(&kSceneFormat, 1), false, &over);
+    vkDestroyShaderModule(device_, fvs, nullptr);
+    vkDestroyShaderModule(device_, fog, nullptr);
 }
 
 void VkContext::write_post_descriptors() {
@@ -1226,6 +1295,7 @@ void VkContext::write_post_descriptors() {
     };
     for (std::uint32_t i = 0; i < kBloomLevels; ++i)
         writes.push_back({bloom_sets_[i + 1], 0, {post_linear_sampler_, bloom_[i].view, kRead}});
+    if (zone_fog_set_) writes.push_back({zone_fog_set_, 0, {post_sampler_, depth.view, kRead}});
     // Every set of the post set's layout: the object motion and the reactive mask (the AO image without them).
     const VkImageView object_motion = object_motion_.view ? object_motion_.view : ao_.view;
     const VkImageView reactive = reactive_.view ? reactive_.view : ao_.view;
@@ -1268,7 +1338,108 @@ void VkContext::write_post_descriptors() {
     vkUpdateDescriptorSets(device_, static_cast<std::uint32_t>(w.size()), w.data(), 0, nullptr);
 }
 
+void VkContext::set_zone_fog_field(const ZoneFogField& field) {
+    // The old field and its set go once the frames that may draw with them are done.
+    if (zone_fog_set_ || zone_fog_texture_.image) {
+        retire([this, set = zone_fog_set_, texture = std::move(zone_fog_texture_)]() mutable {
+            if (set) vkFreeDescriptorSets(device_, zone_fog_pool_, 1, &set);
+            texture.destroy(device_, allocator_);
+        });
+        zone_fog_set_ = VK_NULL_HANDLE;
+        zone_fog_texture_ = {};
+    }
+    if (!field.valid() || !zone_fog_pool_) return;
+    assets::Image image;
+    image.width = static_cast<std::uint32_t>(field.nx);
+    image.height = static_cast<std::uint32_t>(field.ny);
+    std::vector<std::byte> texels(field.texels.size() * 4);
+    for (std::size_t i = 0; i < field.texels.size(); ++i)
+        for (std::size_t c = 0; c < 4; ++c) texels[i * 4 + c] = static_cast<std::byte>((field.texels[i] >> (8 * c)) & 0xffu);
+    image.mips.push_back(std::move(texels));
+    UploadBatch batch(*this);
+    zone_fog_texture_ = batch.texture(image, TextureUse::Data);
+    batch.submit();
+    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorPool = zone_fog_pool_;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &zone_fog_set_layout_;
+    if (vkAllocateDescriptorSets(device_, &ai, &zone_fog_set_) != VK_SUCCESS) {
+        log::warn("the zone's fog: no descriptor set left; it is not drawn");
+        zone_fog_set_ = VK_NULL_HANDLE;
+        return;
+    }
+    const glm::vec2 size = glm::vec2(static_cast<float>(field.nx), static_cast<float>(field.ny)) * field.cell;
+    zone_fog_grid_ = glm::vec4(field.lo, 1.0f / size.x, 1.0f / size.y);
+    zone_fog_floor_ = glm::vec2(field.floor_lo, field.floor_range);
+    const Image& depth = depth_resolved_.image ? depth_resolved_ : depth_;
+    const VkDescriptorImageInfo images[2] = {
+        {post_sampler_, depth.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {post_linear_sampler_, zone_fog_texture_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+    };
+    VkWriteDescriptorSet w[2]{};
+    for (std::uint32_t i = 0; i < 2; ++i) {
+        w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[i].dstSet = zone_fog_set_;
+        w[i].dstBinding = i;
+        w[i].descriptorCount = 1;
+        w[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[i].pImageInfo = &images[i];
+    }
+    vkUpdateDescriptorSets(device_, 2, w, 0, nullptr);
+}
+
+void VkContext::draw_zone_fog(const FrameInfo& frame, const AoView& view, float depth_x, float depth_y) {
+    const ZoneFogView& fog = *zone_fog_view_;
+    VkCommandBuffer cmd = frame.cmd;
+    // The resolve (or the scene's own drawing) wrote the colour; the fog blends over it.
+    image_barrier(cmd, scene_resolved_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                  VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                  VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    VkRenderingAttachmentInfo target{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    target.imageView = scene_resolved_.view;
+    target.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    target.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    target.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+    ri.renderArea = {{0, 0}, frame.extent};
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = 1;
+    ri.pColorAttachments = &target;
+    vkCmdBeginRendering(cmd, &ri);
+    VkViewport vp{0.0f, 0.0f, static_cast<float>(frame.extent.width), static_cast<float>(frame.extent.height), 0.0f, 1.0f};
+    VkRect2D scissor{{0, 0}, frame.extent};
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    ZoneFogPush push;
+    push.right = glm::vec4(fog.right * view.tan_half_x, depth_x);
+    push.up = glm::vec4(fog.up * view.tan_half_y, depth_y);
+    push.forward = glm::vec4(fog.forward, std::min(fog.reach, view.far_plane));
+    push.camera = glm::vec4(fog.camera, zone_fog_floor_.x);
+    push.color = glm::vec4(fog.color, zone_fog_floor_.y);
+    push.glow = glm::vec4(fog.glow, fog.camera_past);
+    // The time wrapped, so the noise stays precise far from its origin; the mist shifts once every 68 minutes.
+    push.to_sun = glm::vec4(fog.to_sun, std::fmod(fog.time, 4096.0f));
+    push.grid = zone_fog_grid_;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, zone_fog_pipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, zone_fog_layout_, 0, 1, &zone_fog_set_, 0, nullptr);
+    vkCmdPushConstants(cmd, zone_fog_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRendering(cmd);
+}
+
 void VkContext::destroy_post_pipeline() {
+    if (zone_fog_pipeline_) vkDestroyPipeline(device_, zone_fog_pipeline_, nullptr);
+    if (zone_fog_layout_) vkDestroyPipelineLayout(device_, zone_fog_layout_, nullptr);
+    if (zone_fog_pool_) vkDestroyDescriptorPool(device_, zone_fog_pool_, nullptr); // its sets with it
+    if (zone_fog_set_layout_) vkDestroyDescriptorSetLayout(device_, zone_fog_set_layout_, nullptr);
+    zone_fog_texture_.destroy(device_, allocator_);
+    zone_fog_texture_ = {};
+    zone_fog_pipeline_ = VK_NULL_HANDLE;
+    zone_fog_layout_ = VK_NULL_HANDLE;
+    zone_fog_pool_ = VK_NULL_HANDLE;
+    zone_fog_set_layout_ = VK_NULL_HANDLE;
+    zone_fog_set_ = VK_NULL_HANDLE;
     if (post_pipeline_) vkDestroyPipeline(device_, post_pipeline_, nullptr);
     if (post_layout_) vkDestroyPipelineLayout(device_, post_layout_, nullptr);
     if (ao_pipeline_) vkDestroyPipeline(device_, ao_pipeline_, nullptr);
@@ -1590,6 +1761,25 @@ std::optional<FrameInfo> VkContext::begin_frame_commands() {
 
     ++frames_begun_;
     recording_ = true;
+    // The passes' GPU time: the slot's last frame is done (its fence above), so its timestamps are read, then the
+    // slot starts again.
+    read_gpu_marks(frame_index_);
+    if (gpu_timing_ && !gpu_queries_) {
+        VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qi.queryCount = (kMaxGpuMarks + 1) * kFramesInFlight;
+        if (vkCreateQueryPool(device_, &qi, nullptr, &gpu_queries_) != VK_SUCCESS) {
+            gpu_queries_ = VK_NULL_HANDLE;
+            gpu_queries_failed_ = true;
+            gpu_timing_ = false;
+        }
+    }
+    if (gpu_timing_ && gpu_queries_) {
+        const std::uint32_t first = (kMaxGpuMarks + 1) * frame_index_;
+        vkCmdResetQueryPool(f.cmd, gpu_queries_, first, kMaxGpuMarks + 1);
+        vkCmdWriteTimestamp2(f.cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, gpu_queries_, first);
+        gpu_started_[frame_index_] = true;
+    }
     // The temporal upscaler's jitter for this frame: a cycle as long as the upscale asks (render/temporal.h).
     if (temporal()) {
         const float scale = static_cast<float>(scene_extent_.width) / static_cast<float>(std::max(view_extent_.width, 1u));
@@ -1763,6 +1953,9 @@ void VkContext::begin_translucent(const FrameInfo& frame) {
     if (!scene_open_) return;
     VkCommandBuffer cmd = frame.cmd;
     vkCmdEndRendering(cmd);
+    // Recorded on the workers, the scene's rendering takes no timestamps between its buffers (the client's own marks
+    // are left out then): its opaque part is timed here as one.
+    if (scene_secondary_) gpu_mark(frame, "scene opaque (worker-recorded)");
     // The resolved colour and depth (sample 0) into the copies the water samples.
     const Image& depth = depth_resolved_.image ? depth_resolved_ : depth_;
     const auto depth_sync = depth_frame_sync(scene_samples_);
@@ -1817,12 +2010,14 @@ void VkContext::begin_translucent(const FrameInfo& frame) {
 void VkContext::begin_overlay(const FrameInfo& frame) {
     if (!scene_open_) return;
     scene_open_ = false;
+    const bool secondary = scene_secondary_;
     scene_secondary_ = false; // the next frame's scene says again (set_scene_secondary)
     // This frame's AO view (set_ao_view), used up here.
     const std::optional<AoView> taken = ao_view_;
     ao_view_.reset();
     const std::optional<SunShafts> shafts = shafts_;
     shafts_.reset();
+    const bool zone_fog = taken && zone_fog_view_ && zone_fog_set_ && zone_fog_pipeline_;
     const std::optional<glm::vec4> mood = mood_;
     mood_.reset();
     // The temporal upscaler runs in frames that gave their camera (set_temporal_view); any other drops the history.
@@ -1832,6 +2027,8 @@ void VkContext::begin_overlay(const FrameInfo& frame) {
     if (!taa) history_valid_ = false;
     VkCommandBuffer cmd = frame.cmd;
     vkCmdEndRendering(cmd);
+    // As begin_translucent's: the rest of a worker-recorded scene timed as one, its resolve included.
+    gpu_mark(frame, secondary ? "scene (worker-recorded)" : "scene end (resolve)");
 
     const bool ao = taken && scene_options_.ambient_occlusion && ao_pipeline_;
     // The depth for the AO and the post pass (a depth resolve runs in the colour output stage).
@@ -1864,6 +2061,12 @@ void VkContext::begin_overlay(const FrameInfo& frame) {
         depth_x = n / (f - n);
         depth_y = f * n / (f - n);
     }
+    // The fog past the zone's edge, over the scene before anything reads it (render/zone_fog.h).
+    if (zone_fog) {
+        draw_zone_fog(frame, *taken, depth_x, depth_y);
+        gpu_mark(frame, "zone fog");
+    }
+    zone_fog_view_.reset();
     image_barrier(cmd, ao_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
                   VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
@@ -1893,6 +2096,7 @@ void VkContext::begin_overlay(const FrameInfo& frame) {
         vkCmdPushConstants(cmd, ao_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
         vkCmdDraw(cmd, 3, 1, 0, 0);
         vkCmdEndRendering(cmd);
+        gpu_mark(frame, "ambient occlusion");
     }
     image_barrier(cmd, ao_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -1913,6 +2117,7 @@ void VkContext::begin_overlay(const FrameInfo& frame) {
     const bool bloom = taken && scene_options_.bloom > 0.0f && bloom_down_pipeline_;
     if (bloom) {
         draw_bloom(cmd);
+        gpu_mark(frame, "bloom");
     } else {
         image_barrier(cmd, bloom_[0].image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
@@ -2126,6 +2331,7 @@ void VkContext::begin_overlay(const FrameInfo& frame) {
         vkCmdPushConstants(cmd, post_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
         vkCmdDraw(cmd, 3, 1, 0, 0);
     }
+    gpu_mark(frame, "upscale and post");
 }
 
 void VkContext::draw_into(VkCommandBuffer cmd, const Image& target, VkExtent2D extent, VkPipeline pipeline,
@@ -2275,6 +2481,34 @@ void VkContext::read_frame_gen_time(std::uint32_t frame_slot) {
     (fg_query_state_[frame_slot] == 2 ? fg_stats_.gpu_ms : fg_stats_.gpu_real_ms) = ms;
 }
 
+void VkContext::gpu_mark(const FrameInfo& frame, const char* name) {
+    if (!recording_ || !gpu_timing_ || !gpu_started_[frame.frame_slot]) return;
+    auto& marks = gpu_marks_[frame.frame_slot];
+    if (marks.size() >= kMaxGpuMarks) return;
+    marks.push_back(name);
+    vkCmdWriteTimestamp2(frame.cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, gpu_queries_,
+                         (kMaxGpuMarks + 1) * frame.frame_slot + static_cast<std::uint32_t>(marks.size()));
+}
+
+void VkContext::read_gpu_marks(std::uint32_t frame_slot) {
+    auto& marks = gpu_marks_[frame_slot];
+    const bool started = gpu_started_[frame_slot];
+    gpu_started_[frame_slot] = false;
+    if (!started || marks.empty() || !gpu_queries_) {
+        marks.clear();
+        return;
+    }
+    // Done, as read_frame_gen_time's: nothing is waited for, and a result the device did not give is dropped.
+    std::array<std::uint64_t, kMaxGpuMarks + 1> ticks{};
+    const auto n = static_cast<std::uint32_t>(marks.size()) + 1u;
+    if (vkGetQueryPoolResults(device_, gpu_queries_, (kMaxGpuMarks + 1) * frame_slot, n, sizeof(std::uint64_t) * n,
+                              ticks.data(), sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+        render::gpu_sections(marks, std::span(ticks).first(n), timestamp_period_ns_, timestamp_bits_, gpu_sections_);
+        ++gpu_sections_serial_;
+    }
+    marks.clear();
+}
+
 FrameGenStats VkContext::frame_gen_stats() const {
     FrameGenStats s = fg_stats_;
     s.requested = frame_gen_requested_;
@@ -2414,11 +2648,13 @@ FrameOutcome VkContext::end_frame(const FrameInfo& frame) {
     VkImage image = images_[frame.image_index];
     begin_overlay(frame);
     vkCmdEndRendering(frame.cmd);
+    gpu_mark(frame, "UI");
     // Frame generation: the UI went into its own image; the real frame and the in-between one are composited now.
     std::optional<std::uint32_t> generated;
     if (overlay_open_) {
         overlay_open_ = false;
         generated = finish_frame_gen(frame);
+        gpu_mark(frame, "frame generation");
     } else {
         picture_ready_ = false; // a frame without its picture: the next one has nothing to start from
     }

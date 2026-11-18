@@ -1146,6 +1146,18 @@ namespace hailstone::game {
 		// (mechanics::step_remote_spawn) for 12 s after the update.
 		glm::vec3 velocity{ 0.0f };    // world units per physics tick (50 ms), from the update's deltas
 		float speed_run = 0.0f;      // the update's animation field x 0.025
+		// Hailstone, a deliberate difference: the spawn has stayed within WorldState::kStallReach of one place for
+		// kStallSeconds (WorldState::smooth). Its velocity and speed_run are kept as the update left them, but the
+		// movement clip and its footsteps take it as standing. The original walks in place here: its clip reads
+		// only these speeds, AdvanceSpawn @0x4877e0 stops stepping 12 s after the last update without clearing
+		// them, and Handle_OP_ClientUpdate @0x4b3d00 clears them only on a stop (animation 66). So an NPC whose
+		// EQEmu stop update is missed (sent only to clients in range, unreliably, and not when that client was
+		// last sent the same position) would walk in place, and so would any spawn a future change holds while it
+		// is stepped. A stepped spawn now always moves (remote collision only reports contact), so in practice
+		// this is a spawn past the 12 s mark. Never set for the local or controlled player.
+		bool stalled = false;
+		glm::vec3 stall_anchor{ std::numeric_limits<float>::quiet_NaN() }; // where it last moved to
+		double stall_since = 0.0;    // when it got there (smooth's clock)
 		// Last completed StepClock time since app start + 1; absent until this spawn incarnation steps.
 		std::optional<std::uint32_t> physics_step_ms;
 		float speed_heading = 0.0f;  // heading units per tick
@@ -2812,6 +2824,10 @@ namespace hailstone::game {
 		// The step_up above the spawn the client's grounding floor query probes (ClientApp::grounding_floor,
 		// app/client_app_input.cpp). The landing short-cut checks a floor it settled on is still inside this reach.
 		static constexpr float kGroundingFloorReach = 4.0f;
+		// Spawn::stalled: how far a spawn may drift and still count as in one place, and how long it must stay there.
+		// A walk covers several units a second, so a moving spawn leaves the reach within a few frames.
+		static constexpr float kStallReach = 0.25f;
+		static constexpr double kStallSeconds = 1.0;
 		// `region` (optional) gives the region type at a point (the low byte of its flags; 0 outside any).
 		using RegionFn = std::function<std::uint8_t(const glm::vec3&)>;
 		// `vehicle_under` (optional) gives the vehicle whose deck is under a point (0: none): a spawn an update puts

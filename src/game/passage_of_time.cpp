@@ -97,7 +97,8 @@ public:
     // CacheBuffSlotEffects for a distance-modified buff: the Character builds its cache again on the next read.
     void cache_buff_slot_effects(int) override { ch_.invalidate_effects(); }
     bool countdown_held(const AffectSpell* spell) override {
-        return buff_countdown_held(spell ? ch_.spell(spell->id) : nullptr, st_.hold_flag != 0);
+        return buff_countdown_held(spell ? ch_.spell(spell->id) : nullptr, st_.hold_flag != 0,
+                                   spells_.zone_suspends_buffs);
     }
     // GetPCSpellAffect @0x433fd0: a buff (type not 0) whose spell has the SPA before its first blank slot.
     bool has_affect(std::int32_t spa) override {
@@ -279,6 +280,7 @@ bool six_second_tick(SpellState& spells, mechanics::CharacterSheet& sheet, const
 
     // The rest reads the character after the buff tick: its buffs, pools and HP as they are now.
     sheet.buff_timers_on_hold = spells.buff_timers_on_hold;
+    sheet.zone_suspends_buffs = spells.zone_suspends_buffs;
     sheet.mana = pools.mana;
     sheet.endurance = pools.endurance;
     sheet.stored_hp = sheet.spawn_hp = static_cast<std::int32_t>(std::clamp<std::int64_t>(pools.hp, INT32_MIN, INT32_MAX));

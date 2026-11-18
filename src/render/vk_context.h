@@ -19,6 +19,7 @@
 
 #include "render/frame_gen.h"
 #include "render/frame_gen_logic.h"
+#include "render/gpu_timer.h"
 #include "render/graphics_tier.h"
 #include "render/fsr3_upscaler.h"
 #include "render/pipeline_cache.h"
@@ -28,6 +29,8 @@
 #include "render/swapchain_size.h"
 #include "render/temporal.h"
 #include "render/upscaler_provider.h"
+#include "render/gpu.h"
+#include "render/zone_fog.h"
 
 namespace hailstone::platform { class Window; }
 
@@ -59,7 +62,9 @@ struct DeviceCaps {
 
 // How the scene is drawn and shown. The scene renders in linear colour into a floating-point target (multisampled
 // when msaa > 1), which a full-screen pass tonemaps into the swapchain before the UI is drawn on top.
-enum class Tonemap : std::uint8_t { None, AgX, Aces };
+// The tone curve (shaders/post.frag). Soft keeps display values to 0.8 as they are and rolls the rest off towards
+// white (shaders/classic_light.glsl soft_highlights): the smooth classic lighting's (LightingMode::SmoothClassic).
+enum class Tonemap : std::uint8_t { None, AgX, Aces, Soft };
 
 // The most MSAA samples the scene is drawn with: a request for more (display.msaa 8, --msaa 8) is drawn at this.
 inline constexpr std::uint32_t kMaxMsaa = 4;
@@ -138,7 +143,7 @@ struct AoView {
     float intensity = 12.0f;
 };
 
-// Parses display.tonemap's values (none, agx, aces); unknown names give None.
+// Parses display.tonemap's values (none, agx, aces, soft); unknown names give None.
 Tonemap parse_tonemap(std::string_view name);
 
 // One frame being recorded. Rendering into the scene target (colour + depth) is already begun.
@@ -244,6 +249,11 @@ public:
     // The sun's shafts for this frame (post.frag marches from each pixel toward the sun over the depth: the sky lets
     // the light through, everything else blocks it); call before begin_overlay.
     void set_sun_shafts(const SunShafts& shafts) { shafts_ = shafts; }
+    // The fog bank past the zone's edge (render/zone_fog.h): its field, uploaded (an invalid one clears it; the zone's,
+    // at zone-in), and this frame's view, drawn over the scene as it ends in frames that also gave set_ao_view (the
+    // depth's terms are the AO view's); call before begin_overlay.
+    void set_zone_fog_field(const ZoneFogField& field);
+    void set_zone_fog(const ZoneFogView& view) { zone_fog_view_ = view; }
     // This frame's colour grade (render/atmosphere.h ColorGrade: rgb a tint of the linear scene before the tonemap,
     // w the saturation after it); none, or with SceneOptions::color_grade off, leaves the picture as it is.
     void set_color_grade(const glm::vec4& mood) { mood_ = mood; }
@@ -270,6 +280,15 @@ public:
     bool frame_generated() const { return fg_generated_last_; }
     // Frame generation's counters, pacing and GPU time (the performance window).
     FrameGenStats frame_gen_stats() const;
+    // The passes' GPU time (render/gpu_timer.h), for the performance window: on only while it is asked for (the
+    // window open) and the device can time. gpu_mark ends a section after the commands recorded so far; outside a
+    // frame, while off, or past kMaxGpuMarks it does nothing. gpu_sections is the last frame read back, and
+    // gpu_sections_serial counts the frames read, so a reader adds each one once.
+    void set_gpu_timing(bool on) { gpu_timing_ = on && timestamp_capable(); }
+    bool timestamp_capable() const { return timestamp_period_ns_ > 0.0f && !gpu_queries_failed_; }
+    void gpu_mark(const FrameInfo& frame, const char* name);
+    std::span<const GpuSection> gpu_sections() const { return gpu_sections_; }
+    std::uint64_t gpu_sections_serial() const { return gpu_sections_serial_; }
     // Scene pipelines are made for the scene's colour attachments: the colour alone, or under a temporal upscaler
     // (scene_motion()) the colour, the object motion (kMotionFormat) and the reactive mask (kReactiveFormat), as
     // begin_scene renders into. A renderer drawing into targets of its own (the item previews) passes `scene` false
@@ -481,6 +500,7 @@ private:
     void create_post_pipeline(const std::filesystem::path& shader_dir);
     void write_post_descriptors();
     void destroy_post_pipeline();
+    void draw_zone_fog(const FrameInfo& frame, const AoView& view, float depth_x, float depth_y);
     void draw_bloom(VkCommandBuffer cmd);
     void create_shadow_resources();
     void create_shadow_map(std::uint32_t size);
@@ -563,6 +583,7 @@ private:
     Image ao_;             // the ambient occlusion, R8
     std::optional<AoView> ao_view_;
     std::optional<SunShafts> shafts_;
+    std::optional<ZoneFogView> zone_fog_view_;
     std::optional<glm::vec4> mood_;
     // With a render scale below 1 (upscaling()): the post pass's picture at the scene's size, and FSR 1's upscale of it
     // at the view's, which fsr_rcas.frag sharpens into the swapchain.
@@ -618,6 +639,16 @@ private:
     float timestamp_period_ns_ = 0.0f;  // VkPhysicalDeviceLimits::timestampPeriod, 0: no timestamps
     std::array<std::uint8_t, kFramesInFlight> fg_query_state_{}; // 0 unwritten, 1 a real frame, 2 with an in-between
     void read_frame_gen_time(std::uint32_t frame_slot);
+    // The passes' timestamps (gpu_mark): kMaxGpuMarks + 1 a frame in flight, the first the frame's start.
+    VkQueryPool gpu_queries_ = VK_NULL_HANDLE;
+    bool gpu_timing_ = false;
+    bool gpu_queries_failed_ = false; // the pool could not be made: no pass timing
+    std::uint32_t timestamp_bits_ = 0; // the queue family's timestampValidBits
+    std::array<std::vector<const char*>, kFramesInFlight> gpu_marks_{}; // each slot's names, its timestamps 1..n
+    std::array<bool, kFramesInFlight> gpu_started_{};                   // its start timestamp written
+    std::vector<GpuSection> gpu_sections_;
+    std::uint64_t gpu_sections_serial_ = 0;
+    void read_gpu_marks(std::uint32_t frame_slot);
     VkPipeline fg_synth_pipeline_ = VK_NULL_HANDLE;
     VkPipeline fg_composite_pipeline_ = VK_NULL_HANDLE;
     VkPipeline rcas_picture_pipeline_ = VK_NULL_HANDLE; // RCAS into a picture (kUpscaleFormat), not the swapchain
@@ -657,6 +688,15 @@ private:
     VkDescriptorSet ao_set_ = VK_NULL_HANDLE;
     VkPipelineLayout ao_layout_ = VK_NULL_HANDLE;
     VkPipeline ao_pipeline_ = VK_NULL_HANDLE;
+    // The zone's fog (set_zone_fog_field): its own pool, a set per field (0 the depth, 1 the field), retired with it.
+    VkDescriptorSetLayout zone_fog_set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool zone_fog_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSet zone_fog_set_ = VK_NULL_HANDLE;
+    VkPipelineLayout zone_fog_layout_ = VK_NULL_HANDLE;
+    VkPipeline zone_fog_pipeline_ = VK_NULL_HANDLE;
+    Texture zone_fog_texture_;
+    glm::vec4 zone_fog_grid_{0.0f};  // the field's corner, 1 / its size
+    glm::vec2 zone_fog_floor_{0.0f}; // its lowest floor, the floors' range
     // The bloom passes read through the AO's set layout (one sampler): set 0 the scene, set i + 1 level i.
     std::array<VkDescriptorSet, kBloomLevels + 1> bloom_sets_{};
     VkPipelineLayout bloom_layout_ = VK_NULL_HANDLE;

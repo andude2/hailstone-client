@@ -33,6 +33,8 @@ TEST_CASE("fuzz: server cfg survives truncated mutated and binary text with opt-
         "[ADDONS]\r\nENFORCE = YES\r\nALLOW = https://GitHub.com/Maker/Optional.git/\r\nDEFAULT = DENY\r\n",
         "[addons]\nenforce = on\nallow = a,,b\n[addons] trailing text\nblock = helper\n",
         "[addons]\nenforce = on\nallow = \"maker/repo\" ; comment\n# whole line comment\n",
+        "[addons]\nenforce = on\nrequired = Maker/Repo:1.0.0-Preview.4+b.1, maker/repo:1.0.0, maker/other:\n",
+        "[addons]\nenforce = on\nrequired = https://github.com/maker/repo.git:v2.0.0-rc.01\n",
     };
     std::vector<fuzz::Bytes> seeds;
     for (const auto text : text_seeds) seeds.push_back(cfg_bytes(text));

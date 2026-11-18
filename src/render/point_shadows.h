@@ -46,6 +46,17 @@ inline constexpr float kPointShadowRange = 360.0f;
 // the quarter-second fade-in).
 inline constexpr std::uint32_t kPointShadowBuildsPerFrame = 1;
 
+// Whether two lights are one to the shadows: the same place and reach, within a tenth of a unit and a hundredth
+// (the zone shader matched by this before the lights carried their keys).
+bool same_shadow_light(const glm::vec4& a, const glm::vec4& b);
+
+// Each zone light's shadow key, which the zone renderer stores in its light (shaders/lighting.glsl PointLightGpu
+// color.w) and PointShadows::apply in the light's shadow entry (slot.z), so the zone's shader finds a light's shadow
+// by a number instead of searching by position: 1 + the first light that is the same to the shadows
+// (same_shadow_light), so lights stacked in one spot share their cube as they did.
+std::vector<float> point_shadow_keys(std::span<const assets::PointLight> lights);
+float point_shadow_key(std::span<const assets::PointLight> lights, std::size_t light);
+
 // The face a direction from the light falls on, and the point on the face (-1..1 each way).
 struct PointShadowTexel {
     std::uint32_t face = 0;
@@ -126,7 +137,8 @@ public:
     std::uint32_t dynamic_cube(std::uint32_t k) const { return total_ + slot_count() + k; }
 
     // Fills SceneLighting's point shadow fields (`size` texels per face side) from the built slots and the used
-    // moving ones, fading each out over the last quarter of kPointShadowRange from `camera`.
+    // moving ones, fading each out over the last quarter of kPointShadowRange from `camera`; a zone light's entry
+    // holds its shadow key (point_shadow_keys) in slot.z. Then tags the scene's lights (tag_shadowed_lights).
     void apply(SceneLighting& lighting, std::span<const assets::PointLight> lights, const glm::vec3& camera,
                std::uint32_t size) const;
 

@@ -10,7 +10,7 @@ does not bypass a function's own caller, screen or server-state checks.
 `API.version`, `API.Supports(module[, member])` and `API.Describe([module[, member]])`
 provide contract version and structural discovery. They confer no permissions.
 
-Coverage: **330/330 method implementation links**, **205/330 adjacent binding comment excerpts**, and **6/6 constant implementation links**. Excerpts below are verbatim binding comments; they preserve any documented signatures and results, and do not invent omitted arguments or results. **See binding** marks an author documentation gap.
+Coverage: **332/332 method implementation links**, **207/332 adjacent binding comment excerpts**, and **6/6 constant implementation links**. Excerpts below are verbatim binding comments; they preserve any documented signatures and results, and do not invent omitted arguments or results. **See binding** marks an author documentation gap.
 
 Unresolved method implementations: none.
 Unresolved constant implementations: none.
@@ -43,6 +43,13 @@ Unresolved constant implementations: none.
 | `API.achievements.Open` | **See binding** | `hs.AchievementOpen` · [source](../src/app/lua_ui_achievements.cpp) | commands | closed |
 | `API.achievements.Refresh` | **See binding** | `hs.AchievementRefresh` · [source](../src/app/lua_ui_achievements.cpp) | actions | closed |
 | `API.achievements.Reward` | **See binding** | `hs.AchievementReward` · [source](../src/app/lua_ui_achievements.cpp) | actions | closed |
+
+## addons
+
+| Member | Documented signature / binding comment | Existing binding | Required capabilities | Hook policy |
+| --- | --- | --- | --- | --- |
+| `API.addons.Policy` | `q = hs.AddonPolicy(): {serial, message, can_retry} while a required add-on has failed in the world, else nil. The`<br>`same table each frame until the failure changes (read it, do not change it). nil to plugin code and to an interface`<br>`Hailstone does not ship (UiHost::trusted_ui: the client draws the warning under one).` | `hs.AddonPolicy` · [source](../src/app/lua_ui_plugins.cpp) | none (outer gate) | closed |
+| `API.addons.PolicyAction` | `ok = hs.AddonPolicyAction("retry", serial): the player's Retry for the failure with that serial (hs.AddonPolicy):`<br>`the required add-ons that failed are tried again once. False when there is no such failure any more, it cannot be`<br>`retried, or the caller is plugin code, not the interface's own file, or an interface Hailstone does not ship.` | `hs.AddonPolicyAction` · [source](../src/app/lua_ui_plugins.cpp) | none (outer gate) | closed |
 
 ## assets
 

@@ -360,6 +360,27 @@ TEST_CASE("MQ Lua: required script startup failures prevent readiness") {
     CHECK(problem.find("Required add-on needed") != std::string::npos);
 }
 
+TEST_CASE("MQ Lua: Retry starts a required script that failed again, once, and only its recorded bytes") {
+    Host h;
+    const std::string text = "error('required startup failed')\n";
+    h.write("needed/init.lua", text);
+    h.policy.set_ceilings({{plugin::FileKind::Script, sha256(text), plugin::kCapRead, "needed", "owner/needed"}});
+    h.policy.set(plugin::parse_server_cfg("[scripts]\nplayer = on\n[addons]\nenforce = on\nrequired = owner/needed\n"));
+    h.scripts->policy_changed();
+    h.pulses(1);
+    REQUIRE_FALSE(h.scripts->running("needed"));
+    CHECK(h.scripts->retry_required_addons() == 1);
+    CHECK(h.scripts->running("needed")); // started again (it fails again at its first pulse)
+    CHECK(h.scripts->retry_required_addons() == 0); // running: left alone
+    h.pulses(1);
+    CHECK_FALSE(h.scripts->running("needed"));
+    h.write("needed/init.lua", "-- other bytes\n"); // not what the requirement names: not started
+    CHECK(h.scripts->retry_required_addons() == 0);
+    CHECK_FALSE(h.scripts->running("needed"));
+    h.policy.clear(); // no rules: nothing is required
+    CHECK(h.scripts->retry_required_addons() == 0);
+}
+
 TEST_CASE("MQ Lua: a required hash also supplied by a blocked add-on refuses readiness") {
     Host h;
     const std::string text = "while true do require('mq').delay(10) end\n";

@@ -283,7 +283,16 @@ The windows are Lua scripts drawn with ImGui, grouped into user interfaces: ever
   (40 bytes or less) are interned by Lua and cost nothing when the same text comes again; tables, closures and long
   strings made in a draw function each frame are what it counts. The table's history reuses its buffers, so keeping
   it costs no allocation a frame while the window is closed. The Actors row counts the instances not posed this
-  frame (in neither the view nor a shadow's reach).
+  frame (in neither the view nor a shadow's reach). The "GPU passes" table shows the GPU's time per pass, averaged the
+  same way, with the total. The passes are the sun's cascades, the cover and water maps, the light cubes, the sky, the
+  zone, the objects, the characters, the translucent pass, the AO, the bloom, the post pass, the UI and frame
+  generation. Each pass is timed from the timestamp `VkContext::gpu_mark` writes after it to the one before it
+  (`render/gpu_timer.h`). While the scene is recorded on the worker threads (`display.parallel_record`), its
+  rendering holds only the secondary buffers' execution and takes no timestamps between them, so the scene's passes
+  show as two rows, "scene opaque (worker-recorded)" and "scene (worker-recorded)"; `display.parallel_record 0` gives
+  the per-pass rows again. The timestamps are written only while the window is open, and are read back a frame or two
+  late, when that frame's fence has been waited for, so nothing waits on the GPU. The zone viewer's `--gpu-timing`
+  (with `--frames`) logs each pass's mean over the timed frames as `gpu pass: ...`.
 - The Lua UI's garbage collector does not run on its own (`LUA_GCSTOP`): `LuaUi::frame` gives it a 1 ms slice at its
   end while a cycle is due (the heap twice what was live after the last cycle) or under way, and finishes a cycle in
   one go only if the heap reaches four times that. Lua's own pacing put a cycle's sweep into one or two frames, a

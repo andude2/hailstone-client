@@ -171,11 +171,11 @@ TEST_CASE("Buff tick: held countdowns (Spell_IsBuffCountdownHeld, SPA 0x1b4)") {
     f.spell(4, {{0x1b4, 1}});
     SpellData& suspendable_hold = f.spell(3, {{0x1b4, 1}});
     suspendable_hold.suspendable = true;
-    CHECK(buff_countdown_held(&f.spells[1], true));
-    CHECK_FALSE(buff_countdown_held(&f.spells[1], false));
-    CHECK_FALSE(buff_countdown_held(&f.spells[2], true));
-    CHECK_FALSE(buff_countdown_held(&f.spells[3], true)); // SPA 0x1b4 on the spell itself
-    CHECK_FALSE(buff_countdown_held(nullptr, true));
+    CHECK(buff_countdown_held(&f.spells[1], true, false));
+    CHECK_FALSE(buff_countdown_held(&f.spells[1], false, false));
+    CHECK_FALSE(buff_countdown_held(&f.spells[2], true, false));
+    CHECK_FALSE(buff_countdown_held(&f.spells[3], true, false)); // SPA 0x1b4 on the spell itself
+    CHECK_FALSE(buff_countdown_held(nullptr, true, false));
     f.buff(0, 1, 10);
     f.buff(1, 2, 10);
     f.state.buff_timers_on_hold = true;
@@ -202,6 +202,34 @@ TEST_CASE("Buff tick: held countdowns (Spell_IsBuffCountdownHeld, SPA 0x1b4)") {
     f.buff(6, 5, 10);
     REQUIRE(f.tick(25004));
     CHECK(f.state.buffs[1].tics == 7);
+}
+
+TEST_CASE("Buff tick: a zone that suspends buffs holds the suspendable ones (OP_NewZone +876, 0xddfc5c)") {
+    Fixture f;
+    SpellData& suspendable = f.spell(1, {{0x7a, 1}});
+    suspendable.suspendable = true;
+    f.spell(2, {{0x7a, 1}});
+    SpellData& suspendable_hold = f.spell(3, {{0x1b4, 1}});
+    suspendable_hold.suspendable = true;
+    CHECK(buff_countdown_held(&f.spells[1], false, true));
+    CHECK_FALSE(buff_countdown_held(&f.spells[2], false, true)); // not suspendable: EQEmu ticks it too
+    CHECK(buff_countdown_held(&f.spells[3], false, true));       // SPA 0x1b4 excuses only the spawn's hold
+    CHECK_FALSE(buff_countdown_held(nullptr, false, true));
+    f.buff(0, 1, 2);
+    f.buff(1, 2, 10);
+    f.state.zone_suspends_buffs = true;
+    REQUIRE(f.tick(7001));
+    REQUIRE(f.tick(13002));
+    REQUIRE(f.tick(19003));
+    CHECK(f.state.buffs[0].tics == 2); // held, and not run out and removed here
+    CHECK(f.state.buffs[1].tics == 7);
+    // The time the displays show stays at the count as received while it is held.
+    CHECK(buff_ms_left(f.state.buffs[0], &f.spells[1], false, true, 19003 + 5000) == 2 * kBuffTickMs);
+    CHECK(buff_ms_left(f.state.buffs[1], &f.spells[2], false, true, 19003 + 5000) == 7 * kBuffTickMs - 5000);
+    // Out of such a zone the count runs again.
+    f.state.zone_suspends_buffs = false;
+    REQUIRE(f.tick(25004));
+    CHECK(f.state.buffs[0].tics == 1);
 }
 
 TEST_CASE("Buff tick: the buffs' HP, mana and endurance, then the regen of the ported formulas") {

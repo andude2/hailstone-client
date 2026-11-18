@@ -35,7 +35,6 @@
 #include "core/ini_file.h"
 #include "core/server_profile.h"
 #include "core/shared_file_cache.h"
-#include "game/world_atlas.h"
 #include "nav/nav_mesh.h"
 #include "platform/gpu_ipc.h"
 #include "render/gpu_cache_protocol.h"
@@ -798,74 +797,29 @@ TEST_CASE("fuzz: navigation cache files and their tiles") {
           });
 }
 
-// ---- The neighbours' ground cache (render/horizon.h) ---------------------------------------------------------------
-// read_horizon_cache, then the source it gives sampled: a broken file must be refused or give a source that samples
+// ---- The land's worn terrain cache (render/horizon.h) --------------------------------------------------------------
+// read_horizon_terrain, then the terrain it gives sampled: a broken file must be refused or give a terrain that samples
 // without reading past its grid.
 
-TEST_CASE("fuzz: the neighbours' ground cache") {
+TEST_CASE("fuzz: the land's terrain cache") {
     fuzz::QuietLog quiet;
-    std::vector<float> ground(12 * 9);
-    for (std::size_t i = 0; i < ground.size(); ++i) ground[i] = i % 7 == 0 ? std::numeric_limits<float>::quiet_NaN() : static_cast<float>(i);
-    render::HorizonCacheEntry e;
-    e.zone = "ecommons";
-    e.neighbour = "freportw";
-    e.key = 77;
-    e.offset = {1.0f, 2.0f, 3.0f};
-    std::vector<float> water(ground.size(), std::numeric_limits<float>::quiet_NaN());
-    for (std::size_t i = 0; i < water.size(); i += 3) water[i] = 20.0f;
-    e.source = render::horizon_source("freportw", {100.0f, -50.0f}, 64.0f, 12, 9, ground, {}, water);
-    const Bytes seed = render::write_horizon_cache(e);
-    sweep("read_horizon_cache", {seed}, 64, 1500, [&](std::span<const std::byte> d) {
-        auto got = render::read_horizon_cache(d);
+    render::HorizonTerrain t;
+    t.lo = {-640.0f, 128.0f};
+    t.cell = 64.0f;
+    t.nx = 11;
+    t.ny = 7;
+    for (int i = 0; i < t.nx * t.ny; ++i) {
+        t.delta.push_back(static_cast<float>(i % 13) - 6.0f);
+        t.wet.push_back(static_cast<float>(i % 5) / 4.0f);
+    }
+    const std::uint64_t key = 0x1234abcdull;
+    const Bytes seed = render::write_horizon_terrain(t, key);
+    sweep("read_horizon_terrain", {seed}, 64, 1500, [&](std::span<const std::byte> d) {
+        auto got = render::read_horizon_terrain(d, key);
         if (!got) return;
-        for (glm::vec2 p : {glm::vec2(0.0f), glm::vec2(400.0f, 200.0f), glm::vec2(-1e6f, 1e6f), glm::vec2(500.0f, -9.0f)}) {
-            (void)render::sample_source(got->source, p);
-            (void)render::source_ground(got->source, p);
+        for (glm::vec2 p : {glm::vec2(0.0f), glm::vec2(-640.0f, 128.0f), glm::vec2(-1e6f, 1e6f), glm::vec2(1e9f, -1e9f)}) {
+            (void)got->sample(got->delta, p);
+            (void)got->sample(got->wet, p);
         }
-    });
-}
-
-// ---- The world atlas's records (game/world_atlas.h) -----------------------------------------------------------------
-// read_atlas_visit and read_atlas_zone, then the zone's ground read and its lines grouped: a broken file must be
-// refused or give a record that reads without going past its grid.
-
-TEST_CASE("fuzz: the world atlas's records") {
-    fuzz::QuietLog quiet;
-    game::AtlasVisit v;
-    v.zone = "qeytoqrg";
-    v.zone_id = 4;
-    v.outdoor = true;
-    v.points = {{1, 2, 10.0f, 20.0f, 999999.0f}, {3, 1, -5.0f, 6.0f, 7.0f}};
-    sweep("read_atlas_visit", {game::write_atlas_visit(v)}, 64, 1500, [&](std::span<const std::byte> d) {
-        (void)game::read_atlas_visit(d);
-    });
-    game::AtlasZone z;
-    z.zone = "qeynos2";
-    z.key = 9;
-    z.lo = {0.0f, 0.0f, -10.0f};
-    z.hi = {500.0f, 300.0f, 100.0f};
-    z.nx = 8;
-    z.ny = 5;
-    z.ground.assign(40, 1.0f);
-    z.top.assign(40, 2.0f);
-    z.water.assign(40, std::numeric_limits<float>::quiet_NaN());
-    z.color.assign(40, 0xff204060u);
-    z.trees.assign(40, 2);
-    game::ZoneLineCell c;
-    c.region = 1;
-    c.hi = {50.0f, 50.0f, 50.0f};
-    c.zone_id = 2;
-    c.tag = "line";
-    z.lines.push_back(c);
-    c.region = 2;
-    c.reference = true;
-    c.zone_point = 1;
-    z.lines.push_back(c);
-    sweep("read_atlas_zone", {game::write_atlas_zone(z)}, 64, 1500, [&](std::span<const std::byte> d) {
-        auto got = game::read_atlas_zone(d);
-        if (!got) return;
-        for (glm::vec2 p : {glm::vec2(0.0f), glm::vec2(400.0f, 200.0f), glm::vec2(-1e6f, 1e6f), glm::vec2(511.9f, 319.9f)})
-            (void)got->ground_at(p);
-        (void)game::collect_neighbour_lines(got->lines, v.points, 0);
     });
 }

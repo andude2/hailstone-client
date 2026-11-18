@@ -210,3 +210,72 @@ TEST_CASE("point shadows: few slots all go to the zone's lights") {
     shadows.apply(lighting, none, glm::vec3(0.0f), 512);
     CHECK(lighting.point_shadow_params.x == 0.0f);
 }
+
+TEST_CASE("point shadows: shadow keys name the first light in the same place, as a brute-force search does") {
+    std::vector<assets::PointLight> lights = {
+        light_at({0, 0, 0}, 60),       // 1
+        light_at({100, 0, 0}, 40),     // 2
+        light_at({0.05f, 0, 0}, 60),   // the first, within a tenth: 1
+        light_at({0, 0, 0}, 61),       // the first's place, another reach: 4
+        light_at({100, 0.2f, 0}, 40),  // past a tenth of the second: 5
+        light_at({100, 0, 0.09f}, 40), // the second: 2
+    };
+    // A crowd of lights on a few spots, some stacked, in no order.
+    for (int i = 0; i < 300; ++i)
+        lights.push_back(light_at({static_cast<float>((i * 37) % 11) * 0.06f, static_cast<float>(i % 3), 0.0f},
+                                  50.0f + static_cast<float>(i % 2) * 0.005f));
+    const std::vector<float> keys = point_shadow_keys(lights);
+    REQUIRE(keys.size() == lights.size());
+    CHECK(keys[0] == 1.0f);
+    CHECK(keys[1] == 2.0f);
+    CHECK(keys[2] == 1.0f);
+    CHECK(keys[3] == 4.0f);
+    CHECK(keys[4] == 5.0f);
+    CHECK(keys[5] == 2.0f);
+    for (std::size_t i = 0; i < lights.size(); ++i) {
+        INFO("light " << i);
+        // The brute force: the first light the shaders' test calls the same.
+        std::size_t first = i;
+        for (std::size_t j = 0; j < i; ++j)
+            if (same_shadow_light(glm::vec4(lights[j].position, lights[j].radius),
+                                  glm::vec4(lights[i].position, lights[i].radius))) {
+                first = j;
+                break;
+            }
+        CHECK(keys[i] == static_cast<float>(first + 1));
+        CHECK(point_shadow_key(lights, i) == keys[i]);
+    }
+}
+
+TEST_CASE("point shadows: a zone light's entry holds its key; the scene's lights carry their entries") {
+    std::vector<assets::PointLight> lights = {light_at({0, 0, 0}, 60), light_at({0, 0, 0}, 60)};
+    PointShadows shadows(8); // 5 for the zone, the carried light's and the spells' after
+    DynamicShadowLights moving;
+    moving.carried = source_at({1.5f, 2.25f, 4.0f}, 65.0f);
+    shadows.set_dynamic(moving, glm::vec3(0.0f));
+    // One cube is built a frame: both in two.
+    for (int frame = 0; frame < 2; ++frame)
+        for (std::uint32_t b : shadows.update(lights, glm::vec3(0.0f), 0.016f)) shadows.mark_built(b);
+    shadows.update(lights, glm::vec3(0.0f), 1.0f);
+    SceneLighting lighting;
+    // The scene's lights: the carried one first, a light the zone has, one with no shadow.
+    lighting.params.y = 3.0f;
+    lighting.lights[0].position_radius = glm::vec4(moving.carried->position, 65.0f);
+    lighting.lights[1].position_radius = glm::vec4(0.0f, 0.0f, 0.05f, 60.0f);
+    lighting.lights[2].position_radius = glm::vec4(500.0f, 0.0f, 0.0f, 60.0f);
+    lighting.lights[2].color.w = 7.0f; // an old tag goes
+    shadows.apply(lighting, lights, glm::vec3(0.0f), 512);
+    // Both zone lights are chosen (the second shares the first's key), then the carried light.
+    REQUIRE(lighting.point_shadow_params.x == 3.0f);
+    CHECK(lighting.point_shadow_slot[0].z == 1.0f);
+    CHECK(lighting.point_shadow_slot[1].z == 1.0f);
+    CHECK(lighting.point_shadow_slot[2].z == 0.0f); // a moving light has no key
+    CHECK(glm::vec3(lighting.point_shadow_light[2]) == moving.carried->position);
+    CHECK(lighting.lights[0].color.w == 3.0f);
+    CHECK(lighting.lights[1].color.w == 1.0f); // the first entry in its place
+    CHECK(lighting.lights[2].color.w == 0.0f);
+    // Lights past the count are left alone.
+    lighting.lights[3].color.w = 5.0f;
+    tag_shadowed_lights(lighting);
+    CHECK(lighting.lights[3].color.w == 5.0f);
+}

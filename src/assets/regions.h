@@ -141,7 +141,7 @@ public:
 
     // The space a region holds, as boxes: each BSP leaf of a region `want` picks (by 1-based number) is the convex
     // cell its path of split planes cuts from the box lo..hi; its box is that cell's. EQG zones: each box's corners'
-    // box. For the neighbour zones (game/neighbour_zones.h), which need where the zone lines are.
+    // box. For the zone's exits (game/zone_exits.h), which need where the zone lines are.
     struct LeafCell {
         std::uint32_t region = 0;
         glm::vec3 lo{0.0f}, hi{0.0f};

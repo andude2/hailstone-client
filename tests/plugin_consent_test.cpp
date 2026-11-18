@@ -19,6 +19,7 @@
 #include "plugin/consent.h"
 #include "plugin/policy.h"
 #include "scratch_dir.h"
+#include "ui/dev_screens.h"
 #include "ui/lua/lua_host.h"
 
 using namespace hailstone;
@@ -249,6 +250,128 @@ TEST_CASE("hs.PluginConsent in a plugin's code: nil, and its answer is refused")
         CHECK(in_folder(lua, "plug", "return in_draw") == "false");
         CHECK(a.answers.empty()); // the plugin answered nothing
         CHECK(a.prompt.has_value());
+    }
+    ImGui::DestroyContext(ctx);
+}
+
+// The Server add-ons warning for the packs: only while a required add-on has failed, one table per failure (asked
+// every frame, built again only when the failure changes), and Retry only for that failure, from the pack's own code.
+TEST_CASE("hs.AddonPolicy and hs.AddonPolicyAction: the failure for the packs, cached by serial, and Retry") {
+    app::UiHost host;
+    app::UiApi api(host);
+    lua_State* L = luaL_newstate();
+    luaL_openlibs(L);
+    lua_newtable(L);
+    api.register_functions(L);
+    lua_setglobal(L, "hs");
+    CHECK(run(L, "return hs.AddonPolicy()") == "nil"); // no host view
+    ui::AddonPolicyView view;
+    host.addon_policy = &view;
+    int retries = 0;
+    host.retry_required_addons = [&] { ++retries; };
+    CHECK(run(L, "return hs.AddonPolicy()") == "nil"); // nothing failed: no warning
+    view.failed = view.can_retry = true;
+    view.serial = 7;
+    view.message = "Required add-on owner/thing failed with an error in a command";
+    CHECK(run(L, "return hs.AddonPolicy().message") == view.message);
+    CHECK(run(L, "return hs.AddonPolicy().serial") == "7");
+    CHECK(run(L, "return hs.AddonPolicy().can_retry") == "true");
+    CHECK(run(L, "first = hs.AddonPolicy() return rawequal(first, hs.AddonPolicy())") == "true"); // not rebuilt
+    view.message = "changed without a new serial"; // (the host always bumps it; this shows the cache is by serial)
+    CHECK(run(L, "return rawequal(first, hs.AddonPolicy())") == "true");
+    view.serial = 8;
+    CHECK(run(L, "return rawequal(first, hs.AddonPolicy())") == "false");
+    CHECK(run(L, "return hs.AddonPolicy().message") == view.message);
+
+    CHECK(run(L, "return hs.AddonPolicyAction('retry', 8)") == "false"); // not the interface's own file
+    lua_pushboolean(L, 1);
+    lua_setfield(L, LUA_REGISTRYINDEX, ui::lua::kPackStateKey);
+    CHECK(run(L, "return (pcall(hs.AddonPolicyAction, 'retry'))") == "false"); // the serial is required
+    CHECK(run(L, "return hs.AddonPolicyAction('retry', 7)") == "false");        // a failure no longer shown
+    CHECK(run(L, "return hs.AddonPolicyAction('stop', 8)") == "false");         // no emergency stop
+    CHECK(retries == 0);
+    CHECK(run(L, "return hs.AddonPolicyAction('retry', 8)") == "true");
+    CHECK(retries == 1);
+    view.can_retry = false; // the zone's rules, not the running add-ons: Retry cannot help
+    CHECK(run(L, "return hs.AddonPolicyAction('retry', 8)") == "false");
+    view.failed = false;
+    view.serial = 9;
+    CHECK(run(L, "return hs.AddonPolicy()") == "nil");
+    CHECK(retries == 1);
+    lua_close(L);
+}
+
+// Under an interface Hailstone does not ship the warning is the client's: nil, Retry refused, and its window cannot be
+// put away by the interface.
+TEST_CASE("hs.AddonPolicy under an add-on interface: nil, Retry refused, the client's window stays") {
+    app::UiHost host;
+    host.trusted_ui = false;
+    app::UiApi api(host);
+    lua_State* L = luaL_newstate();
+    luaL_openlibs(L);
+    lua_newtable(L);
+    api.register_functions(L);
+    lua_setglobal(L, "hs");
+    ui::AddonPolicyView view;
+    view.failed = view.can_retry = true;
+    view.serial = 3;
+    view.message = "failed";
+    host.addon_policy = &view;
+    int retries = 0;
+    host.retry_required_addons = [&] { ++retries; };
+    lua_pushboolean(L, 1);
+    lua_setfield(L, LUA_REGISTRYINDEX, ui::lua::kPackStateKey);
+    CHECK(run(L, "return hs.AddonPolicy()") == "nil");
+    CHECK(run(L, "return hs.AddonPolicyAction('retry', 3)") == "false");
+    CHECK(retries == 0);
+    api.begin_frame();
+    run(L, "hs.ReplaceWindow('AddonPolicy')");
+    CHECK_FALSE(api.replaces("AddonPolicy"));
+    lua_close(L);
+}
+
+// A plugin's windows run in the UI as that plugin: they neither see the warning nor press Retry.
+TEST_CASE("hs.AddonPolicy in a plugin's code: nil, and Retry is refused") {
+    test::ScratchDir dir("addon_policy_confined");
+    const fs::path pack = dir.path() / "pack", plug = dir.path() / "plug";
+    fs::create_directories(pack);
+    fs::create_directories(plug);
+    std::ofstream(pack / "policy.lua") << "ui.window('Policy', function() pack_saw = hs.AddonPolicy() ~= nil end)\n";
+    std::ofstream(plug / "sneak.lua") << "ui.window('Sneak', function()\n"
+                                         "  saw = hs.AddonPolicy() ~= nil\n"
+                                         "  pressed = hs.AddonPolicyAction('retry', 5)\n"
+                                         "end)\n";
+    ImGuiContext* ctx = ImGui::CreateContext();
+    ImGui::GetIO().IniFilename = nullptr;
+    unsigned char* px = nullptr;
+    int w = 0, h = 0;
+    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    {
+        app::UiHost host;
+        app::UiApi api(host);
+        ui::AddonPolicyView view;
+        view.failed = view.can_retry = true;
+        view.serial = 5;
+        view.message = "failed";
+        host.addon_policy = &view;
+        int retries = 0;
+        host.retry_required_addons = [&] { ++retries; };
+        ui::lua::LuaUi lua(pack, dir.path() / "ui.txt");
+        lua.add_ui_api([&](lua_State* L) { api.register_functions(L); });
+        lua.set_caller_scope([&](std::string_view tag) -> std::shared_ptr<void> {
+            return std::make_shared<plugin::CallerScope>(plugin::kCapAll, tag);
+        });
+        lua.set_folders({{"plug", plug}});
+        ImGui::GetIO().DisplaySize = ImVec2(800, 600);
+        ImGui::GetIO().DeltaTime = 1.0f / 60.0f;
+        ImGui::NewFrame();
+        lua.frame();
+        ImGui::Render();
+        CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
+        CHECK(run(lua.state(), "return pack_saw") == "true");
+        CHECK(in_folder(lua, "plug", "return saw") == "false");
+        CHECK(in_folder(lua, "plug", "return pressed") == "false");
+        CHECK(retries == 0);
     }
     ImGui::DestroyContext(ctx);
 }

@@ -76,18 +76,11 @@ bool gpu_builds_mips(const assets::Image& image, TextureUse use);
 // The CPU half of UploadBatch::texture for a colour texture: the image with its mip chain built (and its colour key
 // taken out, or made opaque), or nullopt when the image goes up as it is. Safe on any thread; an image it returns
 // uploads unchanged as TextureUse::Data. `gpu_mips` false builds the chain here even where gpu_builds_mips() would
-// leave it to the GPU (a caller that cuts the chain down: prepare_capped_texture).
+// leave it to the GPU.
 std::optional<assets::Image> prepare_texture_image(const assets::Image& image, TextureUse use, bool gpu_mips = true);
 // The final immutable external-image payload: colour mips built on the CPU and BC decoded when unsupported.
 // Nullopt means the source is already usable unchanged. This never leaves a colour mip chain for an UNORM blit.
 std::optional<assets::Image> prepare_immutable_texture_image(const assets::Image& image, TextureUse use, bool bc_textures);
-// Drops the image's largest mip levels until it is at most `max_size` texels across (0: none dropped), keeping at
-// least one level.
-void drop_large_mips(assets::Image& image, std::uint32_t max_size);
-// A texture held to `max_size` texels across (0: as it is, `use` unchanged): its chain built on the CPU
-// (prepare_texture_image, even where the GPU would build it) and the levels above `max_size` dropped, `use` then
-// Data. A neighbour zone's textures (ZoneRenderer::Options::max_texture_size).
-void prepare_capped_texture(assets::Image& image, TextureUse& use, std::uint32_t max_size);
 
 class UploadBatch {
 public:

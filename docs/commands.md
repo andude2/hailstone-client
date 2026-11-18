@@ -232,8 +232,7 @@ These are not in the original client.
 | `/stowcursor <id>` | Put the item on your cursor into your packs (never a worn slot), only if its item id is `<id>`. For plugins (docs/plugins.md). |
 | `/web [address]` | The in-game browser, on a new tab (docs/browser.md). |
 | `/luasocial [1..120 \| new]` | The Lua social editor. |
-| `/lighting [modern \| classic]` | Switch the lighting (docs/graphics.md). |
-| `/neighbourzones [on \| off]` | Draw the zones past outdoor zone lines (docs/graphics.md). |
+| `/lighting [modern \| smooth \| classic]` | Switch the lighting (docs/graphics.md); without a mode, between modern and classic. |
 | `/screenshot` | Take a screenshot. |
 | `/perf` | The performance window. |
 

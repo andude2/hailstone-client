@@ -779,9 +779,8 @@ GaugeValue ui_discipline_gauge(const UiHost& host, std::int64_t now_ms) {
     // level, false), 0 when that is not positive; the gauge function caps it at 1000. RoF2 gives the gauge no text.
     // Hailstone additions: interpolation between buff ticks, the seconds text, and permanent effects drawn full.
     if (game::buff_is_permanent(buff.tics, spell)) return {1000, "Permanent"};
-    const auto left = game::buff_countdown_held(spell, c.spell_state().buff_timers_on_hold)
-                          ? static_cast<std::uint64_t>(buff.tics) * game::kBuffTickMs
-                          : game::buff_ms_left(buff.tics, buff.received_ms, now_ms);
+    const auto left = game::buff_ms_left(buff, spell, c.spell_state().buff_timers_on_hold,
+                                         c.spell_state().zone_suspends_buffs, now_ms);
     const auto ticks = host.character ? host.character->spell_duration(*spell, c.player_status().level) : 0;
     const auto total = static_cast<std::int64_t>(ticks) * game::kBuffTickMs;
     const int value = total > 0

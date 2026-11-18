@@ -71,7 +71,6 @@ dependencies was run); the deterministic tests are the verified part.
 | `src/assets/texture.cpp` `decode_bmp` (RLE) | a 130 KB RLE8 could declare 8192 x 8192 (end of bitmap at once), decoded into a 64 MB index buffer and the 256 MB image | refused when the size is over 128 pixels per byte of data (+512 bytes), what runs can fill; decoded straight into the image |
 | `src/assets/character_dress.cpp` `layered_texture` | Luclin layers were composited at the widest layer's width by the tallest's height: a 16384 x 1 and a 1 x 16384 layer made 1 GiB | composited at the size of the layer with the most texels |
 | `src/assets/wld_zone.cpp`, `src/assets/eqg_zone.cpp` (lights) | a non-finite light position, colour or radius from `lights.wld`, an EQG zone's DAT or ZON reached the light grid | left out at load (`finite_light`) |
-| `src/game/neighbour_zones.cpp` `GroundSampler`, `split_cells` | a NaN, infinite or huge band, cell or triangle reached `static_cast<int>(ceil/floor(...))` (UB), and the cell-span product was a `long` (32 bits on Windows) | counted in double and bounded before the cast (NaN is 0 cells); the product in 64 bits |
 
 Behaviour for valid input is unchanged. The typed packet decoders, the session layer, the login parsers and the WLD, ZON,
 model, DDS, TGA, XMI and table parsers produced no findings.

@@ -23,7 +23,7 @@ constexpr std::uint64_t kGiB = 1024ull * 1024ull * 1024ull;
 // Radial flora (the Options window's Radial Flora, ShowGrass): off on Low; Medium and High keep the player's.
 // The volumetric clouds (a compute pass each frame): off on Low, the painted cloud layer instead; Medium and High keep
 // the player's.
-constexpr std::size_t kKeyCount = 16;
+constexpr std::size_t kKeyCount = 15;
 
 constexpr std::array<TierSetting, kKeyCount> kLow = {{
     {"display.shadows", "0"},
@@ -33,7 +33,6 @@ constexpr std::array<TierSetting, kKeyCount> kLow = {{
     {"display.view_distance", "1.50"},
     {"display.light_shadows", "0"},
     {"display.render_scale", ""}, // the upscaler is off: the view is drawn at full size
-    {"display.neighbour_zones", "0"},
     {"display.horizon_hills", "0"},
     {"display.volumetric_clouds", "0"},
     {"display.grass_density", "50"},
@@ -52,7 +51,6 @@ constexpr std::array<TierSetting, kKeyCount> kMedium = {{
     {"display.view_distance", "2.00"},
     {"display.light_shadows", "4"},
     {"display.render_scale", ""},
-    {"display.neighbour_zones", ""},
     {"display.horizon_hills", ""},
     {"display.volumetric_clouds", ""},
     {"display.grass_density", "75"},
@@ -71,7 +69,6 @@ constexpr std::array<TierSetting, kKeyCount> kHigh = {{
     {"display.view_distance", ""},
     {"display.light_shadows", ""},
     {"display.render_scale", ""},
-    {"display.neighbour_zones", ""},
     {"display.horizon_hills", ""},
     {"display.volumetric_clouds", ""},
     {"display.grass_density", ""},

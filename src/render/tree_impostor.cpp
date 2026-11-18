@@ -34,6 +34,42 @@ bool texel(const assets::Image& image, glm::vec2 uv, std::array<std::uint8_t, 4>
 
 } // namespace
 
+assets::Mesh impostor_cards(glm::vec3 lo, glm::vec3 hi, const std::string& texture_name) {
+    assets::Mesh mesh;
+    // The two cards, crossed at the middle.
+    mesh.name = texture_name;
+    assets::Material m;
+    m.name = texture_name;
+    m.blend = assets::BlendMode::Masked;
+    m.frames = {texture_name};
+    m.two_sided = true;
+    mesh.materials.push_back(m);
+    const glm::vec3 mid = 0.5f * (lo + hi);
+    auto vertex = [&](glm::vec3 p, glm::vec2 uv) {
+        assets::Vertex v;
+        v.position = p;
+        v.normal = glm::vec3(0.0f, 0.0f, 1.0f);
+        v.uv = uv;
+        mesh.vertices.push_back(v);
+    };
+    vertex({lo.x, mid.y, hi.z}, {0.0f, 0.0f});
+    vertex({hi.x, mid.y, hi.z}, {0.5f, 0.0f});
+    vertex({hi.x, mid.y, lo.z}, {0.5f, 1.0f});
+    vertex({lo.x, mid.y, lo.z}, {0.0f, 1.0f});
+    vertex({mid.x, hi.y, hi.z}, {0.5f, 0.0f});
+    vertex({mid.x, lo.y, hi.z}, {1.0f, 0.0f});
+    vertex({mid.x, lo.y, lo.z}, {1.0f, 1.0f});
+    vertex({mid.x, hi.y, lo.z}, {0.5f, 1.0f});
+    mesh.indices = {0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7};
+    assets::MeshPart part;
+    part.first_index = 0;
+    part.index_count = static_cast<std::uint32_t>(mesh.indices.size());
+    part.material = 0;
+    part.solid = false;
+    mesh.parts.push_back(part);
+    return mesh;
+}
+
 std::optional<TreeImpostor> tree_impostor(const assets::Mesh& tree, const ImpostorTextureLookup& texture,
                                           const std::string& texture_name) {
     // The triangles drawn, with their pictures.
@@ -166,38 +202,7 @@ std::optional<TreeImpostor> tree_impostor(const assets::Mesh& tree, const Impost
     }
     out.image.mips.push_back(std::move(pixels));
 
-    // The two cards, crossed at the middle.
-    assets::Mesh& mesh = out.mesh;
-    mesh.name = texture_name;
-    assets::Material m;
-    m.name = texture_name;
-    m.blend = assets::BlendMode::Masked;
-    m.frames = {texture_name};
-    m.two_sided = true;
-    mesh.materials.push_back(m);
-    const glm::vec3 mid = 0.5f * (lo + hi);
-    auto vertex = [&](glm::vec3 p, glm::vec2 uv) {
-        assets::Vertex v;
-        v.position = p;
-        v.normal = glm::vec3(0.0f, 0.0f, 1.0f);
-        v.uv = uv;
-        mesh.vertices.push_back(v);
-    };
-    vertex({lo.x, mid.y, hi.z}, {0.0f, 0.0f});
-    vertex({hi.x, mid.y, hi.z}, {0.5f, 0.0f});
-    vertex({hi.x, mid.y, lo.z}, {0.5f, 1.0f});
-    vertex({lo.x, mid.y, lo.z}, {0.0f, 1.0f});
-    vertex({mid.x, hi.y, hi.z}, {0.5f, 0.0f});
-    vertex({mid.x, lo.y, hi.z}, {1.0f, 0.0f});
-    vertex({mid.x, lo.y, lo.z}, {1.0f, 1.0f});
-    vertex({mid.x, hi.y, lo.z}, {0.5f, 1.0f});
-    mesh.indices = {0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7};
-    assets::MeshPart part;
-    part.first_index = 0;
-    part.index_count = static_cast<std::uint32_t>(mesh.indices.size());
-    part.material = 0;
-    part.solid = false;
-    mesh.parts.push_back(part);
+    out.mesh = impostor_cards(lo, hi, texture_name);
     return out;
 }
 

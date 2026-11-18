@@ -4,6 +4,7 @@
 #include <cmath>
 #include <ctime>
 #include <format>
+#include <functional>
 #include <optional>
 #include <random>
 
@@ -180,11 +181,17 @@ template <typename Pass> V buff_with_effect(const Context& c, const game::Spawn&
     return V::nil();
 }
 
-// Buff ticks are 6 s; the countdown the client keeps (BuffSlot::tics) is as the server last sent it.
-std::int64_t buff_ms_left(const game::BuffSlot& b) {
+// Buff ticks are 6 s; the countdown the client keeps (BuffSlot::tics) is as the server last sent it. A held countdown
+// (game::buff_countdown_held) stays at it: the zone's buff suspension holds anyone's suspendable buffs, the player's
+// buff-timer hold only the player's own.
+std::int64_t buff_ms_left(const Context& c, const game::BuffSlot& b) {
     if (b.tics < 0) return -1; // permanent
-    std::int64_t left = static_cast<std::int64_t>(b.tics) * 6000 - (GameConnection::now_ms() - b.received_ms);
-    return std::max<std::int64_t>(0, left);
+    if (!c.conn) return static_cast<std::int64_t>(game::buff_ms_left(b.tics, b.received_ms, GameConnection::now_ms()));
+    const auto& st = c.conn->spell_state();
+    const std::less<const game::BuffSlot*> before;
+    const bool own = !before(&b, st.buffs.data()) && before(&b, st.buffs.data() + st.buffs.size());
+    return static_cast<std::int64_t>(game::buff_ms_left(b, spell_data(c, b.spell), own && st.buff_timers_on_hold,
+                                                        st.zone_suspends_buffs, GameConnection::now_ms()));
 }
 
 const char* target_type_name(int t) {
@@ -510,7 +517,7 @@ void register_spawn() {
     };
     auto duration = [](const Context& c, const V& b) -> V {
         const game::BuffSlot* s = b.kind == Value::Kind::Object ? buff_of(c, b) : nullptr;
-        const std::int64_t ms = s ? buff_ms_left(*s) : -1;
+        const std::int64_t ms = s ? buff_ms_left(c, *s) : -1;
         return ms < 0 ? V::nil() : V::object(g.timestamp, ms);
     };
     spawn_member("Buff", [find_buff](const Context& c, const game::Spawn& s, std::string_view index) -> V {
@@ -963,12 +970,12 @@ void register_spell() {
     bm("Counters", [](const Context&, const Value&, const game::BuffSlot& s, std::string_view) { return V::integer(s.num_hits); });
     bm("HitCount", [](const Context&, const Value&, const game::BuffSlot& s, std::string_view) { return V::integer(s.num_hits); });
     bm("Mod", [](const Context&, const Value&, const game::BuffSlot& s, std::string_view) { return V::number(s.modifier); });
-    bm("Duration", [](const Context&, const Value&, const game::BuffSlot& s, std::string_view) -> V {
-        std::int64_t ms = buff_ms_left(s);
+    bm("Duration", [](const Context& c, const Value&, const game::BuffSlot& s, std::string_view) -> V {
+        std::int64_t ms = buff_ms_left(c, s);
         return ms < 0 ? V::nil() : V::object(g.timestamp, ms);
     });
-    bm("Dur", [](const Context&, const Value&, const game::BuffSlot& s, std::string_view) -> V {
-        std::int64_t ms = buff_ms_left(s);
+    bm("Dur", [](const Context& c, const Value&, const game::BuffSlot& s, std::string_view) -> V {
+        std::int64_t ms = buff_ms_left(c, s);
         return ms < 0 ? V::nil() : V::object(g.timestamp, ms);
     });
 }

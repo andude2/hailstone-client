@@ -1978,6 +1978,23 @@ void ScriptHost::policy_changed(const std::vector<std::string>& autoload) {
     m.start_managed();
 }
 
+std::size_t ScriptHost::retry_required_addons() {
+    Impl& m = *impl_;
+    if (!m.env.policy || !m.env.policy->current() || m.env.policy->current()->provisional) return 0;
+    m.reap();
+    std::size_t started = 0;
+    const auto required = m.required; // (run() can reach policy_changed)
+    for (const auto& [name, hash] : required) {
+        if (running(name)) continue;
+        const auto file = m.resolve(name);
+        const auto text = file ? read_file(*file) : std::nullopt;
+        if (!text || sha256(*text) != hash || m.env.policy->caps(plugin::FileKind::Script, hash, name) == 0) continue;
+        log::info("lua: the player retries the required add-on {}", name);
+        if (run(name, {})) ++started;
+    }
+    return started;
+}
+
 void ScriptHost::Impl::start_managed() {
     if (!env.policy || !env.policy->received()) return;
     for (const auto& addon : managed) {

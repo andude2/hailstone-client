@@ -61,7 +61,7 @@ TEST_CASE("achievements: complete primary plus even empty progress initializes c
     CHECK_FALSE(state.states()[1]->counts[1][0]);
 }
 
-TEST_CASE("achievements: full-key requirement replacement aggregates display only and rejects bad references atomically") {
+TEST_CASE("achievements: full-key requirement replacement aggregates display only and skips records it cannot show") {
     game::Achievements state; initialized(state);
     REQUIRE(state.receive_progress({{900, 201, 70000, 1, 2}, {900, 201, 70001, 1, 3}}));
     CHECK(state.states()[1]->counts[1][0] == 5);
@@ -74,24 +74,44 @@ TEST_CASE("achievements: full-key requirement replacement aggregates display onl
     CHECK(state.states()[1]->counts[1][0] == 10);
     REQUIRE(state.requirements(900).size() == 2);
     CHECK(state.requirements(900)[0].requirement_id == 70000); // catalog byte display order is zero
-    const auto before_bad = state.revision();
-    CHECK_FALSE(state.receive_progress({{900, 201, 70000, 1, 88}, {9999, 201, 0, 1, 1}}));
-    CHECK(state.revision() == before_bad);
-    CHECK(state.states()[1]->counts[1][0] == 10);
-    CHECK_FALSE(state.receive_progress({{900, 303, 1, 3, 1}}));
-    CHECK_FALSE(state.receive_progress({{900, 101, 1, 1, 1}})); // component belongs to another definition
+    // As RoF2's 0x2b42 handler: a record for an unknown achievement, a descriptive-only component or another
+    // definition's component is skipped, and the packet's other records still apply.
+    REQUIRE(state.receive_progress({{900, 201, 70000, 1, 88}, {9999, 201, 0, 1, 1}}));
+    CHECK(state.states()[1]->counts[1][0] == 88 + 3);
+    REQUIRE(state.requirements(900).size() == 2);
+    const auto before_skipped = state.revision();
+    REQUIRE(state.receive_progress({{900, 303, 1, 3, 1}}));
+    REQUIRE(state.receive_progress({{900, 101, 1, 1, 1}})); // component belongs to another definition
+    CHECK(state.revision() == before_skipped);
+    CHECK(state.requirements(900).size() == 2);
+    CHECK(state.states()[1]->counts[1][0] == 88 + 3);
     REQUIRE(state.receive_progress({{900, 201, 70000, 1, 0xffffffffu}, {900, 201, 70001, 1, 0xffffffffu}}));
     CHECK(state.states()[1]->counts[1][0] == 8589934590ull);
     CHECK(state.states()[1]->status == AchievementStatus::Open);
 }
 
-TEST_CASE("achievements: primary serial wrap, sparse definition indices and refresh preserve explicit readiness") {
+TEST_CASE("achievements: a progress record's type is a key, not the bucket, as RoF2's 0x2b42 handler reads it") {
+    game::Achievements state; initialized(state);
+    // A server's requirement kind (4: kill an NPC) for the bucket-1 component 201, beside a type-1 record.
+    REQUIRE(state.receive_progress({{900, 201, 70000, 4, 2}, {900, 201, 70000, 1, 3}}));
+    CHECK(state.states()[1]->counts[1][0] == 5);
+    REQUIRE(state.requirements(900).size() == 2);
+    REQUIRE(state.receive_progress({{900, 200, 7, 9, 6}})); // the bucket-0 component, any type
+    CHECK(state.states()[1]->counts[0][0] == 6);
+    CHECK(state.states()[1]->counts[1][0] == 5);
+    REQUIRE(state.receive_progress({{900, 303, 1, 1, 1}})); // only in the descriptive bucket 3: skipped
+    CHECK(state.requirements(900).size() == 3);
+}
+
+TEST_CASE("achievements: primary leading u32 is ignored, sparse definition indices and refresh preserve explicit readiness") {
     game::Achievements state; state.receive_catalog(catalog());
     REQUIRE(state.receive_primary(primary(state, 0xfffffffeu)));
     REQUIRE(state.receive_progress({{900, 201, 70000, 1, 2}}));
-    CHECK_FALSE(state.receive_primary(primary(state, 0xfffffffeu)));
-    CHECK_FALSE(state.receive_primary(primary(state, 0xfffffffdu)));
-    ByteWriter w; w.le<std::uint32_t>(0xffffffffu); w.le<std::uint8_t>(0); w.le<std::uint32_t>(1);
+    // RoF2's handler (0x403b90) steps over the leading u32: a repeated or lower value applies all the same.
+    REQUIRE(state.receive_primary(primary(state, 0xfffffffeu)));
+    REQUIRE(state.receive_primary(primary(state, 0xfffffffdu)));
+    REQUIRE(state.receive_progress({{900, 201, 70000, 1, 2}}));
+    ByteWriter w; w.le<std::uint32_t>(0); w.le<std::uint8_t>(0); w.le<std::uint32_t>(1);
     w.le<std::uint32_t>(1); fixture::state(w, AchievementStatus::Locked);
     auto update = decode_achievement_primary({kOpAchievementPrimary, w.take()}, &*state.catalog());
     REQUIRE(update); REQUIRE(state.receive_primary(std::move(*update)));

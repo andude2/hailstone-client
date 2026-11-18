@@ -255,6 +255,11 @@ void Automation::set_addon_ceilings(std::vector<plugin::Ceiling> ceilings) {
     m.recheck();
 }
 
+std::size_t Automation::retry_required_addons() {
+    const std::size_t plugins = impl_->plugins->retry_required_addons();
+    return plugins + impl_->scripts->retry_required_addons();
+}
+
 bool Automation::required_addons_ready(std::string* problem) const {
     if (problem) problem->clear();
     if (!impl_->plugins->required_addons_ready(problem)) return false;

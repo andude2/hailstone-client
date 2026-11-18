@@ -17,6 +17,7 @@
 // The scripts get no io or os.execute: files only through mq.pickle (writes under the config directory) and
 // loadfile / dofile of data files there (run with an empty environment).
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -182,6 +183,9 @@ public:
     void policy_changed(const std::vector<std::string>& autoload = {});
     // Required scripts are running, and no running script is forbidden by the current add-on policy.
     bool required_addons_ready(std::string* problem = nullptr) const;
+    // The player's Retry (the Server add-ons warning): each required script that is not running (it failed or
+    // ended) is started again, once, under the usual checks. The number started.
+    std::size_t retry_required_addons();
     void set_managed_addons(std::vector<ManagedScript> addons);
     // The server's scripts/ folder (servers/<profile>/scripts), looked in before env.dirs; empty for none.
     void set_server_dir(const std::filesystem::path& dir);

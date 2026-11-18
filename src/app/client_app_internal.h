@@ -129,8 +129,6 @@
 #include "app/perf_ui.h"
 #include "app/stats_ui.h"
 #include "app/actions_ui.h"
-#include "app/neighbour_zones.h"
-#include "app/world_atlas.h"
 #include "app/world_objects.h"
 #include "app/zone_move_world.h"
 #include "app/group_ui.h"
@@ -341,7 +339,6 @@ public:
         }
         spawn_renderer_ = std::make_unique<render::SpawnRenderer>(vk_, shader_dir_);
         world_objects_ = std::make_unique<WorldObjects>(vk_, game_, shader_dir_);
-        neighbours_ = std::make_unique<NeighbourZones>(vk_, game_, shader_dir_);
         log_memory("startup: world objects");
         spell_ui_ = std::make_unique<SpellUi>(vk_, game_);
         item_ui_ = std::make_unique<ItemUi>(vk_, game_);
@@ -501,15 +498,6 @@ public:
         perf_ui_.set_open(config_.get_bool("ui.perf_window", false));
         perf_ui_.set_log_hitches(config_.get_bool("ui.perf_log_hitches", false));
         automation_->hooks().add_command(plugin::Hooks::kClient, "/perf", [this](std::string_view) { perf_ui_.toggle(); });
-        // /neighbourzones [on | off]: the zones past the outdoor zone lines (display.neighbour_zones).
-        automation_->hooks().add_command(plugin::Hooks::kClient, "/neighbourzones", [this](std::string_view args) {
-            while (!args.empty() && args.front() == ' ') args.remove_prefix(1);
-            bool on = args.empty() ? !neighbour_zones_ : !(args.starts_with("off") || args.starts_with("0"));
-            set_display_option("neighbour_zones", on ? 1 : 0);
-            if (conn_)
-                conn_->ui_message(std::format("Neighbour zones: {} ({} loaded).", on ? "on" : "off",
-                                              neighbours_ ? neighbours_->loaded() : 0));
-        });
         automation_->hooks().add_command(plugin::Hooks::kClient, "/screenshot", [this](std::string_view) { take_screenshot(); });
         // /web [address]: the in-game browser (docs/browser.md; a client extension), on the address in a new tab.
         // The player's own: a script or plugin opens pages with /url, under its 'web' permission.
@@ -662,6 +650,12 @@ private:
     // The opted-in add-on policy (docs/plugins.md "Opt-in add-on policies"), each frame of a connection
     // (AddonAdmission): the cached rules only inform the login screen. No code is installed here.
     bool addon_world_allowed();
+    // The Server add-ons warning (ui::AddonPolicyView, hs.AddonPolicy): a required add-on that failed in the world,
+    // from AddonAdmission's failure; the player's Retry; the client's own window, drawn when the interface does not
+    // replace it ("AddonPolicy") and until the player closes it (back for the next failure).
+    void update_addon_policy_view();
+    void retry_required_addons();
+    void addon_policy_window();
     void show_addon_requirement(const std::vector<AddonRequirementProblem>& problems, std::string message);
     // The upscaler loaded at startup must be allowed, and a required provider must be selected and loaded.
     std::string upscaler_addon_problem(const plugin::Rules& rules) const;
@@ -987,9 +981,7 @@ private:
         // upscaler, which VkContext checks.
         scene.frame_gen = config_.get_bool("display.frame_gen", false);
         std::string tonemap = config_.get_string("display.tonemap", "auto");
-        scene.tonemap = tonemap != "auto" ? render::parse_tonemap(tonemap)
-                        : lighting_mode_ == render::LightingMode::Modern ? render::Tonemap::AgX
-                                                                         : render::Tonemap::None;
+        scene.tonemap = tonemap != "auto" ? render::parse_tonemap(tonemap) : render::automatic_tonemap(lighting_mode_);
         scene.exposure = std::strtof(config_.get_string("display.exposure", "0").c_str(), nullptr);
         scene.shadow_size = static_cast<std::uint32_t>(std::clamp(config_.get_int("display.shadows", 2048), 0, 8192));
         scene.light_shadows = static_cast<std::uint32_t>(
@@ -1209,6 +1201,8 @@ private:
     plugin::Rules addons_rules_;
     AddonAdmission addon_admission_;
     std::vector<AddonRequirementProblem> addon_problems_; // the zone-in's, for the install card
+    ui::AddonPolicyView addon_policy_view_;
+    std::uint64_t addon_policy_failure_serial_ = 0, addon_policy_closed_ = 0;
     // Suggested add-ons (app/addon_suggest.h): the picked server's, as the login screen shows them, and those put
     // away for this run (by profile and addon_repo_key).
     std::vector<AddonSuggestion> suggestions_;
@@ -1385,21 +1379,15 @@ private:
     bool web_text_input_ = false;                    // a page has the keyboard this frame
     std::unique_ptr<WorldObjects> world_objects_;           // doors and ground objects (app/world_objects.h)
     std::uint32_t grounded_doors_ = 0;                      // world_objects_' floor_generation the spawns were grounded on
-    // The zones past the outdoor zone lines, drawn in the distance in the modern lighting (app/neighbour_zones.h);
-    // display.neighbour_zones.
-    std::unique_ptr<NeighbourZones> neighbours_;
-    bool neighbour_zones_ = true;
-    // The world atlas's part in the land round the zone (app/world_atlas.h), as the zone was loaded: the cuts for the
-    // neighbours' ground measured this visit, and the zones whose record the neighbour zones' loader measures.
-    AtlasLand atlas_land_;
-    // The land round an outdoor zone in the modern lighting (render/horizon.h); display.horizon_hills. The drawn
-    // neighbours (NeighbourZones::drawn_key) it was last hidden for.
+    // The land round an outdoor zone in the modern lighting (render/horizon.h); display.horizon_hills.
     bool horizon_hills_ = true;
-    std::uint64_t distant_hidden_key_ = 0;
     // The modern sky's volumetric clouds (render/cloud_renderer.h); display.volumetric_clouds.
     bool volumetric_clouds_ = true;
-    // display.neighbour_tint: the neighbour zones' debugging view (render::ZoneRenderer::set_debug_tint).
-    bool neighbour_tint_ = false;
+    // The fog bank past an outdoor zone's edge (render/zone_fog.h); display.zone_fog. The land's build its field was
+    // last made from (the zone renderer's; a new one, or none, uploads it again).
+    bool edge_fog_ = true;
+    std::shared_ptr<const render::HorizonBuild> zone_fog_build_;
+    render::ZoneFogField zone_fog_field_; // the uploaded field, for the camera's distance past the zone
     // How far the replacement models' (a texture pack's generated trees') levels of detail reach, in percent of their
     // own distances (render::ZoneRenderer::set_lod_scale); display.tree_detail, 50 to 200.
     int tree_detail_ = 100;
@@ -1629,6 +1617,9 @@ private:
     std::optional<Clock::time_point> loading_since_;
     std::int64_t zone_loaded_ms_ = -1, zone_in_ms_ = -1;
     bool zone_settling() const { return zone_settle_.active(); }
+    // The server plugins' consent question waited when this frame's UI began: the loading screen is drawn beneath
+    // it, after the other windows (ClientApp::run), in draw_ui and the settling alike, even if it is answered meanwhile.
+    bool loading_under_question_ = false;
     void begin_zone_settle();
     void update_zone_settle();
     // When the character select screen last appeared (the input script's "c<seconds>" clock); unset off it.

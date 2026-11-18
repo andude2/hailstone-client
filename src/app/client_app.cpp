@@ -8,6 +8,7 @@
 #include "core/frame_sections.h"
 #include "core/wipe.h"
 #include "game/visual_surface_patch.h"
+#include "game/zone_exits.h"
 
 namespace hailstone::app {
 
@@ -138,8 +139,10 @@ int ClientApp::run() {
         // The gamepad before the UI frame: its mode decides what ImGui gets from it (docs/gamepad.md).
         update_gamepad(dt);
         // /safelock: the windows get no mouse while the interface is locked (__ProcessMouseEvents).
-        // Behind the loading screen (zone_settle_) neither do they.
-        ui_.set_mouse_locked(conn_ && screen_ == Screen::InGame && (conn_->interface_locked() || zone_settling()));
+        // Behind the loading screen (zone_settle_) neither do they, except to answer a native plugin question: the
+        // loading screen is then a window over the others (ui::loading_overlay), which takes their presses.
+        ui_.set_mouse_locked(ui_mouse_locked(conn_ && screen_ == Screen::InGame, conn_ && conn_->interface_locked(),
+                                             zone_settling(), automation_ && automation_->plugin_consent().has_value()));
         ui_.new_frame();
         update_lap.mark("gamepad, UI new frame");
         // The boats move first: the player is carried by, and collides with, a boat where it is drawn this frame.
@@ -219,6 +222,7 @@ int ClientApp::run() {
         core::frame_sections::Lap lap;
         sync_item_preview();
         lap.mark("item preview sync");
+        loading_under_question_ = automation_ && automation_->plugin_consent().has_value();
         if (ui_.visible()) draw_ui(fps);
         lap.mark("draw_ui");
         if (lua_ui_) {
@@ -236,8 +240,16 @@ int ClientApp::run() {
         }
         window_.set_text_input(std::exchange(web_text_input_, false) && ui_.visible()); // a page that has the keys (app/lua_ui_web.cpp)
         settle_frame_.ui = true; // UI maintenance ran; loading/settling presentations are always visible
-        if (screen_ == Screen::InGame && zone_settling()) ui::loading_overlay(loading_view_);
+        if (screen_ == Screen::InGame && zone_settling() && !loading_under_question_) ui::loading_overlay(loading_view_);
         if (automation_ && ui_.visible()) automation_->imgui(game_view_.dev_windows);
+        if (ui_.visible()) addon_policy_window();
+        // The server plugins' question waits: the loading screen (draw_ui's, or the settling's) is a window beneath
+        // it, drawn after every other window and with the question raised again above it (ui::loading_overlay).
+        if (loading_under_question_ && ((screen_ == Screen::InGame && zone_settling()) ||
+                                        (screen_ == Screen::Loading && loading_view_.waiting))) {
+            ui::loading_overlay(loading_view_, false);
+            ui::lua::raise_guarded_windows();
+        }
         // The select clock runs on through character creation (input scripts drive both screens).
         if (screen_ != Screen::Characters && screen_ != Screen::Create) select_shown_.reset();
         else if (!select_shown_) select_shown_ = Clock::now();
@@ -398,12 +410,14 @@ int ClientApp::run() {
         }
         const game::ViewDistance& lit = modern_view.view;
         glm::vec4 horizon_haze(0.0f); // the sky's blend into the haze (render::SkyFrame)
+        std::optional<render::ZoneFogView> zone_fog; // the fog past the zone's edge this frame (render/zone_fog.h)
         perf_ui_.mark(FramePhase::Prepare);
         update_view_area();
         for (auto& slot : previews_)
             if (slot.view) slot.view->prepare(dt);
         // A frame not drawn (the background frame rate, or a minimised window) runs as one the GPU had no image for.
         const bool screenshot_frame = !opts_.screenshot.empty() && opts_.frames && frame == opts_.frames - 1;
+        vk_.set_gpu_timing(perf_ui_.open()); // the performance window's GPU passes
         auto f = pace.draw || screenshot_frame ? vk_.begin_frame_commands() : std::nullopt;
         perf_ui_.mark(FramePhase::Wait);
         if (f) last_drawn = now;
@@ -460,7 +474,10 @@ int ClientApp::run() {
                     light.vision_lift = fog_frame->vision_lift;
                 }
                 game::SceneLight scene_light = game::compute_scene_light(light);
-                if (zone_renderer_) zone_renderer_->set_scene_light(scene_light);
+                if (zone_renderer_) {
+                    zone_renderer_->set_scene_light(scene_light);
+                    zone_renderer_->set_classic_smooth(lighting_mode_ == render::LightingMode::SmoothClassic);
+                }
                 // The zone objects that play their own animation, drawn where the zone's animation clock has them now.
                 if (zone_renderer_) {
                     const auto animation_time=zone_animation_ms(static_cast<std::uint64_t>(
@@ -527,6 +544,21 @@ int ClientApp::run() {
                                        f->extent.width, f->extent.height, t);
                     render::set_weather(lighting, weather_look_);
                     horizon_haze = glm::vec4(glm::vec3(lighting.haze_color), 1.0f);
+                    // The fog past the zone's edge: outdoors, in the open air, in the haze's colour and sun glow.
+                    if (edge_fog_ && outdoor && !under_water) {
+                        const glm::mat4 v = camera_.view();
+                        render::ZoneFogView fog;
+                        fog.camera = camera_.position;
+                        fog.right = glm::vec3(v[0][0], v[1][0], v[2][0]);
+                        fog.up = glm::vec3(v[0][1], v[1][1], v[2][1]);
+                        fog.forward = -glm::vec3(v[0][2], v[1][2], v[2][2]);
+                        fog.color = glm::vec3(lighting.haze_color);
+                        fog.glow = glm::vec3(lighting.light) * (lighting.haze.w * 0.25f);
+                        fog.to_sun = glm::vec3(lighting.to_light);
+                        fog.time = static_cast<float>(t);
+                        fog.camera_past = zone_fog_field_.distance_at(glm::vec2(camera_.position));
+                        zone_fog = fog;
+                    }
                 }
                 // The lights' shadows: which lights have a cube (the zone's, the carried light, the spells'), before the
                 // renderers take the lighting.
@@ -574,8 +606,8 @@ int ClientApp::run() {
                     for (const auto& p : conn_->zone_points()) points.push_back({p.number, p.zone_id, p.x, p.y, p.z});
                     const auto zid = static_cast<std::uint32_t>(conn_->zone_id());
                     ui_host_.zone_exits.clear();
-                    for (const auto& g : game::collect_neighbour_lines(zone_->regions, zone_->bounds_min, zone_->bounds_max,
-                                                                       points, zid)) {
+                    for (const auto& g :
+                         game::collect_zone_exits(zone_->regions, zone_->bounds_min, zone_->bounds_max, points, zid)) {
                         UiHost::ZoneExit e;
                         e.zone_id = g.zone_id;
                         for (int i = 0; i < 3; ++i) {
@@ -586,41 +618,6 @@ int ClientApp::run() {
                         ui_host_.zone_exits.push_back(std::move(e));
                     }
                     ui_host_.zone_exits_zone = zid;
-                }
-                if (neighbours_) {
-                    // The zone past each outdoor zone line, once the zone points are in (app/neighbour_zones.h).
-                    if (in_game && zone_ && conn_ && !neighbours_->entered()) {
-                        NeighbourZones::ZoneIn in;
-                        in.zone = &*zone_;
-                        in.collision = collision_ ? &*collision_ : nullptr;
-                        for (const auto& p : conn_->zone_points())
-                            in.points.push_back({p.number, p.zone_id, p.x, p.y, p.z});
-                        in.zone_id = static_cast<std::uint32_t>(conn_->zone_id());
-                        const auto& z = conn_->zone_info();
-                        in.outdoor = z && z->sky != 0 && outdoor;
-                        if (zone_renderer_) in.horizon = zone_renderer_->horizon_build();
-                        in.cache_dir = horizon_cache_dir(server_profile_.id, zone_->name);
-                        // The world atlas: this visit, and what it wants measured (app/world_atlas.h).
-                        game::AtlasVisit visit;
-                        visit.zone = zone_->name;
-                        visit.zone_id = in.zone_id;
-                        visit.outdoor = in.outdoor;
-                        visit.points = in.points;
-                        save_atlas_visit(server_profile_.id, visit);
-                        in.cuts = atlas_land_.cuts;
-                        in.atlas_missing = atlas_land_.missing;
-                        if (std::find(in.atlas_missing.begin(), in.atlas_missing.end(), zone_->name) ==
-                                in.atlas_missing.end() &&
-                            !load_atlas_zone(game_, zone_->name))
-                            in.atlas_missing.insert(in.atlas_missing.begin(), zone_->name);
-                        neighbours_->enter(in);
-                    }
-                    neighbours_->update(camera_.position, lit.far_plane, modern && neighbour_zones_ && in_game);
-                    lap.mark("neighbour zones update");
-                    neighbours_->set_scene_light(scene_light);
-                    neighbours_->set_lighting(lighting);
-                    neighbours_->set_lod_scale(static_cast<float>(tree_detail_) / 100.0f);
-                    neighbours_->set_debug_tint(neighbour_tint_);
                 }
                 frame_lighting_ = lighting;
                 if (actor_renderer_) {
@@ -687,9 +684,12 @@ int ClientApp::run() {
                         vk_.begin_shadow_cascade(*f, shadow_layers_[i], true);
                         shadow_rec.execute(*f, i);
                         vk_.end_shadow_cascade(*f);
+                        // Timed between the renderings (the cascades come first in shadow_layers_).
+                        if (shadows && i + 1 == render::kShadowCascades) vk_.gpu_mark(*f, "sun shadows");
                     }
                     shadow_rec.reset();
                     lap.mark("shadow layers recorded");
+                    vk_.gpu_mark(*f, "cover and water maps");
                 } else {
                     if (shadows)
                         for (std::uint32_t c = 0; c < render::kShadowCascades; ++c) {
@@ -700,6 +700,7 @@ int ClientApp::run() {
                             vk_.end_shadow_cascade(*f);
                         }
                     lap.mark("sun shadows");
+                    vk_.gpu_mark(*f, "sun shadows");
                     for (std::uint32_t layer : {render::kCoverLayer, render::kWaterLayer}) {
                         if (!(layer == render::kCoverLayer ? draw_cover : draw_water)) continue;
                         vk_.begin_shadow_cascade(*f, layer);
@@ -708,12 +709,14 @@ int ClientApp::run() {
                         vk_.end_shadow_cascade(*f);
                     }
                     lap.mark("cover and water maps");
+                    vk_.gpu_mark(*f, "cover and water maps");
                 }
                 cover_drawn_ = covering;
                 if (light_shadows)
                     render::draw_point_shadows(vk_, *f, point_shadows_, zone_->lights, point_builds, *zone_renderer_,
                                                actor_renderer_.get(), objects);
                 lap.mark("draw point shadows");
+                vk_.gpu_mark(*f, "light shadows");
             }
         }
         for (auto& slot : previews_)
@@ -723,6 +726,7 @@ int ClientApp::run() {
             else web_textures_->collect();
         }
         lap.mark("item preview record");
+        vk_.gpu_mark(*f, "item previews, browser");
         // The sky this frame. The sky is drawn while SetFog leaves CDisplay +0x2d38 set (cleared under water, in lava
         // and with fog ending before 101).
         render::SkyFrame sky_frame{sky_hour, t, horizon_haze};
@@ -759,6 +763,14 @@ int ClientApp::run() {
                                                        : glm::vec4(under_water ? water_color : lit.fog_color, 1.0f));
         if (scene && modern) {
             vk_.set_ao_view(camera_.ao_view(width, height, lit.far_plane));
+            // The zone's fog field, made again when the land was built anew (a new zone) or went.
+            auto build = zone_renderer_ ? zone_renderer_->horizon_build() : nullptr;
+            if (build != zone_fog_build_) {
+                zone_fog_build_ = build;
+                zone_fog_field_ = build ? render::zone_fog_field(build->field) : render::ZoneFogField{};
+                vk_.set_zone_fog_field(zone_fog_field_);
+            }
+            if (zone_fog) vk_.set_zone_fog(*zone_fog);
             // The colour grade: the time of day, the weather and the zone's fog hue (render/atmosphere.h).
             render::Daylight day = render::daylight(sky_hour, outdoor, moon_phase_, blood_moon_);
             const auto g = render::color_grade(day, outdoor, render::linear_color(view_.fog_color), weather_look_.storm);
@@ -785,20 +797,18 @@ int ClientApp::run() {
             // character renderer's caches, in one. Nothing they read changes before rec.flush.
             static const char kActorsLane = 0;
             const void* const actors_lane = &kActorsLane;
+            // The GPU passes' marks (VkContext::gpu_mark) in the scene: only while it is drawn inline. Recorded on the
+            // workers, the scene's rendering holds nothing but the secondary buffers' execution, so no timestamp can
+            // go between them; VkContext then times the scene as a whole (begin_translucent, begin_overlay).
+            const auto scene_mark = [&](const render::FrameInfo& fr, const char* name) {
+                if (!rec.active()) vk_.gpu_mark(fr, name);
+            };
             // The land round an outdoor zone (render/horizon.h), under an open sky or none (not the planes' and
-            // Luclin's painted skies); not where a neighbour zone is drawn. Set before the first draw is queued: a
-            // queued draw runs at rec.flush and reads the zone renderer's state then.
-            if (zone_renderer_) {
+            // Luclin's painted skies). Set before the first draw is queued: a queued draw runs at rec.flush and reads
+            // the zone renderer's state then.
+            if (zone_renderer_)
                 zone_renderer_->set_distant(in_game && modern && outdoor && horizon_hills_ &&
                                             (!sky_renderer_ || sky_renderer_->has_atmosphere()));
-                const std::uint64_t drawn = neighbours_ && modern && neighbour_zones_ && in_game ? neighbours_->drawn_key() : 0;
-                if (drawn != distant_hidden_key_) {
-                    distant_hidden_key_ = drawn;
-                    std::vector<std::int64_t> cells;
-                    if (drawn) neighbours_->footprint(cells);
-                    zone_renderer_->set_distant_hidden(std::move(cells));
-                }
-            }
             const auto draw_background = [&] {
                 if (sky_drawn)
                     rec.add(*f, sky_renderer_.get(), [&](const render::FrameInfo& fr) {
@@ -808,26 +818,21 @@ int ClientApp::run() {
                 if (zone_renderer_ && (under_water || (modern && !sky_drawn)))
                     rec.add(*f, zone_renderer_.get(), [&](const render::FrameInfo& fr) { zone_renderer_->draw_backdrop(fr, vp); });
                 lap.mark(rec.active() ? "sky queued" : "sky");
+                scene_mark(*f, "sky");
             };
             // Classic draws all zone parts together; WLD details can blend over uncovered samples.
-            const bool background_first = !modern ||
-                (zone_renderer_ && zone_renderer_->opaque_blends_background()) ||
-                (neighbours_ && modern && neighbour_zones_ && in_game && neighbours_->opaque_blends_background());
+            const bool background_first = !modern || (zone_renderer_ && zone_renderer_->opaque_blends_background());
             if (background_first) draw_background();
             // The modern water reads the opaque world: the zone's other draws wait for VkContext::begin_translucent.
             const render::ZonePhase first = modern ? render::ZonePhase::Opaque : render::ZonePhase::All;
             if (zone_renderer_)
                 rec.add(*f, zone_renderer_.get(), [&](const render::FrameInfo& fr) {
                     zone_renderer_->draw_depth(fr, vp, camera_.position, lit, t);
+                    scene_mark(fr, "zone depth prepass");
                     zone_renderer_->draw(fr, vp, camera_.position, lit, t, first);
                 });
             lap.mark(rec.active() ? "zone queued" : "zone draw");
-            const bool neighbours = neighbours_ && modern && neighbour_zones_ && in_game;
-            if (neighbours)
-                rec.add(*f, neighbours_.get(), [&](const render::FrameInfo& fr) {
-                    neighbours_->draw(fr, vp, camera_.position, lit, t, first);
-                });
-            lap.mark(rec.active() ? "neighbour zones queued" : "neighbour zones draw");
+            scene_mark(*f, "zone");
             // Objects still draw their blended parts in the same call as their opaque parts.
             // Keep their background first, and the existing object/actor/silhouette order intact.
             // The water colour copy must also already contain the sky (flora follows that copy).
@@ -839,6 +844,7 @@ int ClientApp::run() {
                 });
             }
             lap.mark(rec.active() ? "objects queued" : "objects draw");
+            scene_mark(*f, "objects");
             if (flora_renderer_ && grass_) {
                 flora_renderer_->set_reach(flora_reach_);
                 flora_renderer_->set_density(static_cast<float>(grass_density_) / 100.0f);
@@ -884,6 +890,7 @@ int ClientApp::run() {
                     modelled = &actor_renderer_->draw_prepared(fr, vp, camera_.position, lit, render::ActorPhase::Opaque);
                 });
             lap.mark(rec.active() ? "actors queued" : "actors draw");
+            scene_mark(*f, "actors");
             if (in_game) {
                 const auto hidden = hidden_spawn();
                 rec.add(*f, actors_lane, [&, hidden](const render::FrameInfo& fr) {
@@ -891,6 +898,7 @@ int ClientApp::run() {
                 });
             }
             lap.mark(rec.active() ? "spawns queued" : "spawns draw");
+            scene_mark(*f, "spawns");
             // The depth copy is taken before the grass: the target ring lies on the ground under it, not on the
             // blades (a ring traced over them twists into a coil). The water, drawn after the grass, still meets it
             // in the depth buffer.
@@ -904,20 +912,15 @@ int ClientApp::run() {
                     flora_renderer_->draw(fr, vp, camera_.position, t, frame_lighting_, modern);
                 });
             lap.mark(rec.active() ? "flora queued" : "flora draw");
+            scene_mark(*f, "depth copy, flora");
             if (actor_renderer_)
                 rec.add(*f, actors_lane, [&](const render::FrameInfo& fr) {
                     actor_renderer_->draw_prepared(fr, vp, camera_.position, lit, render::ActorPhase::Translucent);
                 });
-            if (modern) {
-                if (zone_renderer_)
-                    rec.add(*f, zone_renderer_.get(), [&](const render::FrameInfo& fr) {
-                        zone_renderer_->draw(fr, vp, camera_.position, lit, t, render::ZonePhase::Translucent);
-                    });
-                if (neighbours)
-                    rec.add(*f, neighbours_.get(), [&](const render::FrameInfo& fr) {
-                        neighbours_->draw(fr, vp, camera_.position, lit, t, render::ZonePhase::Translucent);
-                    });
-            }
+            if (modern && zone_renderer_)
+                rec.add(*f, zone_renderer_.get(), [&](const render::FrameInfo& fr) {
+                    zone_renderer_->draw(fr, vp, camera_.position, lit, t, render::ZonePhase::Translucent);
+                });
             // The target ring lies on the depth copy (taken above, or by it in the classic lighting), under the
             // weather and particles. Character select draws no target, nor does F10's hidden interface. The markers
             // ask the character renderer (model_for): the characters' lane.
@@ -975,6 +978,7 @@ int ClientApp::run() {
                                            particle_lighting);
                 });
             lap.mark(rec.active() ? "translucent, weather, particles queued" : "translucent, weather, particles");
+            scene_mark(*f, "translucent, weather, particles");
             rec.flush(*f); // before the name plates read the characters' poses, and before the scene ends
             report_world_geometry();
             lap.mark("scene record");

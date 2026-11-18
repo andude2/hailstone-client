@@ -167,25 +167,6 @@ std::optional<assets::Image> prepare_immutable_texture_image(const assets::Image
     return std::nullopt;
 }
 
-void drop_large_mips(assets::Image& image, std::uint32_t max_size) {
-    if (max_size == 0) return;
-    while (image.mips.size() > 1 && std::max(image.width, image.height) > max_size) {
-        image.mips.erase(image.mips.begin());
-        image.width = std::max(1u, image.width / 2);
-        image.height = std::max(1u, image.height / 2);
-    }
-}
-
-void prepare_capped_texture(assets::Image& image, TextureUse& use, std::uint32_t max_size) {
-    if (max_size == 0) return;
-    // The chain is built here even for an image the GPU could build it for: only a chain has levels to drop.
-    if (auto built = prepare_texture_image(image, use, false)) {
-        image = std::move(*built);
-        use = TextureUse::Data;
-    }
-    drop_large_mips(image, max_size);
-}
-
 Texture UploadBatch::texture(const assets::Image& source, TextureUse use) {
     const assets::Image* image = &source;
     assets::Image converted;

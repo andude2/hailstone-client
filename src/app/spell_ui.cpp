@@ -39,7 +39,7 @@ std::string seconds(std::uint32_t ms) {
 }
 
 ui::BuffView buff_view(const game::SpellTable& table, const game::EqStrings& strings, const DescriptionPlayer& player,
-                       int slot, const game::BuffSlot& b,
+                       int slot, const game::BuffSlot& b, bool timers_on_hold, bool zone_suspends_buffs,
                        std::int64_t now) {
     ui::BuffView v;
     v.slot = slot;
@@ -49,7 +49,8 @@ ui::BuffView buff_view(const game::SpellTable& table, const game::EqStrings& str
     v.icon = s ? s->spell_icon : -1;
     v.beneficial = !s || s->beneficial();
     v.time_left = game::buff_is_permanent(b.tics, s) ? "permanent"
-                                                      : game::format_duration(game::buff_ms_left(b.tics, b.received_ms, now));
+                                                      : game::format_duration(game::buff_ms_left(
+                                                            b, s, timers_on_hold, zone_suspends_buffs, now));
     v.tooltip = v.name;
     if (!b.caster_name.empty()) v.tooltip += "\nCast by " + b.caster_name;
     if (s) {
@@ -210,7 +211,8 @@ void SpellUi::draw(net::GameConnection& conn, const game::mechanics::Character* 
         if (b.empty()) continue;
         const bool song = slot >= game::kLongBuffSlots && slot < game::kLongBuffSlots + game::kShortBuffSlots;
         if (!(song ? drawn.songs : drawn.buffs)) continue;
-        (song ? buffs.songs : buffs.buffs).push_back(buff_view(table, strings, player, slot, b, now));
+        (song ? buffs.songs : buffs.buffs).push_back(
+            buff_view(table, strings, player, slot, b, st.buff_timers_on_hold, st.zone_suspends_buffs, now));
     }
     const auto& world = conn.world();
     if (drawn.target && world.target_id && st.target_buffs_entity == world.target_id &&
@@ -218,7 +220,9 @@ void SpellUi::draw(net::GameConnection& conn, const game::mechanics::Character* 
         if (auto it = world.spawns.find(world.target_id); it != world.spawns.end()) {
             buffs.target_name = game::display_name(it->second.name);
             for (const auto& [slot, b] : st.target_buffs)
-                buffs.target.push_back(buff_view(table, strings, player, static_cast<int>(slot), b, now));
+                buffs.target.push_back(buff_view(table, strings, player, static_cast<int>(slot), b,
+                                                 st.buff_timers_on_hold && conn.target_buffs_are_own(),
+                                                 st.zone_suspends_buffs, now));
         }
     }
 

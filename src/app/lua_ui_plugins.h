@@ -14,6 +14,11 @@
 //   ok = hs.AnswerPluginConsent(allow, serial)   true allow, false refuse (both kept for those bytes), nil put away
 //                                until the next zone-in; serial the question's. False when there is no question or
 //                                it is not that one any more. A plugin's code gets nil / false.
+//   q = hs.AddonPolicy()         a required add-on that failed in the world, else nil: {serial, message, can_retry},
+//                                the same table until the failure changes. nil to plugin code and to an interface
+//                                Hailstone does not ship.
+//   ok = hs.AddonPolicyAction("retry", serial)   the player's Retry: the failed required add-ons are tried again
+//                                once. False when stale, not retriable, or not the client's own interface's file.
 
 // The Lua scripts' part (mq/lua_mq.h; the Scripts window, docs/plugins.md "The Scripts window"; app/lua_ui_scripts.cpp):
 //   list, info = hs.Scripts([rescan])   {name, status ("" | "running" | "paused" | "exited" | "error"), error,

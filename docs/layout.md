@@ -95,12 +95,11 @@ hailstone/
   cache/                     safe to delete while no client runs: cache/plugins/ holds the loaded plugins' copies,
                              cache/upscalers/<name>-<key>/ the loaded upscaler's copy of its folder, cache/pipelines.bin
                              the compiled Vulkan pipelines, cache/navmesh/<server>/<zone>.navmesh the zones'
-                             navigation meshes (docs/navigation.md), cache/horizon/<server>/<zone>/<neighbour>.bin
-                             the neighbour zones' ground the land round a zone takes the shape of (docs/graphics.md
-                             "Neighbour zones"; the viewer's under cache/horizon/viewer/), cache/atlas/<server>/
-                             <zone>.visit the world atlas's visits (each zone's id, sky and zone points as that server
-                             sent them) and cache/atlas/zones/<zone>.bin its zones' records, measured from the asset
-                             folder for every server (docs/graphics.md "World atlas")
+                             navigation meshes (docs/navigation.md), cache/terrain/<server>/<zone>.bin the land's
+                             worn terrain round a zone (docs/graphics.md "Horizon hills"; the viewer's under
+                             cache/terrain/viewer/). Up to 0.7 the neighbour zones, the world atlas and the distant
+                             copies kept cache/horizon/, cache/atlas/ and cache/proxies/ here; nothing reads them
+                             now, and they are not removed (delete them by hand, or the whole cache/)
     assets/v1/pfs/           the shared asset cache, when on ("Shared archive memory" below)
 ```
 
@@ -547,7 +546,7 @@ trace needs (`MiniDumpFilterMemory`), so no bytes a frame copied either; the loc
 client itself is on the heap, and the password leaves its fields (overwritten) once the login server has taken it: a
 saved one is read from the keyring again when the login screen comes back. The log itself is flushed line by line, so it holds the rest. A stack overflow is reported
 on the main thread and on the threads that make a `CrashStack` (the network session's, the sound loader's, navigation's,
-the add-on manager's, the updater's, the neighbour zones' and the appearances' workers, `core/latest_jobs.h`). After
+the add-on manager's, the updater's and the appearances' workers, `core/latest_jobs.h`). After
 the report the handler that was there before runs: the default one (a core dump, the crash exit status), a sanitizer's
 report, or on Windows the C++ runtime's, which turns an uncaught C++ exception into `std::terminate` so its message is
 in the report.

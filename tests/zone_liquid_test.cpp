@@ -92,7 +92,7 @@ TEST_CASE("classic liquids: passable surfaces on a liquid region's top, carried 
 }
 
 TEST_CASE("zone renderer: a prepare that is cancelled stops and returns nothing") {
-    // A neighbour zone's load thrown away on zoning (app/neighbour_zones.cpp) asks between placements and materials.
+    // A load thrown away asks between placements and materials.
     assets::Zone zone;
     zone.placements.resize(3);
     render::ZoneRenderOptions options;
@@ -133,7 +133,7 @@ assets::Mesh flat_terrain(float x0, float y0, float x1, float y1, float cell, fl
 
 } // namespace
 
-TEST_CASE("zone renderer: the land round the zone, shaped by a neighbour's ground, and the neighbour's part of it") {
+TEST_CASE("zone renderer: the land round the zone takes the zone's ground, and its sea is drawn from both faces") {
     assets::Zone zone;
     zone.name = "here";
     zone.terrain.push_back(flat_terrain(0, 0, 2000, 1500, 100, 50, "grass.bmp"));
@@ -142,85 +142,70 @@ TEST_CASE("zone renderer: the land round the zone, shaped by a neighbour's groun
     const auto land = render::ZoneRenderer::prepared_land(*plain);
     REQUIRE(land.build);
     CHECK(land.build->field.valid());
-    CHECK(land.build->sources.empty());
     CHECK(land.build->ground.frames == std::vector<std::string>{"grass.bmp"});
     CHECK(land.build->ground.density == doctest::Approx(1.0f / 64.0f));
-    CHECK(land.triangles[0] > 0);
-    CHECK(land.triangles[1] + land.triangles[2] == 0);
+    CHECK(land.triangles > 0);
+    CHECK(land.water_triangles == 0);
 
-    // A neighbour's ground east of it, from the cache: the land takes it in.
-    std::vector<float> ground(40 * 30, 150.0f);
-    auto source = std::make_shared<const render::HorizonSource>(
-        render::horizon_source("east", {2000.0f, -400.0f}, render::kHorizonCell, 40, 30, ground));
-    render::ZoneRenderOptions shaped;
-    shaped.horizon_sources = {source};
-    const auto with = render::ZoneRenderer::prepare(zone, shaped, 64);
-    REQUIRE(with);
-    const auto land2 = render::ZoneRenderer::prepared_land(*with);
-    REQUIRE(land2.build);
-    REQUIRE(land2.build->sources.size() == 1);
-    CHECK(land2.build->sources[0]->name == "east");
-
-    // The neighbour draws its part: each triangle with its own ground and with the current zone's.
-    auto patch = std::make_shared<render::LandPatch>();
-    patch->mesh = render::horizon_mesh(land2.build->field, land2.build->sources, 0);
-    patch->ground = land2.build->ground;
-    patch->rock = land2.build->rock;
-    REQUIRE_FALSE(patch->mesh.squares.empty());
-    const std::size_t patch_triangles = (patch->mesh.ground.size() + patch->mesh.rock.size()) / 3;
-    assets::Zone east;
-    east.name = "east";
-    east.terrain.push_back(flat_terrain(-500, 0, 3000, 2000, 100, 0, "dirt.bmp"));
-    render::ZoneRenderOptions neighbour;
-    neighbour.offset = {2500.0f, 0.0f, 150.0f};
-    neighbour.keep = {glm::vec4(1.0f, 0.0f, 0.0f, -2000.0f)}; // past x 2000
-    neighbour.behind = true;
-    neighbour.land = patch;
-    const auto drawn = render::ZoneRenderer::prepare(east, neighbour, 64);
-    REQUIRE(drawn);
-    const auto part = render::ZoneRenderer::prepared_land(*drawn);
-    CHECK_FALSE(part.build); // a neighbour keeps no land of its own
-    CHECK(part.footprint == patch->mesh.squares.size());
-    CHECK(part.triangles[1] == patch_triangles);
-    CHECK(part.triangles[2] == patch_triangles);
-    CHECK(part.triangles[0] == 0);
-
-    // A neighbour with no plain ground of its own: the current zone's alone, not faded.
-    assets::Zone bare;
-    bare.name = "bare";
-    const auto alone = render::ZoneRenderer::prepare(bare, neighbour, 64);
-    REQUIRE(alone);
-    const auto part2 = render::ZoneRenderer::prepared_land(*alone);
-    CHECK(part2.triangles[0] == patch_triangles);
-    CHECK(part2.triangles[1] + part2.triangles[2] == 0);
-}
-
-TEST_CASE("zone renderer: the land's sea is drawn from both faces; its ground takes an atlas zone's colour") {
-    assets::Zone zone;
-    zone.name = "here";
-    zone.terrain.push_back(flat_terrain(0, 0, 2000, 1500, 100, 50, "grass.bmp"));
     // A sea along the west: an EQG water surface, which (as a classic one's two sheets) says nothing of which face
     // is up.
     assets::Mesh sea = flat_terrain(-1000, 0, 0, 1500, 100, 40, "water.dds");
     sea.materials[0].eqg_shader = assets::EqgShader::Water;
     sea.parts[0].solid = false;
     zone.terrain.push_back(sea);
-    const auto plain = render::ZoneRenderer::prepare(zone, {}, 64);
-    REQUIRE(plain);
-    const auto land = render::ZoneRenderer::prepared_land(*plain);
-    CHECK(land.water_triangles > 0);
-    CHECK(land.water_two_sided);
-    CHECK(land.tinted_triangles == 0);
+    const auto wet = render::ZoneRenderer::prepare(zone, {}, 64);
+    REQUIRE(wet);
+    const auto shore = render::ZoneRenderer::prepared_land(*wet);
+    CHECK(shore.water_triangles > 0);
+    CHECK(shore.water_two_sided);
+}
 
-    // An atlas zone's ground east of it, red.
-    std::vector<float> ground(40 * 30, 150.0f);
-    std::vector<std::uint32_t> color(ground.size(), 0xff0000ffu);
-    render::ZoneRenderOptions shaped;
-    shaped.horizon_sources = {std::make_shared<const render::HorizonSource>(render::horizon_source(
-        "east", {2000.0f, -400.0f}, render::kHorizonCell, 40, 30, ground, {}, {}, color))};
-    const auto with = render::ZoneRenderer::prepare(zone, shaped, 64);
-    REQUIRE(with);
-    const auto land2 = render::ZoneRenderer::prepared_land(*with);
-    CHECK(land2.tinted_triangles > 0);
-    CHECK(land2.tinted_triangles < land2.triangles[0]); // not the land past the zone's other sides
+TEST_CASE("zone renderer: the land's ground is no sea bed under water, and its rock no roof over a floor") {
+    // A shore in miniature: grass at z 50 for y < 600 (from x 100); a larger sea bed at z 0 beyond, under a water
+    // region (region 1: z <= 10 and y >= 600); a cliff falling from z 150 to the grass at the zone's west edge; and
+    // more roof than cliff, sloping as steeply but standing over the grass.
+    std::vector<wld::BspNode> nodes = {
+        split({0, 0, -1}, 10, 2, 4),   // 1: z <= 10
+        split({0, 1, 0}, -600, 3, 4),  // 2: y >= 600
+        leaf(1),                       // 3: the sea
+        leaf(2),                       // 4: dry
+    };
+    assets::Zone zone;
+    zone.name = "shore";
+    zone.regions = assets::ZoneRegions::build(nodes, 2, {tag("WT_ZONE", {0})});
+    zone.terrain.push_back(flat_terrain(100, 0, 2000, 600, 100, 50, "grass.bmp"));
+    zone.terrain.push_back(flat_terrain(0, 600, 2000, 1500, 100, 0, "seabed.bmp"));
+    // A slope of 45 degrees: from (x0, z0) up to (x1, z1) along x, over y0..y1.
+    auto ramp = [](float x0, float z0, float x1, float z1, float y0, float y1, const char* texture) {
+        assets::Mesh m;
+        for (float y = y0; y < y1; y += 100.0f)
+            for (glm::vec3 p : {glm::vec3(x0, y, z0), glm::vec3(x1, y, z1), glm::vec3(x1, y + 100, z1),
+                                glm::vec3(x0, y, z0), glm::vec3(x1, y + 100, z1), glm::vec3(x0, y + 100, z0)}) {
+                assets::Vertex v;
+                v.position = p;
+                v.normal = glm::normalize(glm::vec3(z0 - z1, 0.0f, x1 - x0));
+                v.uv = glm::vec2(p) / 64.0f;
+                v.color = 0xff808080u;
+                m.indices.push_back(static_cast<std::uint32_t>(m.vertices.size()));
+                m.vertices.push_back(v);
+            }
+        m.materials.resize(1);
+        m.materials[0].name = texture;
+        m.materials[0].frames = {texture};
+        m.parts.push_back({0, static_cast<std::uint32_t>(m.indices.size()), 0, true});
+        return m;
+    };
+    zone.terrain.push_back(ramp(0, 150, 100, 50, 0, 600, "cliff.bmp"));
+    for (float x : {400.0f, 700.0f, 1000.0f, 1300.0f}) zone.terrain.push_back(ramp(x, 100, x + 100, 200, 100, 500, "slate.bmp"));
+    zone.bounds_min = {0, 0, 0};
+    zone.bounds_max = {2000, 1500, 200};
+
+    const auto prepared = render::ZoneRenderer::prepare(zone, {}, 64);
+    REQUIRE(prepared);
+    const auto land = render::ZoneRenderer::prepared_land(*prepared);
+    REQUIRE(land.build);
+    REQUIRE_FALSE(land.build->ground.frames.empty());
+    REQUIRE_FALSE(land.build->rock.frames.empty());
+    CHECK(land.build->ground.frames.front() == "grass.bmp");
+    CHECK(land.build->rock.frames.front() == "cliff.bmp");
 }

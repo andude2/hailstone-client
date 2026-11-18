@@ -110,16 +110,10 @@ void main() {
     v_color = color;
     v_color2 = in_color2;
     v_normal = n;
-    // RenderEffects/SPL/RegionC1 and RegionOldA (vs_1_1), per vertex:
-    // rgb = C.rgb + C.a Ambient + SpecialAmbient
-    //     + C.a (Bounce max(N.Dn, 0) + Directional max(N.-Dn, 0)), saturated.
-    // SPL/RegionOldDetailSingle and RegionOldDetailPalette (vs_1_1, a detail pass) add the same terms without the
-    // alpha's weight: rgb = C.rgb + Ambient + SpecialAmbient + Bounce max(N.Dn, 0) + Directional max(N.-Dn, 0).
-    vec3 dn = scene.direction.xyz;
+    // The classic region light per vertex (lighting.glsl classic_region_light), as the original's vs_1_1 effects.
     float a = pc.tex2.y == kModeWldDetail ? 1.0 : color.a;
-    vec3 rgb = color.rgb + a * scene.ambient.rgb + scene.special_ambient.rgb +
-               a * (scene.bounce.rgb * max(dot(n, dn), 0.0) + scene.directional.rgb * max(dot(n, -dn), 0.0));
-    rgb = clamp(rgb, 0.0, 1.0);
+    vec3 rgb = classic_region_light(color.rgb, a, n, scene.ambient.rgb, scene.special_ambient.rgb, scene.bounce.rgb,
+                                    scene.directional.rgb, scene.direction.xyz);
     // The multi-pass path adds one pass per point light; the per-vertex sum of
     // the saturated light terms is precomputed (lights are static).
     v_point = (pc.tex2.z & kFlagMultiPass) != 0u ? in_point_light : vec3(0.0);

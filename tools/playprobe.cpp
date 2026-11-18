@@ -37,7 +37,6 @@
 //   --tribute-cycle, --guild-watch, --parcel-at, --parcel-money, --parcel-claim (tools/social_probe.h)
 //   augments: --augment (tools/augment_probe.h)
 //   scripted quests (a GM on a test server): --quest FILE (tools/quest_probe.h)
-//   the world atlas: --atlas-server, --atlas-data, --atlas-crawl (a GM on a test server; tools/atlas_probe.h)
 // Needs EQ_GAME_DIR for the file checksums world asks for.
 
 #include <chrono>
@@ -72,7 +71,6 @@
 #include "social_probe.h"
 #include "augment_probe.h"
 #include "quest_probe.h"
-#include "atlas_probe.h"
 #include "game/server_ext_chain.h"
 #include "platform/paths.h"
 #include "platform/private_file.h"
@@ -172,7 +170,6 @@ int main(int argc, char** argv) {
     probe::SocialProbe social;
     probe::AugmentProbe augment;
     probe::QuestProbe quest;
-    probe::AtlasProbe atlas;
     std::uint32_t create_race = 1, create_class = 1;
     for (int i = 4; i + 1 < argc; i += 2) {
         if (!std::strcmp(argv[i], "--char")) want = argv[i + 1];
@@ -194,7 +191,7 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--plugins")) plugin_dir = argv[i + 1];
         else if (!std::strcmp(argv[i], "--race")) create_race = static_cast<std::uint32_t>(std::atoi(argv[i + 1]));
         else if (!std::strcmp(argv[i], "--class")) create_class = static_cast<std::uint32_t>(std::atoi(argv[i + 1]));
-        else if (!spells.option(argv[i], argv[i + 1]) && !group.option(argv[i], argv[i + 1]) && !shop.option(argv[i], argv[i + 1]) && !bank.option(argv[i], argv[i + 1]) && !progress.option(argv[i], argv[i + 1]) && !market.option(argv[i], argv[i + 1]) && !social.option(argv[i], argv[i + 1]) && !augment.option(argv[i], argv[i + 1]) && !quest.option(argv[i], argv[i + 1]) && !atlas.option(argv[i], argv[i + 1])) items.option(argv[i], argv[i + 1]);
+        else if (!spells.option(argv[i], argv[i + 1]) && !group.option(argv[i], argv[i + 1]) && !shop.option(argv[i], argv[i + 1]) && !bank.option(argv[i], argv[i + 1]) && !progress.option(argv[i], argv[i + 1]) && !market.option(argv[i], argv[i + 1]) && !social.option(argv[i], argv[i + 1]) && !augment.option(argv[i], argv[i + 1]) && !quest.option(argv[i], argv[i + 1])) items.option(argv[i], argv[i + 1]);
     }
     const char* gd = std::getenv("EQ_GAME_DIR");
     if (!gd) { std::fprintf(stderr, "set EQ_GAME_DIR\n"); return 2; }
@@ -357,7 +354,7 @@ int main(int argc, char** argv) {
             entered = true;
         }
         if (conn.state() == net::ConnectionState::InZone) {
-            if (!zone_seen.empty() && conn.world().zone_short_name != zone_seen && (!zl_done || quest.active() || atlas.active())) {
+            if (!zone_seen.empty() && conn.world().zone_short_name != zone_seen && (!zl_done || quest.active())) {
                 // Arrived in the next zone through the zone line (or a --quest step's #zone).
                 zl_done = true;
                 in_zone_at = {};
@@ -376,7 +373,6 @@ int main(int argc, char** argv) {
                 social.zone_in(conn);
                 augment.zone_in(conn);
                 quest.zone_in(conn);
-                atlas.zone_in(conn);
                 const auto& w = conn.world();
                 std::printf("  in %s (%s): %zu spawns, me id %u", w.zone_short_name.c_str(), w.zone_long_name.c_str(), w.spawns.size(), w.player_id);
                 if (const auto* me = w.player()) std::printf(" at %.1f %.1f %.1f heading %.1f", me->position.x, me->position.y, me->position.z, me->heading);
@@ -610,8 +606,7 @@ int main(int argc, char** argv) {
             social.step(conn);
             augment.step(conn);
             quest.step(conn);
-            atlas.step(conn, game);
-            bool walking = (zl_target && !zl_done) || (fight != Fight::Off && fight != Fight::Done) || items.busy() || spells.busy() || group.busy() || shop.busy() || bank.busy() || progress.busy() || market.busy() || social.busy() || augment.busy() || quest.busy() || atlas.busy();
+            bool walking = (zl_target && !zl_done) || (fight != Fight::Off && fight != Fight::Done) || items.busy() || spells.busy() || group.busy() || shop.busy() || bank.busy() || progress.busy() || market.busy() || social.busy() || augment.busy() || quest.busy();
             // A --quest run camps as soon as its steps are done; --seconds is then only its time limit.
             if (!walking && (Clock::now() - in_zone_at > std::chrono::seconds(seconds) || quest.active())) conn.camp();
         }
@@ -626,7 +621,6 @@ int main(int argc, char** argv) {
     market.finish(conn);
     social.finish(conn);
     quest.finish(conn);
-    atlas.finish();
     // The class masks a plugin gave the core (the NMS plugin: OP_SendCharacterSets, OP_ServerAuthStats key 1).
     std::printf("class masks: character set 0x%x, server 0x%x, player 0x%x\n", conn.classes_mask(playing),
                 conn.server_class_mask(), conn.player_class_mask());

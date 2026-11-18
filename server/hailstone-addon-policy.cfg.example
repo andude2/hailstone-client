@@ -17,6 +17,7 @@ player = off
 [addons]
 enforce = on
 ;required = owner/repo
+;required = owner/repo:1.0.0-preview.4
 ;allow = owner/repo
 ;block = owner/repo
 ;suggest = owner/repo
@@ -26,15 +27,19 @@ default = allow
 ;   scripts and plugins start even when the player did not set them to, and cannot be stopped on this server. A
 ;   required compiled plugin still asks the player first. Missing at the zone-in: entry is refused and the player is
 ;   shown what to install. Failing once the character is in the world: a warning in chat, never a disconnect.
+;   owner/repo:1.0.0-preview.4 also needs that installed version or newer (semantic version order); without the
+;   suffix any version will do. WARNING: a client older than the one that added this refuses a server whose
+;   required list uses the :version form (to it the policy is invalid), so its players cannot enter. Use it only
+;   once your players have updated.
 ; allow: permitted when default = deny. Naming an add-on does not turn on [scripts] or [plugins] player above, nor
 ;   grant capabilities: enable the kind it is and choose its player_caps too.
 ; block: refused, whatever else says; an add-on both required and blocked makes the policy invalid.
-; default = deny refuses every add-on not named by required or allow, including upscalers and tools.
+; default = deny refuses every add-on not named by required, allow or suggest, including upscalers and tools.
 ;
 ; WARNING with default = deny: upscalers (XeSS, FSR 4 ...) are add-ons too. Name in allow each one you permit; the
 ; client's built-in choices need no entry. An upscaler loads at start: a refused one keeps the player out until they
 ; pick an allowed or built-in one and restart Hailstone.
 ;
 ; To block only some add-ons, keep default = allow and list them in block. To require some without excluding
-; others, use required with default = allow. A suggestion stays optional and grants nothing: under default = deny
-; also name it in allow.
+; others, use required with default = allow. A suggestion stays optional and is allowed as if named in allow
+; (also under default = deny); block still wins, and it grants no capabilities.

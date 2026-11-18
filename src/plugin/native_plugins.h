@@ -11,6 +11,7 @@
 // A library from the server's plugins/ folder also needs the player's word for its bytes (plugin/consent.h): until
 // then it does not load, and consent() holds the question for the UI; answer_consent() takes the answer.
 
+#include <cstddef>
 #include <cstdint>
 #include "plugin/world_geometry.h"
 #include <filesystem>
@@ -128,6 +129,11 @@ public:
     // Required add-ons are active, and no loaded plugin is forbidden by the current add-on rules. False with an
     // empty problem waits for native-code consent; a nonempty problem is a refusal or a load failure.
     bool required_addons_ready(std::string* problem = nullptr) const;
+    // The player's Retry (the Server add-ons warning): each required plugin that let an exception out is unloaded and
+    // loaded again, once, and one that did not load is tried again, under the usual checks (policy, consent). One
+    // that is running fine is left alone. A plugin inside its own callback is only marked for unloading (the next
+    // pulse does it; a later Retry loads it). The number tried.
+    std::size_t retry_required_addons();
     // The server's plugins/ folder (servers/<profile>/plugins), looked in before env.dirs; empty for none.
     void set_server_dir(const std::filesystem::path& dir);
     // Inside the ImGui frame: OnUpdateImGui.

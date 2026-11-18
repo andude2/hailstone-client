@@ -12,8 +12,10 @@ set(HAILSTONE_SHADER_OUT ${PROJECT_BINARY_DIR}/shaders)
 set(HAILSTONE_SHADER_RUN ${PROJECT_BINARY_DIR}/hailstone/shaders)
 # Files the shaders #include (GL_GOOGLE_include_directive): a change rebuilds every shader.
 set(HAILSTONE_SHADER_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/shaders/lighting.glsl
+                          ${CMAKE_CURRENT_SOURCE_DIR}/shaders/classic_light.glsl
                           ${CMAKE_CURRENT_SOURCE_DIR}/shaders/zone_surface.glsl
                           ${CMAKE_CURRENT_SOURCE_DIR}/shaders/ao_kernel.glsl
+                          ${CMAKE_CURRENT_SOURCE_DIR}/shaders/shadow_filter.glsl
                           ${CMAKE_CURRENT_SOURCE_DIR}/shaders/ao_blur.glsl
                           ${CMAKE_CURRENT_SOURCE_DIR}/shaders/motion.glsl
                           ${CMAKE_CURRENT_SOURCE_DIR}/shaders/reactive.glsl

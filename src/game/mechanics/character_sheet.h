@@ -144,6 +144,7 @@ struct CharacterSheet {
     bool running = false;            // __RunWalkState == 1 and the spawn's speed (+0x7c) is not 0
     bool fast_regen_resting = false; // PcZoneClient_IsRestingForFastRegen
     bool buff_timers_on_hold = false; // the spawn's +0x22d (CharacterZoneClient_AreBuffTimersOnHold)
+    bool zone_suspends_buffs = false; // 0xddfc5c, OP_NewZone +876 (game::SpellState::zone_suspends_buffs)
     std::uint32_t sitting_ms = 0;    // display time (+0x154) - spawn +0x374 (time since sitting down)
     bool tutorial = false;           // byte 0xdd25a1: low levels get a flat regen
     std::int32_t fast_regen_hp_divisor = 0, fast_regen_mana_divisor = 0, fast_regen_endurance_divisor = 0;

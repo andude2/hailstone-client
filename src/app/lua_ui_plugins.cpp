@@ -19,6 +19,7 @@
 #include "plugin/lua_value.h"
 #include "plugin/policy.h"
 #include "plugin/ui_bridge.h"
+#include "ui/dev_screens.h"
 #include "ui/lua/lua_host.h"
 
 namespace hailstone::app {
@@ -370,6 +371,57 @@ int AnswerPluginConsent(lua_State* L) {
     return 1;
 }
 
+// The table hs.AddonPolicy last built, by the view's serial: a pack asks every frame, and it is built again only when
+// the failure changes.
+const char kAddonPolicyTable = 0;
+
+// q = hs.AddonPolicy(): {serial, message, can_retry} while a required add-on has failed in the world, else nil. The
+// same table each frame until the failure changes (read it, do not change it). nil to plugin code and to an interface
+// Hailstone does not ship (UiHost::trusted_ui: the client draws the warning under one).
+int AddonPolicy(lua_State* L) {
+    const UiHost& h = host_of(L);
+    const ui::AddonPolicyView* view = h.addon_policy;
+    if (plugin_code() || !h.trusted_ui || !view || !view->failed) {
+        lua_pushnil(L);
+        return 1;
+    }
+    const auto serial = static_cast<lua_Integer>(view->serial);
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &kAddonPolicyTable);
+    if (lua_istable(L, -1)) {
+        lua_getfield(L, -1, "serial");
+        const bool current = lua_isinteger(L, -1) && lua_tointeger(L, -1) == serial;
+        lua_pop(L, 1);
+        if (current) return 1;
+    }
+    lua_pop(L, 1);
+    lua_createtable(L, 0, 3);
+    lua_pushinteger(L, serial);
+    lua_setfield(L, -2, "serial");
+    lua_pushlstring(L, view->message.data(), view->message.size());
+    lua_setfield(L, -2, "message");
+    lua_pushboolean(L, view->can_retry);
+    lua_setfield(L, -2, "can_retry");
+    lua_pushvalue(L, -1);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &kAddonPolicyTable);
+    return 1;
+}
+
+// ok = hs.AddonPolicyAction("retry", serial): the player's Retry for the failure with that serial (hs.AddonPolicy):
+// the required add-ons that failed are tried again once. False when there is no such failure any more, it cannot be
+// retried, or the caller is plugin code, not the interface's own file, or an interface Hailstone does not ship.
+int AddonPolicyAction(lua_State* L) {
+    UiHost& h = host_of(L);
+    const std::string_view action = luaL_checkstring(L, 1);
+    const lua_Integer serial = luaL_checkinteger(L, 2);
+    const ui::AddonPolicyView* view = h.addon_policy;
+    const bool ok = !plugin_code() && h.trusted_ui && ui::lua::pack_code(L) && view && view->failed &&
+                    view->can_retry && action == "retry" && static_cast<lua_Integer>(view->serial) == serial &&
+                    h.retry_required_addons;
+    if (ok) plugin::cxx_guard(L, [&] { h.retry_required_addons(); });
+    lua_pushboolean(L, ok);
+    return 1;
+}
+
 } // namespace
 
 bool run_plugin_menu(UiHost& h, std::size_t i) {
@@ -389,7 +441,9 @@ void register_plugins_api(lua_State* L, UiHost& host) {
              {"PluginMenu", PluginMenu},
              {"PluginMenuClick", PluginMenuClick},
              {"PluginConsent", PluginConsent},
-             {"AnswerPluginConsent", AnswerPluginConsent}}) {
+             {"AnswerPluginConsent", AnswerPluginConsent},
+             {"AddonPolicy", AddonPolicy},
+             {"AddonPolicyAction", AddonPolicyAction}}) {
         lua_pushlightuserdata(L, &host);
         lua_pushcclosure(L, fn, 1);
         lua_setfield(L, -2, name);

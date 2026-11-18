@@ -374,3 +374,34 @@ ui.window("Server Plugins", function()
   -- B / the close button: not now (asked again at the next zone-in)
   if W.finish() then API.plugins.AnswerConsent(nil, q.serial) end
 end)
+
+-- Server add-ons: a required add-on that failed once the character is in the world (hs.AddonPolicy; docs/plugins.md
+-- "Opt-in add-on policies"). Shown only while there is one; it does not take the controller from the game (the
+-- player can keep fighting), offers Retry when the add-on can be tried again, and B or its close box puts it away
+-- until the next failure. It stands in for the client's own window ("AddonPolicy"). From an idea in fryguy503's PR #93.
+local policyClosed = nil -- the failure's serial the player closed it on
+ui.window("Server add-ons", function()
+  API.windows.Shown("AddonPolicy")
+  local q = API.session.InGame() and API.addons.Policy() or nil
+  if not q or q.serial == policyClosed then return end
+  T.frame()
+  if W.begin("Server add-ons", { w = 700, h = q.can_retry and 300 or 230, x = T.W / T.S - 724, y = 36,
+        title = "Server add-ons", noFocus = true,
+        hints = q.can_retry and { { "a", "Retry" }, { "b", "Close" } } or { { "b", "Close" } } }) then
+    local x0, y0, x1, y1, w = W.area()
+    local y = wrapped(q.message, x0, y0, w, C.bad or C.text)
+    y = wrapped("You can keep playing on this server.", x0, y + T.px(6), w, C.dim)
+    if q.can_retry then
+      local wx, wy = ui.GetWindowPos()
+      ui.SetCursorPos(x0 - wx, y + T.px(10) - wy)
+      if T.button("##addonpolicyretry", "Retry", T.px(210), T.px(52), {}, pad) then
+        API.addons.PolicyAction("retry", q.serial)
+      end
+    end
+  end
+  if W.finish() then
+    policyClosed = q.serial
+    pad.takes_b()
+    pad.set_mode("game")
+  end
+end)

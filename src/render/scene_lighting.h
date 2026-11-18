@@ -28,10 +28,19 @@ namespace hailstone::game { struct SceneLight; struct LightSource; }
 
 namespace hailstone::render {
 
-enum class LightingMode : std::uint8_t { Classic, Modern };
+// The lighting, low to high (the Options window's Lighting choices, in this order). SmoothClassic is the classic
+// lighting with its region light per pixel and its highlights rolled off (Hailstone's own; docs/graphics.md "Smooth
+// classic lighting"); everything else treats it as Classic, which is the original's look.
+enum class LightingMode : std::uint8_t { Classic, SmoothClassic, Modern };
 
-// display.lighting / `/lighting` values: classic, modern ("enhanced", the old name, is modern); nullopt otherwise.
+// display.lighting / `/lighting` values: classic, smooth, modern ("enhanced", the old name, is modern); nullopt
+// otherwise.
 std::optional<LightingMode> parse_lighting_mode(std::string_view name);
+// The value display.lighting saves for `mode`.
+std::string_view lighting_mode_name(LightingMode mode);
+// display.tonemap's "auto": AgX with the modern lighting, Soft with the smooth classic, none (the original's
+// clipping) with the classic.
+Tonemap automatic_tonemap(LightingMode mode);
 
 // The modern mode's light from the sky, in linear HDR units (1 = the white a surface shows at exposure 0). Not the
 // original's: the direction follows its sun path (assets::sky_sweep_heading, overhead at noon, the horizon at 6:00
@@ -92,9 +101,15 @@ struct GpuPointLight {
     glm::vec4 color{0.0f};
 };
 
+struct SceneLighting;
+// Each of the scene's lights (SceneLighting::lights) with its entry among the shadowed ones (the point shadow fields,
+// PointShadows::apply): color.w 1 + the first that is the same light (same_shadow_light), 0 none. The shaders read
+// it instead of searching (shaders/lighting.glsl scene_light_shadow).
+void tag_shadowed_lights(SceneLighting& lighting);
+
 // std140 and std430 lay this out the same (vec4s and mat4s only); shaders/lighting.glsl SCENE_LIGHTING_FIELDS.
 struct SceneLighting {
-    glm::vec4 ambient{0.0f};
+    glm::vec4 ambient{0.0f}; // w: 1 the smooth classic lighting (ZoneRenderer::set_classic_smooth; the zone only)
     glm::vec4 special_ambient{0.0f};
     glm::vec4 directional{0.0f};
     glm::vec4 direction{0.0f};
@@ -137,9 +152,10 @@ struct SceneLighting {
     glm::vec4 reveal_roof{0.0f};
     // The zone lights' shadows (render/point_shadows.h PointShadows::apply), modern only.
     std::array<glm::vec4, kMaxPointShadows> point_shadow_light{}; // xyz the light, w its radius
-    std::array<glm::vec4, kMaxPointShadows> point_shadow_slot{};  // x: its cube's first layer, y: its strength
+    // x: its cube's first layer, y: its strength, z: a zone light's shadow key (point_shadow_keys), 0 a moving light
+    std::array<glm::vec4, kMaxPointShadows> point_shadow_slot{};
     glm::vec4 point_shadow_params{0.0f}; // x: how many, y: 1 / face size, z: kPointShadowFaceScale, w: kPointShadowNear
-    std::array<GpuPointLight, kMaxSceneLights> lights{};
+    std::array<GpuPointLight, kMaxSceneLights> lights{}; // color.w: its shadow entry + 1 (tag_shadowed_lights)
 };
 
 // What the modern water needs of the view: view depth = y / (d + x) of the reverse-Z depth d (FlyCamera's near and far

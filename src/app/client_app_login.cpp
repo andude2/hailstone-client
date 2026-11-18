@@ -625,6 +625,8 @@ void ClientApp::back_to_login(std::string message, bool is_error) {
     retire_world_geometry(); // retire callbacks before the connection they may inspect
     conn_.reset();
     ui_host_.conn = nullptr; // (update_ui_host sets it each frame; the windows must not reach the freed one before)
+    addon_admission_.reset(); // (its failure warning goes with the connection)
+    update_addon_policy_view();
     login_.reset();
     unload_zone();
     leave_character();
@@ -935,6 +937,8 @@ void ClientApp::camp_finished(std::uint32_t kind) {
     retire_world_geometry(); // retire callbacks before the connection they may inspect
     conn_.reset();
     ui_host_.conn = nullptr; // (update_ui_host sets it each frame; the windows must not reach the freed one before)
+    addon_admission_.reset(); // (its failure warning goes with the connection)
+    update_addon_policy_view();
     unload_zone();
     leave_character();
     player_ready_ = false;

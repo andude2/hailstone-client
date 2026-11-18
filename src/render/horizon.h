@@ -3,8 +3,7 @@
 // The land round an outdoor zone (Hailstone's own, the modern lighting; docs/graphics.md "Horizon hills"): terrain past
 // the zone's edges, out to about the modern view's reach, so the land does not end in a blank haze. The original drew
 // nothing past a zone's own geometry. This is the CPU half: what the zone's own terrain says about the land round it
-// (where it lies, how high and rugged it is), the neighbour zones' ground that shapes it past their zone lines, and
-// the mesh, which ZoneRenderer::prepare adds to the zone's geometry under the zone's own ground, rock and water
+// (where it lies, how high and rugged it is) and the mesh, which ZoneRenderer::prepare adds to the zone's geometry under the zone's own ground, rock and water
 // materials, so it is shaded, lit and hazed as the zone is.
 
 #include <cstddef>
@@ -74,9 +73,24 @@ inline constexpr float kHorizonRock = 0.8f;
 // How far under the water's surface the sea's floor lies, past the shore.
 inline constexpr float kHorizonSeaDepth = 250.0f;
 
-// What the land is built from: the zone's terrain on the grid (horizon_field), and the mesh's lines. The same field
-// gives the same lines, so the current zone's land and a neighbour's part of it (horizon_mesh with `only`) meet
-// vertex for vertex.
+// The land's own hills are a generated terrain: warped ridged noise (land_point), worn by water and slumping
+// (horizon_terrain), the known ground (the zone's edge, the sea) held where it is. A
+// grid over the land: how far the wear moved the ground (`delta`, units, added to the land's height) and how much water
+// ran over it (`wet`, 0..1: the valleys and runnels, where the woods gather).
+struct HorizonTerrain {
+    glm::vec2 lo{0.0f};
+    float cell = 64.0f;
+    int nx = 0, ny = 0;
+    std::vector<float> delta, wet;
+    float worn_lo = 0.0f, worn_hi = 0.0f; // the deepest the wear cut, the highest it built (for the log)
+    bool valid() const {
+        return nx > 1 && ny > 1 && delta.size() == static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny) &&
+               wet.size() == delta.size();
+    }
+    float sample(const std::vector<float>& layer, glm::vec2 p) const;
+};
+
+// What the land is built from: the zone's terrain on the grid (horizon_field), and the mesh's lines.
 struct HorizonField {
     HorizonLand land;
     glm::vec2 lo{0.0f};
@@ -92,6 +106,8 @@ struct HorizonField {
     float water_level = 0.0f;           // the median of the zone's water surfaces
     bool has_water = false;
     std::vector<float> xs, ys;          // the mesh's lines
+    // The wear of the land's hills once horizon_terrain has run (null before: the hills unworn).
+    std::shared_ptr<const HorizonTerrain> terrain;
 
     bool valid() const { return land.valid && nx > 0 && xs.size() > 1 && ys.size() > 1; }
     std::size_t at(int x, int y) const {
@@ -102,154 +118,67 @@ struct HorizonField {
     std::size_t square(glm::vec2 p, float& extra) const;
     // Whether `p` lies in a covered square of the grid (the zone's own terrain is there; the land is tucked under it).
     bool covers(glm::vec2 p) const;
-    // The mesh's square holding `p` (row x columns + column), -1 outside the mesh: the key the land's triangles are
-    // hidden by (ZoneRenderer::set_distant_hidden) and a neighbour's part of the land lists (HorizonMesh::squares).
+    // The mesh's square holding `p` (row x columns + column), -1 outside the mesh.
     std::int64_t mesh_square(glm::vec2 p) const;
 };
 
 // The field of the zone's terrain; not valid when `land` is not.
 HorizonField horizon_field(std::span<const HorizonTriangle> triangles, const HorizonLand& land);
 
-// A neighbour zone's ground in the current zone's coordinates (app/neighbour_zones.h), which shapes the land past its
-// zone line: heights on a grid of kHorizonCell squares, NaN where it has none (before the seam, in its void),
-// measured from its terrain alone (its placed objects, trees and houses, are not its ground). A wall or a crest narrower
-// than three squares is taken off (horizon_source: the ground is "opened", eroded then dilated over kHorizonOpening
-// squares), so the land does not rise in a ramp against a wall; wider, it follows the terrain. Past its ground its
-// influence fades over kHorizonSourceFade (its `cover`, 1 on its ground).
-inline constexpr int kHorizonOpening = 1;
-inline constexpr float kHorizonSourceFade = 1200.0f;
-struct HorizonSource {
-    std::string name; // the neighbour's short name
-    glm::vec2 lo{0.0f};
-    float cell = kHorizonCell;
-    int nx = 0, ny = 0;
-    std::vector<float> height; // the opened ground, NaN where none; padded by the fade on every side
-    std::vector<float> top;    // its terrain's highest point in each square, unopened, NaN where none (or empty)
-    std::vector<float> water;  // its water's surface in each square, NaN where none (or empty: none known)
-    // Its ground's colour in each square (sRGB, R in the low byte), 0 where none (or empty: none known): a zone of the
-    // world atlas, whose own textures nothing else draws (app::measure_ground_color).
-    std::vector<std::uint32_t> color;
-    // How many trees stand in each square (empty: none known): a zone of the world atlas, whose own trees nothing else
-    // draws; the land's trees stand as thick over its ground (horizon_trees).
-    std::vector<std::uint8_t> trees;
-    // Whether the land draws its water on its ground (a zone of the world atlas, which nothing else draws); a
-    // neighbour zone draws its own, and the land's sea starts past its ground.
-    bool draws_water = false;
-    // finish_horizon_source: each square's nearest ground, and how far it lies (0 on it); on its ground, how far the
-    // nearest square without ground lies (its edge: before the seam, its void past its own boundary walls).
-    std::vector<float> fill, dist, inner;
-    // finish_horizon_source: on its ground, 1 where its water stands over it; past it, how much of its edge there
-    // is water (the nearest ground's, averaged over kHorizonShoreWidth: a river's mouth is not a shore), which the
-    // land carries on as open sea; and the median of its water's surfaces.
-    std::vector<float> wet, sea;
-    float water_level = 0.0f;
-    // finish_horizon_source: each square's nearest known colour (as `fill` is its nearest ground's height), as linear
-    // rgb softened over kHorizonColorBlur squares, and a: 1 where one is known, else 0 (empty when `color` is).
-    std::vector<glm::vec4> fill_color;
-    bool valid() const {
-        const auto n = static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny);
-        return nx > 0 && ny > 0 && height.size() == n && fill.size() == n && dist.size() == n && inner.size() == n;
-    }
-};
-// The sources a land is built with, sorted by name (each once): the same set builds the same land.
-using HorizonSources = std::vector<std::shared_ptr<const HorizonSource>>;
-void sort_sources(HorizonSources& sources);
-
-// A source from the neighbour's ground sampled on `nx` x `ny` squares from `lo` (NaN: none): padded, opened, finished.
-// `top` (the same squares, or empty): its terrain's highest point in each, kept as it is (horizon_source_top).
-// `water` (the same squares, or empty): its water's surface in each, NaN where none. `color` (the same squares, or
-// empty): its ground's colour in each, 0 where none. `trees` (the same squares, or empty): how many trees stand in each.
-HorizonSource horizon_source(std::string name, glm::vec2 lo, float cell, int nx, int ny, std::vector<float> ground,
-                             std::vector<float> top = {}, std::vector<float> water = {},
-                             std::vector<std::uint32_t> color = {}, std::vector<std::uint8_t> trees = {});
-inline constexpr int kHorizonColorBlur = 2;
-// Fills in the layers finish_horizon_source makes from `height` and `water` (a source read back from the cache).
-void finish_horizon_source(HorizonSource& source);
-// The source with its ground (and water) left out where a square's middle lies on the far side of any of `keep`
-// (xyz . p + w < 0; game::seam_clip_plane), finished again: a zone of the world atlas past the zone line it is
-// reached by, and the zone before it short of that line, so the two do not both stand in the same place.
-HorizonSource cut_horizon_source(const HorizonSource& source, std::span<const glm::vec4> keep);
-// How wide a stretch of a source's edge must be water to be a shore the sea goes on from (finish_horizon_source),
-// and how far in from the edge its water may lie behind a wall or a quay.
+// How wide a stretch of the zone's edge must be water to be a shore the sea goes on from (horizon_field), and how
+// far in from the edge its water may lie behind a wall or a quay.
 inline constexpr float kHorizonShoreWidth = 1024.0f;
 inline constexpr float kHorizonShoreWall = 192.0f;
 // The land under the sea is darker with the depth, down to this share of its light this far under the surface.
 inline constexpr float kHorizonSeaFloorShade = 0.3f;
 inline constexpr float kHorizonSeaFloorDark = 150.0f;
-struct HorizonSourceSample {
-    float height = 0.0f; // the ground, or past it the nearest ground's height
-    float cover = 0.0f;  // 1 on its ground, fading to 0 over kHorizonSourceFade past it
-    float inner = 0.0f;  // on its ground, how far in from its edge
-    float wet = 0.0f;    // on its ground, how much its water stands over it (0..1)
-    float sea = 0.0f;    // past its ground, the open sea past its shore (0..1; HorizonSource::sea)
-    float level = 0.0f;  // its water's surface there (on its ground, its own; past it, the median)
-    float distance = 0.0f; // to its ground (0 on it)
-    glm::vec4 color{0.0f};  // its nearest ground's colour (linear rgb), a 1 where one is known
-};
-// A neighbour's sea goes on over the land where its shore is nearer than the zone's own edge, eased over this either
-// way.
-inline constexpr float kHorizonSeaClaim = 400.0f;
-HorizonSourceSample sample_source(const HorizonSource& source, glm::vec2 p);
-// The opened ground under `p` (bilinear between the squares' centres), nullopt where the source has none.
-std::optional<float> source_ground(const HorizonSource& source, glm::vec2 p);
-// Its terrain's highest point in the square holding `p`, unopened; nullopt where it has none or was not kept.
-std::optional<float> source_top(const HorizonSource& source, glm::vec2 p);
-
-// Where the land comes off the zone's edge onto a neighbour's ground, it eases from the edge's height to the
-// neighbour's over a band past the edge: kHorizonBandSlope times their difference, kHorizonBandMin to kHorizonBandMax
-// across, so a few units' disagreement is a short slope and a cliff's top a long one.
-inline constexpr float kHorizonBandSlope = 3.0f;
-inline constexpr float kHorizonBandMin = 200.0f;
-inline constexpr float kHorizonBandMax = 800.0f;
+// Wears the land: its heights on a grid (at least kHorizonCell, at most kHorizonTerrainMax squares a side) worn by
+// kHorizonDroplets droplets a square of water running downhill (Beyer's particle erosion), each at most
+// kHorizonDropletSteps squares, and a few passes of slumping where it is steeper than the rock holds, each square only
+// as much as it is free: none on the zone or under the sea, all of it
+// kHorizonTerrainFree past the zone's edge; at most kHorizonTerrainMaxCut down and kHorizonTerrainMaxFill up.
+// Deterministic: the same field gives the same terrain (its layers on the cache's steps, so a terrain read
+// back from the cache is the one generated).
+inline constexpr int kHorizonTerrainMax = 512;
+inline constexpr float kHorizonDroplets = 1.0f;
+inline constexpr int kHorizonDropletSteps = 48;
+inline constexpr float kHorizonTerrainFree = 1500.0f;
+inline constexpr float kHorizonTerrainMaxCut = 384.0f;
+inline constexpr float kHorizonTerrainMaxFill = 192.0f;
+HorizonTerrain horizon_terrain(const HorizonField& field);
+// The terrain's cache (cache/terrain/<server>/<zone>.bin, ZoneRenderOptions::terrain_cache): `key` is what it was worn
+// from (horizon_terrain_key: the field's grid and heights, the generator's version), so
+// a file worn from other ground, of another version or damaged is refused and the terrain worn again.
+std::uint64_t horizon_terrain_key(const HorizonField& field);
+std::vector<std::byte> write_horizon_terrain(const HorizonTerrain& terrain, std::uint64_t key);
+std::optional<HorizonTerrain> read_horizon_terrain(std::span<const std::byte> data, std::uint64_t key);
 
 // The land's height at `p` (as the mesh's vertices have it).
-float horizon_height(const HorizonField& field, const HorizonSources& sources, glm::vec2 p);
-
-// Past the band, where a neighbour that is drawn has its own ground (its cover whole) and at least kHorizonInnerFrom
-// in from its edge (kHorizonInnerTo for all of it), the land of its part (horizon_mesh with `only`) sinks kHorizonTuck
-// under that ground, so the neighbour's own terrain is drawn there over it (its roads, its textures, its hills) and the
-// land fills only what it lacks; in the band and by its edge (its own boundary walls and filler) its terrain goes and
-// the land is the ground (game::split_off_land). `settled`, 0..1: how far it has sunk.
-inline constexpr float kHorizonInnerFrom = 128.0f;
-inline constexpr float kHorizonInnerTo = 512.0f;
-struct HorizonPoint {
-    float height = 0.0f; // as `only`'s part has it
-    float settled = 0.0f;
-};
-HorizonPoint horizon_point(const HorizonField& field, const HorizonSources& sources, glm::vec2 p, int only);
+float horizon_height(const HorizonField& field, glm::vec2 p);
 
 struct HorizonMesh {
     std::vector<glm::vec3> positions;
     std::vector<glm::vec3> normals;
     std::vector<float> shade;  // per vertex, 0..1: what is left of the light (woods and valleys are darker)
-    std::vector<float> weight; // per vertex, 0..1: a neighbour's part (`only`): how much its own ground shows
-    std::vector<float> settled; // per vertex, 0..1: a neighbour's part: how far under its terrain (horizon_point)
-    // Per vertex: the colour the ground takes on there (linear rgb: an atlas zone's own, HorizonSource::color), and in
-    // a how much (its cover); 0 where none. The renderer moves the zone's ground texture toward it.
-    std::vector<glm::vec4> tint;
-    // Triangles (index triples into positions), counter-clockwise seen from above: the zone's ground material, its
-    // rock (slopes and peaks), and its water (a flat surface at water_level).
-    std::vector<std::uint32_t> ground, rock, water;
+    // Per vertex: how much rock (x: slopes, peaks) and sand (y: by the water) cover the ground (zone.frag kLandSplat).
+    std::vector<glm::vec2> splat;
+    // Triangles (index triples into positions), counter-clockwise seen from above: the zone's ground material (its
+    // rock splatted in) and its water (a flat surface at water_level).
+    std::vector<std::uint32_t> ground, water;
     float water_level = 0.0f;
-    std::vector<std::int64_t> squares; // a neighbour's part: its squares (HorizonField::mesh_square), sorted
-    bool empty() const { return ground.empty() && rock.empty() && water.empty(); }
+    bool empty() const { return ground.empty() && water.empty(); }
 };
 
-// The land round the zone, shaped by `sources` where their ground is; empty when the field is not valid. With `only`
-// (an index into `sources`), only the squares that source owns (the one with the most cover at their corners), with
-// its weight (its cover times how far across the band the vertex lies) and no water: the part a neighbour zone
-// draws with its own ground (app/neighbour_zones.h), where the current zone's land is hidden.
-HorizonMesh horizon_mesh(const HorizonField& field, const HorizonSources& sources, int only = -1);
+// The land round the zone; empty when the field is not valid.
+HorizonMesh horizon_mesh(const HorizonField& field);
 // The land round the zone from its terrain alone.
 HorizonMesh horizon_mesh(std::span<const HorizonTriangle> triangles, const HorizonLand& land);
 
 // The land's trees (Hailstone's own): far trees (render/tree_impostor.h) standing on the land's woods, the darker
 // patches its shade paints (thick there, a lone one here and there elsewhere), from kHorizonTreeFrom past the zone's
 // edge out to kHorizonTreeReach, fewer past kHorizonTreeThin (as kHorizonTreeThin over the distance; the haze takes
-// them there). Not on the sea, the mountains' rock, slopes steeper than kHorizonTreeSlope (the normal's z) or a
-// neighbour's ground (half its cover or more: a neighbour drawn draws its own trees there), nor in the zone's pockets.
-// Over the ground of a source that says where its trees stand (an atlas zone's, HorizonSource::trees), as thick as
-// they stand in its square there, and only on its ground.
+// them there). Not on the sea, the mountains' rock, slopes steeper than kHorizonTreeSlope (the normal's z), nor
+// in the zone's pockets.
 // Each stands on the land's surface as its mesh draws it, a little sunk so a slope shows no gap under it. At most
 // kHorizonTreeMax, the nearest kept.
 inline constexpr float kHorizonTreeFrom = 256.0f;
@@ -263,27 +192,13 @@ struct HorizonTree {
     float yaw = 0.0f;   // radians round z
     float scale = 1.0f; // 0.8 .. 1.2 of the tree's own size
     float pick = 0.0f;  // 0..1, the same for the same spot: which of the zone's trees stands there
-    bool sourced = false; // on a source's ground, where its own trees stand (HorizonSource::trees)
 };
 // `woods` and `open`: how far apart the trees stand in the woods and elsewhere (units; the zone's own trees' spacing
-// sets them). Empty when the field is not valid or `mesh` is not horizon_mesh(field, sources).
-std::vector<HorizonTree> horizon_trees(const HorizonField& field, const HorizonSources& sources,
-                                       const HorizonMesh& mesh, float woods, float open);
-// The land's surface at `p` as `mesh` (horizon_mesh(field, ...) without `only`) draws it: its height, and the normal
+// sets them). Empty when the field is not valid or `mesh` is not horizon_mesh(field).
+std::vector<HorizonTree> horizon_trees(const HorizonField& field, const HorizonMesh& mesh, float woods, float open);
+// The land's surface at `p` as `mesh` (horizon_mesh(field)) draws it: its height, and the normal
 // of the triangle there. nullopt outside its grid.
 std::optional<float> horizon_surface(const HorizonField& field, const HorizonMesh& mesh, glm::vec2 p,
                                      glm::vec3* normal = nullptr);
-
-// A neighbour's source as the cache keeps it (app/neighbour_zones.h; cache/horizon/<server>/<zone>/<neighbour>.bin):
-// for which pair of zones, the files it was measured from (`key`: their sizes), the offset it was moved by.
-struct HorizonCacheEntry {
-    std::string zone, neighbour;
-    std::uint64_t key = 0;
-    glm::vec3 offset{0.0f};
-    HorizonSource source;
-};
-std::vector<std::byte> write_horizon_cache(const HorizonCacheEntry& entry);
-// nullopt when the bytes are not a cache entry of this version, or are damaged.
-std::optional<HorizonCacheEntry> read_horizon_cache(std::span<const std::byte> data);
 
 } // namespace hailstone::render

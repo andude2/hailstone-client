@@ -400,6 +400,8 @@ void ClientApp::update_ui_host() {
         h.answer_plugin_consent = [this](std::optional<bool> allow) {
             if (automation_) automation_->answer_plugin_consent(allow);
         };
+        h.addon_policy = &addon_policy_view_;
+        h.retry_required_addons = [this] { retry_required_addons(); };
     }
     h.web = web_service_.get();
     h.scripts = automation_ ? &automation_->scripts() : nullptr;

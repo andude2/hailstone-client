@@ -192,11 +192,14 @@ std::string_view trim(std::string_view s) {
     return s;
 }
 
-// A value without its trailing "; comment" or "# comment".
-std::string value_of(std::string_view v) {
+// A value without its trailing "; comment" or "# comment", in its own case.
+std::string value_without_comment(std::string_view v) {
     std::size_t c = v.find_first_of(";#");
-    return lower(trim(c == std::string_view::npos ? v : v.substr(0, c)));
+    return std::string(trim(c == std::string_view::npos ? v : v.substr(0, c)));
 }
+
+// The same, lower-cased.
+std::string value_of(std::string_view v) { return lower(value_without_comment(v)); }
 
 std::optional<bool> on_off(std::string_view v) {
     if (v == "on" || v == "yes" || v == "true" || v == "1") return true;
@@ -401,11 +404,37 @@ Rules parse_server_cfg(std::string_view text, std::vector<std::string>* warnings
                 }
                 if (key == "required" || key == "allow" || key == "block") {
                     auto& identities = key == "required" ? r.addons.required : key == "allow" ? r.addons.allow : r.addons.block;
-                    std::string_view rest = v;
+                    // Repository identities ignore case; a minimum version's prerelease identifiers do not (SemVer).
+                    const std::string list = key == "required"
+                        ? value_without_comment(ini.get_string(section_name, key_name)) : v;
+                    std::string_view rest = list;
                     while (!rest.empty()) {
                         const std::size_t comma = rest.find(',');
                         const std::string_view item = trim(rest.substr(0, comma));
-                        if (auto identity = normalize_addon_identity(item)) {
+                        auto identity = normalize_addon_identity(item);
+                        std::optional<Version> minimum;
+                        bool invalid_minimum = false;
+                        if (key == "required" && !identity) {
+                            // owner/repo:version (a GitHub link with a version after it too).
+                            const auto colon = item.rfind(':');
+                            if (colon != std::string_view::npos) {
+                                identity = normalize_addon_identity(trim(item.substr(0, colon)));
+                                if (identity) {
+                                    minimum = parse_version(trim(item.substr(colon + 1)));
+                                    invalid_minimum = !minimum;
+                                }
+                            }
+                        }
+                        if (invalid_minimum) {
+                            invalid_addons(std::format("{}: \"{}\" has an invalid minimum version; use owner/repo:version "
+                                                       "with a SemVer release", where, item));
+                        } else if (identity) {
+                            if (minimum) {
+                                auto previous = r.addons.minimum_versions.find(*identity);
+                                if (previous == r.addons.minimum_versions.end() ||
+                                    compare_versions(previous->second, *minimum) < 0)
+                                    r.addons.minimum_versions.insert_or_assign(*identity, std::move(*minimum));
+                            }
                             if (std::find(identities.begin(), identities.end(), *identity) == identities.end())
                                 identities.push_back(std::move(*identity));
                         } else if (!item.empty() && item.find('/') == std::string_view::npos) {
@@ -441,6 +470,14 @@ Rules parse_server_cfg(std::string_view text, std::vector<std::string>* warnings
         if (player_caps[scripts] && !player_on[scripts])
             warn(std::format("[{}] player_caps: has no effect without player = on", scripts ? "scripts" : "plugins"));
         (scripts ? r.player_script_caps : r.player_plugin_caps) = player_on[scripts] ? player_caps[scripts].value_or(kCapAll) : 0;
+    }
+    // A repository the server suggests is one it permits: under default = deny it does not have to be named again
+    // in allow. It stays optional (never required or started for it), an explicit block still wins, and like allow
+    // it grants no capability beyond [scripts]/[plugins] player_caps.
+    for (const auto& source : r.suggest_addons) {
+        auto identity = addon_identity(source);
+        if (!identity.empty() && std::find(r.addons.allow.begin(), r.addons.allow.end(), identity) == r.addons.allow.end())
+            r.addons.allow.push_back(std::move(identity));
     }
     for (const auto& identity : r.addons.required)
         if (std::find(r.addons.block.begin(), r.addons.block.end(), identity) != r.addons.block.end())

@@ -41,6 +41,7 @@ namespace hailstone::mq { class ScriptHost; class Registry; struct Context; }
 namespace hailstone::ui {
 class UiTextures; class UiIni; struct ChatView; struct ServerSelectView; struct LoginView; struct CharacterSelectView;
 struct CharacterCreateView;
+struct AddonPolicyView;
 }
 namespace hailstone::game { struct ItemLink; struct QuantityOpen; struct Spawn; class CharCreateLook; class NameplateCanvasRegistry; }
 
@@ -152,7 +153,7 @@ struct UiHost {
     // The server's own folder (servers/<profile>, core/server_profile.h): the map's zone links are kept there
     // (game/zone_routes.h).
     std::filesystem::path server_dir;
-    // The current zone's exits, from its zone-line regions and zone points (game::collect_neighbour_lines), worked
+    // The current zone's exits, from its zone-line regions and zone points (game::collect_zone_exits), worked
     // out by the app once the zone points are in: each zone a line leads to, and where (world coordinates). For the
     // map's exits and the zone finder's "lead me there" (docs/navigation.md "Zone atlas").
     struct ZoneExit {
@@ -185,6 +186,10 @@ struct UiHost {
     // the answer (true allow, false refuse, nullopt put away). Empty: none.
     std::function<std::optional<plugin::ConsentPrompt>()> plugin_consent;
     std::function<void(std::optional<bool> allow)> answer_plugin_consent;
+    // A required add-on that failed in the world (hs.AddonPolicy) and the player's Retry (hs.AddonPolicyAction).
+    // Null / empty: none. Only the client's own interfaces see or act on them (trusted_ui).
+    const ui::AddonPolicyView* addon_policy = nullptr;
+    std::function<void()> retry_required_addons;
     std::function<const mq::Context&()> tlo_context;
     int lua_social_edit = -1;
     std::function<std::string(std::uint32_t skill)> skill_name;

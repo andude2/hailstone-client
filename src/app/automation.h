@@ -13,6 +13,7 @@
 // provisional: plugin/policy.h), the others at the zone-in; hailstone.ini plugins.autoload lists the
 // player's to load when the rules allow them ("*", the default: all allowed).
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -105,6 +106,9 @@ public:
     // False with an empty problem while required native add-ons await consent or scripts start; a nonempty
     // problem identifies refusal/failure. The login's package check separately handles missing installations.
     bool required_addons_ready(std::string* problem = nullptr) const;
+    // The player's Retry for required add-ons that failed (NativePlugins/ScriptHost::retry_required_addons): the
+    // number of plugins and scripts tried again.
+    std::size_t retry_required_addons();
     void refresh_managed_addons();
     // The server's compiled plugins waiting for the player's word (plugin/consent.h, docs/plugins.md "The server's
     // compiled plugins ask first"), with the server's name; nullopt none. The UI packs show it (hs.PluginConsent),

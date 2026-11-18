@@ -695,8 +695,16 @@ bool SpellState::gem_timers_done(int gem, std::uint32_t now) const {
     return !(now < gems[static_cast<std::size_t>(gem)].ready) && !(now < recovery_ready);
 }
 
-bool buff_countdown_held(const SpellData* spell, bool timers_on_hold) {
-    return spell && timers_on_hold && spell->suspendable && !spell->has_effect(kSpaHoldBuffs);
+bool buff_countdown_held(const SpellData* spell, bool timers_on_hold, bool zone_suspends_buffs) {
+    if (!spell || !spell->suspendable) return false;
+    return zone_suspends_buffs || (timers_on_hold && !spell->has_effect(kSpaHoldBuffs));
+}
+
+std::uint64_t buff_ms_left(const BuffSlot& b, const SpellData* spell, bool timers_on_hold, bool zone_suspends_buffs,
+                           std::int64_t now_ms) {
+    if (buff_countdown_held(spell, timers_on_hold, zone_suspends_buffs))
+        return static_cast<std::uint64_t>(std::max<std::int32_t>(b.tics, 0)) * kBuffTickMs;
+    return buff_ms_left(b.tics, b.received_ms, now_ms);
 }
 
 bool scribe_countdown(Scribing& scribing, std::uint32_t& last, std::uint32_t now) {

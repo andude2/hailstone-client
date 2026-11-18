@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 
 #include "assets/model.h"
 #include "render/scene_lighting.h"
@@ -107,6 +108,42 @@ void PointShadows::set_dynamic(const DynamicShadowLights& lights, const glm::vec
     }
 }
 
+bool same_shadow_light(const glm::vec4& a, const glm::vec4& b) {
+    const glm::vec3 d = glm::vec3(a) - glm::vec3(b);
+    return glm::dot(d, d) <= 0.01f && std::abs(a.w - b.w) <= 0.01f;
+}
+
+float point_shadow_key(std::span<const assets::PointLight> lights, std::size_t light) {
+    const glm::vec4 l(lights[light].position, lights[light].radius);
+    for (std::size_t j = 0; j < light; ++j)
+        if (same_shadow_light(glm::vec4(lights[j].position, lights[j].radius), l)) return static_cast<float>(j + 1);
+    return static_cast<float>(light + 1);
+}
+
+std::vector<float> point_shadow_keys(std::span<const assets::PointLight> lights) {
+    // point_shadow_key for each, without comparing every pair: lights the same to the shadows lie within a tenth of
+    // a unit in x, so only the lights near in x (sorted) are compared.
+    std::vector<float> keys(lights.size());
+    std::vector<std::size_t> order(lights.size());
+    std::iota(order.begin(), order.end(), std::size_t{0});
+    std::sort(order.begin(), order.end(),
+              [&](std::size_t a, std::size_t b) { return lights[a].position.x < lights[b].position.x; });
+    constexpr float kReach = 0.11f; // a little past the tenth, for the rounding of the squared distance
+    for (std::size_t k = 0; k < order.size(); ++k) {
+        const std::size_t i = order[k];
+        const glm::vec4 l(lights[i].position, lights[i].radius);
+        std::size_t first = i;
+        for (std::size_t m = k; m-- > 0 && lights[order[m]].position.x >= l.x - kReach;)
+            if (order[m] < first && same_shadow_light(glm::vec4(lights[order[m]].position, lights[order[m]].radius), l))
+                first = order[m];
+        for (std::size_t m = k + 1; m < order.size() && lights[order[m]].position.x <= l.x + kReach; ++m)
+            if (order[m] < first && same_shadow_light(glm::vec4(lights[order[m]].position, lights[order[m]].radius), l))
+                first = order[m];
+        keys[i] = static_cast<float>(first + 1);
+    }
+    return keys;
+}
+
 std::vector<std::uint32_t> PointShadows::update(std::span<const assets::PointLight> lights, const glm::vec3& camera,
                                                 float dt) {
     std::vector<std::uint32_t> builds;
@@ -166,7 +203,8 @@ void PointShadows::apply(SceneLighting& lighting, std::span<const assets::PointL
         float strength = s.strength * range_fade(l.position, l.radius, camera);
         if (strength <= 0.0f) continue;
         lighting.point_shadow_light[n] = glm::vec4(l.position, l.radius);
-        lighting.point_shadow_slot[n] = glm::vec4(static_cast<float>(cube_of(i) * kPointShadowFaces), strength, 0.0f, 0.0f);
+        lighting.point_shadow_slot[n] = glm::vec4(static_cast<float>(cube_of(i) * kPointShadowFaces), strength,
+                                                  point_shadow_key(lights, static_cast<std::size_t>(s.light)), 0.0f);
         ++n;
     }
     for (std::uint32_t k = 0; k < dynamic_.size(); ++k) {
@@ -179,6 +217,7 @@ void PointShadows::apply(SceneLighting& lighting, std::span<const assets::PointL
     }
     lighting.point_shadow_params = glm::vec4(static_cast<float>(n), size ? 1.0f / static_cast<float>(size) : 0.0f,
                                              kPointShadowFaceScale, kPointShadowNear);
+    tag_shadowed_lights(lighting);
 }
 
 } // namespace hailstone::render

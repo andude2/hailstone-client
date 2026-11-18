@@ -363,6 +363,10 @@ struct SpellState {
     // The player spawn's +0x22d (CharacterZoneClient_AreBuffTimersOnHold): set by OP_SpawnAppearance 38 (value != 0),
     // by a SPA 0x1b4 buff landing or ticking; cleared with the spawn (PlayerZoneClient::ResetVariables), here at zone-in.
     bool buff_timers_on_hold = false;
+    // OP_NewZone +876 (suspend_buffs), which the original copies with the rest of the packet to 0xddfc5c: the zone
+    // holds every suspendable buff's countdown (EQEmu's zone.suspendbuffs; the server stops ticking them too).
+    // Cleared on the way out of a zone and set again by the next zone's OP_NewZone.
+    bool zone_suspends_buffs = false;
 
     SpellState() { book.fill(kNoSpell); }
     // CCastSpellWnd::HandleSpellLeftClick's check: now (__EQGetTime) past the gem's timer and the recovery lock.
@@ -371,10 +375,15 @@ struct SpellState {
     bool gem_timers_done(int gem, std::uint32_t now) const;
 };
 
-// Spell_IsBuffCountdownHeld @0x4dcf20: a suspendable spell (+0x279) while the buff timers are on hold, unless it has
-// SPA 0x1b4 itself (the global 0xddfc5c that would hold every suspendable buff is never written: 0). False without a
-// spell.
-bool buff_countdown_held(const SpellData* spell, bool timers_on_hold);
+// Spell_IsBuffCountdownHeld @0x4dcf20: a suspendable spell (+0x279) in a zone that suspends buffs (0xddfc5c, OP_NewZone
+// +876: SpellState::zone_suspends_buffs), or while the buff timers are on hold unless it has SPA 0x1b4 itself: the
+// function tests 0xddfc5c before the SPA, so the exception covers only the hold. False without a spell.
+bool buff_countdown_held(const SpellData* spell, bool timers_on_hold, bool zone_suspends_buffs);
+
+// The time left on a buff as a display shows it: its ticks as received while its countdown is held
+// (buff_countdown_held), else counted down since they arrived. 0 for a negative count: test buff_is_permanent first.
+std::uint64_t buff_ms_left(const BuffSlot& b, const SpellData* spell, bool timers_on_hold, bool zone_suspends_buffs,
+                           std::int64_t now_ms);
 
 // CSpellBookWnd::GetSpellScribeTicksLeft @0x75e620's countdown, run when the book's scribe gauge is drawn: 3 ticks
 // off when the display clock (`now`, CDisplay::TimeStamp ms) moved on more than 1 ms (unsigned) since `last`

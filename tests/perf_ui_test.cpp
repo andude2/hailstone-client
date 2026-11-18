@@ -4,6 +4,7 @@
 
 #include "app/perf_ui.h"
 #include "core/frame_sections.h"
+#include "render/gpu_timer.h"
 
 using namespace hailstone::app;
 
@@ -152,6 +153,33 @@ TEST_CASE("perf: frame generation's rates count every image displayed against th
     // Nothing yet, or histories that do not match: no rates.
     CHECK(frame_rates({}, {}).rendered_fps == 0.0f);
     CHECK(frame_rates({10.0f}, {}).displayed_fps == 0.0f);
+}
+
+TEST_CASE("perf: the GPU passes are the time between their timestamps, a wrapped counter included") {
+    static const char* const kShadows = "shadows";
+    static const char* const kZone = "zone";
+    std::vector<hailstone::render::GpuSection> out{{"stale", 1.0f}};
+    const char* const names[] = {kShadows, kZone, kShadows};
+    const std::uint64_t ticks[] = {1000, 3000, 7000, 8000};
+    hailstone::render::gpu_sections(names, ticks, 1000.0f, 64, out); // a microsecond a tick
+    REQUIRE(out.size() == 2);
+    CHECK(out[0].name == kShadows);
+    CHECK(out[0].ms == doctest::Approx(3.0f)); // 2 + 1: the same name adds up
+    CHECK(out[1].name == kZone);
+    CHECK(out[1].ms == doctest::Approx(4.0f));
+
+    // A 36-bit counter that wrapped between the marks.
+    const std::uint64_t wrapped[] = {(std::uint64_t{1} << 36) - 500, 1500};
+    const char* const one[] = {kZone};
+    hailstone::render::gpu_sections(one, wrapped, 1.0f, 36, out);
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].ms == doctest::Approx(0.002f));
+
+    // Nothing for a device that cannot time, or ticks that do not match the names.
+    hailstone::render::gpu_sections(one, wrapped, 0.0f, 36, out);
+    CHECK(out.empty());
+    hailstone::render::gpu_sections(names, wrapped, 1.0f, 64, out);
+    CHECK(out.empty());
 }
 
 TEST_CASE("perf: the frame sections table is worked out again twice a second") {

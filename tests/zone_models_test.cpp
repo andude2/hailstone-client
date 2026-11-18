@@ -66,18 +66,6 @@ TEST_CASE("zone models: a replacement mesh is stored once and drawn at each plac
     CHECK(n.chunks == 15);    // a chunk for each level at each placement
 }
 
-TEST_CASE("zone models: a neighbour zone keeps the placements on its side of the line whole") {
-    render::ZoneRenderOptions options;
-    options.offset = glm::vec3(1000.0f, 0.0f, 0.0f);
-    options.keep = {glm::vec4(1.0f, 0.0f, 0.0f, -1500.0f)}; // x >= 1500 after the move: the placements at 600 and 900
-    const auto prepared = render::ZoneRenderer::prepare(zone_with(4, 1), options, 16);
-    REQUIRE(prepared);
-    const auto n = render::ZoneRenderer::prepared_counts(*prepared);
-    CHECK(n.instances == 2);
-    CHECK(n.vertices == 4); // not cut: the mesh is in its own space
-    CHECK(n.triangles == 4);
-}
-
 TEST_CASE("zone background: WLD detail blends require sky before the opaque group") {
     assets::Zone zone;
     zone.terrain.push_back(quad_model(1));

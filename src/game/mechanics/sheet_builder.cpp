@@ -132,9 +132,12 @@ void build_sheet_into(CharacterSheet& s, const net::PlayerProfile& p, const Inve
         out.modifier = b.modifier;
         out.spell_id = static_cast<std::int32_t>(b.spell);
         // Ticks left: the server's count less the 6 s ticks since it arrived. A permanent buff keeps its negative
-        // count rather than drifting below it, and nothing counts down while the buff timers are on hold (SPA 436):
-        // the server does not tick them then.
-        out.duration = spells.buff_timers_on_hold ? b.tics : buff_tics_left(b.tics, b.received_ms, live.now_ms);
+        // count rather than drifting below it, and nothing counts down while the buff timers are on hold (SPA 436)
+        // or the zone suspends buffs (OP_NewZone +876): the server does not tick them then. The buff tick decides
+        // per spell (buff_countdown_held) and sets received_ms, so between ticks the count as it stands is right.
+        out.duration = spells.buff_timers_on_hold || spells.zone_suspends_buffs
+                           ? b.tics
+                           : buff_tics_left(b.tics, b.received_ms, live.now_ms);
         out.caster_id = b.caster_id;
         out.caster_is_self = b.caster_id != 0 && b.caster_id == live.player_id;
         if (world) {
@@ -157,6 +160,7 @@ void build_sheet_into(CharacterSheet& s, const net::PlayerProfile& p, const Inve
     s.sitting_ms = live.sitting_ms;
     s.fast_regen_resting = live.fast_regen_resting;
     s.buff_timers_on_hold = spells.buff_timers_on_hold;
+    s.zone_suspends_buffs = spells.zone_suspends_buffs;
     s.attacking = live.attacking;
     s.running = live.running;
     if (zone) {
