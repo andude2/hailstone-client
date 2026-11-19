@@ -35,6 +35,7 @@
 #include "app/lua_ui_api.h"
 #include "app/lua_ui_hooks.h"
 #include "app/lua_ui_plugins.h"
+#include "app/lua_ui_record.h"
 #include "app/lua_ui_extensions.h"
 #include "plugin/lua_keep.h"
 #include "plugin/ui_bridge.h"
@@ -1102,21 +1103,6 @@ void set_art_fields(lua_State* L, int n) {
     for (int k = 4; k >= 0; --k) lua_setfield(L, -2 - k, kFields[k]);
 }
 
-// The record table an hs.*Info call fills: the argument at `arg` when it is a plain table (a caller's, kept from frame
-// to frame), else a new one; left on the top of the stack. A table with a metatable (a plugin's view of the pack's,
-// or one of its own) is not filled: its __newindex or __index would run Lua code in the middle of the fill, which can
-// raise past the C++ objects the fill reads from, or call back in.
-void push_record(lua_State* L, int arg, int fields) {
-    if (lua_type(L, arg) == LUA_TTABLE) {
-        if (!lua_getmetatable(L, arg)) {
-            lua_pushvalue(L, arg);
-            return;
-        }
-        lua_pop(L, 1);
-    }
-    lua_createtable(L, 0, fields);
-}
-
 void set_number(lua_State* L, const char* field, double v) {
     lua_pushnumber(L, v);
     lua_setfield(L, -2, field);
@@ -1169,14 +1155,16 @@ int GemInfo(lua_State* L) {
     // (as m.child, the arguments first; the child's looks in a box across the pushes: plugin/lua_keep.h)
     StockWindow* w = m.window(luaL_checkstring(L, 1));
     const char* id = w ? luaL_checkstring(L, 2) : nullptr;
-    Child& c = plugin::lua_keep<Child>(L);
+    // One box for every call (plugin::LuaScratch): a window draws a gem a frame each, and a new box a call was most
+    // of the garbage the gems made. Given back before the return.
+    plugin::LuaScratch<Child> box(L);
+    Child& c = *box;
     if (w) w->child(m.host, id, c);
-    push_record(L, 3, 16);
+    record::push(L, 3, 16);
     if (c.shown) lua_pushboolean(L, *c.shown);
     else lua_pushnil(L);
     lua_setfield(L, -2, "shown");
-    lua_pushstring(L, c.tooltip ? c.tooltip->c_str() : "");
-    lua_setfield(L, -2, "tooltip");
+    plugin::set_string_field(L, "tooltip", c.tooltip ? c.tooltip->c_str() : ""); // (no new string while unchanged)
     set_art_fields(L, push_art(m, L, c.spellicon));
     const std::array<float, 4> t = c.gem_tint.value_or(std::array<float, 4>{1, 1, 1, 1});
     set_number(L, "tintR", t[0]);
@@ -1199,6 +1187,7 @@ int GemInfo(lua_State* L) {
     } else {
         set_nil(L, "top");
     }
+    box.release();
     return 1;
 }
 
@@ -1466,15 +1455,17 @@ int HotButtonInfoFn(lua_State* L) {
     const char* child = w ? luaL_checkstring(L, 2) : nullptr;
     const bool span = lua_isnumber(L, 4) && lua_isnumber(L, 5);
     const std::int32_t y0 = span ? number_to_int(lua_tonumber(L, 4)) : 0, y1 = span ? number_to_int(lua_tonumber(L, 5)) : 0;
-    auto& hb = plugin::lua_keep<std::optional<HotButtonInfo>>(L); // across the pushes (plugin/lua_keep.h)
+    // Across the pushes, in one box for every call (plugin::LuaScratch): a bar asks for each button each frame.
+    // Given back before the return.
+    plugin::LuaScratch<std::optional<HotButtonInfo>> box(L);
+    auto& hb = *box;
     if (w) hb = w->hot_button(m.host, child);
     const HotButtonInfo empty;
     const HotButtonInfo& info = hb ? *hb : empty;
-    push_record(L, 3, 24);
-    lua_pushstring(L, info.kind.c_str());
-    lua_setfield(L, -2, "kind");
-    lua_pushstring(L, info.label.c_str());
-    lua_setfield(L, -2, "label");
+    record::push(L, 3, 24);
+    // (the strings only when changed: no new ones each frame for a record the caller keeps)
+    plugin::set_string_field(L, "kind", info.kind.c_str());
+    plugin::set_string_field(L, "label", info.label.c_str());
     if (info.icon) {
         push_cell(L, *info.icon);
         set_art_fields(L, 5);
@@ -1483,7 +1474,7 @@ int HotButtonInfoFn(lua_State* L) {
     }
     // Fills the table in field `name` with `n` numbers (a new table when the field holds none).
     auto set_list = [L](const char* name, const float* v, int n) {
-        lua_getfield(L, -1, name); // (the record has no metatable: push_record; the list is written raw)
+        lua_getfield(L, -1, name); // (the record has no metatable: record::push; the list is written raw)
         if (!lua_istable(L, -1)) {
             lua_pop(L, 1);
             lua_createtable(L, n, 0);
@@ -1508,10 +1499,8 @@ int HotButtonInfoFn(lua_State* L) {
         lua_pushboolean(L, hb->enabled);
         lua_setfield(L, -2, "enabled");
         set_number(L, "faceCooldown", hb->cooldown);
-        lua_pushstring(L, hb->overlay.c_str());
-        lua_setfield(L, -2, "overlay");
-        lua_pushstring(L, hb->tooltip.c_str());
-        lua_setfield(L, -2, "tooltip");
+        plugin::set_string_field(L, "overlay", hb->overlay.c_str());
+        plugin::set_string_field(L, "tooltip", hb->tooltip.c_str());
     } else {
         for (const char* f : {"color", "lua", "running", "enabled", "faceCooldown", "overlay", "tooltip"}) set_nil(L, f);
     }
@@ -1542,6 +1531,7 @@ int HotButtonInfoFn(lua_State* L) {
         set_nil(L, "tint");
         set_nil(L, "iconAlpha");
     }
+    box.release();
     return 1;
 }
 
