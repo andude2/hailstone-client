@@ -15,6 +15,8 @@
 #include "assets/zone.h"
 #include "core/character_files.h"
 #include "core/game_dir.h"
+#include "core/ini_file.h"
+#include "core/server_profile.h"
 #include "core/log.h"
 #include "core/step_clock.h"
 #include "core/wipe.h"
@@ -28,6 +30,8 @@
 #include "nav/zone_nav.h"
 #include "net/game_connection.h"
 #include "net/login.h"
+#include "platform/child_processes.h"
+#include "platform/credentials.h"
 #include "platform/paths.h"
 
 namespace hailstone::app {
@@ -59,7 +63,10 @@ HeadlessArgs parse_headless_args(const std::vector<std::string_view>& args) {
             return args[++i];
         };
         const std::string_view a = args[i];
-        if (a == "--game-dir") out.options.game_dir = need(a);
+        if (a == "--game-dir") {
+            out.options.game_dir = need(a);
+            out.options.game_dir_given = true;
+        }
         else if (a == "--data-dir") out.options.data_dir = need(a);
         else if (a == "--host") {
             std::string_view h = need(a);
@@ -73,6 +80,9 @@ HeadlessArgs parse_headless_args(const std::vector<std::string_view>& args) {
         else if (a == "--password") out.options.password = need(a);
         else if (a == "--character") out.options.character = need(a);
         else if (a == "--world") out.options.world = need(a);
+        else if (a == "--server") out.options.server = need(a);
+        else if (a == "--account") out.options.account = need(a);
+        else if (a == "--crew") out.options.crew_file = need(a);
         else if (a == "--list-servers") out.options.list_servers = true;
         else if (a == "--exec") out.options.exec.emplace_back(need(a));
         else if (a == "--exec-zone") out.options.exec_zone.emplace_back(need(a));
@@ -83,13 +93,45 @@ HeadlessArgs parse_headless_args(const std::vector<std::string_view>& args) {
         else out.error = "unknown argument: " + std::string(a);
         if (!out.error.empty()) break;
     }
-    if (out.error.empty()) {
-        if (out.options.host.empty()) out.error = "--host is required";
+    if (out.error.empty() && out.options.crew_file.empty() && out.options.account.empty()) {
+        // A saved-account login (--account) resolves its host, user, password
+        // and character from the profile at run time; a crew run likewise.
+        if (out.options.host.empty()) out.error = "--host is required (or --account, or --crew)";
         else if (out.options.user.empty()) out.error = "--user is required";
         else if (out.options.password.empty()) out.error = "--password is required";
         else if (out.options.character.empty() && !out.options.list_servers) out.error = "--character is required";
         else if (out.options.game_dir.empty()) out.error = "--game-dir or EQ_GAME_DIR is required";
     }
+    return out;
+}
+
+CrewFile parse_crew_file(std::string_view text) {
+    CrewFile out;
+    IniFile ini;
+    ini.parse(text);
+    out.data_dir = ini.get_string("crew", "data_dir");
+    out.game_dir = ini.get_string("crew", "game_dir");
+    out.stagger = ini.get_int("crew", "stagger", out.stagger);
+    for (const auto& section : ini.sections()) {
+        if (section == "crew") continue;
+        CrewMember m;
+        m.label = section;
+        m.server = ini.get_string(section, "server");
+        m.account = ini.get_string(section, "account");
+        m.character = ini.get_string(section, "character");
+        m.world = ini.get_string(section, "world");
+        m.exec = ini.get_string(section, "exec");
+        m.exec_zone = ini.get_string(section, "exec_zone");
+        m.game_dir = ini.get_string(section, "game_dir");
+        m.seconds = ini.get_int(section, "seconds", 0);
+        m.stagger = ini.get_int(section, "stagger", -1);
+        if (m.server.empty() || m.account.empty()) {
+            out.error = "crew member [" + section + "] needs server= and account=";
+            return out;
+        }
+        out.members.push_back(std::move(m));
+    }
+    if (out.error.empty() && out.members.empty()) out.error = "no crew members (a section per character)";
     return out;
 }
 
@@ -103,7 +145,195 @@ std::vector<std::string> headless_zone_commands(const HeadlessOptions& options, 
     return out;
 }
 
+namespace {
+// One saved login, resolved from the profiles under the data folder: the
+// profile, the account in it, and whether its keyring password is there.
+struct SavedLogin {
+    const ServerProfile* profile = nullptr;
+    const SavedAccount* account = nullptr;
+    std::string problem; // empty: resolved (account may still be null without --account)
+};
+SavedLogin resolve_saved(const std::vector<ServerProfile>& profiles, std::string_view server,
+                         std::string_view account) {
+    SavedLogin out;
+    if (!server.empty()) {
+        out.profile = pick_headless_profile(profiles, server);
+        if (!out.profile) {
+            out.problem = "no saved server matches \"" + std::string(server) + "\" (the saved servers are:";
+            for (const auto& p : profiles) out.problem += " " + p.id;
+            out.problem += ")";
+            return out;
+        }
+    } else if (!account.empty()) {
+        for (const auto& p : profiles)
+            if (find_account(p, account)) {
+                if (out.profile) {
+                    out.problem = "account \"" + std::string(account) + "\" is saved on more than one server; name --server";
+                    return out;
+                }
+                out.profile = &p;
+            }
+        if (!out.profile) {
+            out.problem = "no saved server has account \"" + std::string(account) + "\"";
+            return out;
+        }
+    }
+    if (!account.empty() && out.profile) {
+        out.account = find_account(*out.profile, account);
+        if (!out.account) out.problem = "server " + out.profile->id + " has no saved account \"" + std::string(account) + "\"";
+    }
+    return out;
+}
+
+// The crew supervisor (--crew): one hailstone_headless child per member,
+// staggered, each logging in by its saved account (the child reads its
+// password from the keyring itself; a password never goes on a command
+// line). Every member's login is proven before any child starts, as the
+// box set's start proves its passwords. A child that exits 3 (its link
+// died) is relaunched after 30 s; a clean camp (0) or a failure (1)
+// stays down. Stopping the supervisor ends the children (gently, then
+// forcibly after 5 s).
+int run_crew(const HeadlessOptions& options) {
+    std::ifstream in(options.crew_file, std::ios::binary);
+    if (!in) {
+        log::error("headless crew: cannot read {}", options.crew_file);
+        return 2;
+    }
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CrewFile crew = parse_crew_file(text);
+    if (!crew.error.empty()) {
+        log::error("headless crew: {}: {}", options.crew_file, crew.error);
+        return 2;
+    }
+    const std::string data_dir = !crew.data_dir.empty() ? crew.data_dir : options.data_dir;
+    if (!data_dir.empty()) platform::use_data_dir(data_dir, "--crew");
+    if (std::string problem = platform::data_dir_problem(); !problem.empty()) {
+        log::error("{}", problem);
+        return 1;
+    }
+    const auto profiles = list_profiles();
+    struct Member {
+        CrewMember crew;
+        std::string profile_id, character, world;
+        enum class State { Waiting, Running, Done } state = State::Waiting;
+        Clock::time_point at{}; // launch or relaunch time, while Waiting
+        int restarts = 0;
+    };
+    std::vector<Member> members;
+    bool any_problem = false;
+    for (const auto& m : crew.members) {
+        auto saved = resolve_saved(profiles, m.server, m.account);
+        if (!saved.problem.empty()) {
+            log::error("headless crew: [{}] {}", m.label, saved.problem);
+            any_problem = true;
+            continue;
+        }
+        auto pw = platform::system_credentials().load(
+            platform::credential_server(saved.profile->host, saved.profile->port), saved.account->username);
+        if (!pw || pw->empty()) {
+            log::error("headless crew: [{}] no saved password for {} on {}: log in once in the graphical "
+                       "client with Save password ticked",
+                       m.label, saved.account->username, saved.profile->id);
+            any_problem = true;
+            continue;
+        }
+        core::wipe(*pw);
+        Member r;
+        r.crew = m;
+        r.profile_id = saved.profile->id;
+        r.character = !m.character.empty() ? m.character : saved.account->character;
+        r.world = !m.world.empty() ? m.world : saved.account->world;
+        members.push_back(std::move(r));
+    }
+    if (any_problem) {
+        log::error("headless crew: nothing started ({} of {} members cannot log in)",
+                   crew.members.size() - members.size(), crew.members.size());
+        return 1;
+    }
+    std::filesystem::path exe = platform::install_dir() / "hailstone_headless";
+#if defined(_WIN32)
+    exe += ".exe";
+#endif
+    platform::ChildProcesses children;
+    auto launch = [&](Member& r) {
+        std::vector<std::string> args{exe.string(), "--server", r.profile_id, "--account", r.crew.account};
+        const std::string game_dir = !r.crew.game_dir.empty() ? r.crew.game_dir : crew.game_dir;
+        if (!data_dir.empty()) args.insert(args.end(), {"--data-dir", data_dir});
+        if (!game_dir.empty()) args.insert(args.end(), {"--game-dir", game_dir});
+        if (!options.game_dir.empty() && game_dir.empty()) args.insert(args.end(), {"--game-dir", options.game_dir});
+        if (!r.character.empty()) args.insert(args.end(), {"--character", r.character});
+        if (!r.world.empty()) args.insert(args.end(), {"--world", r.world});
+        if (!r.crew.exec.empty()) args.insert(args.end(), {"--exec", r.crew.exec});
+        if (!r.crew.exec_zone.empty()) args.insert(args.end(), {"--exec-zone", r.crew.exec_zone});
+        if (r.crew.seconds > 0) args.insert(args.end(), {"--seconds", std::to_string(r.crew.seconds)});
+        std::string error;
+        if (children.start_tracked(r.crew.label, args, error)) {
+            r.state = Member::State::Running;
+            log::info("headless crew: started [{}] as {} on {}", r.crew.label, r.character, r.profile_id);
+        } else {
+            r.state = Member::State::Done;
+            log::error("headless crew: [{}] could not start: {}", r.crew.label, error);
+        }
+    };
+    auto at = Clock::now();
+    for (auto& r : members) {
+        r.at = at;
+        at += std::chrono::seconds(r.crew.stagger >= 0 ? r.crew.stagger : crew.stagger);
+    }
+    log::info("headless crew: {} members on {} saved server(s); stopping this process ends them all",
+              members.size(), profiles.size());
+    Clock::time_point last_status = Clock::now();
+    while (!stop_requested) {
+        const auto now = Clock::now();
+        for (auto& r : members)
+            if (r.state == Member::State::Waiting && now >= r.at) launch(r);
+        children.poll();
+        for (const auto& e : children.take_exited()) {
+            for (auto& r : members)
+                if (r.crew.label == e.name && r.state == Member::State::Running) {
+                    if (e.exit_code == 3) {
+                        r.state = Member::State::Waiting;
+                        r.at = now + std::chrono::seconds(30);
+                        ++r.restarts;
+                        log::warn("headless crew: [{}] link died; relaunching in 30 s (restart {})", e.name,
+                                  r.restarts);
+                    } else {
+                        r.state = Member::State::Done;
+                        log::info("headless crew: [{}] ended (exit {})", e.name, e.exit_code);
+                    }
+                }
+        }
+        if (std::all_of(members.begin(), members.end(), [](const Member& r) { return r.state == Member::State::Done; }))
+            break;
+        if (now - last_status > std::chrono::seconds(30)) {
+            last_status = now;
+            std::size_t running = 0;
+            for (const auto& r : members) running += r.state == Member::State::Running;
+            log::info("headless crew: {} of {} running", running, members.size());
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+    if (stop_requested) {
+        log::info("headless crew: stopping the children");
+        children.stop_all(false);
+        const auto end = Clock::now() + std::chrono::seconds(5);
+        while (Clock::now() < end && children.running() > 0) {
+            children.poll();
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        children.stop_all(true);
+    }
+    return 0;
+}
+} // namespace
+
 int run_headless(HeadlessOptions options) {
+    if (!options.crew_file.empty()) {
+        stop_requested = 0;
+        std::signal(SIGINT, on_stop_signal);
+        std::signal(SIGTERM, on_stop_signal);
+        return run_crew(options);
+    }
     stop_requested = 0;
     std::signal(SIGINT, on_stop_signal);
     std::signal(SIGTERM, on_stop_signal);
@@ -116,8 +346,52 @@ int run_headless(HeadlessOptions options) {
         log::error("{}", problem);
         return 1;
     }
-    log::open_file(platform::logs_dir() / "headless.log");
+    // A saved server/account (--server/--account): the profile names the
+    // login host, the keyring its password, the account its character and
+    // world — as the graphical client's --account does. No password is
+    // ever written to a file or a command line by this path.
+    std::string saved_profile_id;
+    std::vector<ServerProfile> saved_profiles;
+    if (!options.server.empty() || !options.account.empty()) {
+        saved_profiles = list_profiles();
+        auto saved = resolve_saved(saved_profiles, options.server, options.account);
+        if (!saved.problem.empty()) {
+            log::error("headless: {}", saved.problem);
+            return 1;
+        }
+        saved_profile_id = saved.profile->id;
+        options.host = saved.profile->host;
+        options.port = static_cast<std::uint16_t>(saved.profile->port);
+        if (saved.account) {
+            if (options.character.empty()) options.character = saved.account->character;
+            if (options.world.empty()) options.world = saved.account->world;
+            auto pw = platform::system_credentials().load(
+                platform::credential_server(saved.profile->host, saved.profile->port), saved.account->username);
+            if (!pw || pw->empty()) {
+                log::error("headless: no saved password for {} on {}: log in once in the graphical client "
+                           "with Save password ticked",
+                           saved.account->username, saved.profile->id);
+                return 1;
+            }
+            options.user = saved.account->username;
+            options.password = std::move(*pw);
+        }
+        if (!saved.profile->game_files.empty() && !options.game_dir_given) options.game_dir = saved.profile->game_files;
+        log::info("headless: saved server {} ({}:{}){}", saved.profile->id, options.host, options.port,
+                  saved.account ? " as " + saved.account->username : "");
+    }
+    if (options.host.empty() || options.user.empty() || options.password.empty() || options.character.empty()) {
+        log::error("headless: a login needs --host/--user/--password/--character, or --server/--account");
+        return 1;
+    }
+    if (options.game_dir.empty()) {
+        log::error("headless: --game-dir or EQ_GAME_DIR is required");
+        return 1;
+    }
+    log::open_file(platform::logs_dir() /
+                   ("headless-" + sanitize_file_name(options.character) + ".log"));
     GameDir game(options.game_dir);
+    if (!saved_profile_id.empty()) game.set_overlay(profile_assets_dir(saved_profile_id));
 
     // Login, then play the --world server (or the first on the list).
     net::LoginClient login;
@@ -167,7 +441,9 @@ int run_headless(HeadlessOptions options) {
     env.data_dir = platform::data_dir();
     env.autoload = "*";
     env.server_name = [&server_label] { return server_label; };
-    env.server_profile = [&server_label] { return profile_id_for_world(server_label); };
+    env.server_profile = [&server_label, &saved_profile_id] {
+        return !saved_profile_id.empty() ? saved_profile_id : profile_id_for_world(server_label);
+    };
     env.profile_name = [&server_label] { return server_label; };
     env.connection = [&conn] { return conn.get(); };
     env.window_open = [](std::string_view) { stub_once("window"); return false; };
@@ -233,6 +509,13 @@ int run_headless(HeadlessOptions options) {
     net::ConnectionOptions copts;
     copts.hooks = &automation.hooks();
     copts.plugins = automation.extensions();
+    if (!saved_profile_id.empty()) {
+        // The character's files under the saved profile, its bank snapshot,
+        // and the server's client files at the first zone-in, as in the GUI.
+        copts.profile_id = saved_profile_id;
+        copts.server_files_dir = profile_dir(saved_profile_id);
+        copts.bank_snapshot_file = true;
+    }
     conn = std::make_unique<net::GameConnection>(game, copts);
     conn->start(ticket);
 
@@ -461,7 +744,9 @@ int run_headless(HeadlessOptions options) {
                 conn->camp();
         }
         if (last == net::ConnectionState::Disconnected) {
-            result = conn->error() == "Camped out." ? 0 : 1;
+            // 3 is the crew supervisor's relaunch signal: the link died
+            // under a character that was in the world. A camp is 0.
+            result = conn->error() == "Camped out." ? 0 : conn->link_death() ? 3 : 1;
             break;
         }
         if (!options.status_file.empty() && Clock::now() - last_status > std::chrono::seconds(1)) {

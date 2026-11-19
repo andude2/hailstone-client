@@ -26,12 +26,14 @@
 #include <string_view>
 #include <vector>
 
+#include "core/server_profile.h"
 #include "net/login.h"
 
 namespace hailstone::app {
 
 struct HeadlessOptions {
     std::string game_dir; // --game-dir, else $EQ_GAME_DIR
+    bool game_dir_given = false; // --game-dir was named (a saved server's own game_files only fills it in when not)
     std::string data_dir; // --data-dir: the Hailstone folder to share (plugins, configs); empty: beside the binary
     std::string host;     // login server host[:port]
     std::uint16_t port = 5997;
@@ -39,6 +41,9 @@ struct HeadlessOptions {
     std::string password; // wiped by the caller after run_headless takes it
     std::string character;
     std::string world;    // --world NAME|ID: the server to play (empty: the first on the list)
+    std::string server;   // --server NAME|ID: a saved server (servers/<id>), by id or name
+    std::string account;  // --account USER: a saved account of --server, its password from the system keyring
+    std::string crew_file; // --crew FILE: supervise one child per crew member (below) instead of one character
     bool list_servers = false; // --list-servers: print the login server list and exit
     // Command lines sent as the player's would be (through the hook bus):
     // --exec once after the first zone-in, --exec-zone at every zone-in.
@@ -96,8 +101,59 @@ inline std::optional<std::uint32_t> headless_server_id(const std::vector<net::Se
     return found;
 }
 
+// One member of a crew file (--crew): a saved account on a saved server,
+// entered as its character, with its own command lines. Plain sections of
+// an ini file (docs/headless.md "Crew mode"): the section name is the
+// member's label, [crew] holds the shared keys.
+struct CrewMember {
+    std::string label;
+    std::string server;    // a saved server, by id or name (required)
+    std::string account;   // a saved account of it (required)
+    std::string character; // empty: the account's saved character
+    std::string world;     // empty: the account's saved world, else the first
+    std::string exec;      // one command line after the first zone-in
+    std::string exec_zone; // one command line at every zone-in
+    std::string game_dir;  // empty: the shared one
+    int seconds = 0;       // camp after this long (0: until stopped)
+    int stagger = -1;      // seconds to wait before launching this member (< 0: the shared one)
+};
+struct CrewFile {
+    std::string data_dir;  // [crew] data_dir (the shared folder)
+    std::string game_dir;  // [crew] game_dir
+    int stagger = 10;      // seconds between launches, [crew] stagger
+    std::vector<CrewMember> members;
+    std::string error; // empty: parsed
+};
+CrewFile parse_crew_file(std::string_view text);
+
+// Which saved server --server names: an exact id or name (any case), then
+// a part of the name or id only one profile carries. Nullopt: none, or
+// ambiguous. Pure, like headless_server_id.
+inline const ServerProfile* pick_headless_profile(const std::vector<ServerProfile>& profiles,
+                                                  std::string_view want) {
+    auto fold = [](std::string_view s) {
+        std::string out;
+        out.reserve(s.size());
+        for (char c : s) out += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return out;
+    };
+    const std::string needle = fold(want);
+    for (const auto& p : profiles)
+        if (fold(p.id) == needle || fold(p.name) == needle) return &p;
+    const ServerProfile* found = nullptr;
+    for (const auto& p : profiles)
+        if (fold(p.name).find(needle) != std::string::npos || fold(p.id).find(needle) != std::string::npos) {
+            if (found) return nullptr;
+            found = &p;
+        }
+    return found;
+}
+
 // Runs one character until it camps, the link dies, --seconds runs out or
-// SIGINT/SIGTERM arrives. Returns a process exit code (0: camped cleanly).
+// SIGINT/SIGTERM arrives. Returns a process exit code: 0 camped or
+// stopped, 3 the link died (a crew supervisor relaunches only those), 1
+// anything else. With --crew, supervises the crew instead and returns 0
+// when every member is done or it is stopped.
 int run_headless(HeadlessOptions options);
 
 } // namespace hailstone::app

@@ -58,6 +58,53 @@ TEST_CASE("headless: --exec runs only at the first zone-in, --exec-zone at every
     CHECK(later[0] == "/say ready");
 }
 
+TEST_CASE("headless: --server/--account parse without host or password; --crew stands alone") {
+    auto a = app::parse_headless_args({"--server", "ez", "--account", "crew1"});
+    CHECK(a.error.empty());
+    CHECK(a.options.server == "ez");
+    CHECK(a.options.account == "crew1");
+    auto c = app::parse_headless_args({"--crew", "crew.ini"});
+    CHECK(c.error.empty());
+    CHECK(c.options.crew_file == "crew.ini");
+}
+
+TEST_CASE("headless: a saved server is picked by id, name, or a unique part") {
+    const std::vector<hailstone::ServerProfile> profiles{{"ez-server", "EZ Server"}, {"peq", "ProjectEQ"}};
+    REQUIRE(app::pick_headless_profile(profiles, "ez-server"));
+    CHECK(app::pick_headless_profile(profiles, "ez-server")->name == "EZ Server");
+    CHECK(app::pick_headless_profile(profiles, "projecteq")->id == "peq");
+    CHECK(app::pick_headless_profile(profiles, "EZ")->id == "ez-server");
+    CHECK_FALSE(app::pick_headless_profile(profiles, "e")); // in both names/ids
+    CHECK_FALSE(app::pick_headless_profile(profiles, "nope"));
+}
+
+TEST_CASE("headless: a crew file parses members and shared keys; a member without an account is refused") {
+    auto crew = app::parse_crew_file("[crew]\n"
+                                     "data_dir=D:/Hailstone\n"
+                                     "stagger=5\n"
+                                     "\n"
+                                     "[Okhealz]\n"
+                                     "server=ez-server\n"
+                                     "account=crew1\n"
+                                     "exec=/mono load Sentinel\n"
+                                     "\n"
+                                     "[Tankguy]\n"
+                                     "server=EZ Server\n"
+                                     "account=crew2\n"
+                                     "character=Tankguy\n"
+                                     "seconds=600\n");
+    CHECK(crew.error.empty());
+    CHECK(crew.data_dir == "D:/Hailstone");
+    CHECK(crew.stagger == 5);
+    REQUIRE(crew.members.size() == 2);
+    CHECK(crew.members[0].label == "Okhealz");
+    CHECK(crew.members[0].exec == "/mono load Sentinel");
+    CHECK(crew.members[1].character == "Tankguy");
+    CHECK(crew.members[1].seconds == 600);
+    CHECK_FALSE(app::parse_crew_file("[Lone]\nserver=ez\n").error.empty());
+    CHECK_FALSE(app::parse_crew_file("[crew]\nstagger=5\n").error.empty());
+}
+
 TEST_CASE("headless: an --exec line without its slash is still a command, not a say") {
     // A shell may eat the leading '/' of a quoted argument; --exec names a
     // command line, so the slash is put back rather than said in the zone.

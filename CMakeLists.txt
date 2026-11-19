@@ -1197,6 +1197,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/close_camp_test.cpp
     tests/font_faces_test.cpp
     tests/process_test.cpp
+    tests/child_processes_test.cpp
     tests/flora_test.cpp
     tests/flora_growth_test.cpp
     tests/ground_refine_test.cpp

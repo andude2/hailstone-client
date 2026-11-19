@@ -14,6 +14,8 @@ hailstone_headless --host HOST[:PORT] --user U --password P --character NAME \
     [--world NAME|ID] [--game-dir DIR] [--data-dir DIR] [--exec LINE]... [--exec-zone LINE]... \
     [--seconds N] [--status-file FILE] [--no-collision]
 hailstone_headless --host HOST[:PORT] --user U --password P --list-servers
+hailstone_headless --server NAME|ID --account USER [--character NAME] [--world NAME|ID]
+hailstone_headless --crew crew.ini
 ```
 
 - `--game-dir` (or `EQ_GAME_DIR`) is still required: the connection reads the
@@ -36,8 +38,9 @@ hailstone_headless --host HOST[:PORT] --user U --password P --list-servers
   at later zone-ins; its windows do not draw headless and it says so in the
   log, while its pulses, commands and broker traffic run as usual.
 - `--status-file` is rewritten once a second (`state=`, `zone=`,
-  `character=`) for a supervisor to watch; the log is
-  `logs/headless.log` in the data folder.
+  `character=`) for a supervisor to watch; each character's log is
+  `logs/headless-<character>.log` in the data folder, so a crew's logs
+  do not overwrite each other.
 - `--data-dir DIR` (or the `HAILSTONE_DATA_DIR` environment variable) shares
   another Hailstone folder — normally the graphical client's — as the data
   folder: its `plugins/`, per-character plugin configs and `servers/`
@@ -73,6 +76,55 @@ trigger; a direct door click still goes out when Navigator asks for one.
 Swimming pitch and vehicle/boat handling follow the movement body's own
 rules with no camera behind them.
 
+## Crew mode
+
+One process per character does not scale to a crew by hand, so
+`hailstone_headless --crew crew.ini` supervises them: one child per
+member, staggered launches, and a child whose link died (exit 3) is
+relaunched after 30 s. A clean camp (exit 0) or a failure (exit 1) stays
+down. Stopping the supervisor stops the children (gently, then forcibly
+after 5 s on Windows they end outright). Passwords are never in the file
+or on a command line: every member logs in by a saved account
+(`--server`/`--account` below), and before any child starts the
+supervisor proves every member's saved password is in the keyring —
+a crew that cannot all log in starts none.
+
+```ini
+[crew]
+data_dir=C:/Hailstone
+game_dir=C:/EQ/EZ Server
+stagger=10
+
+[Okhealz]
+server=ez-server
+account=crew1
+exec=/mono load Sentinel
+
+[Tankguy]
+server=EZ Server
+account=crew2
+character=Tankguy
+seconds=0
+```
+
+A member names a saved `server` (its id or name) and `account`; its
+`character` and the account's saved `world` are the defaults from the
+profile, so most members need only those three lines plus their `exec`.
+Member keys: `character`, `world`, `exec`, `exec_zone`, `game_dir`,
+`seconds` (camp after this long; 0 is until stopped), `stagger`
+(seconds before this member launches, over the shared one). Shared
+keys in `[crew]`: `data_dir`, `game_dir`, `stagger` (default 10 s
+between launches, so 23 logins do not land at once).
+
+Single characters get the same saved login without a crew file:
+`hailstone_headless --server ez-server --account crew1` reads the
+login host from the profile, the password from the system keyring,
+the server's own `assets/` as the overlay and the character's files
+under its profile, exactly as the graphical client's `--account`.
+Log in once in the graphical client with **Save password** ticked for
+each account first; a missing saved password is reported, never asked
+for on the command line.
+
 ## Rules and consent
 
 Server rules (`hailstone.cfg`, docs/plugins.md) apply exactly as in the
@@ -94,10 +146,8 @@ These report "unavailable" in the log instead of silently pretending:
 - The Ability Book accessors the graphical client serves from its UI host
   (`AutomationEnv` ability, autoskill list, `use_ability` and the bulk
   ability read), `/keypress` and `/face`.
-- Auto-relogin after a link death: the run ends and the supervisor decides.
-- Saved-server selection (`--server` / `--account` and the keyring) as the
-  graphical client's login has it: headless takes `--host` and credentials
-  only, and the character's files go under the profile the world name makes.
+- A crew member ends for good when it camps or fails: only a link
+  death relaunches, and only in crew mode.
 
 The open items are tracked in docs/todo.md ("Headless client") and
 docs/unknowns.md.
