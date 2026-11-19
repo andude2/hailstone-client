@@ -29,6 +29,8 @@ local descriptors = {
   {"BuffOverlay", "buffs", "Overlay", "function", 0, false},
   {"BuffSlot", "buffs", "Slot", "function", 0, false},
   {"AltCurrencies", "character", "AltCurrencies", "function", 0, false},
+  {"ClassName", "character", "ClassName", "function", 0, false},
+  {"ClassNamesRevision", "character", "ClassNamesRevision", "function", 0, false},
   {"Gauge", "character", "Gauge", "function", 0, true},
   {"Label", "character", "Label", "function", 0, true},
   {"Money", "character", "Money", "function", 0, false},
@@ -39,6 +41,7 @@ local descriptors = {
   {"ChatClear", "chat", "Clear", "function", 2, false},
   {"ChatCloseTab", "chat", "CloseTab", "function", 2, false},
   {"ChatCloseWindow", "chat", "CloseWindow", "function", 2, false},
+  {"ChatCombineTabs", "chat", "CombineTabs", "function", 2, false},
   {"ChatCycleReply", "chat", "CycleReply", "function", 0, false},
   {"ChatDefaultChannels", "chat", "DefaultChannels", "function", 0, false},
   {"ChatFilterGroups", "chat", "FilterGroups", "function", 0, false},
@@ -46,19 +49,26 @@ local descriptors = {
   {"ChatHistory", "chat", "History", "function", 0, false},
   {"ChatHitModes", "chat", "HitModes", "function", 0, false},
   {"ChatInfo", "chat", "Info", "function", 0, false},
+  {"ChatJoinTab", "chat", "JoinTab", "function", 2, false},
   {"ChatLink", "chat", "Link", "function", 2, false},
   {"ChatMenu", "chat", "Menu", "function", 0, false},
   {"ChatNewTab", "chat", "NewTab", "function", 2, false},
   {"ChatNewWindow", "chat", "NewWindow", "function", 2, false},
   {"ChatPage", "chat", "Page", "function", 0, false},
+  {"ChatReorderTab", "chat", "ReorderTab", "function", 2, false},
   {"ChatSelectTab", "chat", "SelectTab", "function", 2, false},
   {"ChatSetAlwaysHere", "chat", "SetAlwaysHere", "function", 2, false},
   {"ChatSetDefault", "chat", "SetDefault", "function", 2, false},
   {"ChatSetFilter", "chat", "SetFilter", "function", 2, false},
   {"ChatSetFont", "chat", "SetFont", "function", 2, false},
   {"ChatSetHitMode", "chat", "SetHitMode", "function", 2, false},
+  {"ChatSetTabFlash", "chat", "SetTabFlash", "function", 2, false},
+  {"ChatSetTabFlashColor", "chat", "SetTabFlashColor", "function", 2, false},
+  {"ChatSetTabScrollbar", "chat", "SetTabScrollbar", "function", 2, false},
   {"ChatSetTellWindows", "chat", "SetTellWindows", "function", 2, false},
   {"ChatSetTitle", "chat", "SetTitle", "function", 2, false},
+  {"ChatSetWindowTitle", "chat", "SetWindowTitle", "function", 2, false},
+  {"ChatSplitTab", "chat", "SplitTab", "function", 2, false},
   {"ChatSubmit", "chat", "Submit", "function", 0, false},
   {"ChatTakeFocus", "chat", "TakeFocus", "function", 0, false},
   {"ChatTellWindows", "chat", "TellWindows", "function", 0, false},
@@ -350,7 +360,7 @@ return function(root)
     end
     return value
   end
-  local API, modules = {version={major=1,minor=6}}, {}
+  local API, modules = {version={major=1,minor=7}}, {}
   for _, row in ipairs(descriptors) do
     local module = modules[row[2]]
     if not module then module={};modules[row[2]]=module end
@@ -391,7 +401,7 @@ return function(root)
       if member~=nil then local row=modules[module][member];return row and describeMember(row) or nil end
       return describeModule(module)
     end
-    local names,result={}, {version={major=1,minor=6},modules={}}
+    local names,result={}, {version={major=1,minor=7},modules={}}
     for name in pairs(modules) do names[#names+1]=name end
     table.sort(names)
     for _, name in ipairs(names) do result.modules[#result.modules+1]=describeModule(name) end

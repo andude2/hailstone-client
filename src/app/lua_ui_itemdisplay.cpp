@@ -20,6 +20,7 @@
 #include "app/lua_ui_windows.h"
 #include "core/log.h"
 #include "game/augments.h"
+#include "game/eq_names.h"
 #include "game/inventory.h"
 #include "game/item_display.h"
 #include "game/item_links.h"
@@ -579,6 +580,7 @@ private:
         // The augments are part of the key: a refreshed item (same serial) with a new augment builds again at once.
         std::string sig = std::to_string(it->item_class) + ":" + it->serial;
         for (const auto& child : it->contents) sig += "/" + std::to_string(child.index) + ":" + std::to_string(child.item.id);
+        sig += "/c:" + std::to_string(game::class_names_revision()); // its class lists name a server's classes
         if (it->is_evolving)
             sig += std::format("/e:{}:{}:{}:{}:{}", it->evolving.final_item_id, it->evolving.evolve_level,
                                it->evolving.evolve_max_level, it->evolving.progress, it->evolving.activated);

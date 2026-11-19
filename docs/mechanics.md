@@ -1336,6 +1336,19 @@ and `npc_owner_line`
   takes the title's place (`game::name_sprite_market_words`). An offline trader reads "Offline Trader Name". Only a
   player's (spawn type 0): an NPC the server marks as a trader keeps its plain name, as in the original. Stock EQEmu
   sets neither offline flag, so its traders and buyers show only "Trader " / "Buyer ".
+- An invisible player or live NPC that the viewer can see has its name in parentheses, `(Name)`, as in the original
+  (PlayerClient::SetNameSpriteState @0x58e2d0: "(" round the name alone, inside the title, last name and leadership
+  marks, when the spawn's HideMode +0x338 is above 0; never on a corpse or a race from 0x8cd up;
+  `GameConnection::name_invisibility`). Another spawn's HideMode is the server's (the spawn record, then
+  SpawnAppearance type 3), so regular invisibility and a hider seen by others count. The player's own comes from its
+  effects (EQ_Character::UpdateMyVisibleStatus @0x459510, by CalcInvisLevel @0x442770): above 0 for regular
+  invisibility (SPAs 12 and 314), -2 and -1 for invisibility versus undead and versus animals, which get no
+  parentheses. The Hide skill is not among them, and stock EQEmu sends the hider nothing for it, so a hidden player's
+  own name stays plain (others see "(Name)"). The marks follow the spawn's state every frame. A Hailstone addition, off by default: Options > Display **Bracket Invis vs. Undead**
+  (`display.show_invis_undead`) shows `[Name]` for invisibility versus undead the client knows of (SPAs 28 and 315 in
+  the player's own buffs, or in the target's OP_TargetBuffs list while it is the target), `([Name])` with both. A
+  deliberate difference, which a UI pack asks for: the player, target and target-of-target captions show the same
+  marks (the original's captions are plain names, __GetLabelFromEQ @0x763640 and __GetGaugeValueFromEQ @0x762410).
 - A GM's name is green (`#1da64b`) as in the original (PlayerClient::SetNameSpriteTint @0x58bf00,
   `game::gm_name_colour`): the gm flag, not a live NPC (type 1), and Anon 0, so an anonymous or roleplaying GM shows
   the ordinary colour. A deliberate difference: the original keeps the green on a corpse that carries the gm flag,
@@ -2043,6 +2056,26 @@ sound's HP. The bare packet value goes below 1 while a geared player still stand
 it. The developer stats window compares its computed Max_HP with that sum. The regeneration ticks and the sheet's
 stored HP keep the packet's value (Cur_HP adds the item sum to it).
 
+## Guild banners
+
+The Guild window's Banner page requests the guild's current design, the active banner and its timer, and a
+kit list filtered by category and inventory. Categories come from the player's `Resources/BannerCategories.txt`.
+Both UI packs show the active banner and available kits. The original's two design layers are previewed using
+the textures in the player's game folder, with separate pattern and colour controls. Cancel discards the draft.
+Saving requires a modification item reported by the server (only an item ID of -1 refuses it). The next received
+design replaces the saved preview.
+A status update asks for the kit list and status again, as does a status reply while the design editor is open.
+
+Change, Plant and Remove require separate guild permissions and ownership of The Buried Sea. Plant also checks
+zone placement and proximity to the floor. The server decides where banners can actually be planted, nearby
+member requirements, kit consumption, removal, benefits and portal travel. The countdown is display-only.
+An inactive kit can stay in the list when Show All is selected. Banner state clears with the guild window,
+guild membership or zone context. Stock EQEmu leaves the kit list empty and the banner actions disabled.
+
+The Guild Hall portal uses the server's normal merchant, interaction and zone-transfer paths, including the
+server's destination and entry checks. Planted actors use the client assets' cloth background and emblem
+with their received colours. See [the RoF2 packet notes](protocol/rof2-packets.md#guild-banners).
+
 ## Fellowships
 
 Fellowship state comes from the server. Create, invitations, MOTD, leadership, removal, leaving, disbanding,
@@ -2076,6 +2109,22 @@ bit to the server. Kit descriptions use DBString type 0, as the original selecti
 keep an all-category filter and the server-supplied kit name. The camp countdown is presentation only: expiration
 does not mutate membership or grant permission to place a camp before the server updates it.
 
+
+## Spirit Shrouds and Monster Missions
+
+A shroudkeeper on a supporting server opens the Spirit Shroud picker. Both interfaces show the offered forms,
+unlock progress, levels, abilities and equipment previews. Returning to the shroudkeeper can restore the original
+form. A shared task with an offered Monster Mission catalog adds Monster Select to the Quest Journal. The picker
+shows required and optional roles and counts assignments against each role's capacity. A server acknowledgement
+confirms the assignment. The server sends the form change when the character actually takes on the role.
+
+A form change replaces the server-supplied profile and carried items, including spells, buffs and alternate
+abilities. The character-select model also uses alternate appearance data when the server supplies it. The
+inventory shows shroud progress when received. At an eligible banker, the Shroud Bank can inspect and retrieve
+items the server stored. The server supplies the storage contents and confirms each withdrawal.
+
+See [the RoF2 packet layouts](protocol/rof2-packets.md#spirit-shrouds-and-monster-missions-netshroud_packetsh)
+and [the remaining server-compatibility and gameplay checks](unknowns.md#spirit-shrouds-and-monster-missions).
 
 ## Adventures (LDoN)
 

@@ -203,7 +203,12 @@ void ClientApp::note_listed_characters() {
     std::vector<SavedCharacter> list;
     std::string signature = char_view_.server_name;
     for (const auto& c : char_view_.characters) {
-        list.push_back({c.name, char_view_.server_name, c.level, game::class_list_name(c.classes, true)});
+        // The stock short names: the list is kept on disk and shown on the login screen, before any server names
+        // its classes (game/eq_names.h).
+        std::string classes;
+        for (std::uint32_t id : c.classes)
+            if (id) classes += (classes.empty() ? "" : "/") + game::stock_class_short_name(id);
+        list.push_back({c.name, char_view_.server_name, c.level, classes.empty() ? std::string("None") : classes});
         signature += "|" + c.name + ":" + std::to_string(c.level) + ":" + list.back().classes;
     }
     if (signature == listed_characters_) return;

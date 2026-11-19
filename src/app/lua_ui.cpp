@@ -27,6 +27,8 @@
 #include <lua.hpp>
 
 #include "app/actions_ui.h"
+#include "app/chat_tab_bar.h"
+#include "app/chat_tabs.h"
 #include "app/lua_ui_menu.h"
 #include "app/lua_ui_values.h"
 #include "app/lua_ui_windows.h"
@@ -42,6 +44,7 @@
 #include "core/ini_file.h"
 #include "core/log.h"
 #include "core/saturate.h"
+#include "game/eq_names.h"
 #include "game/hot_button_state.h"
 #include "game/item_sort.h"
 #include "game/merchant.h"
@@ -59,8 +62,6 @@
 
 namespace hailstone::app {
 
-bool chat_window_used(int slot);  // app/lua_ui_chat.cpp: chat window 1..32 is open
-void chat_window_closed(int slot); // its close button: the window goes with its tabs
 // app/lua_ui_chat.cpp: the chat windows' settings, and the user colours from the character's chat.ini in `user_dir`.
 void chat_layout_loaded(ui::UiIni& ini, UiHost& host, const std::filesystem::path& user_dir);
 void chat_host_gone(const UiHost& host, const ui::UiIni& ini);
@@ -314,13 +315,16 @@ struct UiApi::Impl {
         struct Chat : StockWindow {
             int slot;
             explicit Chat(int s) : StockWindow("Chat" + std::to_string(s), true), slot(s) {}
-            bool shown(UiHost& h2) override { return h2.in_game && (slot == 1 ? open_ : chat_window_used(slot)); }
+            bool shown(UiHost& h2) override {
+                const auto group = chat_tabs::group(slot);
+                return h2.in_game && group.slot && (!group.main || open_);
+            }
             void set_shown(UiHost& h2, bool show) override {
-                if (slot == 1) StockWindow::set_shown(h2, show);
-                else if (!show) chat_window_closed(slot);
+                if (chat_tabs::group(slot).main) StockWindow::set_shown(h2, show);
+                else if (!show) chat_tabs::close_group(slot);
             }
         };
-        for (int slot = 1; slot <= 32; ++slot) windows.push_back(std::make_unique<Chat>(slot));
+        for (int slot = 1; slot <= chat_tabs::kMaxSlots; ++slot) windows.push_back(std::make_unique<Chat>(slot));
         // CEQMainWnd: the EQ button (a check box, pressed while its menu is open), the Marketplace button (SCButton:
         // the window's toggle) and the flash sale button (SCFSButton: hidden by the constructor, shown only by a flash
         // sale notice this client does not get).
@@ -560,6 +564,22 @@ int Name(lua_State* L) {
     return 1;
 }
 
+// hs.ClassName(id [, short]) -> a class's name as the client shows it, its short name with `short`: a server's own
+// where its plugin or script named the class (game/eq_names.h), else the stock one ("Warrior", "WAR").
+int ClassName(lua_State* L) {
+    const lua_Integer id = luaL_checkinteger(L, 1);
+    const auto c = static_cast<std::uint32_t>(std::clamp<lua_Integer>(id, 0, 0xffff));
+    const std::string name = lua_toboolean(L, 2) ? game::class_short_name(c) : game::class_name(c);
+    lua_pushlstring(L, name.data(), name.size());
+    return 1;
+}
+
+// hs.ClassNamesRevision() -> a number that changes whenever hs.ClassName's answers may have (a cache's key).
+int ClassNamesRevision(lua_State* L) {
+    lua_pushinteger(L, static_cast<lua_Integer>(game::class_names_revision() & 0x7fffffffffffffffull));
+    return 1;
+}
+
 // hs.SlotName(slot) -> "Primary", ...
 int SlotName(lua_State* L) {
     lua_pushstring(L, net::possessions_slot_name(held_int(luaL_checkinteger(L, 1))));
@@ -601,9 +621,12 @@ int Money(lua_State* L) {
     return 4;
 }
 
-// text [, r, g, b] = hs.Label(eqType)   -- the text a game label with this EQType shows
+// text [, r, g, b] = hs.Label(eqType [, markInvisibility])
+// The text a game label with this EQType shows. markInvisibility (Hailstone): the name plate's "(Name)" / "[Name]"
+// on the player's (1) and target's (28) names, for a spawn the player sees; the original's labels show them plain.
 int Label(lua_State* L) {
-    LabelValue v = ui_label(Impl::of(L).host, held_int(luaL_checkinteger(L, 1)));
+    const bool mark_invisibility = lua_isboolean(L, 2) && lua_toboolean(L, 2);
+    LabelValue v = ui_label(Impl::of(L).host, held_int(luaL_checkinteger(L, 1)), mark_invisibility);
     lua_pushstring(L, v.text.c_str());
     if (!v.argb) return 1;
     Rgb c = argb_to_rgb(*v.argb);
@@ -611,12 +634,15 @@ int Label(lua_State* L) {
     return 4;
 }
 
-// fraction, text, value [, r, g, b] = hs.Gauge(eqType)   -- fraction 0..1, nil when the gauge is empty/unavailable;
+// fraction, text, value [, r, g, b] = hs.Gauge(eqType [, markInvisibility])
+// fraction 0..1, nil when the gauge is empty/unavailable; markInvisibility (Hailstone) as hs.Label's, on the
+// name captions of gauges 1, 6 and 27.
 // value is __GetGaugeValueFromEQ's own (0..1000, -1 nothing drawn at all, -2 full in dark red, -3 empty: a corpse,
 // -110..-10 and -2000..-1000 the special bands); r, g, b the fill tint CGaugeWnd::Draw gives a special value
 // (gauge_fill), nil for a normal one.
 int Gauge(lua_State* L) {
-    GaugeValue g = ui_gauge(Impl::of(L).host, held_int(luaL_checkinteger(L, 1)));
+    const bool mark_invisibility = lua_isboolean(L, 2) && lua_toboolean(L, 2);
+    GaugeValue g = ui_gauge(Impl::of(L).host, held_int(luaL_checkinteger(L, 1)), mark_invisibility);
     GaugeFill f = gauge_fill(g.value);
     if (f.fill < 0) lua_pushnil(L);
     else lua_pushnumber(L, std::min(f.fill, 1000) / 1000.0);
@@ -3148,6 +3174,7 @@ void UiApi::register_functions(lua_State* L) {
     lua_pop(L,1);
     lua_pushinteger(L,1);lua_setfield(L,-2,"NameplateCanvasVersion");
     register_chat_api(L, impl_->host);
+    register_modern_chat_tabs(L, impl_->host);
     register_gamepad_api(L, impl_->host);
     register_spellbook_api(L, impl_->host);
     register_abilities_api(L, impl_->host);
@@ -3191,6 +3218,7 @@ void UiApi::register_functions(lua_State* L) {
     register_pregame_api(L, impl_->host, impl_->screens);
     static const luaL_Reg fns[] = {
         {"InGame", InGame}, {"UiReady", UiReady}, {"GameState", GameState}, {"Name", Name}, {"SlotName", SlotName},
+        {"ClassName", ClassName}, {"ClassNamesRevision", ClassNamesRevision},
         {"Item", Item}, {"ItemIcon", ItemIcon}, {"Money", Money}, {"Label", Label}, {"Gauge", Gauge},
         {"ClickSlot", ClickSlot}, {"HasSlot", HasSlot}, {"AltCurrencies", AltCurrencies}, {"UiTexture", UiTexture}, {"UiImage", UiImage}, {"UiAnimation", UiAnimation},
         {"ReplaceWindow", ReplaceWindow}, {"WindowPlaced", WindowPlaced}, {"ShowWindow", ShowWindow}, {"WindowButton", WindowButton},

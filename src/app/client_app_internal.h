@@ -55,6 +55,7 @@
 #include "assets/sky.h"
 #include "assets/texture_overrides.h"
 #include "assets/zone.h"
+#include "assets/zone_flora.h"
 #include "core/character_files.h"
 #include "core/config.h"
 #include "core/game_dir.h"
@@ -64,6 +65,7 @@
 #include "core/wipe.h"
 #include "app/nameplate_layer.h"
 #include "app/nameplate_input.h"
+#include "app/spawn_pick.h"
 #include "game/nameplate_overlap.h"
 #include "game/sky_colours.h"
 #include "game/option_commands.h"
@@ -1055,6 +1057,8 @@ private:
     bool plate_input_blocked(bool ignore_right_button = false) const;
     bool nameplate_spawn_clickable(const game::Spawn& spawn) const;
     std::optional<float> nameplate_pixel_depth(glm::vec2 at) const;
+    // A spawn as the click tests see it (app/spawn_pick.h), its pose left to the caller.
+    SpawnPickSource spawn_pick_source(std::uint32_t id, const game::Spawn& spawn) const;
     std::optional<std::uint32_t> nameplate_at(glm::vec2 at) const;
     bool activate_nameplate(std::uint32_t id);
     // CEverQuest::LeftClickedOnPlayer.
@@ -1427,6 +1431,13 @@ private:
     std::vector<assets::ZoneFire> moving_fires_;             // the doors' and objects' this frame (capacity kept)
     std::vector<std::pair<float, glm::vec4>> flora_near_;    // the spawns standing in the grass (capacity kept)
     std::vector<glm::vec4> flora_pushers_;
+    // What covers the grass besides the zone's files (FloraRenderer::set_cover): the doors and objects
+    // (WorldObjects::flora_cover) and the campfire spawns standing now (assets::campfire_cover), kept by
+    // update_flora_cover, which grows again the grass where any came or went.
+    std::vector<assets::CoverDisc> flora_campfires_;
+    std::vector<assets::CoverDisc> flora_campfires_now_; // update_flora_cover's this frame (capacity kept)
+    void update_flora_cover();
+    std::function<bool(const glm::vec3&)> flora_cover(glm::vec2 lo, glm::vec2 hi) const;
     render::SceneLighting frame_lighting_{}; // this frame's lighting, for the flames' haze and depth terms
     std::unique_ptr<SpellParticles> spell_particles_;       // spell stage particles (app/spell_particles.h)
     std::unique_ptr<SpellBolts> spell_bolts_;               // the modern lighting's bolts and comets (app/spell_bolts.h)
@@ -1464,6 +1475,7 @@ private:
     bool own_name_ = true; // Hailstone's switch for the player's own name sprite (display.own_name; game::NameSpriteSwitches)
     bool player_menu_ = true; // Hailstone's right-click menu on players (mouse.player_menu; game::opens_player_menu)
     bool con_name_colour_ = true;     // Hailstone: NPC names in their consider colour (display.con_name_colour)
+    bool show_invis_undead_ = false; // Hailstone: "[Name]" for known invisibility versus undead (display.show_invis_undead)
     bool plate_overlap_fade_ = true; // Hailstone: a covered name fades (display.plate_overlap_fade)
     bool target_plate_through_walls_ = false; // Hailstone: the target's name shown behind walls (display.target_plate_through_walls)
     bool target_plate_highlight_ = true; // Hailstone: the target's name on a dark plate with a marker (display.target_plate_highlight)

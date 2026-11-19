@@ -2,6 +2,31 @@
 
 What the client does not implement yet, or implements with an approximation it cannot confirm. Entries are removed once settled.
 
+## Spirit Shrouds and Monster Missions
+
+- Live acceptance requires a server with Spirit Shrouds, Monster Mission roles, and Shroud Bank storage enabled.
+  The matching EQEmu server draft leaves the profile type zero in some snapshots. Hailstone uses the accepted
+  catalog context for local transitions and recognizes alternate class or race from the character list on relog.
+  A same-class, same-race form in that draft needs a populated profile type to be identifiable after reconnecting.
+- Check a real mission through role selection, zoning, rejoining, failure and successful completion. Confirm the
+  client receives the normal profile and possessions before the mission's rewards arrive. Confirm the shroudkeeper
+  return path and inspect and withdraw stored items near the banker using both interfaces.
+- The RoF2 bank's Shroud Bank button sends `OP_AltStorage` action 0 to the current banker. The draft server
+  accepts this only after it has authorized that NPC. The shroudkeeper can authorize and open storage on the
+  same interaction. Ordinary bankers need server-side authorization for first-time access in the draft.
+- The draft server's Spirit Shroud request decoders count two extra bytes. Those bytes are the application
+  opcode in the stock RoF2 sends. A server using the draft needs to correct those decoders before form
+  requests work. It also needs to resend the role offer when a player rejoins a mission before selecting a role.
+- `OP_ShroudRemove` (0x67e8): the RoF2 handler only shows eqstr 5191 (wait for the transformation) in a 45-second
+  dialog; it does not say which way the form changes. Hailstone shows no dialog and treats the next `OP_Shroud` as
+  the return to the original form, which is how the EQEmu draft uses it. A capture from a server with shrouds, or
+  a trace of what the original does with the profile type on that `OP_Shroud`, would settle it.
+- Draft-only paths: a `ShroudSelectionWindow` whose spawn field names the active shared task opens the forms as
+  Monster Mission roles, a roster template id of 16 or less without a catalog is shown as a class name, and a
+  character-list `ShroudClass`/`ShroudRace` unlike the base class/race marks the character as shrouded when the
+  profile type is 0. RoF2 does none of these (0x414320 keeps the field as the shroudkeeper's id); stock EQEmu sends
+  ShroudClass/ShroudRace equal to the base values and no shroud packets, so none of them fires there.
+
 ## Legacy environmental particles
 
 - Legacy particle switches (`app/switch_particles.*`, `assets/legacy_particles.*`): explicit-position stage-2 slots
@@ -45,6 +70,9 @@ What the client does not implement yet, or implements with an approximation it c
 - The generic world-nameplate canvas has synthetic parser, painter, ownership and input coverage. Actual GPU depth,
   dense scenes, sustained zoning and physical mouse/controller acceptance remain unverified; addons own visual
   recipes and must validate them against a live session.
+- Invisibility versus undead on another spawn (Hailstone's optional `[Name]`) is marked only while it is the target
+  and its OP_TargetBuffs list holds the effect: EQEmu's spawn record and SpawnAppearance carry regular invisibility
+  only, and the server decides whose buffs it sends. A server would have to send more to mark other spawns.
 
 - The shared `hs.UI` contract and migrated Modern/Gamepad presentations require live acceptance of normal mouse,
   keyboard and controller workflows, zoning and interface changes. Declared base packs inherit presentations;
@@ -248,7 +276,7 @@ The experimental texture broker (docs/graphics.md "Shared GPU textures", docs/re
   - A row in state 1 is shown but cannot be bought. The original re-checks it every 2 s through the local player (vfunc +0x38, 0x57d9d0, read as "owns this lore item" from a neighbouring function's name) and sets it to 0 when that fails; this client leaves it to the server's next state feed. A capture of a state-1 row and the item it names would settle it.
   - Kind 3 (a quest-reward gate): the original refuses Buy (exe text @0x9f1368) when PendingRewardMgr is missing or its pending rewards reached a cap. The stock pending manager is now tracked, but the marketplace's cap and Inspect route (PendingRewardMgr 0x463c10) remain unconnected and it buys kind 3 as kind 0. Trace the native purchase gate and inspect route before binding these controls.
   - The zip-code and quest-reward popups: the original's callback (0x6d8570) is read for the purchase answer (Results OK, then the buttons enabled); for the other popups this client only enables the window again and stays on the page.
-  - Not done: the Alt modifier on MKPW_DetailsIcon's right click (the preview instead of Inspect), the monster shroud check (profile +0x340c, not kept), 0x5f8920 → 0x5f84c0 after a wallet or result (may send 0x7679), what the Results OK click's 0x88e060(1) does, and the tree's starting state of a new branch (closed is assumed; only the toggle of "All Items" was read).
+  - Open work includes the Alt modifier on MKPW_DetailsIcon's right click, 0x5f8920 → 0x5f84c0 after a wallet or result (may send 0x7679), what the Results OK click's 0x88e060(1) does, and the tree's starting state of a new branch. Only the toggle of "All Items" was read.
   - The original's ResetView, SyncShelfToSelection and NavigateToEntry set the shelf to array[1] ("Player Studio") while they highlight "All Items"; this client uses "All Items" (a deliberate difference, docs/mechanics.md).
 - Merchant sell price for a unit price outside int32 (a tiny, negative or NaN rate): `game::sell_value` gives 0x80000000, the x86 conversion's result. A capture with an odd merchant rate would settle it.
 
@@ -273,7 +301,16 @@ The experimental texture broker (docs/graphics.md "Shared GPU textures", docs/re
 - "%1 is now the rank of %2." (7656) for another member's promotion or demotion was not seen live: EQEmu sends that member's SpawnAppearance 23 to the member alone (a join's goes to the zone and prints it).
 - The guild bank was tried by one member only (the other test character's trader's satchel keeps it in the bazaar): another member's view of Banker Only and Single Member items, and withdrawals refused by permission, were not seen. After a deposit the selection follows EQEmu's failed flag, which sits where RoF2 reads the slot (deposit slot 0, or 1 after a refusal).
 - `/guildwar` and `/guildpeace`: EQEmu's handlers only log them; what a server answers (a war list, the lines both guilds see) is not known.
-- Guild window, Banner page: EQEmu has no guild banners, so the page shows what the original shows without banner messages (an empty kit list, eqstr 636, Plant / Remove / Edit off). Not sent: OP_GuildOpenGuildWindow (0x0276) on opening the window, the kit list requests (0x0d92 with the inventory's banner kits, item type 0x3a, and the filter; 0x4924) and the banner save (0x4377) and plant; they carry PcBase +0x20a8 (eqlib's UniquePlayerID), which is not mapped to anything this client knows, and EQEmu handles none of them. The kit list reply (HandleWorldMessage case 0x0001, CGuildMgmtWnd_HandleBannerKitList) is not decoded, the opcode not verified. Edit also needs bit 0x1000 of PcBase's virtual +0x5c, whose meaning is not known (kept off). A server with banners, or tracing those fields, would settle it.
+- Guild banners: packet routes, profile fields and actor appearance were recovered from RoF2. A banner-capable
+  server is needed to verify the full live workflow, including modification-item consumption, portal travel,
+  upgrade benefits and the order of kit and status replies. Reserved fields in the banner packets are documented
+  in the protocol notes. The in-world cloth uses Hailstone lighting and its two received texture layers.
+  UpdateBannerPage checks bit `0x1000` of PcBase's virtual +0x5c (`0x681b6e`); the client takes it as the
+  profile's expansion mask and gates Change, Plant and Remove on it (The Buried Sea in EQEmu's list), but the
+  getter behind +0x5c was not traced.
+  While the design editor is open, the original asks for the kit list and status again after every mode 2
+  status reply (`0x685670`); if a server answers each status request with mode 2, that repeats until the editor
+  closes. The client does the same; a banner server's traffic would show whether it does.
 - Guild window, Tribute page: the opt-out request's command and master (stack bytes the original leaves unset) are sent as 0; EQEmu echoes the command, so after an opt-out the member's states show yellow (flag 0) until the next roster, where the original's (unknown) bytes probably show white (seen live on the NMS dev server, 2026-10-31: every opt change came back with command 0). The TributePool label (EQType 122) is the guild's favour, as the benefit window's.
 - Raids: zoning in, EQEmu sends the raid one OP_RaidUpdate add (action 0) per member, and the client prints "%1 joined the raid." (5059) for each after the first, as CRaid::AddRaidMember is read to do for a member new to the list; seen live (2026-10-31) as 17 lines for a raid of 18. Whether the original prints them at zone-in too (a flag that marks the initial list, or EQEmu's packets differing from live's) is not known; a capture from the original client zoning into a raid on EQEmu would settle it.
 
@@ -303,6 +340,7 @@ The experimental texture broker (docs/graphics.md "Shared GPU textures", docs/re
 - The resource level of Luclin model archives and of some global archives is a best guess.
 - Long character tracks at half their frame time (docs/formats/characters.md, `assets::long_track_archives`): the archives that halve were read from `CDisplay::InitWorld`'s load requests; whether GlobalLoad_chr.txt's S3D fallbacks (ChrTxt_Load) set the byte was not read, and they are taken as not halving, as the zone `_chr` loads do. The original halves each track by its own key count; a clip here has one frame time, so a track of 15 keys or fewer in a halved clip plays at the halved time too (none was seen in a stock Luclin clip). Reading ChrTxt_Load's request, or comparing a Luclin swing's length with the original's, would settle them.
 - A donor's tracks lend only when the WLD they are in defines the donor with mostly the model's bones (`src/assets/character.cpp`); otherwise the model has no such clip and plays 0x4b1210's replacement. So a Luclin human has no C10, C11 or T07..T09 (global_chr's classic ELF has them, the Luclin ELF has not). How the original's ActorAnimation finds a borrowed track by name across the loaded WLDs, and whether it would lend the classic ELF's few shared bones, was not traced; the "most bones" threshold is this client's. Tracing that lookup, or watching a Luclin human throw in the original, would settle it.
+- Race 127's IVM (the enchanter pet, docs/formats/characters.md): a world click takes it through the spawn-size sphere a spawn without a model gets (as before it was built), and in the nameplate depth test only its posed held items hide a plate. In the original its fully masked body mesh (0x2c) exists, and whether its click and line tests meet that mesh's triangles, a sphere, or only the held items was not traced. Tracing the original's actor pick for a hierarchical actor whose only material is masked, or clicking just beside an animation pet's weapon in the original client, would settle it.
 - NPC head textures follow a simplified rule (texture-type variant, else head-type variant, else base).
 - Animation (bone groups, `docs/mechanics.md`): remote ladder collision state and new-style rider column-5/style identity are implemented. Classic base requests (0x4afe60's, key 0 or 1) are not run through 0x4b0900 and the upper body's cycle test (slots 0x1c / 0x24) as the original does; whether that delays a walk / stand change was not traced, and a run does not cut an interruptible action such as a social here.
 - Eye height of new-style models uses the classic rule.

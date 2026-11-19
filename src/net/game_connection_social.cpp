@@ -163,6 +163,8 @@ void GameConnection::send_command(const std::string& typed) {
         if (word == "/abilitybook" && client_commands_ && client_commands_("Hailstone_abilitybook", std::string(rest)))
             return;
         if (word == "/camera" && client_commands_ && client_commands_("Hailstone_camera", std::string(rest))) return;
+        if (word == "/chattabs" && client_commands_ && client_commands_("Hailstone_chattabs", std::string(rest)))
+            return;
         if ((word == "/finditem" || word == "/advi") && client_commands_ &&
             client_commands_("Hailstone_finditem", std::string(rest)))
             return;
@@ -1318,6 +1320,7 @@ std::uint32_t GameConnection::received_guild_permission_context() const {
 }
 
 void GameConnection::reset_guild_permissions(std::uint32_t next_guild_id) {
+    reset_guild_banner();
     guild_.permissions.clear();
     guild_.rank_names = {};
     if (pending_guild_permissions_ && next_guild_id != 0 && next_guild_id != 0xffffffff &&
@@ -1478,13 +1481,13 @@ void GameConnection::guild_command(std::string_view h, const std::string& args) 
     }
     if (h == "Send_OP_GuildCreate") {
         // Send_OP_GuildCreate @0x4e3350: 4..27 characters (counted before leading blanks are skipped), refused on a
-        // shrouded character (profile +0x340c; 0 here), {name} (0x40 bytes). Its lines go out in colour 0xf.
+        // shrouded character (profile +0x340c), {name} (0x40 bytes). Its lines go out in colour 0xf.
         constexpr std::uint32_t kColor = 0xf;
         constexpr const char* kMissing = "You must specify a guild name to create!";
         if (args.empty()) return chat(ChatEvent::Kind::System, kMissing, 0, kColor);
         if (args.size() < 4) return system(6369, {}, kColor);
         if (args.size() > 0x1b) return system(6370, {}, kColor);
-        if (!profile_) return system(6371, {}, kColor);
+        if (!profile_ || shrouded()) return system(6371, {}, kColor);
         std::size_t start = args.find_first_not_of(" \t");
         if (start == std::string::npos) return chat(ChatEvent::Kind::System, kMissing, 0, kColor);
         ByteWriter w;

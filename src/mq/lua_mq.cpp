@@ -24,6 +24,7 @@
 #include "core/saturate.h"
 #include "core/sha256.h"
 #include "core/windows_names.h"
+#include "game/eq_names.h"
 #include "game/item_links.h"
 #include "game/slash_commands.h"
 #include "game/world_state.h"
@@ -1937,6 +1938,7 @@ void ScriptHost::policy_changed(const std::vector<std::string>& autoload) {
             m.end(s, "stopped: it may not run here");
         } else if (caps != s.caps) {
             s.caps = caps;
+            if (!(caps & plugin::kCapExtend)) game::clear_class_name_overrides(s.class_names_owner);
             invalidate_plugin_lifecycle(s);
             m.say(std::format("[Lua] {} now may: {}", s.name, plugin::caps_text(caps)));
         }
@@ -1950,6 +1952,7 @@ void ScriptHost::policy_changed(const std::vector<std::string>& autoload) {
         } else {
             if (s.caps != r.caps) invalidate_plugin_lifecycle(s);
             s.caps = r.caps;
+            if (!(s.caps & plugin::kCapExtend)) game::clear_class_name_overrides(s.class_names_owner);
         }
     }
     m.reap();

@@ -4,6 +4,64 @@ What is left before the client is feature complete, in the order to work on it. 
 
 Written 2026-10-28 from `docs/unknowns.md` and `docs/plan.md`.
 
+## Road to 1.0
+
+The steps are in `docs/plan.md` "Road to 1.0". This section says which items belong to which step; most of them are written out in full in the sections below, so tick them there and here together.
+
+### 0.8, freeze the surfaces
+
+- [ ] Lua 5.4.7 to 5.5.1 (the `lua-5.5` branch): the packs and the add-on repositories fixed, the break in the changelog.
+- [ ] Review `hs.*` across both packs and the `mq` module: rename or remove what is not wanted for good, then write the stable set down (`docs/ui-api.md`, `docs/plugins.md`) with the rules for adding to it after 1.0.
+- [ ] Plugin ABI: make the last breaking change, if any, and declare `HAILSTONE_PLUGIN_ABI` stable; write down how it grows after 1.0 (new functions at the end of the tables, no changed layouts).
+- [ ] Remove the `nmsc` compatibility layer: `sdk/nmsc_*.h` and the `nmsc_*` exports, the `NMSC_*` environment variables (`core/env.h`) and CMake settings, the saved window names renamed at start (`core/old_ui_settings`), and the rule about them in AGENTS.md.
+- [ ] Remove the older builds' fallbacks: the chat filters and colours read from the asset folder's `eqclient.ini` under `chat.ini`, and the unsorted character folders adopted per world (docs/layout.md).
+- [ ] Add-on safety: wrap the plugin functions and tables passed to pack functions; the arming delay on the client's own consent prompt; the pack's consent window guarded from before its first draw; the core install skipping add-ons' folders; `server_file_destination` refusing `.so.N` as `make_addon.py` does (all under "Add-ons" and "Code health").
+- [ ] The layer order: `net` and `assets` stop including `game/` headers ("Code health").
+- [ ] The local-time calls outside `src/platform/` through `platform::local_time` ("UI").
+
+### 0.9, platforms and releases
+
+- [ ] Windows: the updater run (WinHTTP, the renames of the running `hailstone.exe`), add-ons run, the Lua review fixes built with MSVC under Wine, the `path::string()` sweep or the manifest recorded as required ("Updates", "Add-ons", "Code health").
+- [ ] A scripted release (packages, manifest, signature, upload), local or in CI ("Updates").
+- [ ] Downloads that resume; the rollback's `kept-<time>/` folders cleaned up.
+- [ ] Add-ons against the real GitHub; XeSS and FSR 4 in the add-on index.
+- macOS is on hold until someone can test and maintain its releases; it stays a test build and does not block 1.0.
+
+### 0.10, live play on stock EQEmu
+
+- [ ] Write the checklist (a doc of its own, played on the stock PEQ test server, both packs, a physical controller) from the live items of "Combat and spells", "Movement", "Items and commerce", "Social and friends", "Navigation", "Item comparison", "Isometric camera" and "Check live".
+- [ ] Play it and fix what it finds.
+- [ ] Shadow step (SPA 379): the zone collision `land_spell` needs ("Combat and spells").
+- [ ] The collision radius, too wide for doorways ("Movement").
+- [ ] Leaving an adventure clears the window ("Adventures").
+- [ ] UCS reconnection and a wrong chat key ("Items and commerce").
+
+### 0.11, real estate
+
+- [ ] Placement: the ghost's wall and surface fit, free mode's mouse moves, the flatness test.
+- [ ] The item-move pre-checks and button greying, alternate-currency deposits, the NPC-item binding, the item menu's unbuilt entries, the neighborhood polls and vote window.
+- [ ] Played live on a server with housing, and the real estate rows of `docs/unknowns.md` settled.
+
+### 0.12, memory and soak
+
+- [ ] The character archives and the base cost ("Memory").
+- [ ] The texture slots of freed appearances freed; the session-long caches evicting ("Check live", "Code health").
+- [ ] An hour in a busy hub with zoning, and several clients on the shared asset cache.
+- [ ] Golden-image tests for a few zones (docs/plan.md section 5).
+
+### 1.0 RC
+
+- [ ] Bug fixes only; a known-issues page from what is left in `docs/unknowns.md`; the wiki and changelog.
+
+### After 1.0
+
+Not blocking 1.0: `/gems`; `/travel`, waypoints and the mesh editor; levitation paths; tactical queries for bots; frame generation's pacing and 3x/4x; FSR's water mask; zone flora rules; an allocator of the client's own; shared GPU textures on Linux and past 16 clients; the MacroQuest alert lists and `/target next`; the "trace the original" rows that change nothing a player sees. The server-dependent systems stock EQEmu never sends (shrouds and missions, LDoN, fellowships, guild banners, achievements, reward selection, evolving items) keep their live checks open past 1.0.
+
+## Spirit Shrouds and Monster Missions
+
+- [x] Server-supplied form catalogs, stats and detail requests, character and observer form updates, shared-task template rows, shroud progress and Shroud Bank item recovery in both UI packs.
+- [ ] Live acceptance on a RoF2 server with configured shroud forms and missions, including zoning or relogging in a form, mission completion, and withdrawal of stored possessions.
+
 ## Server add-on policy
 
 - [x] Optional required/allow/block lists by GitHub repository (owner/repo; bare names refused) for every kind the add-on manager installs, intact package identities, required autostart that the player cannot stop, consent gates, and active upscaler checks; disabled unless `[addons] enforce = on`.
@@ -120,6 +178,8 @@ Written 2026-10-28 from `docs/unknowns.md` and `docs/plan.md`.
 - [x] Position history (PositionTracker, OP_FloatListThing), the retried and the 30-minute saves, closing on loading screens (60069a0). Missing samples are listed in unknowns.md.
 - [x] The live folder's revamped bazaar, lavastorm and highpasshold load when the server's safe point (OP_NewZone) stands on their floor (game/revamped_zone.h): PEQ's Bazaar and Lava Storm version 1 (expansion 9 on) and its only High Pass Hold row. Version 0's safe points have no floor there, so those stay refused.
 - [ ] Arena and Nektulos with a live folder: its arena.s3d and nektulos.s3d win over the revamped .eqg, but PEQ's Arena (its only row) and Nektulos version 1 (expansion 10 on) run the revamp: their spawns stand on the live .eqg, not the .s3d (unknowns.md, Movement and collision).
+- [x] IVM's animation (race 127/600, the enchanter pet): it has no named clips, and GetAlternateAnimTag @0x406a60 sends its code, like the rest of its wood-elf prefix group, to the wood elf's (ELM), so it plays ELM's clips and holds its weapons as an elf does, not spread in its T-shaped rest pose (game::animation_source).
+- [ ] IVM's click volume: whether the original's click meets its masked body mesh, a sphere or only its held items (unknowns.md, Characters and models).
 
 ### Items and commerce
 - [x] Evolving-item Final Result inspection: native action-4 request, ordinary read-only item reply, received instance progress updates and a focusable gamepad action; packet, bridge, mock-server and Lua-pack coverage.
@@ -207,6 +267,7 @@ Written 2026-10-28 from `docs/unknowns.md` and `docs/plan.md`.
 - [ ] Other players' carried lights after an equipment change: stock EQEmu sends nothing for them (docs/unknowns.md); trace how the original updates a remote player's light.
 - [x] Name plates: same-frame per-pixel occlusion against the scene's depth (a hidden name is dropped, no ghost), nearer-over-farther draw order with overlap fading (10 %-20 % coverage to 10 % alpha, tau 0.3 s; the Fade Overlapping Names option), the target always full at its projected head, and a Highlight Target Name option; unit tests and an offline Bazaar viewer check.
 - [x] Name plate text options (Options > Display "Name Plates"): font face, size, bold, shadow / outline / no edge, shrink with distance, guild and owner line size; unit tests for the settings and the distance shrink.
+- [x] Invisibility markers on nameplates and HUD captions, with optional brackets for known invisibility versus undead (mock packets and UI tests).
 - [x] Animation layering: the original's upper/lower bone groups, actions over the legs, per-group cross-fades and SyncToBoneGroup, rider actions on the arms, other spawns' water (d8c9fc2; model viewer and unit tests, live split not seen in a screenshot).
 - [x] Animation: a busy upper body queues (classic, +0x10c4) or drops an action as the original does; the same action never replays over itself (84046fb; unit tests).
 - [x] Animation: classic P08 / O02 after an animation 0x4b0860 does not name (the run, jumps, socials; not after an action, which keeps P01), the follow-up's +0x10c4 = 0x47; the local player's climbing animation on a ladder (anim-fixes; unit tests). Checked live on the NMS dev server (2026-10-31) on another player's Luclin human (HUM from globalhum_chr, an old-style model with P01 and P08) seen from the front by a second client: standing after zoning in and after a walk stop it plays P01 (elbows out, fists at the hips), after a run stop and after `/wave` P08 (arms hanging straight), matching the model viewer's P01 / P08. The local player's own stand was not seen from the front (the camera could not be turned round in a scripted run). The ladder climb could not be tried: this server has no ground object named LADDER*, the only kind the client climbs; its two OBJ_LADDER doors (xorbb door 8, pillarsalra door 7) are switches here (docs/unknowns.md).
@@ -420,11 +481,16 @@ Fog, weather, sky, EQG surfaces, lighting and spell particles are a look-and-fee
 - [x] Modern quantity dialog: opened again for another request while its box has the keyboard, the box shows the new amount (headless ImGui test).
 - [x] Equip slot availability (the profile's slot mask) and auto-inventory's use check, ported.
 - [x] Guilds tried live with a GM-made guild (2026-10-29): invites across zones, chat, MOTD, ranks and permissions, notes, alts, leader change, the guild bank; the join, leave and rank lines and the nameplate's show-guild flag fixed. Open: a second member's view of the guild bank; /guildwar and /guildpeace are only logged by EQEmu.
-- [x] The guild window's Tribute page (each member's tribute and trophy states, donations, last donation; the opt-out buttons) and Banner page (as the original shows it without banner messages, which EQEmu never sends). Checked live on the NMS dev server (2026-10-31) with a GM-made guild of two: the leader's OptOut for the member (`guild_tribute_opt_out`) came back as OP_GuildOptInOut to both and updated the member's row (tribute on to off, `guild_members.tribute_enable` 0), and the Tribute Benefit window's button (`guild_tribute_opt`) opted the member in, out and in again (playprobe `--tribute-opt-out`, `--tribute-cycle`). The Banner page was not tried live. Open: the banner requests and editing (docs/unknowns.md).
+- [x] The guild window's Tribute page (each member's tribute and trophy states, donations, last donation; the opt-out buttons). Checked live on the NMS dev server (2026-10-31) with a GM-made guild of two: the leader's OptOut for the member (`guild_tribute_opt_out`) came back as OP_GuildOptInOut to both and updated the member's row (tribute on to off, `guild_members.tribute_enable` 0), and the Tribute Benefit window's button (`guild_tribute_opt`) opted the member in, out and in again (playprobe `--tribute-opt-out`, `--tribute-cycle`).
+- [x] Guild banners in both UI packs: server kit and status replies, filtered refresh, placement, removal and
+  design edits with the modification item. Planted actors use the received patterns and colours.
+- [ ] Guild banners: verify editing, planting, removal, benefits and Guild Hall portal travel on a banner-capable
+  server (docs/unknowns.md).
 - [x] A raid of 18 and the raid MOTD button: checked live on the NMS dev server (2026-10-31): 17 headless characters invited by `/raidinvite`, every client's list reached 18, and the leader's MOTD reached all 17 members ("Raid MOTD: ...") (playprobe `--raid-size`, `--raid-motd`, `--raid-accept`). Open: zoning in, the leader printed "<name> joined the raid." for each of the 17 members (docs/unknowns.md).
 - [x] Gamepad pack: after B closes a Tip window opened over the merchant, the pad dropped to game mode and the merchant window no longer took it: the merchant and the Tip asked for the pad in the same frame and only the last request was kept. Every request is kept now, and the window under a closed one takes the focus back; checked live on the NMS dev server (2026-10-31): after the Tip, RB reached the merchant's Parcels page.
 - [x] Melee sounds (the cues fire with the right waves; not listened to).
 - [x] Augment appearance-slot gating: checked live on the NMS dev server (2026-10-31): with game feature 0x15 on (the client's setting for EQEmu accounts), a Tricorne Hat Ornament (aug type 21) into a Cloth Cap's type-21 socket was not refused (no 5485), went out as OP_AugmentItem and EQEmu stored it (`inventory.augment_six`); the client showed it in socket 6. The refusal with the feature off is unit-tested only (docs/unknowns.md).
+- [ ] A server's class names (`set_class_name`, docs/plugins.md "Class names") in a live session: a plugin that names classes on its server's hello, then every window that names a class (both UI packs), `/who`, camping to character select and back, and logging in to another server with the plugin still loaded (the names must go). Unit, plugin and script tests only. Open: the stock-layout windows' own class labels (the XML's "WAR" check box labels in the group search and looking-for-guild windows) keep the stock names.
 - [ ] OP_Weblink from a quest's `SendWebLink`, `/url` from a script, and the browser window (`/web`), in a live session (unit and window tests only).
 
 - [ ] Idle appearances freed during a zone (render/look_eviction.h, five minutes unworn): watch a busy hub for an hour (the log's "freed N idle appearances", the GPU memory), and a spawn coming back after its look went (dressed again on the worker). The rule is unit-tested; the renderer side was only built.

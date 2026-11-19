@@ -12,6 +12,7 @@
 
 #include "app/addon_install.h"
 #include "core/log.h"
+#include "game/eq_names.h"
 #include "game/nameplate_canvas.h"
 #include "mq/commands.h"
 #include "mq/lua_mq.h"
@@ -55,6 +56,7 @@ struct Automation::Impl {
     std::set<std::string> autoskill_holds; // the scripts holding autoskill off
     std::uint32_t policy_serial = 0;
     bool had_policy = false;
+    fs::path class_names_dir; // the server folder the class names were given on (game/eq_names.h)
     char run_name[128] = {};
     std::chrono::steady_clock::time_point consent_checked{};
     // The dev window's compiled plugins: NativePlugins::list() reads and hashes every plugin file and reads the
@@ -97,6 +99,12 @@ struct Automation::Impl {
         net::GameConnection* c = conn();
         std::uint32_t serial = c ? c->server_rules_serial() : 0;
         bool has = c && c->server_rules();
+        // The session left the server (disconnected, or another server's rules): the names its plugins and scripts
+        // gave the classes go with it, whatever still runs (game/eq_names.h). Character select keeps them.
+        if (!has || c->server_rules()->dir != class_names_dir) {
+            game::clear_class_name_overrides();
+            class_names_dir = has ? c->server_rules()->dir : fs::path();
+        }
         if (serial == policy_serial && has == had_policy) return;
         policy_serial = serial;
         had_policy = has;
