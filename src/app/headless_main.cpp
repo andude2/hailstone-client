@@ -25,6 +25,8 @@ int main(int argc, char** argv) {
                      "                    (or --character / --world named here)\n"
                      "  --crew FILE       supervise one child per member of FILE (saved accounts and\n"
                      "                    servers only; docs/headless.md \"Crew mode\")\n"
+                     "  --autoload LIST   the plugins to load (default: * = all allowed)\n"
+                     "  --no-chat-log     do not print chat lines (plugins still see them)\n"
                      "  --data-dir DIR    share this Hailstone folder's plugins, configs and server\n"
                      "                    profiles (e.g. the graphical client's folder) instead of the\n"
                      "                    binary's own (HAILSTONE_DATA_DIR does the same)\n"

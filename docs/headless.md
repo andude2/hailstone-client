@@ -94,6 +94,8 @@ a crew that cannot all log in starts none.
 data_dir=C:/Hailstone
 game_dir=C:/EQ/EZ Server
 stagger=10
+autoload=HSMono
+chat_log=0
 
 [Okhealz]
 server=ez-server
@@ -114,7 +116,13 @@ Member keys: `character`, `world`, `exec`, `exec_zone`, `game_dir`,
 `seconds` (camp after this long; 0 is until stopped), `stagger`
 (seconds before this member launches, over the shared one). Shared
 keys in `[crew]`: `data_dir`, `game_dir`, `stagger` (default 10 s
-between launches, so 23 logins do not land at once).
+between launches, so 23 logins do not land at once), `autoload`
+(the plugins each member loads — a crew driving Sentinel wants only
+its host, e.g. `autoload=HSMono`, so no member also opens a second
+command bridge or broker client of its own) and `chat_log` (0, the
+crew default: children drain chat without printing it, so 23 clients
+do not flood one console; their plugins still see every line, and
+the per-character log files are unaffected in kind, only quieter).
 
 Single characters get the same saved login without a crew file:
 `hailstone_headless --server ez-server --account crew1` reads the

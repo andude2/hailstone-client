@@ -83,6 +83,8 @@ HeadlessArgs parse_headless_args(const std::vector<std::string_view>& args) {
         else if (a == "--server") out.options.server = need(a);
         else if (a == "--account") out.options.account = need(a);
         else if (a == "--crew") out.options.crew_file = need(a);
+        else if (a == "--autoload") out.options.plugin_autoload = need(a);
+        else if (a == "--no-chat-log") out.options.chat_log = false;
         else if (a == "--list-servers") out.options.list_servers = true;
         else if (a == "--exec") out.options.exec.emplace_back(need(a));
         else if (a == "--exec-zone") out.options.exec_zone.emplace_back(need(a));
@@ -111,6 +113,8 @@ CrewFile parse_crew_file(std::string_view text) {
     ini.parse(text);
     out.data_dir = ini.get_string("crew", "data_dir");
     out.game_dir = ini.get_string("crew", "game_dir");
+    if (auto a = ini.get("crew", "autoload")) out.autoload = *a;
+    out.chat_log = ini.get_int("crew", "chat_log", out.chat_log ? 1 : 0) != 0;
     out.stagger = ini.get_int("crew", "stagger", out.stagger);
     for (const auto& section : ini.sections()) {
         if (section == "crew") continue;
@@ -123,6 +127,8 @@ CrewFile parse_crew_file(std::string_view text) {
         m.exec = ini.get_string(section, "exec");
         m.exec_zone = ini.get_string(section, "exec_zone");
         m.game_dir = ini.get_string(section, "game_dir");
+        m.autoload = ini.get_string(section, "autoload");
+        m.chat_log = ini.get_int(section, "chat_log", -1);
         m.seconds = ini.get_int(section, "seconds", 0);
         m.stagger = ini.get_int(section, "stagger", -1);
         if (m.server.empty() || m.account.empty()) {
@@ -265,6 +271,8 @@ int run_crew(const HeadlessOptions& options) {
         if (!r.world.empty()) args.insert(args.end(), {"--world", r.world});
         if (!r.crew.exec.empty()) args.insert(args.end(), {"--exec", r.crew.exec});
         if (!r.crew.exec_zone.empty()) args.insert(args.end(), {"--exec-zone", r.crew.exec_zone});
+        args.insert(args.end(), {"--autoload", !r.crew.autoload.empty() ? r.crew.autoload : crew.autoload});
+        if (!(r.crew.chat_log >= 0 ? r.crew.chat_log != 0 : crew.chat_log)) args.emplace_back("--no-chat-log");
         if (r.crew.seconds > 0) args.insert(args.end(), {"--seconds", std::to_string(r.crew.seconds)});
         std::string error;
         if (children.start_tracked(r.crew.label, args, error)) {
@@ -439,7 +447,7 @@ int run_headless(HeadlessOptions options) {
     AutomationEnv env;
     env.install_dir = platform::install_dir();
     env.data_dir = platform::data_dir();
-    env.autoload = "*";
+    env.autoload = options.plugin_autoload;
     env.server_name = [&server_label] { return server_label; };
     env.server_profile = [&server_label, &saved_profile_id] {
         return !saved_profile_id.empty() ? saved_profile_id : profile_id_for_world(server_label);
@@ -649,7 +657,10 @@ int run_headless(HeadlessOptions options) {
             log::error("headless: a server plugin waits for consent and cannot be asked here; "
                        "allow it from the graphical client on this server first (docs/headless.md)");
         }
-        while (auto c = conn->poll_chat()) log::info("chat: {}", c->text);
+        // The hooks (Sentinel and friends) see every line regardless; this
+        // only drains the client's own queue, printed unless silenced.
+        while (auto c = conn->poll_chat())
+            if (options.chat_log) log::info("chat: {}", c->text);
         if (conn->state() != last) {
             last = conn->state();
             log::info("[{}] {}", net::to_string(last), conn->status());

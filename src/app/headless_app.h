@@ -44,6 +44,8 @@ struct HeadlessOptions {
     std::string server;   // --server NAME|ID: a saved server (servers/<id>), by id or name
     std::string account;  // --account USER: a saved account of --server, its password from the system keyring
     std::string crew_file; // --crew FILE: supervise one child per crew member (below) instead of one character
+    std::string plugin_autoload = "*"; // --autoload LIST: the plugins to load ("*" all, else names, space/comma separated)
+    bool chat_log = true; // --no-chat-log: drain chat without printing it (the hooks still see every line)
     bool list_servers = false; // --list-servers: print the login server list and exit
     // Command lines sent as the player's would be (through the hook bus):
     // --exec once after the first zone-in, --exec-zone at every zone-in.
@@ -114,12 +116,16 @@ struct CrewMember {
     std::string exec;      // one command line after the first zone-in
     std::string exec_zone; // one command line at every zone-in
     std::string game_dir;  // empty: the shared one
+    std::string autoload;  // plugins to load (empty: the shared one)
+    int chat_log = -1;     // print chat lines (< 0: the shared one)
     int seconds = 0;       // camp after this long (0: until stopped)
     int stagger = -1;      // seconds to wait before launching this member (< 0: the shared one)
 };
 struct CrewFile {
     std::string data_dir;  // [crew] data_dir (the shared folder)
     std::string game_dir;  // [crew] game_dir
+    std::string autoload = "*"; // [crew] autoload (the plugins every member loads)
+    bool chat_log = false; // [crew] chat_log: a crew's children do not print chat unless asked
     int stagger = 10;      // seconds between launches, [crew] stagger
     std::vector<CrewMember> members;
     std::string error; // empty: parsed

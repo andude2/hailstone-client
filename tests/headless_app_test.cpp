@@ -66,6 +66,11 @@ TEST_CASE("headless: --server/--account parse without host or password; --crew s
     auto c = app::parse_headless_args({"--crew", "crew.ini"});
     CHECK(c.error.empty());
     CHECK(c.options.crew_file == "crew.ini");
+    auto q = app::parse_headless_args({"--host", "h", "--user", "u", "--password", "p", "--character", "c",
+                                       "--game-dir", "/g", "--autoload", "HSMono", "--no-chat-log"});
+    CHECK(q.error.empty());
+    CHECK(q.options.plugin_autoload == "HSMono");
+    CHECK_FALSE(q.options.chat_log);
 }
 
 TEST_CASE("headless: a saved server is picked by id, name, or a unique part") {
@@ -82,6 +87,7 @@ TEST_CASE("headless: a crew file parses members and shared keys; a member withou
     auto crew = app::parse_crew_file("[crew]\n"
                                      "data_dir=D:/Hailstone\n"
                                      "stagger=5\n"
+                                     "autoload=HSMono\n"
                                      "\n"
                                      "[Okhealz]\n"
                                      "server=ez-server\n"
@@ -96,6 +102,8 @@ TEST_CASE("headless: a crew file parses members and shared keys; a member withou
     CHECK(crew.error.empty());
     CHECK(crew.data_dir == "D:/Hailstone");
     CHECK(crew.stagger == 5);
+    CHECK(crew.autoload == "HSMono");
+    CHECK_FALSE(crew.chat_log); // a crew's children do not print chat unless asked
     REQUIRE(crew.members.size() == 2);
     CHECK(crew.members[0].label == "Okhealz");
     CHECK(crew.members[0].exec == "/mono load Sentinel");
