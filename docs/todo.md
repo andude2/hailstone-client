@@ -523,6 +523,14 @@ Fog, weather, sky, EQG surfaces, lighting and spell particles are a look-and-fee
 - [ ] Updates: `kept-<time>/` folders left by a rollback are never cleaned up; offer to remove them.
 - [ ] Conversation journal texts over 0xffe characters still split on reload (the fgets limit), as in the original.
 
+## Headless client (docs/headless.md)
+
+- [x] Scaffold: `hailstone_headless` (branch `headless`): login, `--world NAME|ID` server pick (the first server without it) and `--list-servers`, character, `GameConnection` + `Automation` (plugins and MQ scripts, HSMono included), zone collision only, `--exec` / `--exec-zone`, `--seconds`, `--status-file`, SIGINT/SIGTERM shutdown. Unit tests for the arguments, the server pick and the zone-in command schedule. Not yet run against a server.
+- [ ] Live check: a cleric under HSMono/Sentinel on a test server (zone in, `/mono load Sentinel` by `--exec`, heal a group member driven by a second client, zone, camp), and proof no window or GPU is touched. First live login done (2026-11-18, EZ Server): the character zoned into Kael Drakkel under the raid, collision loaded, HSMono loaded with every capability; the first `--exec` went as a say (its slash eaten by the shell — the exec lines now take the slash as optional). Open: Sentinel itself started, healing, zoning, camp. Second live run (same day): Sentinel C# started and cast; two faults found — the headless host never answered `${EverQuest.Server}`, so Sentinel's heartbeat went out with no server (invisible to peers) and the character's config (tank, the 80% heal point) never loaded, leaving defaults healing herself (fixed: the host now answers with the played world's name); and the branch was then brought onto the newer base that has the `get_raid_data_bulk` plugin host, so Sentinel's raid heal list populates. Open: a shared `--data-dir` live run confirming comms started, the tank and the heal point loaded, peers listing her, and a raid heal under the threshold.
+- [x] The player's own movement headless: `Navigator`'s steering drives the graphical client's movement body per game step (`/nav`, `/moveto`, `/stick`, zone-line teleports), the nav mesh built from the zone collision at the zone-in. Open: live check (a chase and a zone-line walk), and door models in movement (no `WorldObjects` headless, so a closed door does not stop a walk).
+- [ ] The Ability Book accessors without a UI host (`AutomationEnv` ability, autoskill list, `use_ability`, the bulk ability read), `/keypress` and `/face`.
+- [ ] Auto-relogin after a link death, if a supervisor-respawn is not enough.
+
 ## Not planned
 
 Voice macros and audio triggers, the commercial-service windows (the marketplace's funding pages among them), the zone guide, zone path and tribute trophies (no data on EQEmu), Miles' reverb DSP and DLS synthesis, the client's own graphics settings.

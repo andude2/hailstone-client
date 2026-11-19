@@ -159,6 +159,8 @@ The experimental texture broker (docs/graphics.md "Shared GPU textures", docs/re
 - Membership details: the feature ids' names and the refusal lines are decoded (`game/feature_restrictions.h`); the other uses of the 22 entries are not.
 - Spawn suffix in destructible form (OtherData 0xe1): the client reads no suffix there. EQEmu writes one only when it is not empty; the original appears to read one whenever bit 0x20 is set (`EQPlayer::UnSerializeSpawn`) and to treat only bit 0x04 as interactive. A capture of a destructible spawn with a suffix, or the original's register use at `UnSerializeSpawn`, would settle it.
 
+- Headless client (`hailstone_headless`, docs/headless.md): login, zone-in and plugin load are live (a cleric in Kael Drakkel on EZ Server, HSMono loaded with every capability), but Sentinel itself has not run headless yet, so whether its cleric automation behaves the same without the graphical client's UI-host services is untested. In particular the Ability Book accessors, `/keypress` and `/face` report "unavailable" there; `Navigator` is driven into the movement body, but a headless chase and zone-line walk have not been checked live, and doors have no models headless so a closed door does not stop a walk; what each Sentinel class path actually reaches for would be settled by the live cleric check in docs/todo.md ("Headless client").
+
 ## Updates
 
 - A Hailstone folder extracted by hand has no record of what was shipped (`update/installed.txt`), so its first update removes none of the files a release dropped; from the second update on they are removed (docs/updater.md). A file list in the first-install archives would settle it.

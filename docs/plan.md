@@ -46,6 +46,8 @@ hailstone/
 
 The client's own folder (the binary, shaders, UI packs, settings, saved servers with their files, scripts, plugins, logs) and the rules for the asset folder are in `docs/layout.md`: the RoF2 install is only read, and a server's files are layered over it.
 
+`hailstone_headless` (docs/headless.md) is a second host in `src/app/`: the same login, connection and automation (`app::Automation`) with no window, renderer or UI, and zone files loaded only as collision. It is for a character run by its plugins and scripts in the background.
+
 The layers depend only downward: `app` → `game`/`ui`/`render`/`audio` → `assets`/`net`/`web` → `core`/`platform`. `game` does not include Vulkan headers. `nav` (the navigation meshes, `docs/navigation.md`) sits above `game` and `assets` and below `app`; the MQ layer reaches it only through `nav/nav_control.h`. `render` and `ui` read game state through narrow interfaces, so the zone viewer and tests can run without a network connection.
 
 The main loop runs simulation and movement at a fixed step, polls the network on its own thread with a lock-free queue into the game thread, and renders with interpolation. Asset loading runs on worker threads behind a loading screen.

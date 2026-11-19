@@ -43,6 +43,7 @@ PAGES = [
         ("docs/isometric.md", "Isometric-Camera"),
         ("docs/item-compare.md", "Item-Comparison"),
         ("docs/zones.md", "Zones"),
+        ("docs/headless.md", "Headless-Client"),
     ]),
     ("Scripting and UI", [
         ("docs/plugins.md", "Plugins-and-Scripts"),

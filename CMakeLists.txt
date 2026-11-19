@@ -565,6 +565,7 @@ add_library(hailstone_engine STATIC
   src/ui/ui_ini.cpp
   src/app/lua_ui.cpp
   src/app/automation.cpp
+  src/app/headless_app.cpp
   src/app/navigator.cpp
   src/app/guide_path.cpp
   src/app/lua_ui_values.cpp
@@ -905,6 +906,22 @@ if(HAILSTONE_CLANG_TIDY)
   set_target_properties(hailstone PROPERTIES CXX_CLANG_TIDY "${HAILSTONE_TIDY_COMMAND}")
 endif()
 target_link_libraries(hailstone PRIVATE hailstone_engine)
+
+# The headless client (docs/headless.md): the same engine without the window,
+# Vulkan device or UI; its own main, next to the client's.
+add_executable(hailstone_headless src/app/headless_main.cpp ${HAILSTONE_WIN_MANIFEST})
+target_compile_options(hailstone_headless PRIVATE ${HAILSTONE_WARNINGS})
+if(HAILSTONE_CLANG_TIDY)
+  set_target_properties(hailstone_headless PROPERTIES CXX_CLANG_TIDY "${HAILSTONE_TIDY_COMMAND}")
+endif()
+target_link_libraries(hailstone_headless PRIVATE hailstone_engine)
+set_target_properties(hailstone_headless PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${HAILSTONE_TREE_DIR}$<0:>)
+if(WIN32)
+  add_custom_command(TARGET hailstone_headless POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:hailstone_headless> $<TARGET_FILE_DIR:hailstone_headless>
+    COMMAND_EXPAND_LISTS)
+endif()
+
 set_target_properties(hailstone PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${HAILSTONE_TREE_DIR}$<0:>)
 # Shaders are looked up next to the executable.
 add_custom_command(TARGET hailstone POST_BUILD
@@ -1126,6 +1143,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/mq_calc_test.cpp
     tests/mq_combat_test.cpp
     tests/automation_test.cpp
+    tests/headless_app_test.cpp
     tests/mq_lua_test.cpp
     tests/mq_script_path_test.cpp
     tests/mq_event_pattern_test.cpp
