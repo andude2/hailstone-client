@@ -1,0 +1,187 @@
+[info] headless: playing on [] EZ Server - Custom Zones, Vendors, Quests, Items, etc (64)
+[info] headless: login ok, world 148.113.203.173:9000
+[info] chat: [Plugin] HSMono loaded (read,commands,target,actions,move,chat,events,ui,packets,extend,login,net,web)
+[info] plugin HSMono loaded from C:\Users\andy\source\repos\hailstone-client\build-wt\headless\plugins\HSMono\HSMono.dll (sha256 c4fdfa6529f8565089559a56d2ebc04865fe33c30387dcf160fb9e3de8cc1d42, caps read,commands,target,actions,move,chat,events,ui,packets,extend,login,net,web)
+[info] chat: [Plugin] HSMono loaded (read,commands,target,actions,move,chat,events,ui,packets,extend,login,net,web)
+[info] [connecting to world] Connecting to [] EZ Server - Custom Zones, Vendors, Quests, Items, etc
+[info] [authenticating with world] Logging in to [] EZ Server - Custom Zones, Vendors, Quests, Items, etc
+[info] world: PvP rule set 0
+[info] world: membership level 2
+[info] [character select] 
+[info] [entering world] Entering the world as Okhealz
+[info] chat: Tier 12.5 - Direwind Cliffs is now open, Tier 13 due soon.
+[info] zone server 148.113.203.173:7138
+[info] chat: Tier 12.5 - Direwind Cliffs is now open, Tier 13 due soon.
+[info] [connecting to zone] Connecting to the zone server
+[info] zone entry: spell file crc 0x3cf0536e, assoc crc 0x4f353196
+[info] [entering zone] Entering the zone
+[info] spells: 352 in the book, gems 1:Direwind's Grace 2:Holy Cataclysm 4:Armor of the Crab V 5:Focus of Healing 6:Divine Intervention 7:Armor of the Martyr III 8:Aura of the Zealot 9:Sound of Divinity 10:Tower of Vie III 11:Amplify Healing II 12:Aura of Devotion 
+[info] inventory: 33 items (112958 bytes)
+[info] weather: OP_Weather kind 0xff intensity 0
+[info] headless: collision for kael loaded (no scene)
+[info] 117 doors
+[info] server rules: none (no hailstone.cfg): plugins and scripts run freely
+[info] chat: You have entered Kael Drakkel.
+[info] chat server: connecting to 148.113.203.173:7778 as EZ (Linux) x4 Exp.Okhealz
+[info] spells: 12 gems usable (SPA 326: AA 4, buffs 0, items 0)
+[info] chat: You have entered Kael Drakkel.
+[info] [in zone] 
+[info] headless: in kael as Okhealz
+[info] headless: exec: mono load Sentinel
+[info] chat: You say, 'mono load Sentinel'
+[info] chat: You say, 'mono load Sentinel'
+[info] mail: 1 mailbox(es), the first SOE.EQ.EZ (Linux) x4 Exp.Okhealz
+[info] task 127 'Ultimate Augment V' (type 2, slot 0)
+[info] task 124 'Improvements!' (type 2, slot 3)
+[info] task 174 'Ultimate Charm v7' (type 2, slot 4)
+[info] task 153 'Draca’s Emblem of the Legends' (type 2, slot 5)
+[info] task 149 'Harder than wood' (type 2, slot 6)
+[info] chat: Linamas joined the raid.
+[info] chat: Linamas has been delegated Raid Main Assist.
+[info] chat: Kelythar joined the raid.
+[info] chat: Dureln joined the raid.
+[info] chat: Wedyin joined the raid.
+[info] chat: Linaheal joined the raid.
+[info] chat: Fehaver joined the raid.
+[info] chat: Estos joined the raid.
+[info] chat: Wikain joined the raid.
+[info] chat: Juwuje joined the raid.
+[info] chat: Udmame joined the raid.
+[info] chat: Degoju joined the raid.
+[info] chat: Vepaon joined the raid.
+[info] chat: Ashenra joined the raid.
+[info] chat: Ebhove joined the raid.
+[info] chat: Fateve joined the raid.
+[info] chat: Pacoha joined the raid.
+[info] chat: Yuzeun joined the raid.
+[info] chat: Velari joined the raid.
+[info] chat: Gifiren joined the raid.
+[info] chat: Nudeya joined the raid.
+[info] chat: Lerdari joined the raid.
+[info] chat: Xutafu joined the raid.
+[info] chat: Woroon joined the raid.
+[info] chat: Zefios joined the raid.
+[info] chat: Hehici joined the raid.
+[info] chat: Gobedogu joined the raid.
+[info] chat: Zudau joined the raid.
+[info] chat: Donomoan joined the raid.
+[info] chat: Ubjuu joined the raid.
+[info] chat: Linamas is now the leader of your raid.
+[info] weather: OP_Weather kind 0x0 intensity 0
+[info] chat:  
+[info] chat: -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+[info] chat:      WELCOME TO KAEL DRAKKEL     
+[info] chat: -------------Tier 11-------------
+[info] chat: -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+[info] chat:  
+[info] chat: The war between the Kromzek and the Kromrif rages on in Kael. Seek opportunity to weaken both clans.
+[info] chat: 
+[info] chat: Look out for the sirens!
+[info] chat: 
+[info] chat: 
+[info] chat: This zone plays music from time to time. If you find yourself in a situation where a sound file is playing and you want to stop it, you can just type 'stop'
+[info] chat: See this progression zone's \x120FFFFF000007A1EE0000000000000000000000000000000000000000Wiki Page\x12 before you get started.
+[info] chat:  
+[info] chat: You can view the EZ Server Changelog via \x120FFFFF000003262E0000000000000000000000000000000000000000#viewchangelog\x12
+[info] chat: Check out our website at ez-server.online and wiki at wiki.ez-server.online
+[info] chat: RIP Hunter 2014, you are loved and missed by all
+[info] chat: Don't forget to read the \x120FFFFF000002537D0000000000000000000000000000000000000000Rules\x12 so you don't get banned!
+[info] chat:  --- Select response from options --- 
+[info] chat: [\x120FFFFF000002537D0000000000000000000000000000000000000000Rules\x12 - \x120FFFFF00000675680000000000000000000000000000000000000000Guide\x12 - \x120FFFFF00000804060000000000000000000000000000000000000000Discord\x12 - \x120FFFFF000006756B0000000000000000000000000000000000000000Issues\x12]
+[info] chat: PID (659849) Kael Drakkel (113) (Instance ID 2112) will expire in 22 Hours, 26 Minutes, and 36 Seconds.
+[info] chat: Linamas joined the raid.
+[info] chat: Linamas has been delegated Raid Main Assist.
+[info] chat: Kelythar joined the raid.
+[info] chat: Dureln joined the raid.
+[info] chat: Wedyin joined the raid.
+[info] chat: Linaheal joined the raid.
+[info] chat: Fehaver joined the raid.
+[info] chat: Estos joined the raid.
+[info] chat: Wikain joined the raid.
+[info] chat: Juwuje joined the raid.
+[info] chat: Udmame joined the raid.
+[info] chat: Degoju joined the raid.
+[info] chat: Vepaon joined the raid.
+[info] chat: Ashenra joined the raid.
+[info] chat: Ebhove joined the raid.
+[info] chat: Fateve joined the raid.
+[info] chat: Pacoha joined the raid.
+[info] chat: Yuzeun joined the raid.
+[info] chat: Velari joined the raid.
+[info] chat: Gifiren joined the raid.
+[info] chat: Nudeya joined the raid.
+[info] chat: Lerdari joined the raid.
+[info] chat: Xutafu joined the raid.
+[info] chat: Woroon joined the raid.
+[info] chat: Zefios joined the raid.
+[info] chat: Hehici joined the raid.
+[info] chat: Gobedogu joined the raid.
+[info] chat: Zudau joined the raid.
+[info] chat: Donomoan joined the raid.
+[info] chat: Ubjuu joined the raid.
+[info] chat: Linamas is now the leader of your raid.
+[info] chat:  
+[info] chat: -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+[info] chat:      WELCOME TO KAEL DRAKKEL     
+[info] chat: -------------Tier 11-------------
+[info] chat: -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+[info] chat:  
+[info] chat: The war between the Kromzek and the Kromrif rages on in Kael. Seek opportunity to weaken both clans.
+[info] chat: 
+[info] chat: Look out for the sirens!
+[info] chat: 
+[info] chat: 
+[info] chat: This zone plays music from time to time. If you find yourself in a situation where a sound file is playing and you want to stop it, you can just type 'stop'
+[info] chat: See this progression zone's \x120FFFFF000007A1EE0000000000000000000000000000000000000000Wiki Page\x12 before you get started.
+[info] chat:  
+[info] chat: You can view the EZ Server Changelog via \x120FFFFF000003262E0000000000000000000000000000000000000000#viewchangelog\x12
+[info] chat: Check out our website at ez-server.online and wiki at wiki.ez-server.online
+[info] chat: RIP Hunter 2014, you are loved and missed by all
+[info] chat: Don't forget to read the \x120FFFFF000002537D0000000000000000000000000000000000000000Rules\x12 so you don't get banned!
+[info] chat:  --- Select response from options --- 
+[info] chat: [\x120FFFFF000002537D0000000000000000000000000000000000000000Rules\x12 - \x120FFFFF00000675680000000000000000000000000000000000000000Guide\x12 - \x120FFFFF00000804060000000000000000000000000000000000000000Discord\x12 - \x120FFFFF000006756B0000000000000000000000000000000000000000Issues\x12]
+[info] chat: PID (659849) Kael Drakkel (113) (Instance ID 2112) will expire in 22 Hours, 26 Minutes, and 36 Seconds.
+[info] chat: [Guild] Okhealz is now online
+[info] chat: [Guild] Okhealz is now online
+[info] chat: Wedyin begins to cast a spell.
+[info] chat: Wedyin begins to cast a spell.
+[info] chat: Vepaon begins to cast a spell.
+[info] chat: Vepaon begins to cast a spell.
+[info] chat: Vepaon begins to cast a spell.
+[info] chat: Vepaon begins to cast a spell.
+[info] chat: Linamas tells you, 'Hello'
+[info] chat: Linamas tells you, 'Hello'
+[info] chat: Linaheal begins to cast a spell.
+[info] chat: Linaheal begins to cast a spell.
+[info] chat: Linaheal begins to cast a spell.
+[info] chat: Linaheal begins to cast a spell.
+[info] chat: Linamas begins to cast a spell.
+[info] chat: Linamas begins to cast a spell.
+[info] stand state 100 -> 110: OP_SpawnAppearance {1339, 14, 110}
+[info] chat: It will take you about 30 seconds to prepare your camp.
+[info] chat: It will take you about 30 seconds to prepare your camp.
+[info] [camping] 
+[info] chat: Dureln begins to cast a spell.
+[info] chat: Dureln begins to cast a spell.
+[info] chat: It will take about 25 more seconds to prepare your camp.
+[info] chat: It will take about 25 more seconds to prepare your camp.
+[info] chat: It will take about 20 more seconds to prepare your camp.
+[info] chat: It will take about 20 more seconds to prepare your camp.
+[info] chat: It will take about 15 more seconds to prepare your camp.
+[info] chat: It will take about 15 more seconds to prepare your camp.
+[info] chat: It will take about 10 more seconds to prepare your camp.
+[info] chat: It will take about 10 more seconds to prepare your camp.
+[info] chat: Linamas begins to cast a spell.
+[info] chat: Linamas begins to cast a spell.
+[info] chat: It will take about 5 more seconds to prepare your camp.
+[info] chat: It will take about 5 more seconds to prepare your camp.
+[info] chat: Dureln begins to cast a spell.
+[info] chat: Dureln begins to cast a spell.
+[info] chat: Vepaon begins to cast a spell.
+[info] chat: Vepaon begins to cast a spell.
+[info] chat: [Plugin] HSMono: it may not run here
+[info] chat: [Plugin] HSMono unloaded
+[info] chat: [Plugin] HSMono: it may not run here
+[info] chat: [Plugin] HSMono unloaded
+[info] [disconnected] 
+[info]   error: Camped out.
