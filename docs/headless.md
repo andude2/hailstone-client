@@ -74,7 +74,10 @@ headless (no `WorldObjects`), so a walk passes through a closed door's
 doorway on the mesh and Navigator's clicks for a door in the way do not
 trigger; a direct door click still goes out when Navigator asks for one.
 Swimming pitch and vehicle/boat handling follow the movement body's own
-rules with no camera behind them.
+rules with no camera behind them. The server asking the client to move
+(`OP_RequestClientZoneChange`: a summon, `#goto`, a gate) goes through the
+same DoTeleportB the zone lines use, so a summon inside the zone moves the
+character there instead of zoning.
 
 ## Crew mode
 

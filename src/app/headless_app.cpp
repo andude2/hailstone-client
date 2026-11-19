@@ -534,6 +534,47 @@ int run_headless(HeadlessOptions options) {
     bool movement_ready = false; // the movement body placed at a zone-in
     glm::vec3 feet{0.0f};
     float yaw = 0.0f, pitch = 0.0f, floor_offset = 6.0f;
+    // DoTeleportB on the player (game/zoning.h), as the graphical client's
+    // teleport_b runs it with only the connection and collision behind its
+    // hooks: a move inside this zone places the movement body there, another
+    // zone goes out through MoveToZone. Shared by the zone lines below and
+    // the server's OP_RequestClientZoneChange (a summon, #goto), which the
+    // connection hands to the app's teleport handler.
+    auto teleport_b = [&](const game::TeleportBArgs& a) -> bool {
+        game::TeleportBPlayer p;
+        const glm::vec3 at = feet + glm::vec3(0, 0, floor_offset);
+        p.x = at.x;
+        p.y = at.y;
+        p.z = at.z;
+        p.heading = game::yaw_to_heading(yaw);
+        p.stand_state = conn->player_status().stand_state;
+        p.zone = static_cast<std::int32_t>(conn->current_zone_dword());
+        if (const game::Spawn* me = conn->world().player()) p.race = static_cast<std::int32_t>(me->race);
+        bool local = false;
+        game::TeleportBHooks b;
+        b.send_client_update = [&] { conn->send_position_now(); };
+        b.position_sample = [&](int kind) {
+            if (kind != game::kPositionUpdate) conn->record_position_sample(static_cast<std::uint32_t>(kind));
+        };
+        b.save_physics = [] {};
+        b.floor_height = [&](float fx, float fy, float fz, int) -> double {
+            local = true;
+            auto f = collision ? collision->floor_below({fx, fy, fz}, 0.0f) : std::nullopt;
+            return f ? static_cast<double>(*f) : static_cast<double>(game::kNoFloor);
+        };
+        b.update_actor = [] {};
+        b.find_person_request = [&] { conn->find_person_request(); };
+        b.rewind_reset = [] {};
+        b.move_to_zone = [&](const game::MoveToZoneCall& m) { conn->move_to_zone(m); };
+        bool ok = game::do_teleport_b(p, a, 5, b);
+        if (ok && local) {
+            feet = glm::vec3(p.x, p.y, p.z - floor_offset);
+            yaw = game::heading_to_yaw(p.heading);
+            movement.place(feet);
+            log::info("headless: moved within the zone to ({:.1f}, {:.1f}, {:.1f})", p.x, p.y, p.z);
+        }
+        return ok;
+    };
     // A zone line under the feet (game/zone_lines.h): DoTeleport as the
     // graphical client's region_teleport runs it, with only the connection
     // and the collision mesh behind its hooks.
@@ -566,38 +607,7 @@ int run_headless(HeadlessOptions options) {
             a.y = std::bit_cast<float>(y);
             a.z = std::bit_cast<float>(z);
             a.heading = std::bit_cast<float>(heading);
-            game::TeleportBPlayer p;
-            const glm::vec3 at = feet + glm::vec3(0, 0, floor_offset);
-            p.x = at.x;
-            p.y = at.y;
-            p.z = at.z;
-            p.heading = game::yaw_to_heading(yaw);
-            p.stand_state = conn->player_status().stand_state;
-            p.zone = static_cast<std::int32_t>(conn->current_zone_dword());
-            if (const game::Spawn* me = conn->world().player()) p.race = static_cast<std::int32_t>(me->race);
-            bool local = false;
-            game::TeleportBHooks b;
-            b.send_client_update = [&] { conn->send_position_now(); };
-            b.position_sample = [&](int kind) {
-                if (kind != game::kPositionUpdate) conn->record_position_sample(static_cast<std::uint32_t>(kind));
-            };
-            b.save_physics = [] {};
-            b.floor_height = [&](float fx, float fy, float fz, int) -> double {
-                local = true;
-                auto f = collision ? collision->floor_below({fx, fy, fz}, 0.0f) : std::nullopt;
-                return f ? static_cast<double>(*f) : static_cast<double>(game::kNoFloor);
-            };
-            b.update_actor = [] {};
-            b.find_person_request = [&] { conn->find_person_request(); };
-            b.rewind_reset = [] {};
-            b.move_to_zone = [&](const game::MoveToZoneCall& m) { conn->move_to_zone(m); };
-            bool ok = game::do_teleport_b(p, a, 5, b);
-            if (ok && local) {
-                feet = glm::vec3(p.x, p.y, p.z - floor_offset);
-                yaw = game::heading_to_yaw(p.heading);
-                movement.place(feet);
-            }
-            return ok;
+            return teleport_b(a);
         };
         h.send_index_request = [&](std::int32_t zp) { conn->send_teleport_index_request(zp); };
         h.position_sample = [&](int kind, const float* point) {
@@ -610,6 +620,16 @@ int run_headless(HeadlessOptions options) {
         game::do_teleport(in, h);
         if (in.waiting_for_port == 0 && conn->waiting_for_port()) conn->clear_waiting_for_port();
     };
+    // The connection's app hooks the graphical client installs per connection:
+    // CastSpell's line-of-sight test, and OP_RequestClientZoneChange's
+    // DoTeleportB (a summon or #goto in this zone moves the player instead of
+    // zoning). Without the second, a server summon is answered with a zone
+    // change the server never asked for and the movement body keeps
+    // reporting the old position, so the character stays where it was.
+    conn->set_line_of_sight([&collision](const glm::vec3& a, const glm::vec3& b) {
+        return !collision || collision->line_of_sight(a, b);
+    });
+    conn->set_teleport_handler([&teleport_b](const game::TeleportBArgs& a) { teleport_b(a); });
     Clock::time_point in_zone_at{}, last_status{};
     std::string zone_seen;
     net::ConnectionState last = net::ConnectionState::Idle;
