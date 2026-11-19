@@ -52,6 +52,7 @@ struct AutomationEnv {
     std::function<bool(std::string_view window)> window_open;  // a stock window shows (hs API)
     std::function<void(double degrees, bool fast)> face;       // MQ degrees, clockwise from north
     std::function<bool(std::string_view command, int mode)> keypress; // /keypress (0 tap, 1 hold, 2 release)
+    std::function<void()> raise_window; // /foreground
     std::function<nav::NavControl*()> nav; // /nav, /moveto and the Navigation TLO (app/navigator.h); null: none
     // The camera's zoom limit for plugins (plugin::NativeEnv); setting it cuts the zoom to it.
     std::function<float()> max_camera_distance;

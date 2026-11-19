@@ -1,0 +1,3 @@
+2026-11-18T19:30:58.4445442Z handshake refused: token mismatch (client 'Intruder', token file /tmp/sentinel-tests/out/sentinel-comms.token)
+2026-11-18T19:31:51.8407939Z handshake refused: token mismatch (client 'Intruder', token file /tmp/sentinel-tests/out/sentinel-comms.token)
+2026-11-18T19:32:37.8322264Z handshake refused: token mismatch (client 'Intruder', token file /mnt/c/Users/andy/source/repos/hailstone-client/plugins/Sentinel/Tests/bin/linux/sentinel-comms.token)

@@ -228,6 +228,7 @@ These are not in the original client.
 | `/abilitybook [auto [on\|off]]` | The Ability Book; `auto` turns autoskill on or off. |
 | `/finditem [text]`, `/advi [text]` | The Advanced Inventory, searching everything you have for the text. |
 | `/destroy` | Destroy the item on your cursor (the inventory's Destroy button). |
+| `/foreground` | Raise this client’s window and request keyboard focus. On Windows, a maximized window keeps its size. |
 | `/destroycursor <id>` | Destroy the item on your cursor without asking, only if its item id is `<id>`; never coin or a bag. For plugins (docs/plugins.md). |
 | `/stowcursor <id>` | Put the item on your cursor into your packs (never a worn slot), only if its item id is `<id>`. For plugins (docs/plugins.md). |
 | `/web [address]` | The in-game browser, on a new tab (docs/browser.md). |

@@ -169,6 +169,9 @@ Automation::Automation(AutomationEnv env) : impl_(std::make_unique<Impl>()) {
     ce.face = m.env.face;
     ce.keypress = m.env.keypress;
     m.commands = std::make_unique<mq::Commands>(ce);
+    if (m.env.raise_window)
+        m.hooks.add_command(plugin::Hooks::kClient, "/foreground",
+                            [&m](std::string_view) { m.env.raise_window(); });
 
     std::error_code ec;
     mq::ScriptEnv se;

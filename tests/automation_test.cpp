@@ -25,12 +25,14 @@ struct AutomationHost {
     mq_test::World world{"hailstone_automation_test"};
     std::unique_ptr<app::Automation> automation;
     std::vector<std::pair<mq::AbilityKind, std::string>> used;
+    int window_raises = 0;
     AutomationHost() {
         net::GameConnectionTestAccess::set_server_rules(*world.conn, plugin::Rules{}); // no hailstone.cfg: free
         app::AutomationEnv env;
         env.data_dir = world.dir / "data";
         env.install_dir = world.dir / "install";
         env.connection = [this] { return world.conn.get(); };
+        env.raise_window = [this] { ++window_raises; };
         env.autoskill_list = [] {
             game::AutoskillRule kick;
             kick.key = "skill:30";
@@ -62,6 +64,13 @@ struct AutomationHost {
     }
 };
 } // namespace
+
+TEST_CASE("Automation: /foreground raises this client window") {
+    AutomationHost h;
+    std::string line = "/foreground";
+    CHECK(h.automation->hooks().command(line));
+    CHECK(h.window_raises == 1);
+}
 
 TEST_CASE("Automation: a script holds autoskill off while it runs; stopping it lets go") {
     AutomationHost h;

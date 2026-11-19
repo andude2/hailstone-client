@@ -148,6 +148,8 @@ public:
     void set_text_input(bool on);
     // Whether the window has the keyboard focus.
     bool focused() const;
+    // Raise the window and request keyboard focus.
+    void raise();
 
     // Fullscreen: the window's mode, and switching it (Fullscreen uses the display mode closest to `size`, or the
     // desktop's when it is 0 x 0). In Windowed mode a non-zero size resizes the window (and un-maximizes it).
