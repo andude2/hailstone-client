@@ -787,8 +787,18 @@ int run_headless(HeadlessOptions options) {
                             const float own = glm::length(glm::vec2(frame.velocity)) * 60.0f;
                             std::string target = "none";
                             float seen = 0.0f, trun = 0.0f, twalk = 0.0f;
-                            if (const auto t = conn->world().spawns.find(conn->world().target_id);
-                                conn->world().target_id && t != conn->world().spawns.end()) {
+                            // The spawn being walked to (Navigator's stick
+                            // spawn, else its goal by name), else the target:
+                            // a chase rarely leaves the leader targeted.
+                            std::uint32_t goal_id = navigator.status().stick_spawn;
+                            if (!goal_id && conn->world().target_id) goal_id = conn->world().target_id;
+                            if (!goal_id) {
+                                const std::string goal = navigator.status().goal;
+                                for (const auto& [id, s] : conn->world().spawns)
+                                    if (game::display_name(s.name) == goal) { goal_id = id; break; }
+                            }
+                            if (const auto t = conn->world().spawns.find(goal_id);
+                                goal_id && t != conn->world().spawns.end()) {
                                 target = game::display_name(t->second.name);
                                 trun = t->second.run_speed;
                                 twalk = t->second.walk_speed;
