@@ -775,18 +775,46 @@ int run_headless(HeadlessOptions options) {
                     pitch = std::clamp(frame.pitch, -1.5f, 1.5f);
                     // Once a second of walking: our own speed in units a
                     // second (the body's velocity a tick, at 60 ticks), and
-                    // the target spawn's observed speed from its smoothed
-                    // positions, with the spawn record's run/walk multipliers
-                    // both stand on (0.7 for a player before buffs).
+                    // the fastest the target spawn actually moved in that
+                    // second (its smoothed positions sampled every step: an
+                    // average over the second reads low whenever it stops
+                    // or turns, which a chased leader does constantly), with
+                    // the spawn record's run/walk multipliers both stand on
+                    // (0.7 / 0.30 for a player before buffs).
                     if (steer.active) {
                         static int nav_steps = 0;
                         static std::uint32_t seen_id = 0;
                         static glm::vec3 seen_pos{0.0f};
                         static Clock::time_point seen_at{};
+                        static float seen_fastest = 0.0f;
+                        const auto sample_at = Clock::now();
+                        {
+                            // Sampled every step, whatever is logged later.
+                            std::uint32_t want = navigator.status().stick_spawn;
+                            if (!want && conn->world().target_id) want = conn->world().target_id;
+                            if (!want) {
+                                const std::string goal = navigator.status().goal;
+                                for (const auto& [id, s] : conn->world().spawns)
+                                    if (game::display_name(s.name) == goal) { want = id; break; }
+                            }
+                            if (const auto s = conn->world().spawns.find(want); want && s != conn->world().spawns.end()) {
+                                if (seen_id == want && seen_at != Clock::time_point{}) {
+                                    const float dt = std::chrono::duration<float>(sample_at - seen_at).count();
+                                    if (dt > 0.0f)
+                                        seen_fastest = std::max(seen_fastest,
+                                                                glm::length(glm::vec2(s->second.position - seen_pos)) / dt);
+                                } else {
+                                    seen_id = want;
+                                    seen_fastest = 0.0f;
+                                }
+                                seen_pos = s->second.position;
+                                seen_at = sample_at;
+                            }
+                        }
                         if (++nav_steps % 60 == 1) {
                             const float own = glm::length(glm::vec2(frame.velocity)) * 60.0f;
                             std::string target = "none";
-                            float seen = 0.0f, trun = 0.0f, twalk = 0.0f;
+                            float trun = 0.0f, twalk = 0.0f;
                             // The spawn being walked to (Navigator's stick
                             // spawn, else its goal by name), else the target:
                             // a chase rarely leaves the leader targeted.
@@ -802,18 +830,11 @@ int run_headless(HeadlessOptions options) {
                                 target = game::display_name(t->second.name);
                                 trun = t->second.run_speed;
                                 twalk = t->second.walk_speed;
-                                const auto now = Clock::now();
-                                if (seen_id == t->first && seen_at != Clock::time_point{}) {
-                                    const float dt = std::chrono::duration<float>(now - seen_at).count();
-                                    if (dt > 0.0f) seen = glm::length(glm::vec2(t->second.position - seen_pos)) / dt;
-                                }
-                                seen_id = t->first;
-                                seen_pos = t->second.position;
-                                seen_at = now;
                             }
                             log::info("headless nav: own {:.1f} u/s (record run {:.2f} walk {:.2f}); target {} "
-                                      "{:.1f} u/s (record run {:.2f} walk {:.2f})",
-                                      own, me->run_speed, me->walk_speed, target, seen, trun, twalk);
+                                      "fastest {:.1f} u/s (record run {:.2f} walk {:.2f})",
+                                      own, me->run_speed, me->walk_speed, target, seen_fastest, trun, twalk);
+                            seen_fastest = 0.0f;
                         }
                     }
                     nav_was_active = steer.active;
