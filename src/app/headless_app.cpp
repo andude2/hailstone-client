@@ -775,19 +775,16 @@ int run_headless(HeadlessOptions options) {
                     pitch = std::clamp(frame.pitch, -1.5f, 1.5f);
                     // Once a second of walking: our own speed in units a
                     // second (the body's velocity a tick, at 60 ticks), and
-                    // the fastest the target spawn actually moved in that
-                    // second (its smoothed positions sampled every step: an
-                    // average over the second reads low whenever it stops
-                    // or turns, which a chased leader does constantly), with
-                    // the spawn record's run/walk multipliers both stand on
+                    // the fastest the target spawn moved in that second by
+                    // its own update velocity (units a 50 ms tick, x20: a
+                    // position average reads low whenever it stops or turns,
+                    // and position deltas spike on a teleport or summon,
+                    // whose updates carry no velocity), with the spawn
+                    // record's run/walk multipliers both stand on
                     // (0.7 / 0.30 for a player before buffs).
                     if (steer.active) {
                         static int nav_steps = 0;
-                        static std::uint32_t seen_id = 0;
-                        static glm::vec3 seen_pos{0.0f};
-                        static Clock::time_point seen_at{};
                         static float seen_fastest = 0.0f;
-                        const auto sample_at = Clock::now();
                         {
                             // Sampled every step, whatever is logged later.
                             std::uint32_t want = navigator.status().stick_spawn;
@@ -797,19 +794,8 @@ int run_headless(HeadlessOptions options) {
                                 for (const auto& [id, s] : conn->world().spawns)
                                     if (game::display_name(s.name) == goal) { want = id; break; }
                             }
-                            if (const auto s = conn->world().spawns.find(want); want && s != conn->world().spawns.end()) {
-                                if (seen_id == want && seen_at != Clock::time_point{}) {
-                                    const float dt = std::chrono::duration<float>(sample_at - seen_at).count();
-                                    if (dt > 0.0f)
-                                        seen_fastest = std::max(seen_fastest,
-                                                                glm::length(glm::vec2(s->second.position - seen_pos)) / dt);
-                                } else {
-                                    seen_id = want;
-                                    seen_fastest = 0.0f;
-                                }
-                                seen_pos = s->second.position;
-                                seen_at = sample_at;
-                            }
+                            if (const auto s = conn->world().spawns.find(want); want && s != conn->world().spawns.end())
+                                seen_fastest = std::max(seen_fastest, glm::length(glm::vec2(s->second.velocity)) * 20.0f);
                         }
                         if (++nav_steps % 60 == 1) {
                             const float own = glm::length(glm::vec2(frame.velocity)) * 60.0f;
