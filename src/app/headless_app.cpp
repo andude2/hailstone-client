@@ -773,9 +773,39 @@ int run_headless(HeadlessOptions options) {
                     feet = frame.feet;
                     yaw = frame.yaw;
                     pitch = std::clamp(frame.pitch, -1.5f, 1.5f);
-                    if (steer.active && !nav_was_active)
-                        log::info("headless nav: walking at speed {:.1f} (running {})", frame.speed_run,
-                                  conn->running() ? "yes" : "no");
+                    // Once a second of walking: our own speed in units a
+                    // second (the body's velocity a tick, at 60 ticks), and
+                    // the target spawn's observed speed from its smoothed
+                    // positions, with the spawn record's run/walk multipliers
+                    // both stand on (0.7 for a player before buffs).
+                    if (steer.active) {
+                        static int nav_steps = 0;
+                        static std::uint32_t seen_id = 0;
+                        static glm::vec3 seen_pos{0.0f};
+                        static Clock::time_point seen_at{};
+                        if (++nav_steps % 60 == 1) {
+                            const float own = glm::length(glm::vec2(frame.velocity)) * 60.0f;
+                            std::string target = "none";
+                            float seen = 0.0f, trun = 0.0f, twalk = 0.0f;
+                            if (const auto t = conn->world().spawns.find(conn->world().target_id);
+                                conn->world().target_id && t != conn->world().spawns.end()) {
+                                target = game::display_name(t->second.name);
+                                trun = t->second.run_speed;
+                                twalk = t->second.walk_speed;
+                                const auto now = Clock::now();
+                                if (seen_id == t->first && seen_at != Clock::time_point{}) {
+                                    const float dt = std::chrono::duration<float>(now - seen_at).count();
+                                    if (dt > 0.0f) seen = glm::length(glm::vec2(t->second.position - seen_pos)) / dt;
+                                }
+                                seen_id = t->first;
+                                seen_pos = t->second.position;
+                                seen_at = now;
+                            }
+                            log::info("headless nav: own {:.1f} u/s (record run {:.2f} walk {:.2f}); target {} "
+                                      "{:.1f} u/s (record run {:.2f} walk {:.2f})",
+                                      own, me->run_speed, me->walk_speed, target, seen, trun, twalk);
+                        }
+                    }
                     nav_was_active = steer.active;
                     for (const auto& line : frame.messages) log::info("movement: {}", line);
                     if (frame.stand_state) conn->set_stand_state(*frame.stand_state);
