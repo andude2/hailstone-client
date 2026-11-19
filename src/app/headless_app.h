@@ -46,6 +46,7 @@ struct HeadlessOptions {
     std::string crew_file; // --crew FILE: supervise one child per crew member (below) instead of one character
     std::string plugin_autoload = "*"; // --autoload LIST: the plugins to load ("*" all, else names, space/comma separated)
     bool chat_log = true; // --no-chat-log: drain chat without printing it (the hooks still see every line)
+    bool quiet = false;   // --quiet: the log goes to its file only, nothing to this console (a crew child)
     bool list_servers = false; // --list-servers: print the login server list and exit
     // Command lines sent as the player's would be (through the hook bus):
     // --exec once after the first zone-in, --exec-zone at every zone-in.

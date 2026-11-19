@@ -12,6 +12,10 @@ namespace hailstone::log {
 enum class Level { Debug, Info, Warn, Error };
 
 void set_level(Level level);
+// The stdout/stderr copy of each line (the file keeps everything): off for
+// a process whose console belongs to a supervisor (a headless crew child),
+// so many processes sharing one console only speak through their own lines.
+void set_console_enabled(bool enabled);
 // Whether a line at `level` is written at the level set now.
 bool enabled(Level level);
 void write(Level level, std::string_view message);

@@ -112,6 +112,10 @@ character=Tankguy
 seconds=0
 ```
 
+Each child also runs `--quiet`: its whole log goes to its per-character
+log file and nothing to the supervisor's console, which shows only the
+supervisor's own started/ended/relaunch lines.
+
 A member names a saved `server` (its id or name) and `account`; its
 `character` and the account's saved `world` are the defaults from the
 profile, so most members need only those three lines plus their `exec`.

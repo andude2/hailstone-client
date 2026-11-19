@@ -67,10 +67,11 @@ TEST_CASE("headless: --server/--account parse without host or password; --crew s
     CHECK(c.error.empty());
     CHECK(c.options.crew_file == "crew.ini");
     auto q = app::parse_headless_args({"--host", "h", "--user", "u", "--password", "p", "--character", "c",
-                                       "--game-dir", "/g", "--autoload", "HSMono", "--no-chat-log"});
+                                       "--game-dir", "/g", "--autoload", "HSMono", "--no-chat-log", "--quiet"});
     CHECK(q.error.empty());
     CHECK(q.options.plugin_autoload == "HSMono");
     CHECK_FALSE(q.options.chat_log);
+    CHECK(q.options.quiet);
 }
 
 TEST_CASE("headless: a saved server is picked by id, name, or a unique part") {

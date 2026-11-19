@@ -85,6 +85,7 @@ HeadlessArgs parse_headless_args(const std::vector<std::string_view>& args) {
         else if (a == "--crew") out.options.crew_file = need(a);
         else if (a == "--autoload") out.options.plugin_autoload = need(a);
         else if (a == "--no-chat-log") out.options.chat_log = false;
+        else if (a == "--quiet") out.options.quiet = true;
         else if (a == "--list-servers") out.options.list_servers = true;
         else if (a == "--exec") out.options.exec.emplace_back(need(a));
         else if (a == "--exec-zone") out.options.exec_zone.emplace_back(need(a));
@@ -273,6 +274,7 @@ int run_crew(const HeadlessOptions& options) {
         if (!r.crew.exec_zone.empty()) args.insert(args.end(), {"--exec-zone", r.crew.exec_zone});
         args.insert(args.end(), {"--autoload", !r.crew.autoload.empty() ? r.crew.autoload : crew.autoload});
         if (!(r.crew.chat_log >= 0 ? r.crew.chat_log != 0 : crew.chat_log)) args.emplace_back("--no-chat-log");
+        args.emplace_back("--quiet"); // its log is its file's; this console is the supervisor's
         if (r.crew.seconds > 0) args.insert(args.end(), {"--seconds", std::to_string(r.crew.seconds)});
         std::string error;
         if (children.start_tracked(r.crew.label, args, error)) {
@@ -345,6 +347,7 @@ int run_headless(HeadlessOptions options) {
     stop_requested = 0;
     std::signal(SIGINT, on_stop_signal);
     std::signal(SIGTERM, on_stop_signal);
+    if (options.quiet) log::set_console_enabled(false); // everything still goes to the log file
     // Share a graphical client's folder when asked: its plugins, its
     // per-character plugin configs and its servers/ profiles are the crew's,
     // and an automation's config (e.g. HSMono's sentinel.json, which starts
