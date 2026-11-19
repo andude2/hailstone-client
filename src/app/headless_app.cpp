@@ -535,6 +535,7 @@ int run_headless(HeadlessOptions options) {
     const auto start = Clock::now();
     bool entered = false, first_zone = true, consent_logged = false;
     bool movement_ready = false; // the movement body placed at a zone-in
+    bool nav_was_active = false; // for the walk's speed line, once per walk
     glm::vec3 feet{0.0f};
     float yaw = 0.0f, pitch = 0.0f, floor_offset = 6.0f;
     // DoTeleportB on the player (game/zoning.h), as the graphical client's
@@ -641,6 +642,16 @@ int run_headless(HeadlessOptions options) {
         const auto now_us = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start).count());
         auto steps = step_clock.advance(now_us);
+        if (step_clock.take_dropped()) {
+            // The game clock drops time past a 250 ms hitch (docs/mechanics.md
+            // "Frame rate"): under load the movement then lags the wall clock,
+            // which reads as walking slower than a graphical client.
+            static Clock::time_point last_drop_log{};
+            if (Clock::now() - last_drop_log > std::chrono::seconds(10)) {
+                last_drop_log = Clock::now();
+                log::warn("headless: the game clock dropped steps under load; movement lags the wall clock");
+            }
+        }
         if (conn && !steps.empty()) {
             std::vector<std::int64_t> at;
             const std::int64_t conn_now = net::GameConnection::now_ms();
@@ -711,6 +722,7 @@ int run_headless(HeadlessOptions options) {
             // and driven per game step by Navigator's steering, as the
             // graphical client drives it: /nav, /moveto and /stick walk here.
             if (const game::Spawn* me = conn->world().player(); me && !movement_ready) {
+                conn->set_running(true); // a background character travels at a run (the GUI's run/walk toggle)
                 floor_offset = me->heights.avatar_height;
                 feet = me->position - glm::vec3(0, 0, floor_offset);
                 yaw = game::heading_to_yaw(me->heading);
@@ -761,6 +773,10 @@ int run_headless(HeadlessOptions options) {
                     feet = frame.feet;
                     yaw = frame.yaw;
                     pitch = std::clamp(frame.pitch, -1.5f, 1.5f);
+                    if (steer.active && !nav_was_active)
+                        log::info("headless nav: walking at speed {:.1f} (running {})", frame.speed_run,
+                                  conn->running() ? "yes" : "no");
+                    nav_was_active = steer.active;
                     for (const auto& line : frame.messages) log::info("movement: {}", line);
                     if (frame.stand_state) conn->set_stand_state(*frame.stand_state);
                     if (frame.sit_toggle) conn->sit_toggle();
