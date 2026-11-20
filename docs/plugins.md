@@ -718,7 +718,7 @@ Buff, spawn, extended target, ability and raid records: `get_buff_data_bulk(host
 `get_spawns_data_bulk(host, out, out_size)`, `get_xtarget_data_bulk(host, out, out_size)`,
 `get_target_buff_data_bulk(host, out, out_size)`, `get_avail_aa_data_bulk(host, out, out_size)`,
 `get_avail_disc_data_bulk(host, out, out_size)`, `get_buff_name_data_bulk(host, out, out_size)`,
-`get_ability_data_bulk(host, out, out_size)` and
+`get_ability_data_bulk(host, out, out_size)`, `get_loot_data_bulk(host, out, out_size)` and
 `get_raid_data_bulk(host, out, out_size)` (with `read`; added later in ABI 3, so test `HAILSTONE_HOST_HAS(host, <field>)` first;
 `out` is an `unsigned char*` and `out_size` an `int32_t`) write records into `out` and return the bytes written.
 The records are the SDK's packed structs (`HS_Bulk_BuffData`, `HS_Bulk_PetBuffData`, `HS_Bulk_SpawnHeader`,
@@ -1001,6 +1001,68 @@ size nothing is written and 0 comes back; with nothing to list the header alone 
   The `LOOTER` flag follows the loot type: 1 Leader Only, 2 Leader and Group Leader, 3 Leader Selected, 4 Entire
   Raid. That differs from the raid window's own `looter()` check for the member menu, which only tests the leader
   and the listed looters; the flag here answers "may this member loot under the current type".
+
+### Loot records and actions
+
+The loot window's session is a plugin's to read and drive: corpses are found as spawns
+(`get_spawns_data_bulk` and the spawn searches; a corpse's `is_corpse`), and the session the client holds
+for the corpse being looted is read and acted on here. Added later in ABI 3: test
+`HAILSTONE_HOST_HAS(host, get_loot_data_bulk)` first.
+
+- `get_loot_data_bulk(host, out, out_size)` (with `read`): an `HS_BulkLootHeader`
+  (`HS_BULK_LOOT_HEADER_SIZE` = 120 bytes), then one record per item slot of the open session, in slot
+  order. A reader starts the records at the header's `size` and steps by its `recordSize`; `count < total`
+  means `out_size` cut the list, so retry with a larger buffer. With no session the header alone goes out
+  (`corpseId` 0), so a caller can poll it.
+
+  Header (`HS_BulkLootHeader`):
+
+  | Offset | Type | Field |
+  |---|---|---|
+  | 0 | u32 | `sizeof(HS_BulkLootHeader)` |
+  | 4 | i32 | version, 1 |
+  | 8 | u32 | the session's corpse spawn id; 0 with no session |
+  | 12 | u32 | that spawn's incarnation now; 0 when it is gone (read it beside `get_spawn`, so a reused spawn id is not mistaken for the same corpse) |
+  | 16 | i32 | bytes between records; a later client may grow it |
+  | 20 | i32 | open: the server accepted the loot request |
+  | 24 | i32 | complete: every item of the session has arrived |
+  | 28 | i32 | `count`: records that follow (what fit in `out_size`) |
+  | 32 | i32 | `total`: the item slots the session holds |
+  | 36 | i32 | loot requests awaiting the server's answer |
+  | 40 | i32 | the session's coin: platinum, then gold, silver, copper (offsets 40, 44, 48, 52) |
+  | 56 | char[64] | the corpse's name, NUL-terminated; "" with no session |
+
+  Each record (`HS_BulkLootRecord`, `HS_BULK_LOOT_RECORD_SIZE` = 24 bytes of fixed part, then the item's
+  name, `nameLength` bytes with no terminating NUL; the next record starts after the name):
+
+  | Offset | Type | Field |
+  |---|---|---|
+  | 0 | i32 | the corpse slot |
+  | 4 | i32 | item id |
+  | 8 | i32 | icon id |
+  | 12 | i32 | the stack's count (1 when not stackable) |
+  | 16 | u32 | flags: 1 lore (the item has a lore group; the client refuses a second one), 2 no-drop (taking it asks first), 4 no-rent (a temporary item) |
+  | 20 | i32 | `nameLength`: the bytes of the item's name that follow |
+
+  A session's items can arrive over several packets; wait for `open` and read again while `complete` is
+  0, and watch `pending` before acting on a slot a request is still out for. An item's fuller record
+  (classes, races, effects, augments) is the item display's: `inspect_item` and the `get_item` family cover
+  items the player holds, and a looted item is the player's once taken.
+
+- With `actions`: `loot_corpse(corpse_id)` asks the server to open that corpse (the loot window's own
+  request; nonzero when the request went out), `loot_item(slot, auto_loot)` takes one slot of the open
+  session (into the inventory, or onto the cursor without `auto_loot`), `loot_all()` takes everything, and
+  `end_loot()` closes the session, as the window's buttons do. The client's own questions apply on the
+  way: a no-drop item (flag 2 above) and a stack's quantity ask first instead of going out at once.
+- `answer_confirmation(yes)` (with `actions`) answers the confirmation question the client is asking now
+  — the no-drop and quantity questions above, or any other stock question — and does nothing when none
+  is open. A caller that loots unattended answers for the player, so it should ask only when its own
+  rules have already decided the item.
+
+Corpse slots are not inventory slots: they are read here, not with `get_item`, whose slots address what
+the player holds. What the player holds is counted with `get_item` over the possessions and their bags,
+the cursor item with the cursor slot, and `/destroycursor` and `/stowcursor` (above) settle a cursor item
+by its id.
 
 ### Connections (ABI 2)
 

@@ -47,6 +47,10 @@ static_assert(offsetof(PluginHostApi, get_raid_data_bulk) == offsetof(PluginHost
 static_assert(offsetof(PluginHostApi, get_ability_data_bulk) == offsetof(PluginHostApi, caps) + 88 * sizeof(PluginHostApi::caps));
 static_assert(offsetof(PluginHostApi, select_raid_member) == offsetof(PluginHostApi, caps) + 89 * sizeof(PluginHostApi::caps));
 static_assert(offsetof(PluginHostApi, set_class_name) == offsetof(PluginHostApi, get_map_policy) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, get_loot_data_bulk) == offsetof(PluginHostApi, caps) + 105 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, answer_confirmation) == offsetof(PluginHostApi, caps) + 110 * sizeof(PluginHostApi::caps));
+static_assert(sizeof(HS_BulkLootHeader) == HS_BULK_LOOT_HEADER_SIZE);
+static_assert(sizeof(HS_BulkLootRecord) == HS_BULK_LOOT_RECORD_SIZE);
 
 namespace {
 
@@ -407,6 +411,50 @@ void probe_raid(void*, const char* args) {
     }
 }
 
+// The loot session's header, then each item one line: slot, name, item id, icon, quantity, flags.
+void probe_loot(void*, const char* args) {
+    if (!HAILSTONE_HOST_HAS(host, get_loot_data_bulk)) {
+        WriteChatf("[Probe] loot: not in this client");
+        return;
+    }
+    unsigned char buf[8192];
+    const std::int32_t r = host->get_loot_data_bulk(host->host, buf, size_arg(args, sizeof buf));
+    if (r < static_cast<std::int32_t>(sizeof(HS_BulkLootHeader))) {
+        WriteChatf("[Probe] loot %d bytes", r);
+        return;
+    }
+    const auto* header = reinterpret_cast<const HS_BulkLootHeader*>(buf);
+    WriteChatf("[Probe] loot corpse %u inc %u open %d complete %d count %d total %d pending %d coin %d %d %d %d %s %d bytes",
+        header->corpseId, header->corpseIncarnation, header->open, header->complete, header->count, header->total,
+        header->pending, header->platinum, header->gold, header->silver, header->copper, header->corpseName, r);
+    std::size_t at = header->size >= sizeof(HS_BulkLootHeader) ? header->size : sizeof(HS_BulkLootHeader);
+    for (std::int32_t i = 0; i < header->count; ++i) {
+        const auto* rec = reinterpret_cast<const HS_BulkLootRecord*>(buf + at);
+        WriteChatf("[Probe] loot slot %d: %.*s %d icon %d qty %d flags %u", rec->slot, rec->nameLength,
+            reinterpret_cast<const char*>(buf + at + sizeof(HS_BulkLootRecord)), rec->itemId, rec->iconId,
+            rec->quantity, rec->flags);
+        at += static_cast<std::size_t>(header->recordSize) + static_cast<std::size_t>(rec->nameLength);
+    }
+}
+
+// The loot actions by their return: open <corpse>, item <slot> <auto>, all, end, confirm <yes>.
+void probe_loot_act(void*, const char* args) {
+    if (!HAILSTONE_HOST_HAS(host, loot_corpse)) {
+        WriteChatf("[Probe] loot act: not in this client");
+        return;
+    }
+    int a = 0, b = 0;
+    char op[16] = {};
+    std::sscanf(args ? args : "", "%15s %d %d", op, &a, &b);
+    int r = 0;
+    if (!std::strcmp(op, "open")) r = host->loot_corpse(host->host, static_cast<std::uint32_t>(a));
+    else if (!std::strcmp(op, "item")) r = host->loot_item(host->host, a, b);
+    else if (!std::strcmp(op, "all")) r = host->loot_all(host->host);
+    else if (!std::strcmp(op, "end")) r = host->end_loot(host->host);
+    else if (!std::strcmp(op, "confirm")) r = host->answer_confirmation(host->host, a);
+    WriteChatf("[Probe] loot act %s %d", op, r);
+}
+
 void probe_cursor(void*, const char*) {
     if (!HAILSTONE_HOST_HAS(host, cursor_origin)) {
         WriteChatf("[Probe] cursor origin: not in this client");
@@ -646,6 +694,8 @@ HAILSTONE_API void InitializePlugin(void) {
     AddCommand("/probediscs", probe_disc, nullptr);
     AddCommand("/proberaid", probe_raid, nullptr);
     AddCommand("/probecursor", probe_cursor, nullptr);
+    AddCommand("/probeloot", probe_loot, nullptr);
+    AddCommand("/probelootact", probe_loot_act, nullptr);
     AddCommand("/probebinary", probe_binary, nullptr);
     AddCommand("/probebinarythread", probe_binary_thread, nullptr);
     AddCommand("/probedecode", probe_decode, nullptr);

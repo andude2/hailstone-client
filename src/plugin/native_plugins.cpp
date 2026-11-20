@@ -2150,6 +2150,55 @@ int32_t h_get_raid_data_bulk(void* h, unsigned char* data, int32_t datamax) {
     return written;
 }
 
+// The open loot session as records (docs/plugins.md "Loot records and actions"): the header states the
+// session even with no items, and with no session at all (corpseId 0) so a caller can poll it.
+int32_t h_get_loot_data_bulk(void* h, unsigned char* data, int32_t datamax) {
+    const net::GameConnection* c = readable(Loaded::of(h), "get_loot_data_bulk");
+    if (!c || !data || datamax < static_cast<int32_t>(sizeof(HS_BulkLootHeader))) return 0;
+    static_assert(sizeof(HS_BulkLootHeader) == HS_BULK_LOOT_HEADER_SIZE);
+    static_assert(sizeof(HS_BulkLootRecord) == HS_BULK_LOOT_RECORD_SIZE);
+    HS_BulkLootHeader header{};
+    header.size = static_cast<std::uint32_t>(sizeof header);
+    header.version = 1;
+    header.recordSize = static_cast<std::int32_t>(sizeof(HS_BulkLootRecord));
+    int32_t written = static_cast<int32_t>(sizeof header);
+    if (const auto& loot = c->loot_session()) {
+        header.corpseId = loot->corpse_id;
+        if (auto it = c->world().spawns.find(loot->corpse_id); it != c->world().spawns.end())
+            header.corpseIncarnation = static_cast<std::uint32_t>(it->second.incarnation);
+        header.open = loot->open ? 1 : 0;
+        header.complete = loot->complete ? 1 : 0;
+        header.pending = static_cast<std::int32_t>(loot->pending_requests);
+        header.platinum = static_cast<std::int32_t>(loot->money.platinum);
+        header.gold = static_cast<std::int32_t>(loot->money.gold);
+        header.silver = static_cast<std::int32_t>(loot->money.silver);
+        header.copper = static_cast<std::int32_t>(loot->money.copper);
+        copy_name(header.corpseName, loot->corpse_name);
+        header.total = static_cast<std::int32_t>(loot->items.size());
+        unsigned char* p = data + sizeof header;
+        for (const auto& [slot, item] : loot->items) {
+            const std::int32_t need = static_cast<std::int32_t>(sizeof(HS_BulkLootRecord) + item.name.size());
+            if (need > datamax - written) break; // whole records only, in slot order
+            HS_BulkLootRecord rec{};
+            rec.slot = slot;
+            rec.itemId = static_cast<std::int32_t>(item.id);
+            rec.iconId = static_cast<std::int32_t>(item.icon);
+            rec.quantity = static_cast<std::int32_t>(item.stack_count);
+            if (!item.lore.empty()) rec.flags |= HS_LOOT_FLAG_LORE;
+            if (c->loot_asks_no_drop(item)) rec.flags |= HS_LOOT_FLAG_NO_DROP;
+            if (item.no_rent == 0) rec.flags |= HS_LOOT_FLAG_NO_RENT;
+            rec.nameLength = static_cast<std::int32_t>(item.name.size());
+            std::memcpy(p, &rec, sizeof rec);
+            std::memcpy(p + sizeof rec, item.name.data(), item.name.size());
+            p += need;
+            written += need;
+            ++header.count;
+        }
+    }
+    std::memcpy(data, &header, sizeof header);
+    return written;
+}
+
 int h_get_xtarget(void* h, std::uint32_t index, HailstoneXTarget* out) {
     const net::GameConnection* c = readable(Loaded::of(h), "get_xtarget");
     if (!c) return 0;
@@ -2180,6 +2229,41 @@ net::GameConnection* acting(Loaded& l, const char* what) {
         return nullptr;
     }
     return connection_of(l);
+}
+
+int h_loot_corpse(void* h, std::uint32_t corpse_id) {
+    net::GameConnection* c = acting(Loaded::of(h), "loot_corpse");
+    if (!c || !corpse_id) return 0;
+    c->loot(corpse_id);
+    return 1;
+}
+
+int h_loot_item(void* h, std::int32_t slot, int auto_loot) {
+    net::GameConnection* c = acting(Loaded::of(h), "loot_item");
+    if (!c || !c->loot_session() || !c->loot_session()->open) return 0;
+    c->loot_item(static_cast<std::int16_t>(slot), auto_loot != 0);
+    return 1;
+}
+
+int h_loot_all(void* h) {
+    net::GameConnection* c = acting(Loaded::of(h), "loot_all");
+    if (!c || !c->loot_session() || !c->loot_session()->open) return 0;
+    c->loot_all();
+    return 1;
+}
+
+int h_end_loot(void* h) {
+    net::GameConnection* c = acting(Loaded::of(h), "end_loot");
+    if (!c || !c->loot_session()) return 0;
+    c->end_loot();
+    return 1;
+}
+
+int h_answer_confirmation(void* h, int yes) {
+    net::GameConnection* c = acting(Loaded::of(h), "answer_confirmation");
+    if (!c || !c->confirmation()) return 0;
+    c->answer_confirmation(yes != 0);
+    return 1;
 }
 
 int h_right_click_item(void* h, const HailstoneItemSlot* slot, std::uint32_t class_id) {
@@ -3040,6 +3124,12 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
     p.table.measure_binary = main_only<h_measure_binary>;
     p.table.get_map_policy = main_only<h_get_map_policy>;
     p.table.set_class_name = main_only<h_set_class_name>;
+    p.table.get_loot_data_bulk = main_only<h_get_loot_data_bulk>;
+    p.table.loot_corpse = main_only<h_loot_corpse>;
+    p.table.loot_item = main_only<h_loot_item>;
+    p.table.loot_all = main_only<h_loot_all>;
+    p.table.end_loot = main_only<h_end_loot>;
+    p.table.answer_confirmation = main_only<h_answer_confirmation>;
     Hooks& hooks = *m.env.hooks;
     Loaded* lp = &p;
     // Each callback runs with the plugin's capabilities and counts as the plugin being busy (no unloading under it).

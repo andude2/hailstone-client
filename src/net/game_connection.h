@@ -1823,6 +1823,9 @@ public:
     void loot_all();
     void end_loot();
     const std::optional<LootSession>& loot_session() const { return loot_; }
+    // Whether taking this item out of a corpse would ask first (LootNoDrop): the loot window's own question,
+    // asked of a plugin reading the session before it loots.
+    bool loot_asks_no_drop(const Item& item) const;
     // Item links: asks the server for the linked item (OP_ItemLinkClick); its
     // OP_ItemLinkResponse arrives through take_item_display().
     void request_item(const game::ItemLink& link);
@@ -3434,7 +3437,6 @@ private:
     void loot_all_now();              // CLootWnd::LootAll(1)
     void send_loot_item(std::int16_t corpse_slot, bool auto_loot, std::uint32_t quantity = 0); // OP_LootItem
     bool looting_own_corpse() const;  // the loot corpse's owner (+0xe4) is the player
-    bool loot_asks_no_drop(const Item& item) const;
     bool can_use_item_class(const Item& item) const; // CanUseItem(item, 0, 0)
     std::deque<Item> item_displays_;
     std::deque<Item> item_refreshes_;                     // for take_item_refresh()

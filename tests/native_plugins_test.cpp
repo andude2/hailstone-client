@@ -224,6 +224,70 @@ TEST_CASE("native plugins: raid_action moves a member only as the locked raid's 
     CHECK(move("Groupie 2") == "[Probe] raid move 0");
 }
 
+TEST_CASE("native plugins: the loot bulk reads the open session; the loot actions drive it") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll);
+    REQUIRE(h.plugins->load("HostProbe"));
+    auto run = [&](const std::string& line) {
+        h.printed.clear();
+        h.run(line);
+        return h.printed;
+    };
+    // No session: the header alone, corpse 0, so a caller can poll it.
+    auto lines = run("/probeloot");
+    REQUIRE(lines.size() == 1);
+    CHECK(lines[0] == "[Probe] loot corpse 0 inc 0 open 0 complete 0 count 0 total 0 pending 0 coin 0 0 0 0  120 bytes");
+    // Taking or closing without a session does nothing.
+    CHECK(run("/probelootact item 0 1")[0] == "[Probe] loot act item 0");
+    CHECK(run("/probelootact end")[0] == "[Probe] loot act end 0");
+    CHECK(run("/probelootact confirm 1")[0] == "[Probe] loot act confirm 0");
+
+    // An open session on a corpse, two items (one lore), coin.
+    auto& world = net::GameConnectionTestAccess::world(*h.world.conn);
+    game::Spawn corpse;
+    corpse.id = 4000;
+    corpse.name = "a_rat's_corpse01";
+    corpse.is_corpse = true;
+    corpse.incarnation = 77;
+    world.spawns[corpse.id] = corpse;
+    auto& loot = net::GameConnectionTestAccess::loot(*h.world.conn);
+    loot.emplace();
+    loot->corpse_id = 4000;
+    loot->corpse_name = "a rat";
+    loot->open = true;
+    loot->complete = true;
+    loot->money.platinum = 3;
+    net::Item tail;
+    tail.id = 1001;
+    tail.name = "Rat Tail";
+    tail.icon = 501;
+    tail.stack_count = 1;
+    tail.no_rent = 255; // tradeable and not temporary, so no flags beyond the lore below
+    tail.no_drop = 255; // EQEmu's byte: 255 tradeable, so taking it asks nothing
+    tail.lore = "RATTAIL";
+    net::Item chips;
+    chips.id = 1002;
+    chips.name = "Bone Chips";
+    chips.icon = 502;
+    chips.stack_count = 20;
+    chips.no_rent = 255;
+    chips.no_drop = 255;
+    loot->items[0] = tail;
+    loot->items[3] = chips;
+    lines = run("/probeloot");
+    REQUIRE(lines.size() == 3);
+    CHECK(lines[0] == "[Probe] loot corpse 4000 inc 77 open 1 complete 1 count 2 total 2 pending 0 coin 3 0 0 0 a rat 186 bytes");
+    CHECK(lines[1] == "[Probe] loot slot 0: Rat Tail 1001 icon 501 qty 1 flags 1");
+    CHECK(lines[2] == "[Probe] loot slot 3: Bone Chips 1002 icon 502 qty 20 flags 0");
+    // A buffer that holds only the first record truncates whole records only.
+    lines = run("/probeloot 140");
+    REQUIRE(lines.size() == 2);
+    CHECK(lines[0] == "[Probe] loot corpse 4000 inc 77 open 1 complete 1 count 1 total 2 pending 0 coin 3 0 0 0 a rat 152 bytes");
+    // The actions answer: an item request goes out (its answer is the server's), the close ends it.
+    CHECK(run("/probelootact end")[0] == "[Probe] loot act end 1");
+    loot.reset();
+}
+
 TEST_CASE("native plugins: binary measurement uses the admitted library copy and preserves failures") {
     Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
     h.approve(plugin::kCapAll);

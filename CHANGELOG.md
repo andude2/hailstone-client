@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Compiled plugins can read and drive looting: `get_loot_data_bulk` reads the open loot session (the corpse, its item slots with names, the coin, whether every item has arrived), and `loot_corpse`, `loot_item`, `loot_all`, `end_loot` and `answer_confirmation` work it as the loot window's buttons do, the client's no-drop and quantity questions included (docs/plugins.md "Loot records and actions")
+
 - New `hailstone_headless` binary (scaffold): one character logged in with its plugins and scripts running and no window or graphics — for a crew character driven by automation (such as a healer under a plugin) on the same machine. It picks its server with `--world NAME|ID` (as the client's `--world` does; `--list-servers` shows the names), logs in by a saved server and account (`--server`/`--account`, the password from the system keyring), shares a graphical client's folder with `--data-dir`, and `--crew crew.ini` supervises one child per crew member (staggered, a link death relaunched, a camp left down). Zone files load only as collision, not as a scene. The Ability Book accessors are not wired yet; see docs/headless.md
 - Guilds: the Banner page in Modern and Gamepad shows available kits, the active banner and its remaining time. On a server with RoF2 guild banners, members with the appropriate permissions can plant, remove or customise the banner. Planted banners display their guild's patterns and colours.
 - Enchanter pets and other invisible-body spawns (race 127's IVM, also race 600) show the weapon they hold again. The body stays invisible, but the primary and secondary items are drawn in its hands, which move as a wood elf's, as in the original; an aura with nothing held still shows nothing

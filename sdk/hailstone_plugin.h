@@ -990,6 +990,22 @@ typedef struct PluginHostApi {
      * or scripts name one class the latest call wins; a call with both empty takes this plugin's back. Added later
      * in ABI 3: test HAILSTONE_HOST_HAS(host, set_class_name) first. */
     void (*set_class_name)(void* host, uint32_t class_id, const char* name, const char* short_name);
+    /* READ. The open loot session (a corpse's items and coin) as records, as get_raid_data_bulk lays its list
+     * out. Added later in ABI 3: test HAILSTONE_HOST_HAS(host, get_loot_data_bulk) first. */
+    int32_t (*get_loot_data_bulk)(void* host, unsigned char* out, int32_t out_size);
+    /* ACTIONS. Ask the server to open corpse `corpse_id` for looting (the loot window's own request). Nonzero:
+     * the request went out. The session's items arrive after; read them with get_loot_data_bulk. */
+    int (*loot_corpse)(void* host, uint32_t corpse_id);
+    /* ACTIONS. Take corpse slot `slot` of the open session: auto_loot into the inventory, else onto the cursor.
+     * The client's own questions apply (a no-drop item, a stack's quantity), as the loot window's. */
+    int (*loot_item)(void* host, int32_t slot, int auto_loot);
+    /* ACTIONS. Loot everything in the open session, as the loot window's Loot All. */
+    int (*loot_all)(void* host);
+    /* ACTIONS. Close the open loot session, as the loot window's Done. */
+    int (*end_loot)(void* host);
+    /* ACTIONS. Answer the confirmation question the client is asking now (a no-drop loot, a quantity, any
+     * stock ConfirmationDialog): nonzero when one was answered. Without a question it does nothing. */
+    int (*answer_confirmation)(void* host, int yes);
 } PluginHostApi;
 /* What use_ability and ability_state take: the kinds of ability the Ability Book lists. The values are stable. */
 enum HS_AbilityKinds {
@@ -1020,6 +1036,38 @@ enum HS_AbilityKinds {
 #define HAILSTONE_ID_NAME_RECORD_SIZE 8
 #define HAILSTONE_ABILITY_RECORD_SIZE 32 /* get_ability_data_bulk's fixed part, before the name */
 #define HS_BULK_LIST_HEADER_SIZE 8 /* HS_Bulk_ListHeader */
+/* get_loot_data_bulk: an HS_BulkLootHeader, then one record per item slot of the open session. A reader starts
+ * the records at the header's size and steps by its recordSize; count < total means out_size cut the list. */
+#define HS_BULK_LOOT_HEADER_SIZE 120
+#define HS_BULK_LOOT_RECORD_SIZE 24 /* the fixed part; the item's name follows, nameLength bytes, no NUL */
+#define HS_LOOT_FLAG_LORE 1u       /* the item has a lore group: the client refuses a second one */
+#define HS_LOOT_FLAG_NO_DROP 2u    /* taking it asks first (the client's no-drop question) */
+#define HS_LOOT_FLAG_NO_RENT 4u    /* a temporary item */
+#pragma pack(push, 1)
+typedef struct HS_BulkLootHeader {
+    uint32_t size;      /* sizeof(HS_BulkLootHeader) */
+    int32_t version;    /* 1 */
+    uint32_t corpseId;  /* the session's corpse spawn id; 0 with no session */
+    uint32_t corpseIncarnation; /* that spawn's incarnation now; 0 when it is gone (read it beside get_spawn) */
+    int32_t recordSize; /* HS_BULK_LOOT_RECORD_SIZE for now; a later client may grow it */
+    int32_t open;       /* the server accepted the request */
+    int32_t complete;   /* every item of the session has arrived */
+    int32_t count;      /* records that follow (what fit in out_size) */
+    int32_t total;      /* item slots the session holds */
+    int32_t pending;    /* loot requests awaiting the server's answer */
+    int32_t platinum, gold, silver, copper; /* the session's coin */
+    char corpseName[64]; /* NUL-terminated; "" with no session */
+} HS_BulkLootHeader;
+typedef struct HS_BulkLootRecord {
+    int32_t slot;       /* the corpse slot */
+    int32_t itemId;
+    int32_t iconId;
+    int32_t quantity;   /* the stack's count (1 when not stackable) */
+    uint32_t flags;     /* HS_LOOT_FLAG_* */
+    int32_t nameLength; /* bytes of the item's name that follow; 0 for none */
+    /* char name[nameLength] */
+} HS_BulkLootRecord;
+#pragma pack(pop)
 /* raid_action's actions. */
 #define HAILSTONE_RAID_MOVE 1u /* move a member to another group, or out of every group */
 /* Whether this client's host table has `field` (one added after the plugin's ABI) and it is set. */
