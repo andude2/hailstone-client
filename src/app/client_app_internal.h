@@ -23,6 +23,7 @@
 #include "app/market_ui.h"
 #include "app/client_app.h"
 #include "app/close_camp.h"
+#include "app/drive_client.h"
 #include "app/login_token_session.h"
 #include "app/input_script.h"
 #include "app/zone_settle.h"
@@ -266,6 +267,7 @@ public:
               ui::ImGuiLayerDesc{.scale_override = ui_scale_setting(options),
                                  .ini_path = platform::imgui_ini()}) {
         core::wipe(options.login_launch.ticket); // opts_ owns the only application copy now
+        drive_mode_ = !opts_.drive_file.empty();
         log_memory("startup: window, Vulkan, fonts");
         vk_.screenshot_generated(options.screenshot_generated);
         apply_window_icon(window_);
@@ -453,8 +455,9 @@ public:
         aenv.web = web_service_.get();
         aenv.install_dir = platform::install_dir();
         aenv.data_dir = platform::data_dir();
-        aenv.autoload = config_.get("plugins.autoload").value_or("*");
-        aenv.script_autoload = config_.get("scripts.autoload").value_or("");
+        // The viewer is not a second automation host: the headless already runs this character's plugins and scripts.
+        aenv.autoload = drive_mode_ ? std::string() : config_.get("plugins.autoload").value_or("*");
+        aenv.script_autoload = drive_mode_ ? std::string() : config_.get("scripts.autoload").value_or("");
         aenv.connection = [this] { return conn_.get(); };
         aenv.server_name = [this] { return char_view_.server_name; };
         aenv.server_profile = [this] { return server_profile_.id; };
@@ -501,6 +504,10 @@ public:
         perf_ui_.set_open(config_.get_bool("ui.perf_window", false));
         perf_ui_.set_log_hitches(config_.get_bool("ui.perf_log_hitches", false));
         automation_->hooks().add_command(plugin::Hooks::kClient, "/perf", [this](std::string_view) { perf_ui_.toggle(); });
+        // /crew: the headless characters this window can observe, and the switch back (docs/headless.md).
+        automation_->hooks().add_command(plugin::Hooks::kClient, "/crew", [this](std::string_view) {
+            crew_window_open_ = !crew_window_open_;
+        });
         automation_->hooks().add_command(plugin::Hooks::kClient, "/screenshot", [this](std::string_view) { take_screenshot(); });
         // /web [address]: the in-game browser (docs/browser.md; a client extension), on the address in a new tab.
         // The player's own: a script or plugin opens pages with /url, under its 'web' permission.
@@ -578,7 +585,9 @@ public:
         // The isometric camera when it was the one in use (hailstone.ini camera.iso, /camera).
         if (config_.get_bool("camera.iso", false)) set_camera_type(game::kCameraIsometric);
         game::reset_camera_defaults(cameras_);
-        if (opts_.login_launch.token_requested) {
+        if (drive_mode_) {
+            if (!start_drive()) quit_ = true;
+        } else if (opts_.login_launch.token_requested) {
             token_login_worker.finish();
             if (token_login_worker.error) std::rethrow_exception(token_login_worker.error);
             apply_server_profile(server_profile_);
@@ -766,6 +775,14 @@ private:
     static double bolt_clock() { return std::chrono::duration<double>(Clock::now().time_since_epoch()).count(); }
     game::MissileList missiles_;
     void enter_zone();
+    // --drive-file: connect to the headless observe server, install its snapshot, and start in the loading screen.
+    bool start_drive();
+    // The same-window swap: park A's connection and view, show L, and put A back on release.
+    bool switch_to_observe(const std::filesystem::path& file);
+    void release_observe();
+    void pump_parked_connection();
+    void draw_crew_window();
+    void refresh_crew_entries();
     void update_player(float dt);
     // The world's mouse presses and releases (__ProcessMouseEvents): the mouse look (game/mouse_look.h), the left
     // click to act on (left_click_) and whether the right release clicks (right_click_).
@@ -1229,7 +1246,20 @@ private:
     Screen picture_screen_ = Screen::InGame;
     bool picture_behind_ = false; // picture_ goes beneath this frame's screen
     std::mt19937 picture_rng_{std::random_device{}()};
+    // Before conn_: its sessions keep shared state, but the factory captures drive_client_.get().
+    std::unique_ptr<DriveClient> drive_client_;
     std::unique_ptr<net::GameConnection> conn_;
+    bool drive_mode_ = false;
+    // A parked while an observe view is shown in the same window.
+    std::unique_ptr<net::GameConnection> parked_conn_;
+    ui::InGameView parked_game_view_;
+    std::filesystem::path parked_ui_character_dir_;
+    std::string parked_layout_for_, parked_files_profile_, parked_server_name_;
+    bool viewing_observe_ = false;
+    bool crew_window_open_ = false;
+    Clock::time_point crew_entries_at_{};
+    std::vector<DriveObserveFile> crew_entries_;
+    std::vector<std::filesystem::path> crew_entry_paths_;
     bool creating_ = false;
     bool auto_enter_sent_ = false;
 

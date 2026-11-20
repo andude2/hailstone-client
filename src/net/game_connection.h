@@ -92,6 +92,7 @@
 #include "net/guild_bank_packets.h"
 #include "net/fellowship_packets.h"
 #include "net/guild_banner_packets.h"
+#include "net/drive_snapshot.h"
 #include "net/item_packets.h"
 #include "net/evolving_packets.h"
 #include "net/commerce.h"
@@ -322,8 +323,11 @@ struct ConnectionOptions {
     std::function<void(const AppPacket&)> zone_packet_tap;
     // Tests and the drive spike: makes the world and zone sessions. Empty: the
     // real UDP sessions (Session::create with `session`). A test installs one
-    // that returns a mirror session behind an in-process relay.
+    // that returns a mirror session behind a relay.
     std::function<std::unique_ptr<Session>()> session_factory;
+    // Keeps every zone packet in a bounded journal for capture_snapshot(): the
+    // drive relay's first state transfer. Off by default: a normal client does not pay for it.
+    bool snapshot_journal = false;
     // The plugin hook bus (plugin/hooks.h): packets both ways, chat lines, commands, game state, zoning and spawns
     // pass it. Null: no plugins.
     plugin::Hooks* hooks = nullptr;
@@ -480,6 +484,16 @@ public:
     // The last server time is the sky clock's reference; the current calendar advances between packets.
     const std::optional<TimeOfDay>& time_of_day() const { return time_; }
     std::optional<TimeOfDay> current_time_of_day() const;
+    // D1 (docs/research/drive-headless.md): the recorded zone stream and the local state, and playing it into a
+    // fresh connection. apply_snapshot leaves the connection in InZone; it sends nothing.
+    DriveSnapshot capture_snapshot() const;
+    // The local half alone (position, target, possessions), for a viewer's periodic state message.
+    DriveSnapshot capture_local_state() const;
+    void apply_snapshot(const DriveSnapshot& snapshot);
+    // Observe mode (docs/research/drive-headless.md, D2): receive zone packets over `zone_session` and apply the
+    // local state that the server does not echo. Nothing this connection sends leaves it.
+    void start_observe(std::unique_ptr<Session> zone_session);
+    void apply_local_state(const DriveSnapshot& local);
     // The OP_Weather messages since the last call (game::Weather::handle_message takes them).
     std::vector<Weather> take_weather() { return std::exchange(weather_messages_, {}); }
     // The zone the server put us in, once per zone-in: load its geometry. Not while the server's files come.
@@ -3268,6 +3282,10 @@ private:
     std::vector<std::uint32_t> hook_spawns_; // the spawn ids last raised, sorted
     std::vector<std::uint32_t> hook_spawns_scratch_; // raise_hook_events' buffer for the next list
     ConnectionState state_ = ConnectionState::Idle;
+    std::vector<AppPacket> snapshot_journal_;
+    std::size_t snapshot_bytes_ = 0;
+    bool snapshot_truncated_ = false;
+    bool applying_snapshot_ = false;
     std::string error_;
     std::string status_;
 

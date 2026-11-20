@@ -124,7 +124,8 @@ A member names a saved `server` (its id or name) and `account`; its
 profile, so most members need only those three lines plus their `exec`.
 Member keys: `character`, `world`, `exec`, `exec_zone`, `game_dir`,
 `seconds` (camp after this long; 0 is until stopped), `stagger`
-(seconds before this member launches, over the shared one). Shared
+(seconds before this member launches, over the shared one) and `observe`
+(1/0, over the shared one). Shared
 keys in `[crew]`: `data_dir`, `game_dir`, `stagger` (default 10 s
 between launches, so 23 logins do not land at once), `autoload`
 (the plugins each member loads — a crew driving Sentinel wants only
@@ -134,6 +135,11 @@ crew default: chat lines are omitted from each worker's diagnostic log.
 Set `chat_log=1` to write each chat event once. For a standalone worker,
 `--no-chat-log` suppresses diagnostic chat. In both cases plugins still
 receive chat, and the in-game `/log` setting controls its own file).
+`observe=1` in `[crew]` gives every member `--drive-observe` and a
+`drive-<label>.txt` file, so the graphical client's `/crew` window can
+show any of them; `drive_dir` chooses where those files go (empty:
+`<data dir>/run`). A member's file is removed when its child exits and
+before a relaunch, so a dead endpoint is not left in `/crew`.
 
 Single characters get the same saved login without a crew file:
 `hailstone_headless --server ez-server --account crew1` reads the
@@ -143,6 +149,43 @@ under its profile, exactly as the graphical client's `--account`.
 Log in once in the graphical client with **Save password** ticked for
 each account first; a missing saved password is reported, never asked
 for on the command line.
+
+## Observing a headless character
+
+Character A, already running in the graphical client, can show a headless
+character's UI in the same window. Give the single-character headless run
+`--drive-observe` and a new private file in the client's `run` folder:
+
+```sh
+hailstone_headless --server ez-server --account crew1 --drive-observe \
+    --drive-file C:/Hailstone/run/drive-L.txt
+```
+
+The file holds the local endpoint and a token, the character, the profile and
+the game folder; it is created owner-only and must not exist yet. The headless
+keeps playing, and the token admits one viewer at a time.
+
+In A's window, type `/crew`. The Crew window lists the `drive-*.txt` files in
+`<data dir>/run` with their character names; **View** switches the window to
+that character. A is parked: its connection stays alive in the background, but
+its zone and UI are unloaded and saved to its own character files. L's snapshot,
+zone and UI are loaded in the same window. **View** on another member switches
+straight from L to that character: A stays parked and only the observe view is
+replaced. **Release** in the Crew window unloads the observed character and
+puts A back, reloading A's zone and UI layout. A and L must use the same game
+folder and server files, as a crew normally does; the window has one asset
+folder.
+
+Every packet the viewer would send is dropped, so it cannot move, speak or
+change the character; the headless keeps its own plugins and scripts, and the
+viewer does not autoload any. The viewer follows the headless's position,
+target and possessions about ten times a second and the server's live packets
+as they arrive.
+
+`--drive-observe` is one character, not a crew supervisor; the viewer is
+read-only (the control lease is a later feature), and the same-window switch
+has not yet been run live. `hailstone --drive-file F` still exists as a
+separate diagnostic viewer for the same stream.
 
 ## Rules and consent
 

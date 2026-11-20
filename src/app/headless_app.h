@@ -56,6 +56,10 @@ struct HeadlessOptions {
     int seconds = 0; // > 0: camp after this long in the first zone; 0: run until stopped
     bool load_collision = true; // --no-collision: no zone geometry at all
     std::string status_file;    // rewritten once a second while running; empty: none
+    // --drive-observe: serve the character to an observe viewer over the local token pipe; --drive-file: write
+    // its endpoint and token to a new private file for the viewer to read.
+    bool drive_observe = false;
+    std::string drive_file;
 };
 
 // The arguments for one headless run; `error` empty means they parsed.
@@ -121,6 +125,7 @@ struct CrewMember {
     int chat_log = -1;     // print chat lines (< 0: the shared one)
     int seconds = 0;       // camp after this long (0: until stopped)
     int stagger = -1;      // seconds to wait before launching this member (< 0: the shared one)
+    int observe = -1;      // serve this member to /crew (< 0: the shared one)
 };
 struct CrewFile {
     std::string data_dir;  // [crew] data_dir (the shared folder)
@@ -128,6 +133,8 @@ struct CrewFile {
     std::string autoload = "*"; // [crew] autoload (the plugins every member loads)
     bool chat_log = false; // [crew] chat_log: a crew's children do not print chat unless asked
     int stagger = 10;      // seconds between launches, [crew] stagger
+    bool observe = false;  // [crew] observe: every member gets --drive-observe and a file in drive_dir
+    std::string drive_dir; // [crew] drive_dir: where those files go (empty: <data dir>/run)
     std::vector<CrewMember> members;
     std::string error; // empty: parsed
 };

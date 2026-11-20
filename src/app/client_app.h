@@ -36,6 +36,9 @@ struct ClientOptions {
     // box set's other windows are started so). Not a test login: the server's files and character files are used.
     std::string account;
     std::string auto_character;
+    // --drive-file: the private file hailstone_headless --drive-observe wrote; open a read-only viewer for that
+    // character instead of logging in.
+    std::string drive_file;
     float auto_walk_seconds = 0.0f; // walk forward this long after zoning in
     float camera_distance = 0.0f;   // start in third person at this distance
     std::string watch;              // testing: point the camera at the nearest spawn whose name contains this

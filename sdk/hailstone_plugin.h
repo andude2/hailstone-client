@@ -1025,6 +1025,12 @@ typedef struct PluginHostApi {
     /* READ. A zone's long name ("South Qeynos") by id, the name the windows show: as zone_name, -1 for an
      * unknown id. Added later in ABI 3: test HAILSTONE_HOST_HAS(host, zone_long_name) first. */
     int (*zone_long_name)(void* host, uint32_t zone_id, char* out, size_t out_size);
+    /* ACTIONS. answer_confirmation for the loot window's no-drop question alone: answers only when
+     * that is the question being asked now, so a caller mid-loot can never accept an unrelated
+     * question (an invite, an offer) by mistake. Nonzero when it answered; 0 when the current
+     * question is another one (the loot question may be queued behind it: ask again later) or
+     * there is none. Added later in ABI 3: test HAILSTONE_HOST_HAS(host, answer_loot_confirmation). */
+    int (*answer_loot_confirmation)(void* host, int yes);
 } PluginHostApi;
 /* What use_ability and ability_state take: the kinds of ability the Ability Book lists. The values are stable. */
 enum HS_AbilityKinds {

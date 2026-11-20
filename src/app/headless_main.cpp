@@ -36,6 +36,8 @@ int main(int argc, char** argv) {
                      "  --exec-zone LINE  command sent at every zone-in (repeatable)\n"
                      "  --seconds N       camp after N seconds in the first zone (default: run until stopped)\n"
                      "  --status-file F   rewrite F once a second with the state, zone and character\n"
+                     "  --drive-observe   serve this character to an observe viewer (needs --drive-file)\n"
+                     "  --drive-file F    write the drive endpoint and token to a new private file\n"
                      "  --no-collision    do not load the zone's collision mesh\n"
                      "The password shows in the process list; use a test or crew account's.\n",
                      parsed.error.c_str());

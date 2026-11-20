@@ -189,6 +189,9 @@ void GameConnection::chat(ChatEvent::Kind kind, std::string text, std::uint32_t 
 }
 
 void GameConnection::start(const WorldTicket& ticket) {
+    snapshot_journal_.clear();
+    snapshot_bytes_ = 0;
+    snapshot_truncated_ = false;
     close_evolving_transfer();
     reset_fellowship();
     reset_achievements();
@@ -206,6 +209,64 @@ void GameConnection::start(const WorldTicket& ticket) {
 std::unique_ptr<Session> GameConnection::create_session() {
     if (options_.session_factory) return options_.session_factory();
     return Session::create(options_.session);
+}
+
+DriveSnapshot GameConnection::capture_local_state() const {
+    DriveSnapshot snapshot;
+    snapshot.character = character_;
+    snapshot.position = position_;
+    snapshot.heading = heading_;
+    snapshot.velocity = velocity_;
+    snapshot.moving = moving_;
+    snapshot.target = world_.target_id;
+    std::vector<Item> items;
+    items.reserve(inventory_.items().size());
+    for (const auto& entry : inventory_.items()) items.push_back(entry.second);
+    snapshot.inventory_packet = encode_char_inventory(items);
+    return snapshot;
+}
+
+DriveSnapshot GameConnection::capture_snapshot() const {
+    DriveSnapshot snapshot = capture_local_state();
+    snapshot.packets = snapshot_journal_;
+    snapshot.truncated = snapshot_truncated_;
+    return snapshot;
+}
+
+void GameConnection::apply_snapshot(const DriveSnapshot& snapshot) {
+    applying_snapshot_ = true;
+    // The zone-in's own-spawn packet is matched by name (Handle_OP_ZoneEntry's `name == character_`); without it
+    // the player spawn would be treated as an NPC and the HP update would not find the local player.
+    character_ = snapshot.character;
+    try {
+        for (const auto& packet : snapshot.packets) handle_zone(packet);
+        // The zone-in's OP_CharInventory is the server's snapshot from then; the possessions as they stand now
+        // replace it, so items moved or looted since are in the GUI's copy too.
+        handle_zone(snapshot.inventory_packet);
+    } catch (...) {
+        applying_snapshot_ = false;
+        throw;
+    }
+    applying_snapshot_ = false;
+    state_ = ConnectionState::InZone;
+    zone_ready_ = true;
+    set_target(snapshot.target);
+    set_player_motion(snapshot.position, snapshot.heading, snapshot.velocity, snapshot.moving);
+    set_player_drawn(snapshot.position, snapshot.heading);
+}
+
+void GameConnection::start_observe(std::unique_ptr<Session> zone_session) {
+    zone_session_ = std::move(zone_session);
+    state_ = ConnectionState::InZone;
+    zone_ready_ = true;
+    status_ = "Observing";
+}
+
+void GameConnection::apply_local_state(const DriveSnapshot& local) {
+    set_target(local.target);
+    set_player_motion(local.position, local.heading, local.velocity, local.moving);
+    set_player_drawn(local.position, local.heading);
+    if (local.inventory_packet.opcode != 0) handle_zone(local.inventory_packet);
 }
 
 void GameConnection::connect_world(bool zoning) {
@@ -451,6 +512,7 @@ bool GameConnection::new_armor_membership_changed() {
 }
 
 void GameConnection::send_world(const AppPacket& p) {
+    if (applying_snapshot_) return;
     if (!world_session_) return;
     if (options_.hooks && options_.hooks->has_packet_hooks(plugin::Stream::World, plugin::Direction::Out)) {
         AppPacket copy = p;
@@ -462,6 +524,7 @@ void GameConnection::send_world(const AppPacket& p) {
 }
 
 bool GameConnection::send_zone(const AppPacket& p, bool reliable, const std::function<bool()>& still_current) {
+    if (applying_snapshot_) return false;
     if (!zone_session_ || zone_session_->state() != SessionState::Connected) return false;
     if (still_current && !still_current()) return false;
     const auto* session = zone_session_.get();
@@ -1213,6 +1276,14 @@ std::optional<TimeOfDay> GameConnection::current_time_of_day() const {
 }
 
 void GameConnection::handle_zone(const AppPacket& p) {
+    if (options_.snapshot_journal && !applying_snapshot_ && !snapshot_truncated_) {
+        const std::size_t bytes = p.data.size() + 4; // the opcode and a length, near enough for the bound
+        if (snapshot_bytes_ + bytes > kDriveSnapshotMaxBytes) snapshot_truncated_ = true;
+        else {
+            snapshot_journal_.push_back(p);
+            snapshot_bytes_ += bytes;
+        }
+    }
     if (options_.zone_packet_tap) options_.zone_packet_tap(p);
     if (p.opcode == kOpHsFiles) {
         if (auto reply = decode_server_files(p); reply && server_files_ && !server_files_->finished()) {

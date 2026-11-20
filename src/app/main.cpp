@@ -141,6 +141,7 @@ struct Options {
     std::string host;                              // --host for the auto-login
     std::string server;                            // --server: a saved server (servers/<id>), by id or name
     std::string account;                           // --account: a saved account of that server
+    std::string drive_file;                        // --drive-file: observe a headless character, read-only
     int port = 0;
     float auto_walk = 0.0f, camera_distance = 0.0f;
     std::string watch;
@@ -201,6 +202,8 @@ void usage() {
         "                     account A and A's password from the system keyring, play the world played\n"
         "                     last there and enter A's character (or --character); the login screen's\n"
         "                     Log in box starts its other windows so\n"
+        "  --drive-file F     observe the headless character whose --drive-observe wrote F; read-only,\n"
+        "                     needs the same --game-dir and --data-dir as that headless run\n"
         "  --auto-target      after zoning in, target and consider the nearest NPC (testing)\n"
         "  --pick-test        after zoning in, turn to the NPCs nearby and pick at the screen centre\n"
         "                     (logging which are hit and whether a wall is in the way), left click the\n"
@@ -592,6 +595,10 @@ Options parse_args(int argc, char** argv) {
         } else if (arg("--account")) {
             need(1);
             o.account = argv[++i];
+        } else if (arg("--drive-file")) {
+            need(1);
+            o.drive_file = argv[++i];
+            if (o.drive_file.empty()) throw std::runtime_error("--drive-file needs a path.");
         } else if (arg("--port")) {
             need(1);
             const std::string_view text(argv[++i]);
@@ -848,7 +855,7 @@ int main(int argc, char** argv) {
             // The updater is for a player's own runs, not the test drives that stop after some frames. A ticket
             // launch keeps it, but is never restarted into another version before its one-use ticket is sent
             // (update_at_start_allowed); the next start without a ticket finishes what update_at_start would do.
-            c.updates = opts.frames == 0 && opts.screenshot.empty();
+            c.updates = opts.frames == 0 && opts.screenshot.empty() && opts.drive_file.empty();
             if (c.updates && app::update_at_start_allowed(opts.login_launch)) {
                 // A cut-off install, or an update that never reached the login screen, is put back first; when the
                 // folder then holds another version than this one, that one is started instead.
@@ -882,6 +889,7 @@ int main(int argc, char** argv) {
             c.auto_port = opts.port;
             c.server = opts.server;
             c.account = opts.account;
+            c.drive_file = opts.drive_file;
             c.auto_character = opts.character;
             c.auto_walk_seconds = opts.auto_walk;
             c.camera_distance = opts.camera_distance;

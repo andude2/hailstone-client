@@ -138,6 +138,8 @@ TEST_CASE("headless: a crew file parses members and shared keys; a member withou
                                      "data_dir=D:/Hailstone\n"
                                      "stagger=5\n"
                                      "autoload=HSMono\n"
+                                     "observe=1\n"
+                                     "drive_dir=run\n"
                                      "\n"
                                      "[Okhealz]\n"
                                      "server=ez-server\n"
@@ -148,13 +150,18 @@ TEST_CASE("headless: a crew file parses members and shared keys; a member withou
                                      "server=EZ Server\n"
                                      "account=crew2\n"
                                      "character=Tankguy\n"
-                                     "seconds=600\n");
+                                     "seconds=600\n"
+                                     "observe=0\n");
     CHECK(crew.error.empty());
     CHECK(crew.data_dir == "D:/Hailstone");
     CHECK(crew.stagger == 5);
     CHECK(crew.autoload == "HSMono");
+    CHECK(crew.observe);
+    CHECK(crew.drive_dir == "run");
     CHECK_FALSE(crew.chat_log); // a crew's children do not print chat unless asked
     REQUIRE(crew.members.size() == 2);
+    CHECK(crew.members[0].observe == -1); // the shared [crew] value
+    CHECK(crew.members[1].observe == 0);
     CHECK(crew.members[0].label == "Okhealz");
     CHECK(crew.members[0].exec == "/mono load Sentinel");
     CHECK(crew.members[1].character == "Tankguy");

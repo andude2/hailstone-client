@@ -18,8 +18,10 @@ namespace client_internal {
 int ClientApp::run() {
     if (quit_) return 0; // the asset-folder picker was quit: nothing else was set up
     login_view_.version = build_version();
-    start_updater();
-    start_addons();
+    if (!drive_mode_) {
+        start_updater();
+        start_addons();
+    }
     auto last = Clock::now();
     auto start = last;
     auto last_drawn = last;
@@ -104,8 +106,10 @@ int ClientApp::run() {
         // model is built in the spawns' smoothing (CreatePlayerActor's model choice).
         core::frame_sections::Lap update_lap;
         box_clients_.poll();
-        update_updater();
-        update_addons();
+        if (!drive_mode_) {
+            update_updater();
+            update_addons();
+        }
         refresh_ui_packs();
         // Without a connection, a deferred selection can be applied now. Connected clients wait until
         // update_connection has applied the zone-in's asset rules, before the required-addon gate can hold it.
@@ -113,10 +117,14 @@ int ClientApp::run() {
             const auto next = std::exchange(pending_ui_pack_, std::nullopt);
             use_ui_pack(*next, std::exchange(ui_reload_pending_, false));
         }
-        update_login();
+        if (!drive_mode_) update_login();
         follow_ui_pack_screen();
         update_lap.mark("update login, updater, add-ons");
+        pump_parked_connection();
         update_connection();
+        if (drive_client_ && conn_) {
+            if (auto local = drive_client_->take_local_state()) conn_->apply_local_state(*local);
+        }
         update_lap.mark("update connection");
         close_orphan_tabs();
         if (browser_)
@@ -1267,6 +1275,157 @@ void ClientApp::update_guide() {
     else if (u.waiting_mesh) conn_->ui_message("The path to " + name + " will show once this zone's map is ready.");
 }
 
+
+void ClientApp::pump_parked_connection() {
+    if (parked_conn_) parked_conn_->update();
+}
+
+bool ClientApp::switch_to_observe(const std::filesystem::path& file) {
+    const bool from_observe = viewing_observe_;
+    if (from_observe && !parked_conn_) {
+        log::warn("crew: the parked character is gone; release this view first");
+        return false;
+    }
+    std::string error;
+    const auto info = read_drive_observe_file(file, error);
+    if (!info) {
+        log::error("crew: {}", error);
+        return false;
+    }
+    // Connect the new character before tearing down the one on screen: a failed attach leaves the current view
+    // unchanged.
+    auto client = DriveClient::connect(*info, error);
+    if (!client) {
+        log::error("crew: {}", error);
+        return false;
+    }
+    auto snapshot = client->take_snapshot();
+
+    if (!from_observe) {
+        if (!conn_ || conn_->state() != net::ConnectionState::InZone) {
+            log::warn("crew: cannot observe {} while this window is not in a zone", info->character);
+            return false;
+        }
+        // Park A: its connection keeps running, its view and per-character paths are kept for the return.
+        save_chat_history(true);
+        parked_conn_ = std::move(conn_);
+        parked_game_view_ = std::move(game_view_);
+        game_view_ = {};
+        parked_ui_character_dir_ = std::exchange(ui_character_dir_, {});
+        parked_layout_for_ = std::exchange(layout_for_, {});
+        parked_files_profile_ = std::exchange(files_profile_, {});
+        parked_server_name_ = std::exchange(char_view_.server_name, {});
+        unload_zone();
+    } else {
+        // L is being replaced by D in the same parked-A session. A stays parked; only L's scene and connection go.
+        unload_zone();
+        conn_.reset();
+        drive_client_.reset();
+        game_view_ = {};
+        ui_character_dir_.clear();
+        layout_for_.clear();
+        viewing_observe_ = false;
+    }
+    player_ready_ = false;
+    screen_ = Screen::Loading;
+
+    // D: the same window, a normal GameConnection over the observe stream.
+    drive_client_ = std::move(client);
+    files_profile_ = info->profile;
+    char_view_.server_name = info->profile;
+    net::ConnectionOptions options;
+    options.profile_id = info->profile;
+    options.diagnostic_chat_log = false;
+    options.session_factory = [this] { return drive_client_->make_session(); };
+    conn_ = std::make_unique<net::GameConnection>(game_, std::move(options));
+    conn_->start_observe(drive_client_->make_session());
+    conn_->apply_snapshot(snapshot);
+    if (!conn_->character_name().empty())
+        use_character_settings(character_files(files_profile(), char_view_.server_name, conn_->character_name()).dir);
+    loading_view_.title = "Observing";
+    loading_view_.detail = info->character.empty() ? conn_->character_name() : info->character;
+    viewing_observe_ = true;
+    log::info("crew: observing {} in this window", conn_->character_name());
+    return true;
+}
+
+void ClientApp::release_observe() {
+    if (!viewing_observe_) return;
+    unload_zone();
+    conn_.reset();
+    drive_client_.reset();
+
+    conn_ = std::move(parked_conn_);
+    game_view_ = std::move(parked_game_view_);
+    ui_character_dir_ = std::move(parked_ui_character_dir_);
+    layout_for_.clear(); // the return loads A's layout again
+    files_profile_ = std::move(parked_files_profile_);
+    char_view_.server_name = std::move(parked_server_name_);
+    player_ready_ = false;
+    screen_ = Screen::Loading;
+    viewing_observe_ = false;
+    loading_view_.title = "Returning";
+    loading_view_.detail = conn_ ? conn_->character_name() : std::string();
+    if (conn_) {
+        if (auto pending = conn_->take_zone_to_load()) load_zone(*pending);
+        else if (const auto& current = conn_->zone_info()) load_zone(current->zone_short_name);
+        log::info("crew: back to {}", conn_->character_name());
+    }
+}
+
+void ClientApp::refresh_crew_entries() {
+    crew_entries_.clear();
+    crew_entry_paths_.clear();
+    std::vector<std::pair<DriveObserveFile, std::filesystem::path>> found;
+    std::error_code ec;
+    const auto dir = platform::data_dir() / "run";
+    for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        const std::string name = it->path().filename().string();
+        if (!name.starts_with("drive-") || it->path().extension() != ".txt") continue;
+        std::string error;
+        auto file = read_drive_observe_file(it->path(), error);
+        if (!file) continue;
+        found.emplace_back(std::move(*file), it->path());
+    }
+    std::sort(found.begin(), found.end(),
+              [](const auto& a, const auto& b) { return a.first.character < b.first.character; });
+    for (auto& entry : found) {
+        crew_entries_.push_back(std::move(entry.first));
+        crew_entry_paths_.push_back(std::move(entry.second));
+    }
+    crew_entries_at_ = Clock::now();
+}
+
+bool ClientApp::start_drive() {
+    std::string error;
+    auto file = read_drive_observe_file(opts_.drive_file, error);
+    if (!file) {
+        log::error("--drive-file: {}", error);
+        return false;
+    }
+    auto client = DriveClient::connect(*file, error);
+    if (!client) {
+        log::error("--drive-file: {}", error);
+        return false;
+    }
+    drive_client_ = std::move(client);
+    files_profile_ = file->profile;
+    char_view_.server_name = file->profile;
+    net::ConnectionOptions options;
+    options.profile_id = file->profile;
+    options.diagnostic_chat_log = false;
+    options.session_factory = [client = drive_client_.get()] { return client->make_session(); };
+    conn_ = std::make_unique<net::GameConnection>(game_, std::move(options));
+    conn_->start_observe(drive_client_->make_session());
+    conn_->apply_snapshot(drive_client_->take_snapshot());
+    if (!conn_->character_name().empty())
+        use_character_settings(character_files(files_profile(), char_view_.server_name, conn_->character_name()).dir);
+    screen_ = Screen::Loading;
+    loading_view_.title = "Observing";
+    loading_view_.detail = file->character;
+    return true;
+}
 
 } // namespace client_internal
 

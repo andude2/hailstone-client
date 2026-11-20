@@ -1,12 +1,15 @@
 # Driving a headless character from the graphical client
 
-**Status: plan; D0, the transport spike, passed in process and between
-processes.** This page works out whether one Hailstone client can borrow another
-character's session long enough to show that character's UI and play it, and how
-to build it without moving a live session between processes. The spikes are
-`tests/mock_drive_spike_test.cpp`, `tests/local_pipe_test.cpp` and
-`tests/mock_drive_pipe_test.cpp`; the snapshot, the production pipe hardening
-and the drive window are still ahead.
+**Status: plan; D0 (transport), D1 (snapshot) and D2's data path passed; the
+same-window swap is built but not run live.** This page works out whether one
+Hailstone client can borrow another character's session long enough to show
+that character's UI in character A's own window (not a second process), and how
+to build it without moving a live session between processes. Tests:
+`tests/mock_drive_spike_test.cpp`, `tests/local_pipe_test.cpp`,
+`tests/mock_drive_pipe_test.cpp`, `tests/drive_snapshot_test.cpp`,
+`tests/drive_observe_test.cpp` and `tests/drive_client_test.cpp`. The
+production pipe hardening, the live swap check and the control lease are still
+ahead.
 
 ## The short answer
 
@@ -408,32 +411,88 @@ one and keeps the same message API. Production hardening still needs:
 
 None of that changes the `GameConnection`/`MirrorSession` seam D0 proved.
 
-### D1 — Drive snapshot
+### D1 — Drive snapshot — passed in process
 
-- Define `DriveSnapshot` (version, section ids, lengths, limits).
-- Capture and apply P0 sections; round-trip through two `GameConnection`s.
-- Add the mock-server/test encoders needed for the snapshot and test each
-  packet against its decoder.
-- Fuzz the snapshot reader; cap every section and the total.
+`net/drive_snapshot.h` defines `DriveSnapshot`, its versioned byte encoding and
+its bound. `GameConnection::capture_snapshot()` records the zone stream in
+`ConnectionOptions::snapshot_journal` (off by default, 64 MiB bound) and adds the
+local state the server does not echo: the character name, the current
+possessions as an `OP_CharInventory`, position, heading, velocity, moving and
+target. `GameConnection::apply_snapshot()` replays the packets into a fresh
+connection with outgoing sends suppressed, then applies the local state and
+leaves the connection in `InZone`.
 
-Exit criteria: a character with inventory, buffs, group, target and a spawn
-list survives capture → apply → compare. Missing P1/P2 sections are reported,
-not guessed.
+`tests/drive_snapshot_test.cpp` (37 assertions) proves capture → apply → compare
+for a character in `qeynos2`: profile and character name, zone, spawns,
+inventory, HP, target and position; then the encoded snapshot decodes and
+applies again from the wire. Empty and half-truncated encodings are refused.
 
-### D2 — Observe client (read-only, separate process)
+Known D1 limits, to carry into D2/D3:
 
-- `--drive` start mode with an observe lease, `MirrorSession`, snapshot apply,
-  zone load, render; every outgoing packet is dropped or refused.
-- Input is disabled (or limited to camera movement that is sent nowhere).
-- Do not start the MQ script host or compiled plugins in the drive client; it
-  is a UI viewer, not a second automation host.
-- Do not let the drive client write the headless character's automation files.
+- the zone journal grows with the session; the 64 MiB bound sets `truncated`
+  and the caller must not trust a truncated snapshot;
+- replaying old zone packets also replays old timers; buff/cooldown timers are
+  not yet shortened to their remaining time;
+- the inventory patch covers possessions (including the cursor) but not the
+  bank, shared bank or an open merchant/trade/loot session;
+- chat backlog and plugin state are not in the snapshot.
 
-Exit criteria: on the mock server and then live, a viewer shows the character,
-its zone, inventory, buffs and chat while the headless keeps playing; L moved
-by its automation visibly moves in the viewer, and an item the headless moves
-appears in the viewer's inventory; detaching leaves the headless untouched.
-This is already the "briefly display their UI" half of the request.
+The test does not have a real game folder or vectors, so the spell names and
+skill caps are the empty fixtures; the packet replay path is the real one.
+
+### D2 — Observe in character A's window — data path passed; swap built, not run live
+
+The user's target is character A's existing `hailstone.exe` window, not a
+second client. The separate `hailstone --drive-file` viewer is a diagnostic
+tool for the same stream.
+
+- Headless: `hailstone_headless --drive-observe --drive-file F` starts
+  `app::DriveObserveServer`, writes its endpoint and token to the new private
+  file F, sends the snapshot to the first viewer, forwards every zone packet
+  from the connection's `zone_packet_tap`, and sends a 100 ms local-state
+  message (position, heading, velocity, moving, target, possessions). A crew
+  sets `observe=1` in `[crew]`; the supervisor passes `--drive-observe` and
+  `drive-<label>.txt` under `drive_dir` (default `<data dir>/run`) to each
+  child, removes the file before a relaunch and when the child exits.
+- Viewer data path: `app::DriveClient` reads F, connects, takes the snapshot,
+  and feeds a normal `GameConnection` (`start_observe` / `apply_local_state`).
+  A `State` message's inventory packet is applied as `OP_CharInventory`; live
+  zone packets go through the ordinary `handle_zone` path. Every `send` from
+  the viewer's mirror session is dropped, so an observe viewer cannot change
+  the character.
+- Same window: A types `/crew`; the Crew window lists `drive-*.txt` in
+  `<data dir>/run`. **View** calls `switch_to_observe`: A's `GameConnection` is
+  moved to `parked_conn_` and keeps updating, A's `game_view_`, character
+  profile, UI directory and layout are saved, and A's zone is unloaded. L's
+  snapshot is installed in the same `ClientApp`; `update_connection` loads L's
+  zone, renderers, UI and audio. **View** on another member while L is shown
+  connects the new member first and then replaces only L's view; A stays parked
+  and its zone is not reloaded between headless characters. **Release** unloads
+  the observed character, restores A's connection/view, clears the layout so
+  A's UI reloads, and loads A's current zone again. No process is started or
+  logged in.
+- Plugins and MQ scripts are not autoloaded in the viewer path
+  (`aenv.autoload` / `script_autoload` are empty); the headless keeps its own.
+
+Tests: `tests/drive_observe_test.cpp` (12 assertions) proves the headless
+server → pipe → viewer data path, including movement and a live chat packet;
+`tests/drive_client_test.cpp` (13 assertions) does the same through the
+production `DriveClient`. The GUI builds, but this development environment has
+no display/GPU, so the swap itself has not been run.
+
+Still open for D2:
+
+- run A with `/crew` on a real display: view L, move L, open its windows, and
+  release back to A; check that A's zone/UI reload and its session was kept;
+- A's scene and UI are unloaded while L is shown, so A's open windows/camera
+  and its chat are saved only to the extent `game_view_`/the character files
+  hold them; `spell_ui_`, `item_ui_` and the other C++ panels may keep state
+  from L when A returns. A `CharacterView` refactor would keep both live;
+- A's `parked_conn_` keeps processing packets and its plugin hooks are still
+  attached; whether A's scripts should pause while parked is open;
+- the same window uses A's game folder: A and L must be on the same server's
+  files (the usual crew case), because `ClientApp` has one `GameDir`;
+- no live headless run yet (D5).
 
 ### D3 — Control lease
 
@@ -543,12 +602,10 @@ Open questions to settle with a spike or a live run:
 
 ## Recommendation
 
-D0 has passed in process and between processes. The next step is **D1
-(snapshot)** and **D2 (observe client)**; that already answers "let me look at
-L" in a second window, with L's real UI, without touching L's automation or
-A's session. Then build **D3 (control lease)** for "briefly play L". The pipe
-hardening (named pipe/Unix socket, peer credentials, CSPRNG) belongs with D3's
-lease/security work. After that, decide whether the same-window refactor (D6) is worth its cost.
+D0, D1 and D2's data path have passed; A's same-window swap is built. The next
+steps are the **live `/crew` check** on a display and **D3 (control lease)**
+for "briefly play L". The pipe hardening (named pipe/Unix socket, peer
+credentials, CSPRNG) belongs with D3's lease/security work. After that, decide whether the same-window refactor (D6) is worth its cost.
 If A is eventually run headless too (D7), the graphical client becomes a viewer
 for any session and the separate drive client can disappear; that is the clean
 end state, but it is a different product decision.

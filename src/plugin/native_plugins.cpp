@@ -2273,6 +2273,13 @@ int h_answer_confirmation(void* h, int yes) {
     return 1;
 }
 
+int h_answer_loot_confirmation(void* h, int yes) {
+    net::GameConnection* c = acting(Loaded::of(h), "answer_loot_confirmation");
+    if (!c || !c->confirmation() || c->confirmation()->id != net::kConfirmLootNoDrop) return 0;
+    c->answer_confirmation(yes != 0);
+    return 1;
+}
+
 int h_free_inventory_slots(void* h) {
     const net::GameConnection* c = readable(Loaded::of(h), "free_inventory_slots");
     return c ? game::free_inventory_slots(c->inventory()) : -1;
@@ -3160,6 +3167,7 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
     p.table.loot_all = main_only<h_loot_all>;
     p.table.end_loot = main_only<h_end_loot>;
     p.table.answer_confirmation = main_only<h_answer_confirmation>;
+    p.table.answer_loot_confirmation = main_only<h_answer_loot_confirmation>;
     p.table.free_inventory_slots = main_only_or<h_free_inventory_slots, -1>; // off the thread "unknown", not 0 ("no room")
     p.table.can_loot_corpse = main_only_or<h_can_loot_corpse, -1>; // off the thread "unknown", not 0 ("too far")
     p.table.loot_item_modifiers = main_only<h_loot_item_modifiers>;

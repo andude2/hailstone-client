@@ -418,7 +418,40 @@ void ClientApp::draw_ui(float fps) {
         break;
     }
     }
+    draw_crew_window();
     draw_screen_picture_behind();
+}
+
+void ClientApp::draw_crew_window() {
+    if (!crew_window_open_) return;
+    if (Clock::now() - crew_entries_at_ > std::chrono::seconds(2)) refresh_crew_entries();
+    ImGui::SetNextWindowSize(ImVec2(420.0f, 240.0f), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Crew", &crew_window_open_)) {
+        ImGui::End();
+        return;
+    }
+    if (viewing_observe_) {
+        ImGui::Text("Observing %s", conn_ ? conn_->character_name().c_str() : "");
+        ImGui::SameLine();
+        if (ImGui::Button("Release")) release_observe();
+        ImGui::Separator();
+    }
+    if (crew_entries_.empty()) {
+        const std::string where = "No headless characters in " + (platform::data_dir() / "run").string();
+        ImGui::TextUnformatted(where.c_str());
+        ImGui::TextUnformatted("Start one with --drive-observe --drive-file <that folder>/drive-<name>.txt");
+    } else {
+        for (std::size_t i = 0; i < crew_entries_.size(); ++i) {
+            const auto& entry = crew_entries_[i];
+            ImGui::Text("%s", entry.character.empty() ? "?" : entry.character.c_str());
+            ImGui::SameLine();
+            if (entry.profile.empty()) ImGui::TextUnformatted("(no profile)");
+            else ImGui::Text("(%s)", entry.profile.c_str());
+            ImGui::SameLine();
+            if (ImGui::Button(("View##" + std::to_string(i)).c_str())) switch_to_observe(crew_entry_paths_[i]);
+        }
+    }
+    ImGui::End();
 }
 
 } // namespace hailstone::app::client_internal

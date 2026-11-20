@@ -177,6 +177,7 @@ add_library(hailstone_engine STATIC
   src/net/des.cpp
   src/net/login.cpp
   src/net/game_connection.cpp
+  src/net/drive_snapshot.cpp
   src/net/game_connection_spells.cpp
   src/net/game_connection_ticks.cpp
   src/net/game_connection_spell_sets.cpp
@@ -566,6 +567,8 @@ add_library(hailstone_engine STATIC
   src/ui/ui_ini.cpp
   src/app/lua_ui.cpp
   src/app/automation.cpp
+  src/app/drive_client.cpp
+  src/app/drive_observe.cpp
   src/app/headless_app.cpp
   src/app/navigator.cpp
   src/app/guide_path.cpp
@@ -1528,6 +1531,9 @@ if(HAILSTONE_BUILD_TESTS)
     tests/mock_eqemu_compat_test.cpp
     tests/mock_drive_spike_test.cpp
     tests/mock_drive_pipe_test.cpp
+    tests/drive_snapshot_test.cpp
+    tests/drive_observe_test.cpp
+    tests/drive_client_test.cpp
     tests/local_pipe_test.cpp
     tests/item_use_test.cpp
     tests/game_connection_cast_test.cpp

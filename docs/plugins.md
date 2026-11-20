@@ -1059,7 +1059,9 @@ for the corpse being looted is read and acted on here. Added later in ABI 3: tes
   window's modifier keys held: `shift` takes the whole stack at once, with no quantity question (a
   headless caller has no dialog to answer), and `ctrl` takes one. Added later in ABI 3: test
   `HAILSTONE_HOST_HAS(host, loot_item_modifiers)` first.
-- `answer_confirmation(yes)` (with `actions`) answers the confirmation question the client is asking now
+- `answer_confirmation(yes)` (with `actions`) answers the confirmation question the client is asking now;
+  `answer_loot_confirmation(yes)` answers only when that question is the loot window's no-drop one, so
+  looting code can poll it without ever accepting an unrelated question queued ahead of it
   — the no-drop and quantity questions above, or any other stock question — and does nothing when none
   is open. A caller that loots unattended answers for the player, so it should ask only when its own
   rules have already decided the item.
