@@ -63,7 +63,10 @@ whose files cannot be read (the run continues, with a warning in the log).
 
 ## Movement
 
-The player's own movement is the graphical client's: `Navigator`
+The player's own movement is the graphical client's: the full mechanics
+Character (sheet from profile, inventory, buffs and owned AA, as the GUI's
+StatsUi builds it) is built each frame, so its TotalEffect SPA totals —
+AA and worn-item effects included — drive the movement. `Navigator`
 (`src/app/navigator.h`) steers the movement body
 (`src/app/player_movement.h`) once per game step over the zone's collision
 mesh, exactly as a drawn frame drives it there, so `/nav`, `/moveto`,
