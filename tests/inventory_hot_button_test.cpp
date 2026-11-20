@@ -138,6 +138,23 @@ TEST_CASE("inventory hot button: a link finds its item by serial, else by id") {
     CHECK_FALSE(game::hot_button_item_slot(inv, social));
 }
 
+TEST_CASE("inventory hot button: a saved serial can belong to another item after login") {
+    const auto potion = item(13005, "Potion", 25, "0000000000000020");
+    const auto link = game::inventory_hot_button(net::ItemSlot::possessions(25), &potion, false);
+    REQUIRE(link);
+    const auto saved = game::parse_hot_button(game::format_hot_button(*link));
+
+    game::Inventory inv;
+    const auto other = item(13006, "Other potion", 25, potion.serial.c_str());
+    inv.load({other, item(potion.id, "Potion", 26, "0000000000000030")});
+    const auto at = game::hot_button_item_slot(inv, saved);
+    REQUIRE(at);
+    CHECK(at->same(net::ItemSlot::possessions(26)));
+
+    inv.load({other});
+    CHECK_FALSE(game::hot_button_item_slot(inv, saved));
+}
+
 TEST_CASE("inventory hot button: held on a slot, dropped on a bar") {
     ImGuiContext* ctx = ImGui::CreateContext(); // the hs API reads the keyboard's modifiers
     MockConfig config = MockConfig::standard();

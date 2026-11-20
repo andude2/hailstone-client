@@ -1022,6 +1022,9 @@ typedef struct PluginHostApi {
      * once, with no quantity question (a shift-click), and `ctrl` takes one. 0 without an open session,
      * as loot_item. Added later in ABI 3: test HAILSTONE_HOST_HAS(host, loot_item_modifiers) first. */
     int (*loot_item_modifiers)(void* host, int32_t slot, int auto_loot, int shift, int ctrl);
+    /* READ. A zone's long name ("South Qeynos") by id, the name the windows show: as zone_name, -1 for an
+     * unknown id. Added later in ABI 3: test HAILSTONE_HOST_HAS(host, zone_long_name) first. */
+    int (*zone_long_name)(void* host, uint32_t zone_id, char* out, size_t out_size);
 } PluginHostApi;
 /* What use_ability and ability_state take: the kinds of ability the Ability Book lists. The values are stable. */
 enum HS_AbilityKinds {

@@ -314,6 +314,7 @@ add_library(hailstone_engine STATIC
   src/platform/shared_file.cpp
   src/platform/shared_library.cpp
   src/platform/gpu_ipc.cpp
+  src/platform/local_pipe.cpp
   src/platform/gpu_external_memory.cpp
   src/platform/process.cpp
   src/game/eq_names.cpp
@@ -1525,6 +1526,9 @@ if(HAILSTONE_BUILD_TESTS)
     tests/hover_respawn_test.cpp
     tests/tracking_death_test.cpp
     tests/mock_eqemu_compat_test.cpp
+    tests/mock_drive_spike_test.cpp
+    tests/mock_drive_pipe_test.cpp
+    tests/local_pipe_test.cpp
     tests/item_use_test.cpp
     tests/game_connection_cast_test.cpp
     tests/spell_book_swap_test.cpp

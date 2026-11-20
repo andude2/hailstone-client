@@ -6,7 +6,7 @@
 //   ui:      hailstone.ui_function(name, fn), hailstone.option{...}, hailstone.menu(label, command), and the
 //            script folder's ui/<pack>/ windows
 //   read:    hailstone.player(), spawn(id), spawns(), spell(id), item(slot), buff(i), xtarget(i), eqstr(id, ...),
-//            zone_name(id), autoskill_list(), alt_abilities()
+//            zone_name(id), zone_long_name(id), autoskill_list(), alt_abilities()
 //   actions: hailstone.right_click_item(slot [, class]), close_spell_book(), clear_spell_recovery(),
 //            set_window_pet(id), inspect_item(id [, augments]), set_max_camera_distance(d), hold_autoskill(on),
 //            use_ability(kind, name), train_aa(group)
@@ -1227,6 +1227,15 @@ int l_zone_name(lua_State* L) {
     return 1;
 }
 
+// hailstone.zone_long_name(id): the zone's long name, as the windows show it; nil for an unknown id.
+int l_zone_long_name(lua_State* L) {
+    need_cap(L, plugin::kCapRead, "hailstone.zone_long_name");
+    std::string name = game::zone_long_name(static_cast<std::uint32_t>(luaL_checkinteger(L, 1)));
+    if (name.empty()) lua_pushnil(L);
+    else lua_pushlstring(L, name.data(), name.size());
+    return 1;
+}
+
 // hailstone.server(): {name, host, port, world, world_host}, the server this login is on (hailstone_plugin.h
 // server_info); nil before the world login.
 int l_server(lua_State* L) {
@@ -1589,6 +1598,7 @@ void register_hailstone(lua_State* L) {
              {"raid", l_raid},
              {"eqstr", l_eqstr},
              {"zone_name", l_zone_name},
+             {"zone_long_name", l_zone_long_name},
              {"server", l_server},
              {"chat", l_chat},
              {"server_dir", l_server_dir},

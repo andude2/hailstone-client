@@ -320,6 +320,10 @@ struct ConnectionOptions {
     std::shared_ptr<game::ServerExtension> plugins;
     // Called with every zone packet before it is handled (tools: packet captures).
     std::function<void(const AppPacket&)> zone_packet_tap;
+    // Tests and the drive spike: makes the world and zone sessions. Empty: the
+    // real UDP sessions (Session::create with `session`). A test installs one
+    // that returns a mirror session behind an in-process relay.
+    std::function<std::unique_ptr<Session>()> session_factory;
     // The plugin hook bus (plugin/hooks.h): packets both ways, chat lines, commands, game state, zoning and spawns
     // pass it. Null: no plugins.
     plugin::Hooks* hooks = nullptr;
@@ -2894,6 +2898,8 @@ private:
     void apply_spawn(const Spawn& s);
     void set_spawn_motion(game::Spawn& s, const Motion& m);
     void connect_world(bool zoning);
+    // The real UDP session, or ConnectionOptions::session_factory's (tests, the drive spike).
+    std::unique_ptr<Session> create_session();
     void chat(ChatEvent::Kind kind, std::string text, std::uint32_t rgb = 0, std::uint32_t color = 0,
               std::string peer = {}, std::optional<std::string> display_text = std::nullopt);
     // ReportSuccessfulHit's melee line for an attack by `source`, through the chat filters (`report`: its argument).

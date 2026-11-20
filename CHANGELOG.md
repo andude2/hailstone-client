@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Saved item hotbuttons no longer pick up an unrelated item when EQEmu reassigns a serial on login or zoning.
+
 - Headless workers honor `--no-chat-log` and crew `chat_log=0` in their diagnostic logs. With chat logging enabled, each event is written once. Plugins still receive chat.
 
 - Compiled plugins can read and drive looting: `get_loot_data_bulk` reads the open loot session (the corpse, its item slots with names, the coin, whether every item has arrived), and `loot_corpse`, `loot_item`, `loot_all`, `end_loot` and `answer_confirmation` work it as the loot window's buttons do, the client's no-drop and quantity questions included (docs/plugins.md "Loot records and actions"). `free_inventory_slots` reads the room an auto-looted item can use, counting the bags' empty slots as `${Me.FreeInventory}` does, and `can_loot_corpse` answers the client's own reach check, so a giant's corpse is opened from its real range. `loot_item_modifiers` takes a whole stack with Shift, with no quantity dialog for a headless caller

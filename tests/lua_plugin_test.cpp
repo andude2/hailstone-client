@@ -800,6 +800,7 @@ local p = hs.player()
 print('[more] server ' .. tostring(hs.server_dir()))
 print('[more] character ' .. tostring(hs.character_dir()))
 print('[more] zone ' .. hs.zone_name(1) .. ' ' .. tostring(hs.zone_name(999999)))
+print('[more] zone long ' .. hs.zone_long_name(1) .. ' ' .. tostring(hs.zone_long_name(999999)))
 print('[more] pet ' .. p.pet_id .. ' stand ' .. p.stand_state .. ' casting ' .. p.casting_spell_id)
 hs.set_window_pet(301)
 hs.clear_spell_recovery()
@@ -819,6 +820,7 @@ print('[more] camera ' .. math.floor(hs.max_camera_distance()))
     // (the world's name gives the character a folder: servers/<profile>/characters/<world>/Tester/)
     CHECK(h.printed_part((fs::path("Tester") / "plugin-config" / "more").string()));
     CHECK(h.printed_part("[more] zone qeynos nil"));
+    CHECK(h.printed_part("[more] zone long South Qeynos nil"));
     CHECK(h.printed_part("[more] pet 300 stand 100 casting 0"));
     CHECK(c.pets().focused == 301);
     CHECK(h.printed_part("[more] camera 90"));

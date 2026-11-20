@@ -203,10 +203,15 @@ void GameConnection::start(const WorldTicket& ticket) {
     connect_world(false);
 }
 
+std::unique_ptr<Session> GameConnection::create_session() {
+    if (options_.session_factory) return options_.session_factory();
+    return Session::create(options_.session);
+}
+
 void GameConnection::connect_world(bool zoning) {
     zoning_ = zoning;
     world_login_sent_ = false;
-    world_session_ = Session::create(options_.session);
+    world_session_ = create_session();
     world_session_->connect(ticket_.world_host, ticket_.world_port);
     state_ = zoning ? ConnectionState::Zoning : ConnectionState::WorldConnecting;
     status_ = "Connecting to " + ticket_.server_name;
@@ -254,7 +259,7 @@ void GameConnection::update() {
         if (!world_session_) {
             // "ZONING": Net_ConnectToServer with the address from OP_ZoneServerInfo.
             world_drop_pending_ = false;
-            zone_session_ = Session::create(options_.session);
+            zone_session_ = create_session();
             zone_session_->connect(zone_host_, zone_port_);
         } else if (Clock::now() >= world_drop_deadline_) {
             world_drop_pending_ = false;

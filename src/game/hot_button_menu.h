@@ -89,8 +89,8 @@ bool assign_label(HotButtonStore& store, HotButton& b, const std::string& text);
 std::optional<HotButton> inventory_hot_button(const net::ItemSlot& slot, const net::Item* item, bool shift_or_ctrl);
 
 // The possessions slot whose item a type 5 or 12 button stands for: type 5 its slot; type 12 the item with the
-// button's GUID (the item's serial), else (no such serial: EQEmu gives an item a new serial in each zone) the first
-// with its item id, top-level slots in order, each bag's contents after the bag; never the cursor. Nullopt: none.
+// button's item ID and GUID (the item's serial), else the first with its item ID. EQEmu can reassign serials
+// on zone-in. Search top-level slots in order, each bag's contents after the bag, excluding the cursor.
 std::optional<net::ItemSlot> hot_button_item_slot(const Inventory& inv, const HotButton& b);
 
 } // namespace hailstone::game

@@ -78,8 +78,10 @@ std::optional<net::ItemSlot> hot_button_item_slot(const Inventory& inv, const Ho
     for (const auto& [key, top] : inv.items()) {
         if (key.first != net::kInvPossessions || key.second < 0 || key.second >= net::kSlotCursor) continue;
         auto check = [&](const net::Item& it, net::ItemSlot at) {
+            if (b.item_id == 0 || static_cast<std::int32_t>(it.id) != b.item_id) return false;
+            // EQEmu can reassign a saved serial to a different item on zone-in.
             if (has_guid && it.serial == b.guid) return true;
-            if (!by_id && b.item_id != 0 && static_cast<std::int32_t>(it.id) == b.item_id) by_id = at;
+            if (!by_id) by_id = at;
             return false;
         };
         if (check(top, net::ItemSlot::possessions(key.second))) return net::ItemSlot::possessions(key.second);

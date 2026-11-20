@@ -2328,6 +2328,17 @@ int h_zone_name(void* h, std::uint32_t zone_id, char* out, std::size_t out_size)
     return name.empty() ? -1 : copy_out(name, out, out_size);
 }
 
+int h_zone_long_name(void* h, std::uint32_t zone_id, char* out, std::size_t out_size) {
+    Loaded& l = Loaded::of(h);
+    if (!l.can(kCapRead)) {
+        if (!l.read_denied) l.denied("zone_long_name", kCapRead);
+        l.read_denied = true;
+        return -1;
+    }
+    std::string name = game::zone_long_name(zone_id);
+    return name.empty() ? -1 : copy_out(name, out, out_size);
+}
+
 void h_close_spell_book(void* h) {
     if (net::GameConnection* c = acting(Loaded::of(h), "close_spell_book")) c->close_spell_book();
 }
@@ -3080,6 +3091,7 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
     p.table.server_config_dir = main_only<h_server_config_dir>;
     p.table.character_config_dir = main_only<h_character_config_dir>;
     p.table.zone_name = main_only<h_zone_name>;
+    p.table.zone_long_name = main_only<h_zone_long_name>;
     p.table.close_spell_book = main_only<h_close_spell_book>;
     p.table.clear_spell_recovery = main_only<h_clear_spell_recovery>;
     p.table.set_window_pet = main_only<h_set_window_pet>;

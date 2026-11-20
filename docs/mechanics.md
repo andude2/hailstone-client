@@ -1555,6 +1555,9 @@ Vectors in `tests/hotbutton_tracking_vectors_test.cpp` (do-hot-button 4000, hot-
   greyed): Activate / Consume (krono), Inspect, Clear, Change Size, Assign Icon, Clear Icon, Assign Label (15
   characters; a social's label renames the social), Assign Social (10 pages of 12, "<New Social>" opening the social
   editor), Memorize (the gem's spell select menu, in the spell categorization order) and Unmemorize.
+- A saved item hotbutton matches the item ID and serial together. If the serial changes or EQEmu gives it to
+  another item on zone-in, the button uses the first carried item with the saved ID. It has no item if the ID
+  is absent from the carried inventory.
 - The hot bar's own menu and settings (`game/hot_button_sets.*`, `game/icon_selection.*`): PercentSize (UI ini,
   40..175, default 100) sizes each button (XML size x percent / 100); ShowKeyMap / ShowSpinner (default on);
   hotbutton sets: 10 named entries in the character ini's [HBLoadouts] (HBSet<n>.inuse / name / fileNum), each bar's
