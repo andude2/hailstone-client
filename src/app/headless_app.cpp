@@ -522,6 +522,7 @@ int run_headless(HeadlessOptions options) {
 
     net::ConnectionOptions copts;
     copts.hooks = &automation.hooks();
+    copts.diagnostic_chat_log = options.chat_log;
     copts.plugins = automation.extensions();
     if (!saved_profile_id.empty()) {
         // The character's files under the saved profile, its bank snapshot,
@@ -699,10 +700,8 @@ int run_headless(HeadlessOptions options) {
             log::error("headless: a server plugin waits for consent and cannot be asked here; "
                        "allow it from the graphical client on this server first (docs/headless.md)");
         }
-        // The hooks (Sentinel and friends) see every line regardless; this
-        // only drains the client's own queue, printed unless silenced.
-        while (auto c = conn->poll_chat())
-            if (options.chat_log) log::info("chat: {}", c->text);
+        // The connection has already dispatched the chat hooks.
+        while (conn->poll_chat()) {}
         if (conn->state() != last) {
             last = conn->state();
             log::info("[{}] {}", net::to_string(last), conn->status());

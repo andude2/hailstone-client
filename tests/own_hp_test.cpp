@@ -13,6 +13,7 @@
 #include "game/mechanics/character.h"
 #include "game/mechanics/tables.h"
 #include "mock_server/harness.h"
+#include "mock_server/profile_builder.h"
 #include "net/zone_packets.h"
 
 using namespace hailstone;
@@ -96,6 +97,14 @@ TEST_CASE("Own HP: the windows add the items' HP that EQEmu's HP update leaves o
     app::share_own_hp_items(conn, &ext);
     CHECK(app::ui_label(host, 17).text == "100");
     CHECK(app::ui_label(host, 18).text == "200");
+
+    // A profile applied after the HP update must not replace only the current side of the pair:
+    // at login that left a full character reporting below 100% until the next zone's HP update.
+    ProfileSpec late;
+    late.cur_hp = 50;
+    conn.receive_zone_packet_for_test(build_player_profile(late));
+    CHECK(conn.player_status().hp == 100);
+    CHECK(conn.player_status().max_hp == 200);
 
     // Leaving the zone (no character): the server's points as they came.
     app::share_own_hp_items(conn, nullptr);

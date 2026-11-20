@@ -130,9 +130,10 @@ between launches, so 23 logins do not land at once), `autoload`
 (the plugins each member loads — a crew driving Sentinel wants only
 its host, e.g. `autoload=HSMono`, so no member also opens a second
 command bridge or broker client of its own) and `chat_log` (0, the
-crew default: children drain chat without printing it, so 23 clients
-do not flood one console; their plugins still see every line, and
-the per-character log files are unaffected in kind, only quieter).
+crew default: chat lines are omitted from each worker's diagnostic log.
+Set `chat_log=1` to write each chat event once. For a standalone worker,
+`--no-chat-log` suppresses diagnostic chat. In both cases plugins still
+receive chat, and the in-game `/log` setting controls its own file).
 
 Single characters get the same saved login without a crew file:
 `hailstone_headless --server ez-server --account crew1` reads the

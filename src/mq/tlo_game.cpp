@@ -792,18 +792,8 @@ void register_character() {
         return item_value(ctx, net::ItemSlot::possessions(static_cast<std::int16_t>(slot)));
     });
     me_member("FreeInventory", [](const Context& ctx, const GameConnection& c, std::string_view) {
-        std::int64_t free = 0;
-        for (int s = net::kSlotGeneral1; s <= net::kSlotGeneral10; ++s) {
-            const net::Item* it = c.inventory().at(net::ItemSlot::possessions(static_cast<std::int16_t>(s)));
-            if (!it) {
-                ++free;
-            } else if (it->is_bag()) {
-                for (int i = 0; i < it->bag_slots; ++i)
-                    if (!it->content(static_cast<std::uint32_t>(i))) ++free;
-            }
-        }
         (void)ctx;
-        return V::integer(free);
+        return V::integer(game::free_inventory_slots(c.inventory()));
     });
     me_member("Pet", [](const Context& ctx, const GameConnection& c, std::string_view) -> V {
         if (c.pets().focused) return spawn_value(spawn_of(ctx, c.pets().focused));

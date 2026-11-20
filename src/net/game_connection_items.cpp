@@ -929,6 +929,20 @@ void GameConnection::apply_server_move(const MoveItem& m) {
 
 // ---------------------------------------------------------------- loot
 
+bool GameConnection::corpse_in_reach(std::uint32_t corpse_id) const {
+    const auto it = world_.spawns.find(corpse_id);
+    if (it == world_.spawns.end() || !it->second.is_corpse) return false;
+    const game::Spawn* me = world_.player();
+    if (!me) return false;
+    const glm::vec3 at = motion_known_ ? position_ : me->position;
+    return game::player_distance(&it->second.position, &at, 1.2f) <=
+           it->second.heights.avatar_height * 1.6f + 14.0f;
+}
+
+bool GameConnection::can_loot(std::uint32_t corpse_id) const {
+    return state_ == ConnectionState::InZone && !pstatus_.dead && !loot_ && corpse_in_reach(corpse_id);
+}
+
 void GameConnection::loot(std::uint32_t corpse_id) {
     // CEverQuest::LootCorpse @0x536720 (__do_loot, a right click on a corpse): a corpse (type above 1), not while
     // dead, an item request is pending or another corpse is open; beyond its AvatarHeight * 1.6 + 14 (PlayerDistance
@@ -936,11 +950,8 @@ void GameConnection::loot(std::uint32_t corpse_id) {
     if (state_ != ConnectionState::InZone || pstatus_.dead || loot_) return;
     auto it = world_.spawns.find(corpse_id);
     if (it == world_.spawns.end() || !it->second.is_corpse) return;
-    const game::Spawn* me = world_.player();
-    if (!me) return;
-    glm::vec3 at = motion_known_ ? position_ : me->position;
-    if (game::player_distance(&it->second.position, &at, 1.2f) > it->second.heights.avatar_height * 1.6f + 14.0f) {
-        system(12390, {}, 0xd);
+    if (!corpse_in_reach(corpse_id)) {
+        if (world_.player()) system(12390, {}, 0xd); // a missing player is silent, as the original
         return;
     }
     loot_session_generation_ = core::next_process_identity();

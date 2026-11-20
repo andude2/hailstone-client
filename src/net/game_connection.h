@@ -340,6 +340,7 @@ struct ConnectionOptions {
     // Hailstone: the bank as last seen is read from and saved to the character's bank.dat (game/bank_snapshot.h).
     // Off: kept for the session only (tests, which share character names).
     bool bank_snapshot_file = false;
+    bool diagnostic_chat_log = true; // chat in the application log, separate from /log
 };
 
 // The modifier keys of a click on an item slot (CXWndManager::GetKeyboardFlags: Shift, Ctrl, Alt).
@@ -1815,6 +1816,11 @@ public:
         std::size_t pending_requests = 0; // OP_LootItem requests awaiting an answer, including individual loots
     };
     void loot(std::uint32_t corpse_id);
+    // CEverQuest::LootCorpse's preconditions without opening anything: in a zone, alive, no loot
+    // session open, and the corpse within its reach (PlayerDistance at z scale 1.2, refused beyond
+    // AvatarHeight * 1.6 + 14: a giant's reach is much longer than a normal corpse's). True when
+    // loot() would go ahead now.
+    bool can_loot(std::uint32_t corpse_id) const;
     // CLootWnd::RequestLootSlot: a corpse slot onto the cursor (or auto looted); a no-drop item may ask first
     // (LootNoDrop, game/item_options.h); a stack on someone else's corpse asks how many (quantity_request(),
     // Shift / Ctrl as the quantity dialog takes them).
@@ -2970,6 +2976,10 @@ private:
     // CEverQuest_ProcessCursorQueue @0x5321a0, once a frame (net/game_connection_items.cpp).
     void process_cursor_queue();
     bool item_command(const std::string& command, const std::string& args);
+    // /rez: answer a resurrection offer and select the resurrection row of the respawn window. A headless
+    // character has neither ConfirmationDialogBox nor RespawnWnd to click; only a kConfirmRezz question or
+    // the reserved resurrection option is acted on.
+    bool rez_command();
     void handle_commerce(Op op, const AppPacket& p);
     void commerce_item(std::uint32_t packet_type, Item item);
     bool commerce_command(const std::string& command, const std::string& args);
@@ -3033,6 +3043,7 @@ private:
     void update_barter();
     void update_bank();
     void update_loot();
+    bool corpse_in_reach(std::uint32_t corpse_id) const;
     void loot_failed(std::uint32_t eqstr);
     void reset_loot_session();
     void auto_bank_cursor(bool stacks);

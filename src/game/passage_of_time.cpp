@@ -33,10 +33,14 @@ bool elapsed_over(std::int64_t now, std::int64_t last, std::int64_t limit) {
 }
 
 // CharacterZoneClient::ModifyCurHP @0x4537d0 on the player (never an NPC spawn): the HP plus the change, clamped to
-// -0x20000..10000000; the spawn's Cur_HP read afterwards keeps it at most the maximum.
+// -0x20000..10000000; the spawn's Cur_HP read afterwards keeps it at most the maximum. Hailstone extension: a
+// server whose HP pools past RoF2's 10M formula cap sends that maximum in OP_HPUpdate (pools.max_hp); the tick
+// prediction must not truncate a pool the server already gave whole, so the ceiling follows the server's maximum
+// when it is the larger. Stock maxima (at most the formula's 10M) clamp exactly as the original's.
 void modify_cur_hp(TickPools& pools, std::int32_t delta) {
     if (delta == 0) return;
-    std::int64_t hp = std::clamp<std::int64_t>(pools.hp + delta, -0x20000, 10000000);
+    const std::int64_t ceiling = std::max<std::int64_t>(10000000, pools.max_hp);
+    std::int64_t hp = std::clamp<std::int64_t>(pools.hp + delta, -0x20000, ceiling);
     if (pools.max_hp > 0 && hp > pools.max_hp) hp = pools.max_hp;
     pools.hp = hp;
 }

@@ -1006,6 +1006,22 @@ typedef struct PluginHostApi {
     /* ACTIONS. Answer the confirmation question the client is asking now (a no-drop loot, a quantity, any
      * stock ConfirmationDialog): nonzero when one was answered. Without a question it does nothing. */
     int (*answer_confirmation)(void* host, int yes);
+    /* READ. The empty slots a newly looted item can go into: the empty general slots (23..32) and the empty
+     * slots inside the bags there, as ${Me.FreeInventory} counts them. An empty general slot counts one; a
+     * filled one counts its bag's empty slots, not the slot the bag occupies. An item's size against a bag's
+     * cap is not considered, so a tight bag may still refuse what this counts room for. -1 when the plugin
+     * lacks `read`, the client has no connection, or the call is off its thread. Added later in ABI 3: test
+     * HAILSTONE_HOST_HAS(host, free_inventory_slots) first. */
+    int (*free_inventory_slots)(void* host);
+    /* READ. Whether `loot_corpse` would open the corpse now: in a zone, alive, no loot session open, and
+     * the corpse within the client's reach (its AvatarHeight * 1.6 + 14, at z scale 1.2, so a giant's
+     * reach is much longer than a normal corpse's). 1 yes, 0 no, -1 off the client's thread. Added later
+     * in ABI 3: test HAILSTONE_HOST_HAS(host, can_loot_corpse) first. */
+    int (*can_loot_corpse)(void* host, uint32_t corpse_id);
+    /* ACTIONS. `loot_item` with the loot window's modifier keys held: `shift` takes the whole stack at
+     * once, with no quantity question (a shift-click), and `ctrl` takes one. 0 without an open session,
+     * as loot_item. Added later in ABI 3: test HAILSTONE_HOST_HAS(host, loot_item_modifiers) first. */
+    int (*loot_item_modifiers)(void* host, int32_t slot, int auto_loot, int shift, int ctrl);
 } PluginHostApi;
 /* What use_ability and ability_state take: the kinds of ability the Ability Book lists. The values are stable. */
 enum HS_AbilityKinds {

@@ -288,6 +288,27 @@ std::int64_t GameConnection::respawn_now_ms() const {
     return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
 }
 
+bool GameConnection::rez_command() {
+    bool acted = false;
+    // The offer's ConfirmationDialog first. A same-zone hover offer answers yes locally and only enables
+    // the reserved row; another zone's offer sends OP_RezzAnswer at once.
+    if (confirmation_ && confirmation_->id == kConfirmRezz) {
+        answer_confirmation(true);
+        acted = true;
+    }
+    // Then the respawn window's Select, when that answers the reservation's yes: only the reserved
+    // resurrection row, never a bind, and never a row the player has refused. With the window's delay
+    // already past, one /rez does both steps.
+    if (respawn_ && !respawn_chosen() && respawn_ready()) {
+        const RespawnOption* rez = respawn_resurrection_option();
+        if (rez && respawn_option_available(rez->id)) {
+            choose_respawn(rez->id);
+            acted = true;
+        }
+    }
+    return acted;
+}
+
 void GameConnection::choose_respawn(std::uint32_t option_id) {
     if (respawn_selection_sending_ || !respawn_ready() || !respawn_option_available(option_id)) return;
     const auto option = std::find_if(respawn_->options.begin(), respawn_->options.end(),

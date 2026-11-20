@@ -59,6 +59,21 @@ Item* Inventory::at(const ItemSlot& slot) {
     return const_cast<Item*>(static_cast<const Inventory&>(*this).at(slot));
 }
 
+int free_inventory_slots(const Inventory& inventory) {
+    int free = 0;
+    for (std::int16_t slot = net::kSlotGeneral1; slot <= net::kSlotGeneral10; ++slot) {
+        const Item* item = inventory.at(ItemSlot::possessions(slot));
+        if (!item) {
+            ++free;
+            continue;
+        }
+        if (!item->is_bag()) continue;
+        for (int sub = 0; sub < item->bag_slots; ++sub)
+            if (!item->content(static_cast<std::uint32_t>(sub))) ++free;
+    }
+    return free;
+}
+
 bool Inventory::put(const ItemSlot& slot, Item item) {
     if (slot.type < 0 || slot.slot < 0) return false;
     if (slot.sub < 0) {

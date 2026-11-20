@@ -248,6 +248,15 @@ TEST_CASE("Buff tick: the buffs' HP, mana and endurance, then the regen of the p
     REQUIRE(r.endurance > 0);
     REQUIRE(f.tick(7001));
     CHECK(f.pools.hp == 500 - 20 + r.hp);
+
+    // A server pool past RoF2's 10M formula cap: a heal tick at full HP stays at the server's maximum
+    // (ModifyCurHP's ceiling follows pools.max_hp), it does not truncate the pool to 10000000.
+    Fixture big;
+    big.spell(13, {{0, 20}}); // a HoT
+    big.buff(0, 13, 5);
+    big.pools.hp = big.pools.max_hp = 19823682;
+    REQUIRE(big.tick(7001));
+    CHECK(big.pools.hp == 19823682);
     CHECK(f.pools.mana == 100 + 10 + r.mana);
     CHECK(f.pools.endurance == 50 + 5 + r.endurance);
     CHECK(f.host.lines.empty());

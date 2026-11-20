@@ -279,13 +279,74 @@ TEST_CASE("native plugins: the loot bulk reads the open session; the loot action
     CHECK(lines[0] == "[Probe] loot corpse 4000 inc 77 open 1 complete 1 count 2 total 2 pending 0 coin 3 0 0 0 a rat 186 bytes");
     CHECK(lines[1] == "[Probe] loot slot 0: Rat Tail 1001 icon 501 qty 1 flags 1");
     CHECK(lines[2] == "[Probe] loot slot 3: Bone Chips 1002 icon 502 qty 20 flags 0");
-    // A buffer that holds only the first record truncates whole records only.
-    lines = run("/probeloot 140");
+    // A buffer that holds only the first record truncates whole records only: 160 holds the
+    // 120-byte header and the 32-byte first record, and cuts the second.
+    lines = run("/probeloot 160");
     REQUIRE(lines.size() == 2);
     CHECK(lines[0] == "[Probe] loot corpse 4000 inc 77 open 1 complete 1 count 1 total 2 pending 0 coin 3 0 0 0 a rat 152 bytes");
+    // A stack on someone else's corpse asks the quantity question; Shift takes the whole stack at once.
+    CHECK(run("/probelootact item 3 1")[0] == "[Probe] loot act item 1");
+    REQUIRE(h.world.conn->quantity_request().has_value());
+    CHECK(h.world.conn->quantity_request()->max == 20);
+    h.world.conn->cancel_quantity();
+    CHECK(run("/probelootact itemshift 3 1 1 0")[0] == "[Probe] loot act itemshift 1");
+    CHECK(!h.world.conn->quantity_request().has_value());
     // The actions answer: an item request goes out (its answer is the server's), the close ends it.
     CHECK(run("/probelootact end")[0] == "[Probe] loot act end 1");
     loot.reset();
+}
+
+TEST_CASE("native plugins: free_inventory_slots counts the bags' room, not only the general slots") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll);
+    REQUIRE(h.plugins->load("HostProbe"));
+    auto& inventory = net::GameConnectionTestAccess::inventory(*h.world.conn);
+    // Every general slot holds a bag: no top-level slot is empty, but the bags have room.
+    for (int i = 0; i < net::kGeneralSlots; ++i) {
+        net::Item bag;
+        bag.id = 17005 + static_cast<std::uint32_t>(i);
+        bag.name = "Bag";
+        bag.item_class = 1;
+        bag.bag_slots = 2;
+        inventory.put(net::ItemSlot::possessions(static_cast<std::int16_t>(net::kSlotGeneral1 + i)), bag);
+    }
+    net::Item item;
+    item.id = 5001;
+    item.name = "Something";
+    inventory.put(net::ItemSlot::possessions(net::kSlotGeneral1, 0), item);
+    h.run("/probefreeinv");
+    CHECK(h.printed_line("[Probe] free inventory 19"));
+    // Without read the answer is unknown (-1), so a caller does not take it for no room.
+    h.approve(plugin::kCapAll & ~plugin::kCapRead);
+    h.plugins->policy_changed({});
+    h.printed.clear();
+    h.run("/probefreeinv");
+    CHECK(h.printed_line("[Probe] free inventory -1"));
+}
+
+TEST_CASE("native plugins: can_loot_corpse uses the corpse's own reach, so a giant is in range from further") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll);
+    REQUIRE(h.plugins->load("HostProbe"));
+    auto& world = net::GameConnectionTestAccess::world(*h.world.conn);
+    game::Spawn corpse;
+    corpse.id = 4001;
+    corpse.name = "a giant's_corpse";
+    corpse.is_corpse = true;
+    corpse.position = {30.0f, 0.0f, 0.0f};
+    corpse.heights.avatar_height = 20.0f; // a giant: its reach is 20 * 1.6 + 14 = 46
+    world.spawns[corpse.id] = corpse;
+    h.run("/probecanloot 4001");
+    CHECK(h.printed_line("[Probe] can loot 4001 1"));
+    // A normal corpse at the same distance is out of reach (6 * 1.6 + 14 = 23.6).
+    world.spawns[4001].heights.avatar_height = 6.0f;
+    h.run("/probecanloot 4001");
+    CHECK(h.printed_line("[Probe] can loot 4001 0"));
+    // A live spawn is not a corpse.
+    world.spawns[4001].heights.avatar_height = 20.0f;
+    world.spawns[4001].is_corpse = false;
+    h.run("/probecanloot 4001");
+    CHECK(h.printed_line("[Probe] can loot 4001 0"));
 }
 
 TEST_CASE("native plugins: binary measurement uses the admitted library copy and preserves failures") {

@@ -182,7 +182,7 @@ void GameConnection::chat(ChatEvent::Kind kind, std::string text, std::uint32_t 
         rgb = line.color;
     }
     // Hit modes change presentation only: logs and incoming-chat parsers retain the complete sentence.
-    log::info("chat: {}", text);
+    if (options_.diagnostic_chat_log) log::info("chat: {}", text);
     if (chat_logging()) write_chat_log(text); // dsp_chat's OutputTextToLog (Log on)
     chat_.push_back({kind, display_text ? std::move(*display_text) : std::move(text), rgb, color, std::move(peer)});
     if (chat_.size() > 500) chat_.pop_front();
@@ -1334,9 +1334,13 @@ void GameConnection::handle_zone(const AppPacket& p) {
             sync_shroud_mode();
             fellowship_.vitality.normal = profile_->fellowship_vitality_normal;
             fellowship_.vitality.aa = profile_->fellowship_vitality_aa;
-            pstatus_.hp = profile_->cur_hp;
-            pstatus_.mana = profile_->mana;
-            pstatus_.endurance = profile_->endurance;
+            // The profile's points seed the pools until the update packets arrive. Once a maximum is known,
+            // OP_HPUpdate / OP_ManaUpdate / OP_EnduranceUpdate own the pair: a profile applied after one
+            // would replace only the current side and leave a full character reading below 100% until the
+            // next update (a zone-in's HP update repairs it), while the spawn's server percent stays 100.
+            if (pstatus_.max_hp == 0) pstatus_.hp = profile_->cur_hp;
+            if (pstatus_.max_mana == 0) pstatus_.mana = profile_->mana;
+            if (pstatus_.max_endurance == 0) pstatus_.endurance = profile_->endurance;
             pstatus_.level = profile_->level;
             position_ = game::server_to_world({profile_->x, profile_->y, profile_->z});
             heading_ = profile_->heading;

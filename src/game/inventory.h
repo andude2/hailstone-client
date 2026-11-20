@@ -57,6 +57,12 @@ private:
     std::uint64_t cursor_placement_ = 0;
 };
 
+// The empty slots a newly looted item can go into: the empty general slots (23..32) and the empty slots
+// inside the bags there. An empty general slot counts as one; a filled one counts its bag's empty slots
+// and nothing for an item that is not a bag. An item's size against a bag's cap is not considered (the
+// server places the loot and refuses what does not fit), so this is the room auto-inventory can use.
+int free_inventory_slots(const Inventory& inventory);
+
 // ---- item rules (client side; the server checks again) ----
 
 // The client's race bit for an item's race mask (CharacterZoneClient_CanUseItemRace

@@ -168,6 +168,33 @@ TEST_CASE("Hover respawn: a yes to an offer for this zone is held back for the r
     CHECK(MockEqServer::count(h.rig.server.zone_log, Op::RezzAnswer) == 0);
 }
 
+TEST_CASE("Hover respawn: /rez accepts the offer and selects the resurrection row") {
+    HoverRig h;
+    REQUIRE(h.start());
+    auto& c = h.rig.conn;
+    c.receive_zone_packet_for_test(rez_offer());
+    c.send_command("/rez");
+    CHECK(c.accepted_hover_rez_option() == 1);
+    hover_barrier(h.rig);
+    CHECK(MockEqServer::count(h.rig.server.zone_log, Op::RezzAnswer) == 0); // held back for the window
+    h.clock.advance(1ms); // the window's zero delay has passed
+    REQUIRE(c.respawn_ready());
+    c.send_command("/rez");
+    CHECK(c.respawn_chosen());
+    hover_barrier(h.rig);
+    CHECK(MockEqServer::count(h.rig.server.zone_log, Op::RespawnWindow) == 1);
+}
+
+TEST_CASE("Hover respawn: /rez answers another zone's offer at once") {
+    HoverRig h;
+    REQUIRE(h.start());
+    auto& c = h.rig.conn;
+    c.receive_zone_packet_for_test(rez_offer(100, 3, 0));
+    c.send_command("/rez");
+    hover_barrier(h.rig);
+    CHECK(MockEqServer::count(h.rig.server.zone_log, Op::RezzAnswer) == 1);
+}
+
 TEST_CASE("Hover respawn: a dropped selection retains consent and can be retried") {
     plugin::Hooks hooks;
     HoverRig h(&hooks);

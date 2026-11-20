@@ -1054,6 +1054,10 @@ for the corpse being looted is read and acted on here. Added later in ABI 3: tes
   session (into the inventory, or onto the cursor without `auto_loot`), `loot_all()` takes everything, and
   `end_loot()` closes the session, as the window's buttons do. The client's own questions apply on the
   way: a no-drop item (flag 2 above) and a stack's quantity ask first instead of going out at once.
+- `loot_item_modifiers(slot, auto_loot, shift, ctrl)` (with `actions`) is `loot_item` with the loot
+  window's modifier keys held: `shift` takes the whole stack at once, with no quantity question (a
+  headless caller has no dialog to answer), and `ctrl` takes one. Added later in ABI 3: test
+  `HAILSTONE_HOST_HAS(host, loot_item_modifiers)` first.
 - `answer_confirmation(yes)` (with `actions`) answers the confirmation question the client is asking now
   — the no-drop and quantity questions above, or any other stock question — and does nothing when none
   is open. A caller that loots unattended answers for the player, so it should ask only when its own
@@ -1062,7 +1066,18 @@ for the corpse being looted is read and acted on here. Added later in ABI 3: tes
 Corpse slots are not inventory slots: they are read here, not with `get_item`, whose slots address what
 the player holds. What the player holds is counted with `get_item` over the possessions and their bags,
 the cursor item with the cursor slot, and `/destroycursor` and `/stowcursor` (above) settle a cursor item
-by its id.
+by its id. `free_inventory_slots(host)` (with `read`) says how much room the player has for an auto-looted
+item: the empty general slots (23..32) plus the empty slots inside the bags there, as `${Me.FreeInventory}`
+counts them. An empty general slot counts one; a bag counts its empty slots, not the slot the bag itself
+occupies. A bag's size cap is not considered, so a tight bag may still refuse what this counts room for.
+It returns -1 without `read`, with no connection, or off the client's thread. Added later in ABI 3: test
+`HAILSTONE_HOST_HAS(host, free_inventory_slots)` first.
+
+`can_loot_corpse(corpse_id)` (with `read`) says whether `loot_corpse` would open that corpse now, the
+same check a right click on it makes: in a zone, alive, no loot session open, and within the corpse's
+reach. That reach is its `AvatarHeight * 1.6 + 14` at z scale 1.2, so a giant's corpse opens from much
+further than a rat's. 1 yes, 0 no, -1 off the client's thread. Added later in ABI 3: test
+`HAILSTONE_HOST_HAS(host, can_loot_corpse)` first.
 
 ### Connections (ABI 2)
 

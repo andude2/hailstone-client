@@ -168,6 +168,11 @@ void GameConnection::send_command(const std::string& typed) {
         if ((word == "/finditem" || word == "/advi") && client_commands_ &&
             client_commands_("Hailstone_finditem", std::string(rest)))
             return;
+        // Hailstone: a resurrection without the two windows that ask for it (a headless character).
+        if (word == "/rez") {
+            rez_command();
+            return;
+        }
         system(12380); // That is not a valid command.  Please use /help.
         return;
     }

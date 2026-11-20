@@ -2245,6 +2245,13 @@ int h_loot_item(void* h, std::int32_t slot, int auto_loot) {
     return 1;
 }
 
+int h_loot_item_modifiers(void* h, std::int32_t slot, int auto_loot, int shift, int ctrl) {
+    net::GameConnection* c = acting(Loaded::of(h), "loot_item_modifiers");
+    if (!c || !c->loot_session() || !c->loot_session()->open) return 0;
+    c->loot_item(static_cast<std::int16_t>(slot), auto_loot != 0, shift != 0, ctrl != 0);
+    return 1;
+}
+
 int h_loot_all(void* h) {
     net::GameConnection* c = acting(Loaded::of(h), "loot_all");
     if (!c || !c->loot_session() || !c->loot_session()->open) return 0;
@@ -2264,6 +2271,17 @@ int h_answer_confirmation(void* h, int yes) {
     if (!c || !c->confirmation()) return 0;
     c->answer_confirmation(yes != 0);
     return 1;
+}
+
+int h_free_inventory_slots(void* h) {
+    const net::GameConnection* c = readable(Loaded::of(h), "free_inventory_slots");
+    return c ? game::free_inventory_slots(c->inventory()) : -1;
+}
+
+int h_can_loot_corpse(void* h, std::uint32_t corpse_id) {
+    const net::GameConnection* c = readable(Loaded::of(h), "can_loot_corpse");
+    if (!c || !corpse_id) return 0;
+    return c->can_loot(corpse_id) ? 1 : 0;
 }
 
 int h_right_click_item(void* h, const HailstoneItemSlot* slot, std::uint32_t class_id) {
@@ -3130,6 +3148,9 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
     p.table.loot_all = main_only<h_loot_all>;
     p.table.end_loot = main_only<h_end_loot>;
     p.table.answer_confirmation = main_only<h_answer_confirmation>;
+    p.table.free_inventory_slots = main_only_or<h_free_inventory_slots, -1>; // off the thread "unknown", not 0 ("no room")
+    p.table.can_loot_corpse = main_only_or<h_can_loot_corpse, -1>; // off the thread "unknown", not 0 ("too far")
+    p.table.loot_item_modifiers = main_only<h_loot_item_modifiers>;
     Hooks& hooks = *m.env.hooks;
     Loaded* lp = &p;
     // Each callback runs with the plugin's capabilities and counts as the plugin being busy (no unloading under it).

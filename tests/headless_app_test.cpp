@@ -3,9 +3,58 @@
 #include <doctest/doctest.h>
 
 #include "app/headless_app.h"
+#include "core/game_dir.h"
+#include "core/log.h"
+#include "net/game_connection.h"
 #include "net/login.h"
+#include "plugin/hooks.h"
+#include "scratch_dir.h"
+
+#include <fstream>
+#include <iterator>
 
 using namespace hailstone;
+
+TEST_CASE("headless: diagnostic chat logging preserves chat delivery") {
+    bool enabled = true;
+    SUBCASE("enabled") {}
+    SUBCASE("disabled") { enabled = false; }
+
+    test::ScratchDir scratch("headless_chat");
+    const auto file = scratch.path() / "diagnostic.log";
+    GameDir game(scratch.path());
+    plugin::Hooks hooks;
+    int delivered = 0;
+    hooks.on_chat(hooks.new_owner("test"), [&](plugin::ChatLine& line) {
+        ++delivered;
+        line.text = "headless chat test";
+        return plugin::Flow::Continue;
+    });
+    net::ConnectionOptions options;
+    options.hooks = &hooks;
+    options.diagnostic_chat_log = enabled;
+    net::GameConnection conn(game, options);
+
+    REQUIRE(log::open_file(file));
+    conn.system_message(1);
+    log::close_file();
+
+    CHECK(delivered == 1);
+    const auto event = conn.poll_chat();
+    REQUIRE(event.has_value());
+    CHECK(event->text == "headless chat test");
+    std::ifstream log_file(file);
+    REQUIRE(log_file.is_open());
+    const std::string contents{std::istreambuf_iterator<char>(log_file), {}};
+    const std::string_view entry = "[info] chat: headless chat test";
+    const auto pos = contents.find(entry);
+    if (enabled) {
+        REQUIRE(pos != std::string::npos);
+        CHECK(contents.find(entry, pos + entry.size()) == std::string::npos);
+    } else {
+        CHECK(pos == std::string::npos);
+    }
+}
 
 TEST_CASE("headless: arguments parse, host port split, defaults") {
     auto a = app::parse_headless_args({"--host", "login.example:5999", "--user", "u", "--password", "p",

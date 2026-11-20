@@ -49,6 +49,9 @@ static_assert(offsetof(PluginHostApi, select_raid_member) == offsetof(PluginHost
 static_assert(offsetof(PluginHostApi, set_class_name) == offsetof(PluginHostApi, get_map_policy) + sizeof(PluginHostApi::caps));
 static_assert(offsetof(PluginHostApi, get_loot_data_bulk) == offsetof(PluginHostApi, caps) + 105 * sizeof(PluginHostApi::caps));
 static_assert(offsetof(PluginHostApi, answer_confirmation) == offsetof(PluginHostApi, caps) + 110 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, free_inventory_slots) == offsetof(PluginHostApi, caps) + 111 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, can_loot_corpse) == offsetof(PluginHostApi, caps) + 112 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, loot_item_modifiers) == offsetof(PluginHostApi, caps) + 113 * sizeof(PluginHostApi::caps));
 static_assert(sizeof(HS_BulkLootHeader) == HS_BULK_LOOT_HEADER_SIZE);
 static_assert(sizeof(HS_BulkLootRecord) == HS_BULK_LOOT_RECORD_SIZE);
 
@@ -443,12 +446,14 @@ void probe_loot_act(void*, const char* args) {
         WriteChatf("[Probe] loot act: not in this client");
         return;
     }
-    int a = 0, b = 0;
+    int a = 0, b = 0, c = 0, d = 0;
     char op[16] = {};
-    std::sscanf(args ? args : "", "%15s %d %d", op, &a, &b);
+    std::sscanf(args ? args : "", "%15s %d %d %d %d", op, &a, &b, &c, &d);
     int r = 0;
     if (!std::strcmp(op, "open")) r = host->loot_corpse(host->host, static_cast<std::uint32_t>(a));
     else if (!std::strcmp(op, "item")) r = host->loot_item(host->host, a, b);
+    else if (!std::strcmp(op, "itemshift") && HAILSTONE_HOST_HAS(host, loot_item_modifiers))
+        r = host->loot_item_modifiers(host->host, a, b, c, d);
     else if (!std::strcmp(op, "all")) r = host->loot_all(host->host);
     else if (!std::strcmp(op, "end")) r = host->end_loot(host->host);
     else if (!std::strcmp(op, "confirm")) r = host->answer_confirmation(host->host, a);
@@ -461,6 +466,23 @@ void probe_cursor(void*, const char*) {
         return;
     }
     WriteChatf("[Probe] cursor origin %u", static_cast<unsigned>(host->cursor_origin(host->host)));
+}
+
+void probe_free_inventory(void*, const char*) {
+    if (!HAILSTONE_HOST_HAS(host, free_inventory_slots)) {
+        WriteChatf("[Probe] free inventory: not in this client");
+        return;
+    }
+    WriteChatf("[Probe] free inventory %d", host->free_inventory_slots(host->host));
+}
+
+void probe_can_loot(void*, const char* args) {
+    if (!HAILSTONE_HOST_HAS(host, can_loot_corpse)) {
+        WriteChatf("[Probe] can loot: not in this client");
+        return;
+    }
+    const auto id = static_cast<std::uint32_t>(std::strtoul(args ? args : "", nullptr, 10));
+    WriteChatf("[Probe] can loot %u %d", id, host->can_loot_corpse(host->host, id));
 }
 
 void probe_binary(void*, const char* arguments) {
@@ -694,6 +716,8 @@ HAILSTONE_API void InitializePlugin(void) {
     AddCommand("/probediscs", probe_disc, nullptr);
     AddCommand("/proberaid", probe_raid, nullptr);
     AddCommand("/probecursor", probe_cursor, nullptr);
+    AddCommand("/probefreeinv", probe_free_inventory, nullptr);
+    AddCommand("/probecanloot", probe_can_loot, nullptr);
     AddCommand("/probeloot", probe_loot, nullptr);
     AddCommand("/probelootact", probe_loot_act, nullptr);
     AddCommand("/probebinary", probe_binary, nullptr);
@@ -731,6 +755,8 @@ HAILSTONE_API void ShutdownPlugin(void) {
     RemoveCommand("/probediscs");
     RemoveCommand("/proberaid");
     RemoveCommand("/probecursor");
+    RemoveCommand("/probefreeinv");
+    RemoveCommand("/probecanloot");
     RemoveCommand("/probebinary");
     RemoveCommand("/probebinarythread");
     RemoveCommand("/probedecode");
