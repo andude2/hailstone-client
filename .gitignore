@@ -3,6 +3,9 @@ build-*/
 .local/
 .claude/worktrees/
 build.log
+build-*.log
+# Client and headless run logs; they hold character names and server addresses.
+/logs/
 /plugins/nms
 /plugins/projecttriune
 __pycache__/
