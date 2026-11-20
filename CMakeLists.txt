@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 # The oldest macOS a build runs on (set before project()). 13.3 is the first whose libc++ formats floating-point
 # numbers (std::format of a float, std::to_chars), which the client uses; the bundled MoltenVK needs 12.0.
 set(CMAKE_OSX_DEPLOYMENT_TARGET "13.3" CACHE STRING "The oldest macOS the build runs on")
-project(hailstone VERSION 0.7.2 LANGUAGES C CXX)
+project(hailstone VERSION 0.7.1 LANGUAGES C CXX)
 # The release's pre-release label (SemVer: "0.1.0-alpha"); empty for a final release. With the version it is what the
 # updater compares against a release's manifest (core/version.h, docs/updater.md), so change both with each release.
 set(HAILSTONE_VERSION_LABEL "beta")
@@ -146,7 +146,6 @@ add_library(hailstone_engine STATIC
   src/mq/lua_mq_web.cpp
   src/mq/lua_hailstone.cpp
   src/plugin/native_plugins.cpp
-  src/plugin/native_nameplates.cpp
   src/plugin/world_geometry.cpp
   src/render/world_geometry_renderer.cpp
   src/plugin/plugin_tcp.cpp
@@ -274,7 +273,6 @@ add_library(hailstone_engine STATIC
   src/net/evolving_packets.cpp
   src/net/spell_packets.cpp
   src/game/spell_description.cpp
-  src/game/spell_effect_text.cpp
   src/game/item_compare.cpp
   src/game/item_display.cpp
   src/game/augments.cpp
@@ -715,7 +713,7 @@ add_custom_target(hailstone_build_info
 add_dependencies(hailstone_engine hailstone_build_info)
 set_source_files_properties(src/core/build_info.cpp PROPERTIES OBJECT_DEPENDS ${PROJECT_BINARY_DIR}/generated/build_info.inc)
 target_include_directories(hailstone_engine PRIVATE ${PROJECT_BINARY_DIR}/generated)
-# Lua 5.5.1 (third_party/lua, MIT), for the Lua UI (src/ui/lua): compiled as C.
+# Lua 5.4.7 (third_party/lua, MIT), for the Lua UI (src/ui/lua): compiled as C.
 file(GLOB HAILSTONE_LUA_SOURCES CONFIGURE_DEPENDS third_party/lua/*.c)
 add_library(hailstone_lua STATIC ${HAILSTONE_LUA_SOURCES})
 target_include_directories(hailstone_lua PUBLIC third_party/lua)
@@ -1099,7 +1097,6 @@ if(HAILSTONE_BUILD_TESTS)
     tests/world_geometry_queries_test.cpp
     tests/visual_surface_patch_test.cpp
     tests/bag_move_test.cpp
-    tests/bard_song_animation_test.cpp
     tests/byte_io_test.cpp
     tests/env_test.cpp
     tests/sdk_old_names_test.cpp
@@ -1354,7 +1351,6 @@ if(HAILSTONE_BUILD_TESTS)
     tests/nameplate_input_test.cpp
     tests/spawn_pick_test.cpp
     tests/spells_test.cpp
-    tests/spell_effect_text_test.cpp
     tests/spell_hit_modes_test.cpp
     tests/proc_cast_stage_test.cpp
     tests/passage_of_time_test.cpp
@@ -1473,7 +1469,6 @@ if(HAILSTONE_BUILD_TESTS)
     tests/anim_vectors_test.cpp
     tests/anim_layers_test.cpp
     tests/hit_by_spell_vectors_test.cpp
-    tests/cure_counters_test.cpp
     tests/spell_gems_vectors_test.cpp
     tests/usable_gems_test.cpp
     tests/zone_change_request_test.cpp
@@ -1532,7 +1527,6 @@ if(HAILSTONE_BUILD_TESTS)
     tests/mock_eqemu_compat_test.cpp
     tests/item_use_test.cpp
     tests/game_connection_cast_test.cpp
-    tests/game_connection_buff_test.cpp
     tests/spell_book_swap_test.cpp
     tests/feign_death_spell_test.cpp
     tests/loot_test.cpp

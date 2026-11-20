@@ -90,8 +90,7 @@ struct Polygon {
     std::array<std::uint16_t, 3> v{};
 };
 
-// 0x36 DMSPRITEDEF2: a mesh. Positions here are final (centre added). Also the older 0x2C DMSPRITEDEF, read into
-// the same shape (Fragment::type tells them apart), its centre added too.
+// 0x36 DMSPRITEDEF2: a mesh. Positions here are final (centre added).
 struct MeshDef {
     std::uint32_t flags = 0;
     Ref material_list = 0;
@@ -118,7 +117,7 @@ struct ActorDef {
     std::vector<Ref> sprites;
 };
 
-// 0x2D DMSPRITE: reference to a 0x36 mesh (or a 0x2C one).
+// 0x2D DMSPRITE: reference to a 0x36 mesh.
 struct MeshRef {
     Ref mesh = 0;
     std::uint32_t flags = 0;

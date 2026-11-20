@@ -339,7 +339,6 @@ void GameConnection::apply_shroud_transition(ShroudTransition transition) {
     inventory_.load(std::move(transition.possessions));
     mark_cursor_origin(CursorOrigin::Unknown);
     quantity_.reset();
-    refresh_instrument_state();
 }
 
 void GameConnection::handle_shroud(Op op, const AppPacket& p) {

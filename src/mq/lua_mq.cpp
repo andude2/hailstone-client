@@ -1419,7 +1419,7 @@ ScriptHost::~ScriptHost() {
 }
 
 bool ScriptHost::Impl::open_state(Script& sc, std::string& why) {
-    sc.L = lua_newstate(limited_alloc, &sc, luaL_makeseed(nullptr));
+    sc.L = lua_newstate(limited_alloc, &sc);
     if (!sc.L) {
         why = "out of memory";
         return false;
