@@ -483,6 +483,11 @@ public:
         aenv.autoskill_list = [this] { return autoskill_list(ui_host_); };
         aenv.use_ability = [this](mq::AbilityKind kind, std::string_view name) { return use_ability(ui_host_, kind, name); };
         aenv.ability_bulk = [this] { return ability_bulk_rows(ui_host_); };
+        aenv.spell_description = [this](const game::SpellData& s) {
+            return ui_host_.conn ? spell_description(s, ui_host_.conn->strings(),
+                                                     description_player(*ui_host_.conn, ui_host_.character))
+                                 : std::string();
+        };
         aenv.can_see = [this](std::uint32_t id) -> std::optional<bool> {
             return conn_ ? can_see_spawn(id) : std::nullopt;
         };
@@ -1444,6 +1449,10 @@ private:
     std::unique_ptr<render::TargetRingRenderer> target_ring_renderer_; // the target ring, made on first use
     std::unique_ptr<ActorEmitters> actor_emitters_;         // the models' and held items' own (app/actor_emitters.h)
     std::vector<ActorEmitters::Actor> actor_emitter_list_;  // this frame's actors that have some
+    // Hailstone: an actor out of view emits no particles (ActorEmitters::Actor::in_view; display.particle_offscreen_hold,
+    // read at start-up), judged against the scene's view as drawn last frame (none yet: every actor in view).
+    bool particle_offscreen_hold_ = true;
+    std::optional<glm::mat4> emitter_view_proj_;
     game::Weather weather_;                                 // OP_Weather played out (game/weather.h)
     render::WeatherLook weather_look_;                      // its wet ground, snow and storm light
     render::HazeBlend haze_blend_;                          // the modern haze, eased between places (zone-in resets)

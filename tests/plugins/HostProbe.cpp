@@ -20,6 +20,8 @@
 //   /probecursor   cursor_origin, when the host table has it
 //   /probeability <kind> <name>  ability_state then use_ability, when the host table has them
 //   /probeabilities [n]  get_ability_data_bulk the same way, through HS_Bulk_ListHeader and HS_Bulk_AbilityRecord
+//   /probespells n id...  get_spells_data_bulk for those ids into n bytes, through HS_Bulk_SpellFixedRecord and the
+//   strings and effect lines after each
 // Built again with HAILSTONE_PROBE_THROW_INIT (HostProbeThrow): InitializePlugin registers a command and a TLO, then
 // throws.
 #include <cstddef>
@@ -30,6 +32,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -47,6 +50,8 @@ static_assert(offsetof(PluginHostApi, get_raid_data_bulk) == offsetof(PluginHost
 static_assert(offsetof(PluginHostApi, get_ability_data_bulk) == offsetof(PluginHostApi, caps) + 88 * sizeof(PluginHostApi::caps));
 static_assert(offsetof(PluginHostApi, select_raid_member) == offsetof(PluginHostApi, caps) + 89 * sizeof(PluginHostApi::caps));
 static_assert(offsetof(PluginHostApi, set_class_name) == offsetof(PluginHostApi, get_map_policy) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, get_spells_data_bulk) ==
+              offsetof(PluginHostApi, nameplate_spell_icon) + sizeof(PluginHostApi::caps));
 
 namespace {
 
@@ -557,6 +562,125 @@ void probe_map_thread(void*, const char*) {
     WriteChatf("[Probe] map thread %d", result);
 }
 
+bool unregister_in_nameplate = false;
+bool nameplate_strides = false; // /probenameplate stride: also claim the second candidate with other command strides
+
+void probe_nameplate_frame(void* userdata, const HailstoneNameplateFrame* frame) {
+    if (!frame || frame->size < sizeof(*frame) || !frame->candidate_count) return;
+    const auto& actor = *hailstone_nameplate_candidate(frame, 0);
+    // The second candidate, found by the host's stride rather than by this SDK's sizeof.
+    const auto* second = hailstone_nameplate_candidate(frame, 1);
+    const bool stride = frame->candidate_size >= sizeof(HailstoneNameplateCandidate) &&
+        HAILSTONE_NAMEPLATE_CANDIDATE_HAS(frame, cast_name) && second && second->spawn_id == 11 &&
+        !(second->flags & HAILSTONE_NAMEPLATE_TARGET) && !hailstone_nameplate_candidate(frame, frame->candidate_count);
+    const bool snapshot = actor.spawn_id == 10 && actor.incarnation == 17 &&
+        (actor.flags & HAILSTONE_NAMEPLATE_TARGET) && (actor.flags & HAILSTONE_NAMEPLATE_INVISIBLE_UNDEAD) &&
+        (actor.flags & HAILSTONE_NAMEPLATE_MANA_KNOWN) && !(actor.flags & HAILSTONE_NAMEPLATE_ENDURANCE_KNOWN) &&
+        actor.mana_percent == 0 && std::string_view(actor.caption.data, actor.caption.bytes) == "Guard";
+    HailstoneNameplateTextMetrics metrics{};
+    metrics.size = sizeof(metrics);
+    const int measured = host->nameplate_measure_text(host->host, "Guard", 5, 12, 0, &metrics);
+    HailstoneNameplateImage image{};
+    image.size = sizeof(image);
+    HailstoneNameplateCommand commands[2]{};
+    char label[] = "native";
+    commands[0].kind = HAILSTONE_NAMEPLATE_TEXT;
+    commands[0].color = 0x123456;
+    commands[0].alpha = 1;
+    commands[0].font_size = 12;
+    commands[0].text = {label, sizeof(label) - 1};
+    commands[1].kind = HAILSTONE_NAMEPLATE_IMAGE;
+    commands[1].color = 0xffffff;
+    commands[1].alpha = 1;
+    commands[1].x1 = 4;
+    commands[1].y1 = 4;
+    commands[1].texture = 123;
+    HailstoneNameplateModel model{};
+    model.size = sizeof(model);
+    model.flags = HAILSTONE_NAMEPLATE_CLICKABLE;
+    model.frame = frame->frame;
+    model.bounds = {-20, -10, 40, 20};
+    model.commands = commands;
+    model.command_count = 2;
+    model.command_size = sizeof(commands[0]);
+    const int no_image = host->nameplate_submit(host->host, &model);
+    const int icon = host->nameplate_spell_icon(host->host, 37, &image);
+    commands[1].texture = image.texture;
+    commands[1].u0 = image.u0;
+    commands[1].v0 = image.v0;
+    commands[1].u1 = image.u1;
+    commands[1].v1 = image.v1;
+    ++model.frame;
+    const int stale = host->nameplate_submit(host->host, &model);
+    model.frame = frame->frame;
+    const int accepted = host->nameplate_submit(host->host, &model);
+    const int duplicate = host->nameplate_submit(host->host, &model);
+    label[0] = 'X'; // the host must own its copy at the time of submit
+    // A newer SDK's command record (extra bytes at its end, an unaligned stride) for the second candidate: the host
+    // reads the fields it knows. A stride shorter than the host's record is refused.
+    struct Wider {
+        HailstoneNameplateCommand command;
+        unsigned char extra[13];
+    };
+    unsigned char wide_bytes[2 * sizeof(Wider)]{};
+    std::memset(wide_bytes, 0xa5, sizeof(wide_bytes));
+    char wide_label[] = "wide";
+    HailstoneNameplateCommand wide_command{};
+    wide_command.kind = HAILSTONE_NAMEPLATE_TEXT;
+    wide_command.color = 0x654321;
+    wide_command.alpha = 1;
+    wide_command.font_size = 12;
+    wide_command.text = {wide_label, sizeof(wide_label) - 1};
+    const std::uint32_t wide_stride = sizeof(HailstoneNameplateCommand) + 13;
+    std::memcpy(wide_bytes, &wide_command, sizeof(wide_command));
+    wide_command.color = 0x0000ff;
+    std::memcpy(wide_bytes + wide_stride, &wide_command, sizeof(wide_command));
+    HailstoneNameplateModel wide{};
+    wide.size = sizeof(wide);
+    wide.frame = frame->frame;
+    wide.candidate_index = 1;
+    wide.bounds = {-20, -10, 40, 20};
+    wide.commands = wide_bytes;
+    wide.command_count = 2;
+    wide.command_size = sizeof(HailstoneNameplateCommand) - 4;
+    int narrow = -1, zero = -1, wider = -1;
+    if (nameplate_strides) {
+        narrow = host->nameplate_submit(host->host, &wide);
+        wide.command_size = 0;
+        zero = host->nameplate_submit(host->host, &wide);
+        wide.command_size = wide_stride;
+        wider = host->nameplate_submit(host->host, &wide);
+    }
+    WriteChatf("[Probe] nameplate data %d measure %d width %.0f icon %d no_image %d wrong_frame %d accepted %d duplicate %d",
+               snapshot, measured, static_cast<double>(metrics.width), icon, no_image, stale, accepted, duplicate);
+    WriteChatf("[Probe] nameplate stride %d narrow %d zero %d wider %d", stride, narrow, zero, wider);
+    if (*static_cast<const bool*>(userdata)) host->nameplate_unregister(host->host);
+}
+
+void probe_nameplate(void*, const char* args) {
+    if (!args || !HAILSTONE_HOST_HAS(host, nameplate_spell_icon)) return;
+    if (std::strcmp(args, "off") == 0) {
+        WriteChatf("[Probe] nameplate unregister %d", host->nameplate_unregister(host->host));
+        return;
+    }
+    if (std::strcmp(args, "outside") == 0) {
+        HailstoneNameplateModel model{};
+        model.size = sizeof(model);
+        HailstoneNameplateTextMetrics metrics{};
+        metrics.size = sizeof(metrics);
+        HailstoneNameplateImage image{};
+        image.size = sizeof(image);
+        WriteChatf("[Probe] nameplate outside %d %d %d", host->nameplate_submit(host->host, &model),
+                   host->nameplate_measure_text(host->host, "Guard", 5, 12, 0, &metrics),
+                   host->nameplate_spell_icon(host->host, 37, &image));
+        return;
+    }
+    unregister_in_nameplate = std::strcmp(args, "self-retire") == 0;
+    nameplate_strides = std::strcmp(args, "stride") == 0;
+    const int registered = host->nameplate_register(host->host, probe_nameplate_frame, &unregister_in_nameplate);
+    WriteChatf("[Probe] nameplate register %d", registered);
+}
+
 // /probeability <kind> <name>: ability_state then use_ability, both added later in ABI 3.
 void probe_ability(void*, const char* args) {
     if (!HAILSTONE_HOST_HAS(host, ability_state) || !HAILSTONE_HOST_HAS(host, use_ability)) {
@@ -620,6 +744,104 @@ void probe_abilities(void*, const char* args) {
                header->total, static_cast<int>(r), count, size - at);
 }
 
+static_assert(sizeof(HS_Bulk_SpellFixedRecord) == HS_BULK_SPELL_RECORD_SIZE);
+
+// A uint16_t-prefixed string at buf + at, within size; false when it runs past the end.
+bool read_str16(const unsigned char* buf, std::size_t size, std::size_t& at, std::string& out) {
+    std::uint16_t len = 0;
+    if (size - at < sizeof len) return false;
+    std::memcpy(&len, buf + at, sizeof len);
+    at += sizeof len;
+    if (len > size - at) return false;
+    out.assign(reinterpret_cast<const char*>(buf + at), len);
+    at += len;
+    return true;
+}
+
+// The count, then each record one line (id, found, its size, name, mana, target type, flags, effect lines), its
+// description (the ninth string), the target type's, resist type's and categories' names (the tenth to fourteenth)
+// and each effect line, stepping by recordSize; then the bytes left over after the last record (0 when every record is framed
+// right). The first number is the buffer size, the rest the spell ids; also how many bytes past the first n the host
+// changed.
+void probe_spells(void*, const char* args) {
+    if (!HAILSTONE_HOST_HAS(host, get_spells_data_bulk)) {
+        WriteChatf("[Probe] spells: not in this client");
+        return;
+    }
+    std::vector<std::int32_t> nums;
+    for (const char* p = args ? args : "";;) {
+        char* end = nullptr;
+        const long v = std::strtol(p, &end, 10);
+        if (end == p) break;
+        nums.push_back(static_cast<std::int32_t>(v));
+        p = end;
+    }
+    unsigned char buf[16384];
+    constexpr unsigned char guard = 0xA5;
+    std::memset(buf, guard, sizeof buf);
+    const std::int32_t n = nums.empty() || nums[0] < 0 ? 0
+        : nums[0] < static_cast<std::int32_t>(sizeof buf) ? nums[0] : static_cast<std::int32_t>(sizeof buf);
+    std::vector<std::int32_t> ids;
+    if (nums.size() > 1) ids.assign(nums.begin() + 1, nums.end());
+    const std::int32_t r = host->get_spells_data_bulk(host->host, ids.data(), static_cast<std::int32_t>(ids.size()),
+                                                      buf, n);
+    if (n < static_cast<std::int32_t>(sizeof buf)) {
+        std::size_t changed = 0;
+        for (std::size_t i = static_cast<std::size_t>(n); i < sizeof buf; ++i) changed += buf[i] != guard;
+        WriteChatf("[Probe] spells past the end %zu", changed);
+    }
+    const std::size_t size = r > 0 ? static_cast<std::size_t>(r) : 0;
+    if (size < HS_BULK_SPELL_HEADER_SIZE) {
+        WriteChatf("[Probe] spells %d bytes", static_cast<int>(r));
+        return;
+    }
+    std::int32_t count = 0;
+    std::memcpy(&count, buf, sizeof count);
+    std::size_t at = HS_BULK_SPELL_HEADER_SIZE;
+    for (std::int32_t i = 0; i < count; ++i) {
+        if (size - at < sizeof(HS_Bulk_SpellFixedRecord)) break;
+        const auto* rec = reinterpret_cast<const HS_Bulk_SpellFixedRecord*>(buf + at);
+        const std::size_t recordSize = rec->recordSize > 0 ? static_cast<std::size_t>(rec->recordSize) : 0;
+        if (recordSize < sizeof(HS_Bulk_SpellFixedRecord) || recordSize > size - at) break;
+        const std::size_t end = at + recordSize;
+        std::size_t p = at + sizeof(HS_Bulk_SpellFixedRecord);
+        std::string name;
+        std::string description;
+        std::string names[5]; // targetTypeDesc, resistTypeDesc, category, subcategory, subcategory2
+        std::vector<std::string> lines;
+        if (rec->found) {
+            std::string text;
+            // stringCount strings: the ones this SDK knows, then any a later client appended, skipped.
+            for (int k = 0; k < rec->stringCount; ++k) {
+                if (!read_str16(buf, end, p, text)) break;
+                if (k == 0) name = text;
+                if (k == 8) description = text;
+                if (k >= 9 && k <= 13) names[k - 9] = text;
+            }
+            for (std::int32_t k = 0; k < rec->effectCount; ++k) {
+                if (!read_str16(buf, end, p, text)) break;
+                lines.push_back(text);
+            }
+        }
+        WriteChatf("[Probe] spell %d: id %d, found %d, %zu bytes, name %s, mana %d, target %d, flags %u, strings %d, "
+                   "effects %d",
+                   static_cast<int>(i), rec->id, rec->found, recordSize, name.empty() ? "-" : name.c_str(), rec->mana,
+                   static_cast<int>(rec->targetType), rec->flags, rec->stringCount, rec->effectCount);
+        if (rec->found)
+            WriteChatf("[Probe] spell %d description %d: %s", static_cast<int>(i), rec->descriptionId,
+                       description.empty() ? "-" : description.c_str());
+        if (rec->found)
+            WriteChatf("[Probe] spell %d target %s, resist %s, category %d %s, subcategory %d %s, subcategory2 %d %s",
+                       static_cast<int>(i), names[0].c_str(), names[1].c_str(), rec->category, names[2].c_str(),
+                       rec->subcategory, names[3].c_str(), rec->subcategory2, names[4].c_str());
+        for (const std::string& line : lines) WriteChatf("[Probe] spell %d effect: %s", static_cast<int>(i), line.c_str());
+        if (p != end) WriteChatf("[Probe] spell %d: %zu bytes unread", static_cast<int>(i), end - p);
+        at = end;
+    }
+    WriteChatf("[Probe] spells count %d, %d bytes, %zu bytes left", static_cast<int>(count), static_cast<int>(r),
+               size - at);
+}
+
 int probe_tlo(void*, const char*, const char* member, const char*, HailstoneValue* out) {
     if (member && std::strcmp(member, "Throw") == 0) throw std::runtime_error("the TLO threw");
     out->kind = HAILSTONE_STRING;
@@ -657,8 +879,10 @@ HAILSTONE_API void InitializePlugin(void) {
     AddCommand("/probemapthread", probe_map_thread, nullptr);
     AddCommand("/probemapprefix", probe_map_prefix, nullptr);
     AddCommand("/probemapcycle", probe_map_cycle, nullptr);
+    AddCommand("/probenameplate", probe_nameplate, nullptr);
     AddCommand("/probeability", probe_ability, nullptr);
     AddCommand("/probeabilities", probe_abilities, nullptr);
+    AddCommand("/probespells", probe_spells, nullptr);
     AddTopLevelObject("Probe", probe_tlo, nullptr);
 #ifdef HAILSTONE_PROBE_THROW_INIT
     throw std::runtime_error("InitializePlugin threw");
@@ -692,6 +916,7 @@ HAILSTONE_API void ShutdownPlugin(void) {
     RemoveCommand("/probemapthread");
     RemoveCommand("/probemapprefix");
     RemoveCommand("/probemapcycle");
+    RemoveCommand("/probenameplate");
     RemoveCommand("/probeability");
     RemoveCommand("/probeabilities");
     RemoveTopLevelObject("Probe");

@@ -52,6 +52,10 @@ struct GameConnectionTestAccess {
     static GameConnection::Leadership& leadership(GameConnection& c) { return c.leadership_; }
     static std::vector<std::pair<std::uint32_t, game::BuffSlot>>& pet_buffs(GameConnection& c) { return c.pet_buffs_; }
     static game::Inventory& inventory(GameConnection& c) { return c.inventory_; }
+    static void refresh_instrument_state(GameConnection& c) { c.refresh_instrument_state(); }
+    static void move_item(GameConnection& c, const ItemSlot& from, const ItemSlot& to, std::uint32_t count) {
+        c.move_item(from, to, count);
+    }
     static std::optional<MerchantSession>& merchant(GameConnection& c) { return c.merchant_; }
     static void apply_spawn(GameConnection& c, const Spawn& s) { c.apply_spawn(s); }
     // How often the evolving transfer's item list was built, and its pair compared with the snapshots.
@@ -150,8 +154,11 @@ struct World {
             // A bard song (the Bard level, column 111, 1).
             f << spell_line({{0, "3373"}, {1, "Test Chant"}, {13, "1000"}, {17, "3"}, {83, "0"}, {111, "1"}}) << "\n";
         }
-        // Two AA names (dbstr type 1), for the tests of hailstone.alt_abilities.
-        std::ofstream(dir / "dbstr_us.txt") << "9001^1^Innate Strength^0^\n9002^1^Mystical Shielding^0^\n";
+        // Two AA names (dbstr type 1), for the tests of hailstone.alt_abilities, and a spell description (type 6) and
+        // two spell categories (type 5) for get_spells_data_bulk's.
+        std::ofstream(dir / "dbstr_us.txt") << "9001^1^Innate Strength^0^\n9002^1^Mystical Shielding^0^\n"
+                                               "3020^6^Heals you for #1 hit points.^0^\n"
+                                               "42^5^Heals^0^\n43^5^Direct^0^\n";
         game = std::make_unique<GameDir>(dir);
         options.servers_dir = dir / "servers"; // the character's files stay in the scratch folder
         conn = std::make_unique<net::GameConnection>(*game, options);

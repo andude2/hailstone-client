@@ -3,12 +3,20 @@
 #include <algorithm>
 #include <cmath>
 
+#include <glm/gtc/quaternion.hpp>
+
 #include "game/anim_layers.h"
 #include "game/mechanics/anim_select.h"
 
 namespace hailstone::render {
 
 namespace mech = game::mechanics;
+
+namespace {
+
+// The follow-up sentinel (+0x10c4): 0x20 (P01) means none.
+constexpr std::uint8_t kNoFollowUp = static_cast<std::uint8_t>(hailstone::AnimationType::Stand);
+} // namespace
 
 bool GroupTrack::start(const assets::AnimationClip* c, std::uint8_t code, float speed, bool loops, bool reversed,
                        float blend_s, bool restart, std::int32_t style_column) {
@@ -26,6 +34,7 @@ bool GroupTrack::start(const assets::AnimationClip* c, std::uint8_t code, float 
         previous = clip;
         previous_time = time;
         previous_reverse = reverse;
+        previous_loop = loop;
         blend = 0.0f;
         blend_seconds = blend_s;
     } else {
@@ -68,6 +77,15 @@ void GroupTrack::sync_to(const GroupTrack& other) {
     if (clip && clip == other.clip && column == other.column) time = other.time;
 }
 
+void GroupTrack::finish() {
+    if (!clip) return;
+    const float d = clip->duration_seconds();
+    time = d;
+    elapsed = rate > 0.0f ? d / rate : d;
+    previous = nullptr;
+    blend = 1.0f;
+}
+
 namespace {
 float shown(const assets::AnimationClip* c, float t, bool reversed) {
     if (!reversed || !c) return t;
@@ -87,8 +105,8 @@ float blend_seconds(const LayerRequest& req, std::uint8_t from, std::uint8_t to,
 }
 } // namespace
 
-bool ActorLayers::start_action(const assets::AnimationClip* clip, std::uint8_t anim, float rate,
-                               const LayerRequest& req) {
+bool ActorLayers::start_action(const assets::AnimationClip* clip, std::uint8_t requested, std::uint8_t chosen,
+                               float rate, const LayerRequest& req) {
     if (!clip || req.corpse) return false;
     GroupTrack& up = group[game::kUpperBones];
     GroupTrack& lo = group[game::kLowerBones];
@@ -96,10 +114,10 @@ bool ActorLayers::start_action(const assets::AnimationClip* clip, std::uint8_t a
     if (req.new_style) {
         // 0x58afa0: each group's sequence and style mode decides. A rider plays only sequences of layer kind 1, on the upper
         // body (0x588e20); a kind 1 sequence plays there alone too while the legs walk, run or turn (kind 2).
-        const std::uint8_t kind = mech::new_style_layer_kind(anim);
+        const std::uint8_t kind = mech::new_style_layer_kind(chosen);
         auto mode_of = [&](const GroupTrack& g) {
             game::LayerModeInput li;
-            li.wanted = anim;
+            li.wanted = chosen;
             li.column = req.action_column;
             li.playing = g.anim;
             li.playing_column = g.column;
@@ -124,7 +142,7 @@ bool ActorLayers::start_action(const assets::AnimationClip* clip, std::uint8_t a
                 if (lower_mode == 0 || (lower_mode != 2 && upper_mode != 2)) return false;
                 upper_only = lower_mode != 2;
                 if (upper_mode != 2) {
-                    lo.start(clip, anim, rate, false, false, blend_seconds(req, lo.anim, anim, 100.0f), false, req.action_column);
+                    lo.start(clip, chosen, rate, false, false, blend_seconds(req, lo.anim, chosen, game::kClassicBlendMs), false, req.action_column);
                     return false;
                 }
             } else {
@@ -135,29 +153,53 @@ bool ActorLayers::start_action(const assets::AnimationClip* clip, std::uint8_t a
         }
     } else {
         // 0x4b15b0 with key 1: an action that may not interrupt waits for the upper body's cycle.
-        if (!game::classic_may_interrupt(anim, up.anim) && up.clip && !up.completed()) {
-            if (game::classic_queues(anim)) {
-                follow_up = anim;
+        if (!game::classic_may_interrupt(requested, up.anim) && up.clip && !up.completed()) {
+            if (game::classic_queues(chosen)) {
+                follow_up = chosen;
                 follow_clip = clip;
                 follow_rate = rate;
-            } else if (game::classic_clears_queue(anim)) {
-                follow_up = 0x20;
+            } else if (game::classic_clears_queue(chosen)) {
+                follow_up = kNoFollowUp;
                 follow_clip = nullptr;
             }
             return false;
         }
-        upper_only = game::classic_action_upper_only(anim, req.mounted, req.humanoid, req.speed_run);
+        upper_only = game::classic_action_upper_only(chosen, req.mounted, req.humanoid, req.speed_run);
     }
     // BlendToAnimation: a group already playing the clip keeps it.
-    up.start(clip, anim, rate, false, false, blend_seconds(req, up.anim, anim, 100.0f), false, req.action_column);
+    up.start(clip, chosen, rate, false, false, blend_seconds(req, up.anim, chosen, game::kClassicBlendMs), false, req.action_column);
     if (!upper_only) {
-        lo.start(clip, anim, rate, false, false, blend_seconds(req, lo.anim, anim, 100.0f), false, req.action_column);
+        lo.start(clip, chosen, rate, false, false, blend_seconds(req, lo.anim, chosen, game::kClassicBlendMs), false, req.action_column);
         up.sync_to(lo);
     }
     action = clip;
-    action_anim = anim;
+    action_anim = chosen;
     action_on_legs = !upper_only;
     legs_took_motion = false;
+    return true;
+}
+
+bool ActorLayers::stand_request(std::uint8_t requested, const LayerRequest& req) {
+    if (req.corpse) return false;
+    GroupTrack& up = group[game::kUpperBones];
+    // 0x4b0900: an unfinished action the stand may not interrupt keeps the upper body.
+    if (action && up.clip && !up.completed() && !game::classic_may_interrupt(requested, up.anim)) return false;
+    action = nullptr;
+    action_on_legs = false;
+    legs_took_motion = false;
+    return true;
+}
+
+bool ActorLayers::start_stand(const assets::AnimationClip* clip, std::uint8_t requested, std::uint8_t anim,
+                              float rate, LayerRequest& req) {
+    if (!clip || !stand_request(requested, req)) return false;
+    req.base = clip;
+    req.base_anim = anim;
+    req.stand_request = true;
+    req.loop = true;
+    req.reverse = false;
+    req.rate = rate;
+    req.restart = false;
     return true;
 }
 
@@ -176,16 +218,16 @@ bool ActorLayers::step(const LayerRequest& req, float dt) {
     if (!req.new_style && !req.corpse) {
         if (action && game::classic_clears_queue(req.base_anim)) {
             // A movement request while the action plays resets the follow-up.
-            follow_up = 0x20;
+            follow_up = kNoFollowUp;
             follow_clip = nullptr;
-        } else if (!action && req.base_anim == 0x20 && follow_up != 0x20 && follow_clip) {
+        } else if (!action && req.stand_request && follow_up != kNoFollowUp && follow_clip) {
             // The stand request plays the follow-up (0x4b15b0's idle path: +0x10c4 becomes the request, and
             // then 0x20 or 0x47 by 0x4b0860 on the animation playing).
             const assets::AnimationClip* c = follow_clip;
             const std::uint8_t a = follow_up;
             follow_up = req.follow_up_after;
             follow_clip = nullptr;
-            followed = start_action(c, a, follow_rate, req);
+            followed = start_action(c, a, a, follow_rate, req);
         }
     }
     bool legs_free = !action;
@@ -222,26 +264,72 @@ bool ActorLayers::step(const LayerRequest& req, float dt) {
         action_on_legs = false;
         legs_took_motion = true;
     }
-    if (legs_free)
-        lo.start(req.base, req.base_anim, req.rate, req.loop, req.reverse,
-                 blend_seconds(req, lo.anim, req.base_anim, req.blend_ms), req.restart, req.base_column);
+    bool started = false;
+    // A corpse that already lies (its clip played through) takes a changed clip at its end too: a new appearance
+    // must not make it fall again.
+    const bool settled = req.corpse && corpse_settled;
+    if (legs_free) {
+        started = lo.start(req.base, req.base_anim, req.rate, req.loop, req.reverse,
+                           blend_seconds(req, lo.anim, req.base_anim, req.blend_ms), req.restart, req.base_column);
+    }
     if (!action) {
         // Back on the base clip, the upper body takes the legs' position when they play the same
         // (the lower group's SyncToBoneGroup call after both are started).
         if (up.start(req.base, req.base_anim, req.rate, req.loop, req.reverse,
-                     blend_seconds(req, up.anim, req.base_anim, req.blend_ms), req.restart, req.base_column))
+                     blend_seconds(req, up.anim, req.base_anim, req.blend_ms), req.restart, req.base_column)) {
             up.sync_to(lo);
+            started = true;
+        }
     }
     up.advance(dt);
     lo.advance(dt);
+    // A spawn already dead when this state first drew it shows the death clip's last frame at once, as the original's
+    // actor build does (BuildActorForSpawn's slot 0x20 call at 0x490366: D05 reversed at speed 0, held at its end):
+    // the fall is not played again. One that dies while drawn starts the clip normally.
+    if (started && req.corpse && (req.corpse_at_end || settled)) {
+        lo.finish();
+        up.finish();
+    }
+    corpse_settled = req.corpse && lo.clip && lo.completed();
     return followed;
+}
+
+void pose_actor(const assets::CharacterModel& model, const PoseInput& in, std::vector<assets::BonePose>& local,
+                std::vector<assets::BonePose>& previous, std::vector<glm::mat4>& world) {
+    // One bone group's tracks: the clip, cross-faded from the previous one by the linear weight.
+    auto sample = [&](const assets::AnimationClip& clip, float time, bool loop, const assets::AnimationClip* from,
+                      float from_time, bool from_loop, float blend, std::vector<assets::BonePose>& out) {
+        model.sample_local(clip, time, loop, out);
+        if (from && blend < 1.0f) {
+            // A played-out one-shot holds its last frame; only a looping clip wraps (0x1003fcc0's old track).
+            model.sample_local(*from, from_time, from_loop, previous);
+            float t = std::clamp(blend, 0.0f, 1.0f);
+            for (std::size_t b = 0; b < out.size() && b < previous.size(); ++b) {
+                out[b].rotation = glm::normalize(glm::slerp(previous[b].rotation, out[b].rotation, t));
+                out[b].translation = glm::mix(previous[b].translation, out[b].translation, t);
+                out[b].scale = glm::mix(previous[b].scale, out[b].scale, t);
+            }
+        }
+    };
+    sample(*in.clip, in.time, in.loop, in.previous, in.previous_time, in.previous_loop, in.blend, local);
+    if (in.upper_clip && in.bone_groups) {
+        thread_local std::vector<assets::BonePose> upper;
+        sample(*in.upper_clip, in.upper_time, in.upper_loop, in.upper_previous, in.upper_previous_time,
+               in.upper_previous_loop, in.upper_blend, upper);
+        const auto& groups = *in.bone_groups;
+        for (std::size_t b = 0; b < local.size() && b < upper.size() && b < groups.size(); ++b)
+            if (groups[b] == game::kUpperBones) local[b] = upper[b];
+    }
+    model.compose(local, world);
 }
 
 bool ActorLayers::split() const {
     const GroupTrack& up = group[game::kUpperBones];
     const GroupTrack& lo = group[game::kLowerBones];
-    return up.clip != lo.clip || up.column != lo.column || up.reverse != lo.reverse || up.time != lo.time || up.previous != lo.previous ||
-           up.blend != lo.blend || (up.previous && up.previous_time != lo.previous_time);
+    return up.clip != lo.clip || up.column != lo.column || up.reverse != lo.reverse || up.time != lo.time ||
+           up.previous != lo.previous || up.blend != lo.blend ||
+           (up.previous && (up.previous_time != lo.previous_time || up.previous_reverse != lo.previous_reverse ||
+                            up.previous_loop != lo.previous_loop));
 }
 
 } // namespace hailstone::render

@@ -152,6 +152,77 @@ MeshDef read_mesh(ByteReader& r, bool new_format) {
     return m;
 }
 
+// 0x2C DMSPRITEDEF, the older mesh (libeq DmSpriteDef): u32 counts and plain floats where 0x36 packs integers. Read
+// into the 0x36 shape. Only five exist in the archives seen (gequip's 2HNSWORD, the Fiery Avenger IT62's blade, and
+// IT1036_O; global_chr's IVM body and head; erudsxing_chr2's HULL); every one is consumed to its last byte by this
+// layout. The centre is added to the vertices, as 0x36's is: the Fiery Avenger's blade plus its centre (0, 0, 1.2065)
+// is IT2's 0x36 blade vertex for vertex (within 0.0004), under the same 2HNSWORD bone pose; without it the blade
+// sat behind the grip, away from its flames. libeq places the centre two floats earlier, where all five hold zero.
+MeshDef read_mesh_2c(ByteReader& r) {
+    MeshDef m;
+    m.flags = r.le<std::uint32_t>();
+    const auto vertex_count = r.le<std::uint32_t>();
+    const auto uv_count = r.le<std::uint32_t>();
+    const auto normal_count = r.le<std::uint32_t>();
+    const auto color_count = r.le<std::uint32_t>();
+    const auto polygon_count = r.le<std::uint32_t>();
+    const auto meshop_count = r.le<std::uint16_t>();
+    r.skip(2); // unknown
+    const auto piece_count = r.le<std::uint32_t>();
+    m.material_list = r.le<std::int32_t>();
+    r.skip(12); // unknown (zero in all five)
+    m.center = read_vec3(r);
+    m.max_distance = r.f32(); // the bounding radius: each mesh's farthest vertex as stored, before the centre
+
+    checked_count(r, vertex_count, 12);
+    m.positions.reserve(vertex_count);
+    for (std::size_t i = 0; i < vertex_count; ++i) m.positions.push_back(m.center + read_vec3(r));
+    checked_count(r, uv_count, 8);
+    m.uvs.reserve(uv_count);
+    for (std::size_t i = 0; i < uv_count; ++i) {
+        float u = r.f32();
+        float v = r.f32();
+        m.uvs.emplace_back(u, v);
+    }
+    checked_count(r, normal_count, 12);
+    m.normals.reserve(normal_count);
+    for (std::size_t i = 0; i < normal_count; ++i) m.normals.push_back(read_vec3(r));
+    checked_count(r, color_count, 4);
+    m.colors.reserve(color_count);
+    for (std::size_t i = 0; i < color_count; ++i) m.colors.push_back(r.le<std::uint32_t>());
+    // Each polygon is 16 bytes: a u16 (0x4b in all five, without 0x36's passable bit; no 0x2C is zone geometry),
+    // four u16 not used here, then its three vertex indices, wound as 0x36's are (front clockwise: the stored normals
+    // agree on every unskinned triangle).
+    checked_count(r, polygon_count, 16);
+    m.polygons.reserve(polygon_count);
+    for (std::size_t i = 0; i < polygon_count; ++i) {
+        Polygon p;
+        p.flags = r.le<std::uint16_t>();
+        r.skip(8);
+        for (auto& v : p.v) v = r.le<std::uint16_t>();
+        m.polygons.push_back(p);
+    }
+    checked_count(r, meshop_count, 12);
+    r.skip(std::size_t{meshop_count} * 12); // mesh ops: u32 type, u32 vertex or f32, u16, u16
+    checked_count(r, piece_count, 4);
+    for (std::size_t i = 0; i < piece_count; ++i) {
+        auto n = r.le<std::uint16_t>();
+        auto bone = r.le<std::uint16_t>();
+        m.vertex_pieces.push_back({n, bone});
+    }
+    if (m.flags & 0x200) r.skip(std::size_t{4} * checked_count(r, r.le<std::uint32_t>(), 4));
+    if (m.flags & 0x800) {
+        const std::size_t groups = checked_count(r, r.le<std::uint32_t>(), 4);
+        for (std::size_t i = 0; i < groups; ++i) {
+            auto n = r.le<std::uint16_t>();
+            auto slot = r.le<std::uint16_t>();
+            m.render_groups.push_back({n, slot});
+        }
+    }
+    // Vertex material groups (flag 0x1000) and two optional blocks follow; not needed for drawing.
+    return m;
+}
+
 ActorDef read_actor_def(ByteReader& r, const WldFile& wld) {
     ActorDef a;
     a.flags = r.le<std::uint32_t>();
@@ -553,6 +624,7 @@ WldFile WldFile::parse_impl(std::span<const std::byte> data, std::string label, 
                 f.data = g;
                 break;
             }
+            case 0x2c: f.data = read_mesh_2c(fr); break;
             case 0x36: f.data = read_mesh(fr, w.new_format_); break;
             default:
                 if (w.unknown_[f.type]++ == 0)
