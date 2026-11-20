@@ -22,7 +22,10 @@
 #include "core/wipe.h"
 #include "game/collision.h"
 #include "game/coords.h"
+#include "game/mechanics/character.h"
 #include "game/mechanics/collision_movement.h"
+#include "game/mechanics/sheet_builder.h"
+#include "game/mechanics/tables.h"
 #include "game/mounts.h"
 #include "game/position_tracker.h"
 #include "game/zone_lines.h"
@@ -530,6 +533,11 @@ int run_headless(HeadlessOptions options) {
     conn = std::make_unique<net::GameConnection>(game, copts);
     conn->start(ticket);
 
+    // The character sheet's tables (the GUI's StatsUi loads the same):
+    // without them the Character's values are 0.
+    game::mechanics::GameTables tables;
+    if (!tables.load(game)) log::warn("headless: BaseData/SkillCaps missing; character values will be 0");
+    std::unique_ptr<game::mechanics::CharacterSheet> sheet;
     core::StepClock step_clock;
     step_clock.set_fixed(true);
     const auto start = Clock::now();
@@ -732,6 +740,29 @@ int run_headless(HeadlessOptions options) {
                 zone_line.reset();
                 if (zone) (void)zone_line.update(feet, zone->regions);
             }
+            // The full Character, as the GUI's StatsUi builds it every frame
+            // (sheet from profile, inventory, buffs and owned AA, then
+            // process_all_stats): its TotalEffect values -- AA and worn-item
+            // effects and the formula-modified buff totals, not just the
+            // buffs' base values -- drive the movement SPAs below. Without
+            // it PlayerMovement falls back to those base sums alone, and a
+            // character whose speed comes from AA or items travels slower
+            // headless than it does in the graphical client.
+            std::unique_ptr<game::mechanics::Character> character;
+            if (movement_ready && conn->profile()) {
+                conn->refresh_worn_stats_disabled();
+                if (!sheet) sheet = std::make_unique<game::mechanics::CharacterSheet>();
+                game::mechanics::build_sheet_into(
+                    *sheet, *conn->profile(), conn->inventory(), conn->spell_state(), conn->live_state(),
+                    [&conn](std::vector<game::mechanics::SheetAbility>& out) { conn->aa_sheet_abilities_into(out); },
+                    conn->zone_info() ? &*conn->zone_info() : nullptr, &conn->world());
+                sheet->prestige_limit = conn->game_feature(0x13);
+                character = std::make_unique<game::mechanics::Character>(
+                    *sheet, tables, game::mechanics::spell_lookup(conn->spell_table()));
+                character->process_all_stats();
+                const std::int64_t items = character->stats().hp_bonus;
+                conn->set_own_hp_items(sheet->vitals.cur_hp ? 0 : items, sheet->vitals.max_hp ? 0 : items);
+            }
             if (movement_ready) {
                 for (const auto& st : steps) {
                     const game::Spawn* me = conn->world().player();
@@ -768,7 +799,7 @@ int run_headless(HeadlessOptions options) {
                     PlayerMovement::Frame frame =
                         movement.update(mk, yaw, pitch, dt_step * 1000.0f,
                                         static_cast<std::uint32_t>(st.ms + 1), *conn,
-                                        zone ? &zone->regions : nullptr, floor_offset, &world, nullptr,
+                                        zone ? &zone->regions : nullptr, floor_offset, &world, character.get(),
                                         st.elapsed_ms);
                     feet = frame.feet;
                     yaw = frame.yaw;
