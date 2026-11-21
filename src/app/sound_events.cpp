@@ -201,6 +201,8 @@ void SoundEvents::update(net::GameConnection& conn, const LocalMotion& me, std::
             if (me.jumped) animation(s, kAnimJump, true, &me, now_ms, st);
             animation(s, a, true, &me, now_ms, st);
             for (std::int32_t w : game::landing_sounds(me.land_sound, me.fall_damage)) play_at(s, w, true);
+            // PlayerClient::SetFeetWetness @0x59ec30 (in into water and out of it).
+            for (std::int32_t w : me.water_sounds) play_at(s, w, true);
             continue;
         }
         if (s.is_corpse) {

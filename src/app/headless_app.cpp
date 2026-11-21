@@ -406,7 +406,7 @@ int run_headless(HeadlessOptions options) {
     stop_requested = 0;
     std::signal(SIGINT, on_stop_signal);
     std::signal(SIGTERM, on_stop_signal);
-    if (options.quiet) log::set_console_enabled(false); // everything still goes to the log file
+    if (options.quiet) log::set_console(false); // everything still goes to the log file
     // Share a graphical client's folder when asked: its plugins, its
     // per-character plugin configs and its servers/ profiles are the crew's,
     // and an automation's config (e.g. HSMono's sentinel.json, which starts

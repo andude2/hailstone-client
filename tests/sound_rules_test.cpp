@@ -1,5 +1,8 @@
 #include <doctest/doctest.h>
 
+#include <limits>
+
+#include "game/mechanics/regions.h"
 #include "game/sound_rules.h"
 
 using namespace hailstone;
@@ -145,4 +148,45 @@ TEST_CASE("Landing sounds") {
     CHECK(landing_sounds(true, std::nullopt) == std::vector<std::int32_t>{kSoundJumpLand});
     CHECK(landing_sounds(false, 0) == std::vector<std::int32_t>{kSoundJumpLand});
     CHECK(landing_sounds(true, 25) == std::vector<std::int32_t>{kSoundJumpLand, kSoundFallHurt});
+}
+
+TEST_CASE("Container sounds: the bag's own sound or the shared container sound") {
+    // The open (0x65cda8) and close (0x65d2d4) tables hold the same 17 answers for bag types 6..22.
+    const std::uint8_t own[] = {0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 1, 0};
+    for (std::uint32_t bag_type = 6; bag_type <= 22; ++bag_type) {
+        const bool own_sound = own[bag_type - 6] == 0;
+        CHECK(container_sound(bag_type, true) == (own_sound ? kSoundBagOpen : kSoundContainer));
+        CHECK(container_sound(bag_type, false) == (own_sound ? kSoundBagClose : kSoundContainer));
+    }
+    // Outside the table: the shared sound, for open and close.
+    CHECK(container_sound(0, true) == kSoundContainer);
+    CHECK(container_sound(5, false) == kSoundContainer);
+    CHECK(container_sound(23, true) == kSoundContainer);
+    CHECK(container_sound(0xffffffffu, false) == kSoundContainer);
+}
+
+TEST_CASE("Feet wetness: entering and leaving a liquid region (0x59ec30)") {
+    mechanics::FeetWetness w;
+    CHECK(w.type() == 0);
+    CHECK_FALSE(w.change(0, 0.0f));                    // no change: nothing
+    CHECK_FALSE(w.change(0x10000000u, 0.0f));          // type 0 too: the high ice bit is ignored
+    CHECK_FALSE(w.change(5, 0.5f));                    // into type 5, too slow
+    CHECK(w.type() == 5);
+    CHECK_FALSE(w.change(5, 3.0f));                    // the same type: nothing
+    CHECK(w.change(6, 1.0f) == kSoundWaterIn);         // exactly 1 counts
+    CHECK(w.change(8, -1.0f) == kSoundWaterIn);        // exactly -1 counts
+    CHECK_FALSE(w.change(10, -0.99f));                 // just short of -1
+    CHECK_FALSE(w.change(10, std::numeric_limits<float>::quiet_NaN())); // unchanged, NaN
+    CHECK_FALSE(w.change(9, std::numeric_limits<float>::quiet_NaN()));  // into 9, NaN: neither compare holds
+    CHECK(w.change(7, 0.0f) == kSoundWaterOut);        // type 7 always plays out
+    CHECK_FALSE(w.change(7, 0.0f));
+    CHECK(w.change(0, 0.0f) == kSoundWaterOut);        // out of the water
+    CHECK_FALSE(w.change(0, 0.0f));
+    CHECK_FALSE(w.change(3, 5.0f));                    // any other type: nothing
+    CHECK(w.change(0, 0.0f) == kSoundWaterOut);        // 3 to 0 is still a step out
+    // A move between two wet types asks the speed again.
+    mechanics::FeetWetness v;
+    CHECK_FALSE(v.change(6, 0.0f));
+    CHECK(v.change(5, 2.0f) == kSoundWaterIn);
+    CHECK(v.change(0, 0.0f) == kSoundWaterOut);
 }

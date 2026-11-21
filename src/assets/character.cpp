@@ -157,11 +157,31 @@ void CharacterModel::sample_local(const AnimationClip& a, float time_seconds, bo
                                   std::vector<BonePose>& out) const {
     out.resize(a.tracks.size());
     float t = std::isfinite(time_seconds) ? std::max(time_seconds, 0.0f) : 0.0f;
-    float phase = t * 1000.0f / static_cast<float>(std::max<std::uint32_t>(a.frame_ms, 1));
-    float count = static_cast<float>(a.frame_count);
-    phase = loop ? std::fmod(phase, count) : std::min(phase, count - 1.0f);
-    auto frame = static_cast<std::size_t>(phase);
-    float frac = phase - static_cast<float>(frame);
+    std::size_t frame = 0;
+    float frac = 0.0f;
+    if (!a.frame_times_ms.empty()) {
+        // The frames' own times (an EQG clip's last frame at the .ani's last key): find the frame the time falls in.
+        const auto& times = a.frame_times_ms;
+        const float end = static_cast<float>(times.back());
+        float ms = t * AnimationClip::kMsPerSecond;
+        ms = loop && end > 0.0f ? std::fmod(ms, end) : std::min(ms, end);
+        auto up = std::upper_bound(times.begin(), times.end(), ms);
+        if (up == times.begin()) {
+            frame = 0;
+        } else if (up == times.end()) {
+            frame = times.size() - 1;
+        } else {
+            frame = static_cast<std::size_t>(up - times.begin()) - 1;
+            const float span = static_cast<float>(times[frame + 1] - times[frame]);
+            frac = span > 0.0f ? (ms - static_cast<float>(times[frame])) / span : 0.0f;
+        }
+    } else {
+        float phase = t * AnimationClip::kMsPerSecond / static_cast<float>(std::max<std::uint32_t>(a.frame_ms, 1));
+        float count = static_cast<float>(a.frame_count);
+        phase = loop ? std::fmod(phase, count) : std::min(phase, count - 1.0f);
+        frame = static_cast<std::size_t>(phase);
+        frac = phase - static_cast<float>(frame);
+    }
     for (std::size_t b = 0; b < a.tracks.size(); ++b) {
         const auto& keys = a.tracks[b];
         if (keys.size() == 1) {
@@ -358,6 +378,9 @@ void append_wld_mesh(const wld::WldFile& w, const wld::Fragment& mf, std::size_t
                      CharacterMesh& out) {
     const auto* md = mf.get<wld::MeshDef>();
     if (!md) return;
+    // A 0x2C mesh with no polygons draws nothing and is left out. RoF2's global_chr IVM_DMSPRITEDEF is one: 506
+    // vertices, no polygons and 17 skin pieces that each count 0, which cannot skin it.
+    if (mf.type == 0x2c && md->polygons.empty()) return;
     // The pieces' counts are checked against the vertices before any is expanded: a forged count must not make a
     // vector of billions of bone indices.
     std::uint64_t covered = 0;
@@ -1190,21 +1213,27 @@ CharacterModel CharacterLibrary::build_actor(const std::string& code, const wld:
             if (sk->nodes[i].sprite) sprites.emplace_back(sk->nodes[i].sprite, static_cast<std::int64_t>(i));
     std::unordered_set<const wld::Fragment*> seen;
     CharacterMesh geometry;
+    bool only_old_meshes = true; // every body mesh a 0x2C
     for (auto [s, owner] : sprites) {
         const wld::Fragment* sprite = w.resolve(s);
         const auto* ref = sprite ? sprite->get<wld::MeshRef>() : nullptr;
         const wld::Fragment* mf = ref ? w.resolve(ref->mesh) : nullptr;
         if (!mf || !mf->holds<wld::MeshDef>() || !seen.insert(mf).second) continue;
         detail::append_wld_mesh(w, *mf, n, owner, geometry);
+        only_old_meshes = only_old_meshes && mf->type == 0x2c;
     }
+    // A skeleton can be its own reason to exist: race 127's IVM (the enchanter pet and the aura spawns, also race
+    // 600) has no named clips (it plays the wood elf's, ELM, game::animation_source), and its body (global_chr's 0x2C
+    // IVM_DMSPRITEDEF and IVMHE00_DMSPRITEDEF) can never show: its one material is masked, its texture all palette
+    // index 0. Such a body, all 0x2C meshes with no texel that draws, is dropped, so the model stays the body-less
+    // skeleton it was before 0x2C meshes were read (bodiless_skeleton: picked through a sphere, framed by its held
+    // items; docs/formats/characters.md). It is kept so the held items can be skinned to R_POINT / L_POINT; with no
+    // item dressed the mesh stays empty and draws nothing. Only a static actor without a mesh is an error (build_static_actor).
+    if (!geometry.indices.empty() && only_old_meshes && !body_can_show(geometry.materials)) geometry = CharacterMesh{};
     m.vertices = std::move(geometry.vertices);
     m.indices = std::move(geometry.indices);
     m.parts = std::move(geometry.parts);
     m.materials = std::move(geometry.materials);
-    // A skeleton can be its own reason to exist: race 127's IVM (the enchanter pet and the aura spawns, also race
-    // 600) has no supported mesh of its own (its 0x2d references name 0x2c meshes) and no named clips: it plays the
-    // wood elf's (ELM, game::animation_source). Keep it so the held items can be skinned to R_POINT / L_POINT; with no
-    // item dressed the mesh stays empty and draws nothing. Only a static actor without a mesh is an error (build_static_actor).
 
     // Clips. Codes come from tracks named <code><bone track>, for the model's
     // own bones and for the donor's equivalent bones (donor code + the same
@@ -1217,11 +1246,20 @@ CharacterModel CharacterLibrary::build_actor(const std::string& code, const wld:
         if (b.size() > code.size() && b.starts_with(code) && std::string_view(b).substr(code.size()) == "TUNIC_POINT_TRACK")
             tunic_point = true;
     m.animation_donor = game::animation_source(code, tunic_point);
+    // A bone's suffix is what follows the first code.size() letters, whatever they are: a few skeletons name a bone
+    // with another model's code. South Karana's Halas female (HLF) has HUFBI_L_TRACK, HUFL_POINT_TRACK and
+    // HLMHEAD_POINT_TRACK, and by its own code alone its left upper arm took no ELF track and stood out at its rest
+    // angle. LanternExtractor matches tracks to bones by position too (SkeletonHierarchy.IsValidSkeleton) and
+    // renames these three (CharacterFixer.FixHalasFemale). How the original builds the borrowed track's name is not
+    // confirmed (docs/unknowns.md).
+    auto bone_suffix = [&](const std::string& bone) {
+        return bone.size() > code.size() ? bone.substr(code.size()) : std::string();
+    };
     std::vector<std::string> donor_names(n);
     if (!m.animation_donor.empty())
         for (std::size_t i = 0; i < n; ++i)
-            if (m.bone_names[i].starts_with(code))
-                donor_names[i] = m.animation_donor + m.bone_names[i].substr(code.size());
+            if (auto suffix = bone_suffix(m.bone_names[i]); !suffix.empty())
+                donor_names[i] = m.animation_donor + suffix;
     // Another skeleton of the same code shares some bone names (the root "WOL_TRACK", points such as
     // "WOLHEAD_POINT_TRACK"): live's wol_v2_chr WOL has an L01 for them, which gave a zone's classic WOL (no L01)
     // a one-frame walk and froze it. A track in another WLD whose own <code>_ACTORDEF has different bones belongs
@@ -1253,7 +1291,7 @@ CharacterModel CharacterLibrary::build_actor(const std::string& code, const wld:
     // skeleton keeps all its tracks, as before.
     std::set<std::string> suffixes;
     for (const auto& b : m.bone_names)
-        if (b.starts_with(code)) suffixes.insert(b.substr(code.size()));
+        if (auto suffix = bone_suffix(b); !suffix.empty()) suffixes.insert(std::move(suffix));
     std::map<const wld::WldFile*, bool> donor_rivals;
     auto donor_rival = [&](const TrackLoc* loc) {
         if (!loc || loc->wld == &w) return false;
@@ -1352,7 +1390,8 @@ CharacterModel CharacterLibrary::build_actor(const std::string& code, const wld:
     }
     // InitAnimationTracks @0x407800 binds a tunic-point model's variants A..H to holding columns 0..7, so a spawn
     // holding something plays its B tracks (held_aliases).
-    if (m.find_bone("TUNIC_POINT_TRACK") >= 0)
+    m.tunic_point = m.find_bone("TUNIC_POINT_TRACK") >= 0;
+    if (m.tunic_point)
         for (const auto& [c, clip] : m.clips)
             if (c.size() == 4 && c[3] == 'B' && clip.frame_count > 0) m.held_aliases.emplace(c.substr(0, 3), c);
     m.clips.emplace("", std::move(rest));

@@ -38,6 +38,7 @@ public:
     struct LocalMotion {
         bool moving = false, running = true, wet = false, flying = false, sneaking = false;
         bool jumped = false, land_sound = false;
+        std::vector<std::int32_t> water_sounds; // the feet's region type changed (0x59ec30)
         std::optional<std::int32_t> fall_damage;
     };
 

@@ -67,7 +67,7 @@ std::optional<float> ClientApp::nameplate_pixel_depth(glm::vec2 at) const {
     }
     if (world_objects_) {
         std::vector<WorldObjects::PickRef> unused;
-        world_objects_->pick_actors(actors, unused);
+        world_objects_->pick_actors(actors, unused, false);
     }
     game::PickScene scene;
     scene.world = pick_world();
@@ -121,13 +121,15 @@ bool ClientApp::activate_nameplate(std::uint32_t id) {
 bool ClientApp::click_world(const PickTarget& hit) {
     if (!world_objects_ || !conn_) return false;
     // CEverQuest::LMouseUp without a spawn: an item on the cursor is a key for ClickedSwitch when it is a key
-    // or a lockpick (item types 12, 33 and 39), else it goes to the ground; with an empty cursor, a ground item
-    // under the cursor is picked up (within 20), anything else goes to ClickedSwitch (doors).
+    // or a lockpick (game/clicks.h cursor_item_is_switch_key), else it goes to the ground; with an empty cursor, a
+    // ground item under the cursor is picked up (within 20), anything else goes to ClickedSwitch (doors).
     if (const net::Item* held = conn_->inventory().cursor()) {
-        bool key = held->item_type == 12 || held->item_type == 33 || held->item_type == 39;
-        return key && hit.kind == PickTarget::Kind::Door && use_door(static_cast<std::uint8_t>(hit.id));
+        if (!game::cursor_item_is_switch_key(held->item_type)) return false;
+        // The click is the key's whether or not a switch is under it, or uses it: it is never dropped.
+        if (hit.kind == PickTarget::Kind::Door) use_door(static_cast<std::uint8_t>(hit.id), hit.point);
+        return true;
     }
-    if (hit.kind == PickTarget::Kind::Door) return use_door(static_cast<std::uint8_t>(hit.id));
+    if (hit.kind == PickTarget::Kind::Door) return use_door(static_cast<std::uint8_t>(hit.id), hit.point);
     // CDisplay::GetClickedActor with climb: a ladder (actor type 6) is climbed (Ladder_MountClickedLadder).
     if (hit.kind == PickTarget::Kind::Ladder) {
         if (hit.id >= zone_ladders_.size()) return false;
@@ -154,7 +156,7 @@ void ClientApp::climb_ladder(const game::mechanics::LadderSwitch& ladder) {
     if (too_far) game_view_.chat.add(ui::ChatChannel::System, conn_->strings().format(game::mechanics::kStrLadderTooFar, {}));
 }
 
-bool ClientApp::use_door(std::uint8_t id) {
+bool ClientApp::use_door(std::uint8_t id, std::optional<glm::vec3> hit) {
     if (!conn_ || !world_objects_) return false;
     const game::Door* d = conn_->door(id);
     if (!d) return false;
@@ -170,11 +172,11 @@ bool ClientApp::use_door(std::uint8_t id) {
     auto use = game::clicked_switch(in, [&](std::int32_t skill) {
         return ch ? ch->adjusted_skill(static_cast<std::uint32_t>(skill)) : conn_->skill_value(static_cast<std::uint32_t>(skill));
     });
-    return conn_->click_door(id, world_objects_->door_radius(id), use.key, use.skill);
+    return conn_->click_door(id, world_objects_->door_radius(id), use.key, use.skill, hit);
 }
 
-bool ClientApp::door_reachable(std::uint8_t id) const {
-    return conn_ && world_objects_ && conn_->door_in_reach(id, world_objects_->door_radius(id));
+bool ClientApp::door_reachable(std::uint8_t id, std::optional<glm::vec3> hit) const {
+    return conn_ && world_objects_ && conn_->door_in_reach(id, world_objects_->door_radius(id), hit);
 }
 
 ClientApp::PickTarget ClientApp::pick_at(float x, float y, std::uint32_t required, std::uint32_t skip, const char* why) {
@@ -248,7 +250,7 @@ ClientApp::PickTarget ClientApp::pick_at(float x, float y, std::uint32_t require
     }
     if (world_objects_) {
         std::vector<WorldObjects::PickRef> wrefs;
-        world_objects_->pick_actors(actors, wrefs);
+        world_objects_->pick_actors(actors, wrefs, true);
         for (const auto& r : wrefs) {
             if (r.is_placed) refs.push_back({PickTarget::Kind::Placed, 0, {}, r.re, r.item});
             else refs.push_back({r.is_door ? PickTarget::Kind::Door : PickTarget::Kind::Object, r.id, {}});
@@ -362,8 +364,10 @@ void ClientApp::region_teleport(const std::string& text) {
         has_description = true;
         float loc[3] = {pos.x, pos.y, pos.z};
         auto t = game::resolve_teleport_index(text, index, static_cast<std::int32_t>(zone), loc, rows);
-        // A few zone pairs move the player itself (34 <-> 10, 3 -> 4).
-        feet_ += glm::vec3(loc[0], loc[1], loc[2]) - pos;
+        // A few zone pairs (34 <-> 10, 3 -> 4) translate the position into the destination's coordinates; it goes
+        // to the server in the OP_ClientUpdate before the zone change. Change to a RoF2 rule: the original writes the
+        // offset into the player's own position (+0x64), so a refused request left the player displaced in the old
+        // zone (1044 units on 10 <-> 34); here the player stays where it crossed.
         pos = glm::vec3(loc[0], loc[1], loc[2]);
         log::info("zone line {}: {} zone {:#x} zone point {} index request {} ({:.1f}, {:.1f}, {:.1f}) heading {:.1f}", text,
                   t.ok ? "to" : "unresolved", t.found, t.zone_point, t.index_request, t.x, t.y, t.z, t.heading);
@@ -379,7 +383,7 @@ void ClientApp::region_teleport(const std::string& text) {
         a.reason = 0;
         a.arg8 = -1;
         a.arg9 = 0;
-        return teleport_b(a, ("zone line " + text).c_str());
+        return teleport_b(a, ("zone line " + text).c_str(), pos);
     };
     h.send_index_request = [&](std::int32_t zp) { conn_->send_teleport_index_request(zp); };
     h.position_sample = [&](int kind, const float* point) {
@@ -622,10 +626,11 @@ void ClientApp::draw_world_container() {
     if (!open) conn_->close_world_container();
 }
 
-bool ClientApp::teleport_b(const game::TeleportBArgs& a, const char* what) {
-    const glm::vec3 pos = local_body_movement_
+bool ClientApp::teleport_b(const game::TeleportBArgs& a, const char* what,
+                           std::optional<glm::vec3> zone_line_position) {
+    const glm::vec3 pos = zone_line_position.value_or(local_body_movement_
         ? local_body_movement_->controller().body.feet + glm::vec3(0, 0, local_body_height_)
-        : feet_ + glm::vec3(0, 0, floor_offset_); // the player's +0x64.. (world x, y, z)
+        : feet_ + glm::vec3(0, 0, floor_offset_)); // the player's +0x64.. (world x, y, z)
     game::TeleportBPlayer p;
     p.x = pos.x;
     p.y = pos.y;
@@ -636,7 +641,10 @@ bool ClientApp::teleport_b(const game::TeleportBArgs& a, const char* what) {
     if (const game::Spawn* me = conn_->world().player()) p.race = me->race;
     bool local = false;
     game::TeleportBHooks b;
-    b.send_client_update = [&] { conn_->send_position_now(); };
+    b.send_client_update = [&] {
+        if (zone_line_position) conn_->send_zone_line_position(*zone_line_position);
+        else conn_->send_position_now();
+    };
     // Sample 2 goes with the OP_ClientUpdate send_client_update makes (GameConnection::send_position records it).
     b.position_sample = [&](int kind) {
         if (kind != game::kPositionUpdate) conn_->record_position_sample(static_cast<std::uint32_t>(kind));

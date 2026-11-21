@@ -22,9 +22,11 @@
 #include "game/item_options.h"
 #include "game/merchant.h"
 #include "game/quantity_dialog.h"
+#include "game/sound_rules.h"
 #include "game/trade_rules.h"
 #include "net/game_connection.h"
 #include "net/opcodes.h"
+#include "net/player_packets.h"
 #include "net/trade_packets.h"
 
 namespace hailstone::net {
@@ -197,6 +199,7 @@ void GameConnection::handle_item(Op op, const AppPacket& p) {
             inventory_.load(std::move(*items));
             mark_cursor_origin(CursorOrigin::Unknown); // zone-in contents are not new arrivals
             set_bank_live(with_bank);
+            refresh_instrument_state();
         } else {
             log::warn("could not decode OP_CharInventory ({} bytes)", p.data.size());
         }
@@ -399,6 +402,15 @@ void GameConnection::handle_item(Op op, const AppPacket& p) {
         coins_.gold += r->coins.gold;
         coins_.silver += r->coins.silver;
         coins_.copper += r->coins.copper;
+        // Only OP_Sound reaches the coin-received wave at 0x4c7ff6, after the four amounts: the case at 0x4c7d39
+        // ends in EqSoundManager::WavePlay(0x8d, 0). OP_CashReward (`0x4c636d` -> `0x4bcef0`) credits the coins
+        // and never plays (docs/formats/audio.md).
+        if (op == Op::Sound) {
+            SoundCue cue;
+            cue.kind = SoundCue::Kind::Wave;
+            cue.spell = game::kSoundEndQuest;
+            sound_cues_.push_back(cue);
+        }
         break;
     }
     default:
@@ -421,11 +433,38 @@ void GameConnection::refresh_worn_slot(int slot) {
     if (item) look = game::worn_look(*item, ms);
     game::apply_wear_change(it->second.appearance, static_cast<std::uint8_t>(ms), look.material, look.hero_forge,
                             look.tint);
+    refresh_instrument_state();
 }
 
-void GameConnection::move_item(const ItemSlot& from, const ItemSlot& to, std::uint32_t count) {
-    // CInvSlotMgr::MoveItem @00698d80: swap locally, then tell the server.
-    if (!inventory_.swap(from, to)) return;
+void GameConnection::refresh_instrument_state() {
+    // PcClient_RefreshWornSlotVisual's instrument bit (0x5923f0): the local player's PlayerState bit 0x10 is set
+    // when the primary or secondary hand holds an instrument (item types 23..26), and the transition is sent as
+    // OP_PlayerStateAdd / OP_PlayerStateRemove. The server relays it for other players; it does not echo our own
+    // packet back to us. Stock EQEmu registers those handlers only once the client is connected, so a bit set during
+    // the zone-in waits for OP_ClientReady; `instrument_published_` is what the zone has been told.
+    auto it = world_.spawns.find(world_.player_id);
+    if (it == world_.spawns.end()) return;
+    bool holds = false;
+    for (std::int16_t slot : {kSlotPrimary, kSlotSecondary}) {
+        const Item* item = inventory_.at(ItemSlot::possessions(slot));
+        if (item && is_instrument_item_type(item->item_type)) {
+            holds = true;
+            break;
+        }
+    }
+    if (holds) it->second.player_state |= kPlayerStateInstrument;
+    else it->second.player_state &= ~kPlayerStateInstrument;
+    if (!zone_ready_ || holds == instrument_published_) return;
+    // Only a packet queued for this zone session counts as published; a dropped hook or a closed session leaves the
+    // state unpublished, so the next refresh tries again.
+    if (send_zone(encode_player_state(holds, PlayerState{world_.player_id, kPlayerStateInstrument})))
+        instrument_published_ = holds;
+}
+
+bool GameConnection::move_item(const ItemSlot& from, const ItemSlot& to, std::uint32_t count) {
+    // CInvSlotMgr::MoveItem @00698d80: swap locally, then tell the server. MoveItem itself plays nothing; the
+    // item-moved wave belongs to its callers (item_moved_sound).
+    if (!inventory_.swap(from, to)) return false;
     // Hailstone: an item this swap leaves on the cursor is the player's own pickup.
     if ((from.same(cursor_slot()) || to.same(cursor_slot())) && inventory_.cursor())
         mark_cursor_origin(CursorOrigin::Inventory);
@@ -445,6 +484,14 @@ void GameConnection::move_item(const ItemSlot& from, const ItemSlot& to, std::ui
             trade_->my_ready = f.my_ready != 0;
         }
     }
+    return true;
+}
+
+void GameConnection::item_moved_sound() {
+    SoundCue cue;
+    cue.kind = SoundCue::Kind::Wave;
+    cue.spell = game::kSoundItemMoved;
+    sound_cues_.push_back(cue);
 }
 
 void GameConnection::click_slot(const ItemSlot& slot, bool shift, bool ctrl) {
@@ -454,11 +501,19 @@ void GameConnection::click_slot(const ItemSlot& slot, bool shift, bool ctrl) {
         return;
     }
     if (slot.type == kInvTrade) {
-        // A click on an own trade slot drops the cursor item there (items never leave the trade).
-        if (inventory_.cursor()) trade_drop_cursor();
+        // A click on an own trade slot drops the cursor item there (items never leave the trade). A drop that moved
+        // something plays the item-moved wave (CInvSlot::HandleLButtonUp @0x69633a).
+        if (const Item* held = inventory_.cursor()) {
+            const std::uint32_t count = held->stack_count;
+            trade_drop_cursor();
+            const Item* after = inventory_.cursor();
+            if (!after || after->stack_count != count) item_moved_sound();
+        }
         return;
     }
-    // CInvSlot::HandleLButtonUp. Bank slots exist only in the
+    // CInvSlot::HandleLButtonUp. Every move it makes that succeeds, a pick-up or a put-down in any window, ends in
+    // the item-moved wave 0x92 (2D, @0x697148 after MoveItem; a stack split through the quantity dialog,
+    // CInvSlot::SliderComplete, plays nothing). Bank slots exist only in the
     // open bank window; one beyond CBankWnd::GetNumBankSlots is ignored
     // (InvSlot_IsBankSlotBeyondLimit @00694140), as are shared bank slots
     // beyond the window's two.
@@ -510,7 +565,7 @@ void GameConnection::click_slot(const ItemSlot& slot, bool shift, bool ctrl) {
                 return;
             }
         }
-        move_item(slot, cursor, 0);
+        if (move_item(slot, cursor, 0)) item_moved_sound();
         return;
     }
     // Put down (step 5).
@@ -555,7 +610,7 @@ void GameConnection::click_slot(const ItemSlot& slot, bool shift, bool ctrl) {
     // MoveItem with bMoveBagContents (Ctrl held, bForceBag 0): a bag at a top-level slot outside a world container
     // takes the cursor item, or the cursor bag's contents, through OP_MoveMultipleItems.
     if (ctrl && there && there->is_bag() && slot.sub < 0 && slot.type != kInvWorld) {
-        move_into_bag(slot);
+        if (move_into_bag(slot)) item_moved_sound();
         return;
     }
     if (slot.sub >= 0) {
@@ -570,10 +625,10 @@ void GameConnection::click_slot(const ItemSlot& slot, bool shift, bool ctrl) {
     // Send_OP_MoveItem / ItemContainer_MergeStacks: as much as fits. A full
     // stack of the same item does not swap (MoveItem fails on CanStackWith).
     if (there && game::can_stack_with(*held, *there)) {
-        merge_stacks(cursor, slot);
+        if (merge_stacks(cursor, slot) != 2) item_moved_sound();
         return;
     }
-    move_item(cursor, slot, 0);
+    if (move_item(cursor, slot, 0)) item_moved_sound();
 }
 
 void GameConnection::finish_quantity(std::uint32_t quantity) {
@@ -705,7 +760,8 @@ bool GameConnection::auto_inventory() {
                 !game::can_go_in_equip_slot(*held, s, primary, secondary, dual_wield, inv_slot_available(s)) ||
                 !can_use_item_class(*held))
                 continue;
-            move_item(cursor, to, 0);
+            // AutoInventoryCursorItem plays the item-moved wave itself for an empty worn slot (@0x4fe388).
+            if (move_item(cursor, to, 0)) item_moved_sound();
             return true;
         }
     }
@@ -740,7 +796,9 @@ bool GameConnection::stow_cursor_in_packs() {
 void GameConnection::drop_on_doll() {
     if (state_ != ConnectionState::InZone) return;
     if (inventory_.cursor()) {
+        // CInventoryWnd::HandleLButtonUp @0x692ec0: the item-moved wave when the cursor ends up empty.
         auto_inventory();
+        if (!inventory_.cursor()) item_moved_sound();
         if (const Item* still = inventory_.cursor(); still && still->id != kKronoItemId) system(5290, {}, 0xd);
         return;
     }
@@ -779,19 +837,26 @@ bool GameConnection::can_use_item_full(const Item& item) const {
 void GameConnection::equip_attuned(const ItemSlot& slot) {
     // ConfirmationDialog_HandleResponse case 0x7a (yes, with a local PC): MoveItem(cursor 33, slot, 1, 1, 0, 0),
     // which sets NoDropFlag 1 for an attuneable item landing in a worn slot and sends the usual OP_MoveItem
-    // {from 33, to slot, count 0}; then sound 0x92. A no leaves the item on the cursor.
+    // {from 33, to slot, count 0}; then the item-moved wave 0x92, whether or not the move went through. A no leaves
+    // the item on the cursor.
     if (state_ != ConnectionState::InZone) return;
     Item* held = inventory_.at(cursor_slot());
     if (!held || !is_worn(slot)) return;
     held->attuned = 1;
     move_item(cursor_slot(), slot, 0);
+    item_moved_sound();
+}
+
+void GameConnection::container_sound(std::uint32_t bag_type, bool open) {
+    // CContainerMgr::OpenContainer @0x65cae0 / CloseContainer @0x65d2f0 (through 0x65d180) play it with
+    // EqSoundManager::WavePlay(sound, 0): a 2D wave.
     SoundCue cue;
     cue.kind = SoundCue::Kind::Wave;
-    cue.spell = 0x92;
+    cue.spell = static_cast<std::uint32_t>(game::container_sound(bag_type, open));
     sound_cues_.push_back(cue);
 }
 
-void GameConnection::move_into_bag(const ItemSlot& to, bool force_bag) {
+bool GameConnection::move_into_bag(const ItemSlot& to, bool force_bag) {
     // CInvSlotMgr::MoveItem's bag path: a placeable target or cursor bag prints eqstr
     // 5311 and fails. Then the list (the cursor item, or each item of a non-empty cursor bag, which stays on the
     // cursor; with bForceBag the target bag's items into the cursor bag too) is resolved as ProcessMove resolves it
@@ -800,20 +865,20 @@ void GameConnection::move_into_bag(const ItemSlot& to, bool force_bag) {
     const ItemSlot cursor = cursor_slot();
     const Item* held = inventory_.at(cursor);
     const Item* bag = inventory_.at(to);
-    if (!held || !bag || !bag->is_bag()) return;
+    if (!held || !bag || !bag->is_bag()) return false;
     auto say = [&](std::uint32_t id, std::vector<std::string> args) {
         chat(ChatEvent::Kind::System, strings_.format(id, args));
     };
     if (bag->placeable_flags() != 0 || (held->is_bag() && held->placeable_flags() != 0)) {
         say(5311, {bag->placeable ? bag->name : held->name});
-        return;
+        return false;
     }
     game::BagMovePlan plan = game::plan_bag_move(*held, *bag, force_bag);
     if (plan.eqstr) {
         say(plan.eqstr, plan.args);
-        return;
+        return false;
     }
-    if (plan.moves.empty()) return;
+    if (plan.moves.empty()) return false;
     auto source = [&](const game::BagMove& m) {
         switch (m.from) {
         case game::BagMove::Where::Cursor: return cursor;
@@ -834,7 +899,7 @@ void GameConnection::move_into_bag(const ItemSlot& to, bool force_bag) {
         moves.push_back(e);
     }
     auto packet = encode_move_multiple(moves);
-    if (!packet) return;
+    if (!packet) return false;
     log::debug("move {} item(s) into the bag at {}/{}", moves.size(), to.type, to.slot);
     send_zone(*packet);
     // Placed as PlaceItems does: every source out first, then each part onto its slot (merged onto a stack there).
@@ -852,6 +917,7 @@ void GameConnection::move_into_bag(const ItemSlot& to, bool force_bag) {
         if (Item* there = inventory_.at(e.to); there && game::can_stack_with(part, *there)) there->stack_count += e.count;
         else inventory_.put(e.to, std::move(part));
     }
+    return true;
 }
 
 void GameConnection::apply_server_move(const MoveItem& m) {
@@ -1361,8 +1427,12 @@ bool GameConnection::item_command(const std::string& command, const std::string&
     if (command == "/autoinventory" || command == "/autoinv") {
         // cmd_autoinventory @0x4fe8c0: an item still held afterwards (not a Krono, 88888) says "There are no open
         // slots for the held item in your inventory." (0xd); the windows' auto-inventory says nothing.
+        // The item-moved wave when the cursor ends up empty (@0x4fe987).
         const Item* held = inventory_.cursor();
-        if (held && !auto_inventory() && held->id != 88888) system(5290, {}, 0xd);
+        if (!held) return true;
+        auto_inventory();
+        if (const Item* still = inventory_.cursor(); !still) item_moved_sound();
+        else if (still->id != kKronoItemId) system(5290, {}, 0xd);
         return true;
     }
     return false;

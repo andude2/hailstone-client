@@ -99,7 +99,7 @@ const char* tag(Level level) {
 } // namespace
 
 void set_level(Level level) { g_level = level; }
-void set_console_enabled(bool enabled) { g_console = enabled; }
+void set_console(bool on) { g_console = on; }
 bool enabled(Level level) { return level >= g_level.load(); }
 
 bool open_file(const std::filesystem::path& path) {

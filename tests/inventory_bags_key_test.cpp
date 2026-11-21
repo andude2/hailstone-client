@@ -3,11 +3,13 @@
 #include <doctest/doctest.h>
 
 #include <string>
+#include <vector>
 
 #include <imgui.h>
 #include <lua.hpp>
 
 #include "app/lua_ui.h"
+#include "app/lua_ui_windows.h"
 #include "mock_server/harness.h"
 #include "net/item_packets.h"
 
@@ -26,6 +28,13 @@ net::Item item(std::uint32_t id, const char* name, std::int16_t slot, bool bag, 
         it.bag_slots = 8;
     }
     return it;
+}
+
+std::vector<std::int32_t> wave_cues(net::GameConnection& c) {
+    std::vector<std::int32_t> out;
+    for (const net::SoundCue& cue : c.take_sound_cues())
+        if (cue.kind == net::SoundCue::Kind::Wave) out.push_back(static_cast<std::int32_t>(cue.spell));
+    return out;
 }
 
 } // namespace
@@ -150,7 +159,12 @@ TEST_CASE("bank bags key: the bank's and the shared bank's bags open while the b
     api.toggle_all_bags();
     api.toggle_all_bank_bags();
     CHECK(open() == "Pouch|Bank Sack|Shared Box|");
+    // The bank's hide closes every open container, carried bags too, each with its close wave: the three bags are
+    // type 0, so the shared container sound. Checked before the next UI frame, as the hide is.
+    conn.take_sound_cues();
     conn.close_bank();
+    app::prune_bag_windows(conn);
+    CHECK(wave_cues(conn) == std::vector<std::int32_t>{0x91, 0x91, 0x91});
     REQUIRE(conn.activate_bank(60));
     CHECK(open() == "|||");
     api.toggle_all_bank_bags();
@@ -161,6 +175,47 @@ TEST_CASE("bank bags key: the bank's and the shared bank's bags open while the b
     CHECK(open() == "|||");
     api.toggle_all_bags(); // the inventory key opens again: its flag was set
     CHECK(open() == "Pouch|||");
+
+    lua_close(L);
+    ImGui::DestroyContext(ctx);
+}
+
+TEST_CASE("bag keys: a new UI session or a /loadskin starts with no bag open and the keys set to open") {
+    ImGuiContext* ctx = ImGui::CreateContext();
+    MockConfig config = MockConfig::standard();
+    config.characters[0].inventory.push_back(item(1003, "Backpack", 23, true));
+    Rig rig(std::move(config));
+    REQUIRE(rig.to_zone());
+
+    app::UiHost host;
+    host.in_game = host.ui_ready = true;
+    host.conn = &rig.conn;
+    lua_State* L = luaL_newstate();
+    luaL_openlibs(L);
+    const auto first_bag = [&](app::UiApi& api) {
+        lua_newtable(L);
+        api.register_functions(L);
+        lua_setglobal(L, "hs");
+        REQUIRE(luaL_dostring(L, "return (hs.BagInfo('Bag1'))") == LUA_OK);
+        const char* name = lua_tostring(L, -1);
+        std::string out = name ? name : "";
+        lua_settop(L, 0);
+        return out;
+    };
+    {
+        app::UiApi api(host);
+        api.toggle_all_bags(); // opens, and leaves the keys at "close"
+        CHECK(first_bag(api) == "Backpack");
+    }
+    app::UiApi again(host);
+    CHECK(first_bag(again).empty());
+    again.toggle_all_bags(); // the first press opens again
+    CHECK(first_bag(again) == "Backpack");
+    // A /loadskin keeps the UiApi and resets its bags the same way.
+    again.reset_bags();
+    CHECK(first_bag(again).empty());
+    again.toggle_all_bags();
+    CHECK(first_bag(again) == "Backpack");
 
     lua_close(L);
     ImGui::DestroyContext(ctx);

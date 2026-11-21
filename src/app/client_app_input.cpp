@@ -233,7 +233,7 @@ void ClientApp::key_command(const game::KeyMap::Event& e) {
         break;
     case C::CLOSE_INV_BAGS:
         if (ui_api_ && ui_api_->replaces("Bag1")) ui_api_->close_all_bags();
-        else if (item_ui_) item_ui_->close_all_bags();
+        else if (item_ui_) item_ui_->close_all_bags(*conn_);
         break;
     case C::TOGGLE_INV_BAGS:
         if (ui_api_ && ui_api_->replaces("Bag1")) ui_api_->toggle_all_bags();

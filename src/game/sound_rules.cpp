@@ -303,6 +303,16 @@ AnimationSounds animation_sounds(const SpawnSounds& s, const AnimationSoundInput
     return out;
 }
 
+std::int32_t container_sound(std::uint32_t bag_type, bool open) {
+    // The open and the close table are the same bytes; their index is the bag
+    // type less 6 and a type outside the 17 entries takes the shared sound.
+    static constexpr std::array<std::uint8_t, kOwnBagTypeCount> kOwn = {0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 1, 0};
+    const bool shared = bag_type < kFirstOwnBagType ||
+                        bag_type - kFirstOwnBagType >= kOwn.size() || kOwn[bag_type - kFirstOwnBagType] != 0;
+    if (shared) return kSoundContainer;
+    return open ? kSoundBagOpen : kSoundBagClose;
+}
+
 std::vector<std::int32_t> landing_sounds(bool land_sound, std::optional<std::int32_t> fall_damage) {
     std::vector<std::int32_t> out;
     if (land_sound) out.push_back(kSoundJumpLand);

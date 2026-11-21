@@ -12,14 +12,18 @@
 #include "core/sha256.h"
 #include "core/binary_measurement.h"
 #include "net/item_packets.h"
+#include "game/nameplate_canvas.h"
 #include "game/server_ext_chain.h"
 #include "mq/commands.h"
+#include "mq/lua_mq.h"
 #include "mq/parse.h"
 #include "platform/tcp_socket.h"
+#include "plugin/native_nameplates.h"
 #include "plugin/native_plugins.h"
 #include "mq_test_world.h"
 #include "plugin_consent_helper.h"
 #include "app/addon_requirements.h"
+#include "app/spell_ui.h"
 #include "app/web_service.h"
 #include "plugin/web_access.h"
 #include "web/browser_host.h"
@@ -39,6 +43,7 @@ struct Host {
     }()};
     fs::path plugin_dir = world.dir / "plugins";
     plugin::Hooks hooks;
+    game::NameplateCanvasRegistry canvas;
     plugin::Policy policy;
     mq::Registry reg;
     mq::Context ctx;
@@ -82,6 +87,7 @@ struct Host {
         ne.web = web;
         ne.connection = [this] { return world.conn.get(); };
         ne.extensions = extensions.get();
+        ne.nameplates = &canvas;
         ne.use_ability = [this](mq::AbilityKind kind, std::string_view name) {
             used.emplace_back(static_cast<int>(kind), std::string(name));
             return true;
@@ -96,6 +102,11 @@ struct Host {
             return st;
         };
         ne.ability_bulk = [this] { return ability_rows; };
+        // The client's own filled-in description, as client_app_internal.h gives it (no character sheet here).
+        ne.spell_description = [this](const game::SpellData& s) {
+            if (!world.conn) return std::string();
+            return app::spell_description(s, world.conn->strings(), app::description_player(*world.conn, nullptr));
+        };
         plugins = std::make_unique<plugin::NativePlugins>(ne);
     }
     ~Host() {
@@ -129,7 +140,211 @@ struct Host {
     bool printed_line(const std::string& t) const { return std::find(printed.begin(), printed.end(), t) != printed.end(); }
 };
 
+game::NameplateCanvasFrame sample_nameplate_frame() {
+    game::NameplateCanvasFrame frame;
+    frame.viewport = {0, 0, 640, 480};
+    game::NameplateCanvasCandidate target;
+    target.spawn.id = 10;
+    target.spawn.incarnation = 17;
+    target.context.name = "Guard";
+    target.context.target = true;
+    target.context.mana_percent = 0;
+    target.context.invisible_undead = true;
+    target.context.concealed = true;
+    target.x = 200;
+    target.y = 100;
+    target.depth = 40;
+    frame.candidates.push_back(target);
+    game::NameplateCanvasCandidate second = target;
+    second.spawn.id = 11;
+    second.context.target = false;
+    second.depth = 50;
+    frame.candidates.push_back(std::move(second));
+    return frame;
+}
+
+void nameplate_test_metrics(game::NameplateCanvasRegistry& canvas) {
+    canvas.set_measure([](std::string_view text, float size, int) -> std::optional<game::CanvasTextMetrics> {
+        return game::CanvasTextMetrics{static_cast<float>(text.size()) * size, size, 0, 0, 0, 0};
+    });
+    canvas.set_icon([](std::uint32_t icon) -> std::optional<game::CanvasImage> {
+        if (icon != 37) return std::nullopt;
+        return game::CanvasImage{123, 0.1f, 0.2f, 0.3f, 0.4f};
+    });
+}
+
 } // namespace
+
+TEST_CASE("native plugins: nameplate frame lease and canvas ownership") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll);
+    nameplate_test_metrics(h.canvas);
+    REQUIRE(h.plugins->load("HostProbe"));
+    CHECK(h.canvas.empty());
+    h.run("/probenameplate outside");
+    CHECK(h.printed_line("[Probe] nameplate outside 0 0 0"));
+    h.run("/probenameplate on");
+    REQUIRE(h.printed_line("[Probe] nameplate register 1"));
+    h.printed.clear();
+    h.run("/probenameplate on");
+    CHECK(h.printed_line("[Probe] nameplate register 0"));
+    auto frame = sample_nameplate_frame();
+    const auto native = h.canvas.frame(frame);
+    REQUIRE(native.size() == 1);
+    CHECK(h.printed_line("[Probe] nameplate data 1 measure 1 width 60 icon 1 no_image 0 wrong_frame 0 accepted 1 duplicate 0"));
+    CHECK(h.printed_line("[Probe] nameplate stride 1 narrow -1 zero -1 wider -1"));
+    CHECK(native[0].candidate_index == 0);
+    CHECK(native[0].frame_serial == frame.serial);
+    CHECK(native[0].model.clickable);
+    REQUIRE(native[0].model.commands.size() == 2);
+    CHECK(native[0].model.commands[0].text == "native");
+    CHECK(native[0].model.commands[1].texture == 123);
+    CHECK(h.canvas.owner_valid(native[0].owner));
+
+    for (const auto cap : {plugin::kCapRead, plugin::kCapUi, plugin::kCapExtend}) {
+        h.approve(plugin::kCapAll & ~cap);
+        h.plugins->policy_changed({});
+        CHECK(h.plugins->loaded("HostProbe"));
+        CHECK_FALSE(h.canvas.owner_valid(native[0].owner));
+        CHECK(h.canvas.frame(frame).empty());
+        h.printed.clear();
+        h.run("/probenameplate on");
+        CHECK(h.printed_line("[Probe] nameplate register 0"));
+    }
+    h.approve(plugin::kCapAll);
+    h.plugins->policy_changed({});
+    CHECK(h.canvas.empty());
+    h.run("/probenameplate self-retire");
+    CHECK_FALSE(h.canvas.empty());
+    CHECK(h.canvas.frame(frame).empty());
+    CHECK(h.canvas.empty());
+    h.run("/probenameplate on");
+    const auto next = h.canvas.frame(frame);
+    REQUIRE(next.size() == 1);
+    CHECK(next[0].owner != native[0].owner);
+    // set_active(0) retires the provider; set_active(1) does not bring it back, so the plugin registers again.
+    h.run("/probemapcycle");
+    CHECK_FALSE(h.canvas.owner_valid(next[0].owner));
+    CHECK(h.canvas.empty());
+    CHECK(h.canvas.frame(frame).empty());
+    h.printed.clear();
+    h.run("/probenameplate on");
+    CHECK(h.printed_line("[Probe] nameplate register 1"));
+    const auto again = h.canvas.frame(frame);
+    REQUIRE(again.size() == 1);
+    REQUIRE(h.plugins->unload("HostProbe"));
+    CHECK_FALSE(h.canvas.owner_valid(again[0].owner));
+    CHECK_FALSE(h.canvas.owner_valid(next[0].owner));
+    CHECK(h.canvas.frame(frame).empty());
+}
+
+TEST_CASE("native plugins: nameplate records are read by their stride") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll);
+    nameplate_test_metrics(h.canvas);
+    REQUIRE(h.plugins->load("HostProbe"));
+    h.run("/probenameplate stride");
+    REQUIRE(h.printed_line("[Probe] nameplate register 1"));
+    auto frame = sample_nameplate_frame();
+    const auto native = h.canvas.frame(frame);
+    // The candidates are found by the host's stride; a command stride shorter than the host's record (or none) is
+    // refused, and a longer one (a newer SDK's record, with bytes this host does not know) is read field by field.
+    CHECK(h.printed_line("[Probe] nameplate stride 1 narrow 0 zero 0 wider 1"));
+    REQUIRE(native.size() == 2);
+    CHECK(native[1].candidate_index == 1);
+    REQUIRE(native[1].model.commands.size() == 2);
+    CHECK(native[1].model.commands[0].text == "wide");
+    CHECK(native[1].model.commands[0].color == 0x654321);
+    CHECK(native[1].model.commands[1].text == "wide");
+    CHECK(native[1].model.commands[1].color == 0x0000ff);
+}
+
+TEST_CASE("native plugins: nameplate frame view steps candidates by its stride") {
+    game::NameplateCanvasRegistry registry;
+    auto frame = sample_nameplate_frame();
+    frame.serial = 9;
+    frame.candidates[0].context.secondary_caption = "<Guild of Guards>";
+    auto& npc = frame.candidates.emplace_back();
+    npc.spawn.id = 12;
+    npc.spawn.npc = true;
+    npc.context.secondary_caption = "(Guildmaster)";
+    plugin::NativeNameplateFrame lease(registry, frame);
+    const auto& view = lease.view();
+    CHECK(view.size == sizeof(HailstoneNameplateFrame));
+    CHECK(view.candidate_size == sizeof(HailstoneNameplateCandidate));
+    CHECK(view.reserved == 0);
+    REQUIRE(view.candidate_count == 3);
+    for (std::uint32_t i = 0; i < view.candidate_count; ++i) {
+        const auto* by_stride = reinterpret_cast<const HailstoneNameplateCandidate*>(
+            static_cast<const unsigned char*>(view.candidates) + std::size_t{i} * view.candidate_size);
+        CHECK(hailstone_nameplate_candidate(&view, i) == by_stride);
+        CHECK(by_stride->spawn_id == frame.candidates[i].spawn.id);
+    }
+    CHECK(hailstone_nameplate_candidate(&view, 3) == nullptr);
+    CHECK(HAILSTONE_NAMEPLATE_CANDIDATE_HAS(&view, cast_name));
+    REQUIRE(HAILSTONE_NAMEPLATE_CANDIDATE_HAS(&view, secondary_caption));
+    const auto guild = hailstone_nameplate_candidate(&view, 0)->secondary_caption;
+    REQUIRE(guild.data);
+    CHECK(std::string_view(guild.data, guild.bytes) == "<Guild of Guards>");
+    const auto hidden = hailstone_nameplate_candidate(&view, 1)->secondary_caption;
+    CHECK(hidden.data == nullptr);
+    CHECK(hidden.bytes == 0);
+    const auto description = hailstone_nameplate_candidate(&view, 2)->secondary_caption;
+    REQUIRE(description.data);
+    CHECK(std::string_view(description.data, description.bytes) == "(Guildmaster)");
+    auto old_view = view;
+    old_view.candidate_size = offsetof(HailstoneNameplateCandidate, secondary_caption);
+    CHECK(HAILSTONE_NAMEPLATE_CANDIDATE_HAS(&old_view, cast_name));
+    CHECK_FALSE(HAILSTONE_NAMEPLATE_CANDIDATE_HAS(&old_view, secondary_caption));
+}
+
+TEST_CASE("native plugins: native and Lua nameplates share candidate claims") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    plugin::Rules rules;
+    rules.configured = true;
+    rules.player_script_caps = rules.player_plugin_caps = plugin::kCapAll;
+    h.policy.set(rules);
+    nameplate_test_metrics(h.canvas);
+    REQUIRE(h.plugins->load("HostProbe"));
+    h.run("/probenameplate on");
+    const auto scripts_dir = h.world.dir / "scripts";
+    fs::create_directories(scripts_dir);
+    std::ofstream(scripts_dir / "test_canvas.lua") << R"lua(
+local np=require('hailstone').nameplates
+assert(np.Register('test',function(frame)
+  local models={}
+  for i,candidate in ipairs(frame.candidates) do
+    models[i]={token=candidate.token,hide=true}
+  end
+  return models
+end))
+)lua";
+    mq::ScriptEnv env;
+    env.hooks = &h.hooks;
+    env.policy = &h.policy;
+    env.registry = &h.reg;
+    env.context = [&]() -> const mq::Context& { return h.ctx; };
+    env.nameplates = &h.canvas;
+    env.dirs = {scripts_dir};
+    env.config_dir = h.world.dir / "config";
+    mq::ScriptHost scripts(std::move(env));
+    REQUIRE(scripts.run("test_canvas", {}));
+    scripts.pulse();
+
+    auto frame = sample_nameplate_frame();
+    const auto both = h.canvas.frame(frame);
+    REQUIRE(both.size() == 2);
+    CHECK(both[0].candidate_index == 0);
+    CHECK_FALSE(both[0].model.hide);
+    CHECK(both[1].candidate_index == 1);
+    CHECK(both[1].model.hide);
+    CHECK(both[0].owner != both[1].owner);
+    REQUIRE(h.plugins->unload("HostProbe"));
+    const auto lua = h.canvas.frame(frame);
+    REQUIRE(lua.size() == 2);
+    CHECK(lua[0].owner == both[1].owner);
+    CHECK(lua[0].model.hide);
+}
 
 TEST_CASE("native plugins: received item decode commits both outputs only for an accepted prefix") {
     Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
@@ -1803,6 +2018,123 @@ TEST_CASE("native plugins: get_avail_aa_data_bulk and get_avail_disc_data_bulk, 
     h.run("/probediscs");
     CHECK(h.printed_line("[Probe] discs count 0, total 0, 8 bytes, 0 bytes left"));
     h.world.conn = std::move(conn);
+}
+TEST_CASE("native plugins: get_spells_data_bulk, laid out as docs/plugins.md says") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll);
+    REQUIRE(h.plugins->load("HostProbe"));
+    net::GameConnection& conn = *h.world.conn;
+    // 3020: a heal (SPA 0, 40), mana 25, single target, magic resist, cleric 5 (no other class), cancelled by sitting,
+    // with a description (dbstr_us.txt type 6, id 3020, in the test world's file) and category 42, subcategory 43
+    // (type 5, Heals and Direct), no second subcategory. 3021: a proc of 3020 and a mana slot, no description. 3022:
+    // 3020 again under another id, not in the player's spell book. The slots they do not use are 254.
+    auto table = std::make_shared<game::SpellTable>();
+    REQUIRE(table->parse(mq_test::spell_line({{0, "3020"}, {1, "Test Heal"}, {19, "25"}, {20, "40"}, {85, "1"},
+                                              {86, "0"}, {87, "254"}, {88, "254"}, {89, "254"}, {90, "254"}, {91, "254"},
+                                              {92, "254"}, {93, "254"}, {94, "254"}, {95, "254"}, {96, "254"},
+                                              {97, "254"}, {98, "5"}, {105, "5"}, {124, "1"}, {155, "3020"},
+                                              {156, "42"}, {157, "43"}}) +
+                         "\n" +
+                         mq_test::spell_line({{0, "3021"}, {1, "Test Proc"}, {20, "3020"}, {21, "10"}, {86, "85"},
+                                              {87, "15"}, {88, "254"}, {89, "254"}, {90, "254"}, {91, "254"},
+                                              {92, "254"}, {93, "254"}, {94, "254"}, {95, "254"}, {96, "254"},
+                                              {97, "254"}}) +
+                         "\n" +
+                         mq_test::spell_line({{0, "3022"}, {1, "Test Heal"}, {19, "25"}, {20, "40"}, {86, "0"},
+                                              {87, "254"}, {88, "254"}, {89, "254"}, {90, "254"}, {91, "254"},
+                                              {92, "254"}, {93, "254"}, {94, "254"}, {95, "254"}, {96, "254"},
+                                              {97, "254"}, {98, "5"}, {124, "1"}, {155, "3020"}})) == 3);
+    conn.set_spell_table_for_test(table);
+    // 3020 and 3021 are in the player's spell book; 3022 is not (until it is a discipline, then an AA's spell).
+    auto& profile = net::GameConnectionTestAccess::profile(conn);
+    if (!profile) profile.emplace();
+    profile->spell_book = {0xffffffffu, 3020, 3021};
+
+    // One record per id, in the order asked: an unknown id gets the fixed record alone (265 bytes, every count 0). A
+    // known one adds its 12 effect slots (20 bytes each), its 16 class levels (a byte each) and its fourteen strings,
+    // as its counts say (the name, seven empty ones here at 2 bytes each, the description, then the target type's,
+    // resist type's and categories' names) and its effect lines. A spell in the player's book has its description
+    // filled in for the player, as the spell display shows it.
+    h.run("/probespells 16384 3020 9999 3021");
+    CHECK(h.printed_line("[Probe] spell 0: id 3020, found 1, 642 bytes, name Test Heal, mana 25, target 5, flags 1, "
+                         "slots 12, classes 16, strings 14, effects 1")); // 265 + 240 + 16 + 11 + 14 + 30 + 39 + 27
+    // The classes that can use it, class 1 first: only the cleric (class 2).
+    CHECK(h.printed_line("[Probe] spell 0 class 2: level 5"));
+    // The slots, slot 1 first; the 11 unused ones (SPA 254) are not printed.
+    CHECK(h.printed_line("[Probe] spell 0 slot 1: effect 0, base 40, base2 0, max 0, formula 0"));
+    CHECK_FALSE(h.printed_line("[Probe] spell 0 slot 2: effect 254, base 0, base2 0, max 0, formula 0"));
+    CHECK(h.printed_line("[Probe] spell 0 description 3020: Heals you for 40 hit points."));
+    CHECK(h.printed_line("[Probe] spell 0 target Single, resist Magic, category 42 Heals, subcategory 43 Direct, "
+                         "subcategory2 0 Unknown"));
+    CHECK(h.printed_line("[Probe] spell 0 effect: Slot 1: Increase HP by 40"));
+    CHECK(h.printed_line("[Probe] spell 1: id 9999, found 0, 265 bytes, name -, mana 0, target 0, flags 0, slots 0, "
+                         "classes 0, strings 0, effects 0"));
+    CHECK(h.printed_line("[Probe] spell 2: id 3021, found 1, 653 bytes, name Test Proc, mana 0, target 0, flags 0, "
+                         "slots 12, classes 16, strings 14, effects 2")); // 265 + 240 + 16 + 11 + 16 + 47 + 29 + 29
+    CHECK(h.printed_line("[Probe] spell 2 slot 1: effect 85, base 3020, base2 0, max 0, formula 0"));
+    CHECK(h.printed_line("[Probe] spell 2 slot 2: effect 15, base 10, base2 0, max 0, formula 0"));
+    // Target type 0 is MacroQuest's "None", resist type 0 "Unresistable"; a category of 0 is "Unknown".
+    CHECK(h.printed_line("[Probe] spell 2 target None, resist Unresistable, category 0 Unknown, subcategory 0 Unknown, "
+                         "subcategory2 0 Unknown"));
+    CHECK(h.printed_line("[Probe] spell 2 description 0: -")); // no description id: an empty string
+    CHECK(h.printed_line("[Probe] spell 2 effect: Slot 1: Add Proc: Test Heal"));
+    CHECK(h.printed_line("[Probe] spell 2 effect: Slot 2: Increase Mana by 10"));
+    CHECK(h.printed_line("[Probe] spells count 3, 1564 bytes, 0 bytes left"));
+    // A spell not in the book keeps dbstr_us.txt's text, its codes left in.
+    h.printed.clear();
+    h.run("/probespells 16384 3022");
+    CHECK(h.printed_line("[Probe] spell 0 description 3020: Heals you for #1 hit points."));
+    // 4 + 265 + 240 + 16 + 11 + 14 + 30 + 49 + 27
+    CHECK(h.printed_line("[Probe] spells count 1, 656 bytes, 0 bytes left"));
+    // A discipline is the player's own too, though not in the book.
+    profile->disciplines = {3022};
+    h.printed.clear();
+    h.run("/probespells 16384 3022");
+    CHECK(h.printed_line("[Probe] spell 0 description 3020: Heals you for 40 hit points."));
+    // The filled text happens to be as long as the unfilled ("40" for "#1").
+    CHECK(h.printed_line("[Probe] spells count 1, 656 bytes, 0 bytes left"));
+    // So is the spell of an AA the player owns.
+    profile->disciplines.clear();
+    auto& aa = net::GameConnectionTestAccess::alt_adv(conn);
+    game::AltAbility rank;
+    rank.id = 7001;
+    rank.group = 9;
+    rank.rank = 1;
+    rank.spell = 3022;
+    aa.add(rank);
+    aa.owned = {{7001, 1, 0}};
+    h.printed.clear();
+    h.run("/probespells 16384 3022");
+    CHECK(h.printed_line("[Probe] spell 0 description 3020: Heals you for 40 hit points."));
+    // An AA rank the player does not own does not count.
+    aa.owned.clear();
+    h.printed.clear();
+    h.run("/probespells 16384 3022");
+    CHECK(h.printed_line("[Probe] spell 0 description 3020: Heals you for #1 hit points."));
+    CHECK(std::none_of(h.printed.begin(), h.printed.end(),
+                       [](const std::string& line) { return line.find("bytes unread") != std::string::npos; }));
+
+    // Only whole records: the third does not fit in 1200 bytes, and nothing goes past them.
+    h.printed.clear();
+    h.run("/probespells 1200 3020 9999 3021");
+    CHECK(h.printed_line("[Probe] spells count 2, 911 bytes, 0 bytes left"));
+    CHECK(h.printed_line("[Probe] spells past the end 0"));
+    // Below the count's 4 bytes nothing; no ids, the count alone.
+    h.printed.clear();
+    h.run("/probespells 3 3020");
+    CHECK(h.printed_line("[Probe] spells 0 bytes"));
+    CHECK(h.printed_line("[Probe] spells past the end 0"));
+    h.printed.clear();
+    h.run("/probespells 64");
+    CHECK(h.printed_line("[Probe] spells count 0, 4 bytes, 0 bytes left"));
+
+    // Without 'read': nothing, and the chat window says why.
+    Host denied(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    denied.approve(plugin::kCapAll & ~plugin::kCapRead);
+    REQUIRE(denied.plugins->load("HostProbe"));
+    denied.run("/probespells 4096 3020");
+    CHECK(denied.printed_line("[Probe] spells 0 bytes"));
+    CHECK(denied.printed_line("[Plugin] HostProbe: get_spells_data_bulk needs the server's 'read' permission"));
 }
 TEST_CASE("native plugins: get_raid_data_bulk roster, pets, positions and edge cases") {
     Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);

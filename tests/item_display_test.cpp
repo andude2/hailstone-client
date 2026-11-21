@@ -2,7 +2,13 @@
 #include <doctest/doctest.h>
 
 #include "game/eq_strings.h"
+#include "game/item_compare.h"
 #include "game/item_display.h"
+#include "ui/item_windows.h"
+
+#include <algorithm>
+#include <set>
+#include <string>
 
 using namespace hailstone;
 
@@ -63,6 +69,32 @@ TEST_CASE("build_item_display: info lines, then the grid in its columns and bloc
     CHECK(d.measured[3] == "Class: WAR PAL ");
     CHECK(d.measured[5] == "Race: HUM BAR ");
     CHECK(d.measured[7].empty()); // no deity
+}
+
+TEST_CASE("Item descriptions show personal and guild tribute favor per item") {
+    net::Item item;
+    const game::ItemDisplayContext ctx;
+    const auto description = [&] { return game::build_item_display(item, ctx).description; };
+    const auto native_has = [&](std::string_view line) {
+        const auto lines = ui::item_info_lines(item);
+        return std::find(lines.begin(), lines.end(), line) != lines.end();
+    };
+
+    CHECK(description().empty());
+    CHECK_FALSE(native_has("Personal Tribute: 0 favor"));
+    CHECK_FALSE(native_has("Guild Tribute: 0 favor"));
+
+    item.favor = 1476;
+    CHECK(description() == "Personal Tribute: 1476 favor<BR>");
+    CHECK(native_has("Personal Tribute: 1476 favor"));
+    CHECK_FALSE(native_has("Guild Tribute: 0 favor"));
+
+    item.guild_favor = 300;
+    item.max_stack = 20;
+    item.stack_count = 5;
+    CHECK(description() == "Personal Tribute: 1476 favor each<BR>Guild Tribute: 300 favor each<BR>");
+    CHECK(native_has("Personal Tribute: 1476 favor each"));
+    CHECK(native_has("Guild Tribute: 300 favor each"));
 }
 
 TEST_CASE("item_display_text_width: the longer of name and flags, then the other lines") {
@@ -322,4 +354,48 @@ TEST_CASE("build_item_display: a flag the game folder's eqstr_us.txt lacks falls
     ctx.strings = &s;
     auto d = game::build_item_display(it, ctx);
     CHECK(d.info[1].text == "Magic, Lore, Summoned, No Trade");
+}
+
+// Hailstone: each stat row carries the comparison's key for that stat (the UI puts the change for you beside it),
+// and every key it carries is one of the comparison's.
+TEST_CASE("build_item_display: the stat rows carry the item comparison's keys") {
+    auto s = strings();
+    net::Item it;
+    it.name = "Keyed Ring";
+    it.equip_slots = 1u << 15;
+    it.ac = 5;
+    it.hp = 20;
+    it.mana = 20;
+    it.endurance = 20;
+    it.astr = it.asta = it.aagi = it.adex = it.awis = it.aint = it.acha = 1;
+    it.mr = it.fr = it.cr = it.dr = it.pr = it.sv_corruption = 2;
+    it.attack = 3;
+    it.regen = 1;
+    it.mana_regen = 1;
+    it.end_regen = 1;
+    it.heal_amt = 4;
+    it.spell_dmg = 4;
+    game::ItemDisplayContext ctx;
+    ctx.strings = &s;
+    auto d = game::build_item_display(it, ctx);
+    std::set<std::string> valid;
+    for (std::size_t i = 0; i < static_cast<std::size_t>(game::CompareStat::Count); ++i)
+        valid.insert(game::compare_stat_key(static_cast<game::CompareStat>(i)));
+    std::set<std::string> keys;
+    for (const auto& row : d.grid)
+        for (const auto& cell : row)
+            if (cell.shown && *cell.key) {
+                CHECK(valid.count(cell.key) == 1);
+                keys.insert(cell.key);
+            }
+    CHECK(d.grid[0][0].stat == "Size:");
+    CHECK(std::string(d.grid[0][0].key).empty()); // a row the comparison has no stat for
+    CHECK(d.grid[0][1].stat == "AC:");
+    CHECK(std::string(d.grid[0][1].key) == "ac");
+    for (const char* k : {"ac", "hp", "mana", "endurance", "str", "sta", "agi", "dex", "wis", "int", "cha", "svMagic",
+                          "svFire", "svCold", "svDisease", "svPoison", "svCorruption", "atk", "hpRegen", "manaRegen",
+                          "enduranceRegen", "healAmount", "spellDamage"}) {
+        CAPTURE(k);
+        CHECK(keys.count(k) == 1);
+    }
 }

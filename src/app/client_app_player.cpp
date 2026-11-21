@@ -695,6 +695,7 @@ void ClientApp::update_player(float dt) {
     // pass and the position report, as the original ran them once per frame at 60 frames a second.
     const MovementKeys frame_keys = mk;
     motion_.jumped = motion_.land_sound = false; // this frame's events, gathered over its steps
+    motion_.water_sounds.clear();
     motion_.fall_damage.reset();
     auto run_step = [&](const core::StepClock::Step& st) {
         // Query extensions before retaining any pointers into the received actor set.
@@ -893,13 +894,11 @@ void ClientApp::update_player(float dt) {
             movement_.set_race(me->race);
             // 0x406740: the duck track's length (L08, or CRCH_BA_1 on an EQG skeleton: the actor's vtable +0xbc, as
             // the bone groups ask it) caps the jump's crouch window.
-            std::optional<double> duck;
+            const assets::AnimationClip* duck_clip = nullptr;
             if (actor_renderer_)
                 if (auto model = actor_renderer_->model_for(*me))
-                    if (const assets::AnimationClip* c =
-                            model->clip(game::mechanics::jump_duck_clip(model->eqg)))
-                        duck = static_cast<double>(c->frame_count) * static_cast<double>(c->frame_ms);
-            movement_.set_crouch_window(game::mechanics::jump_crouch_window(duck));
+                    duck_clip = model->clip(game::mechanics::jump_duck_clip(model->eqg));
+            movement_.set_crouch_window(game::mechanics::jump_crouch_window(duck_clip));
             movement_.set_jump_animation(actor_renderer_ ? actor_renderer_->jump_animation_playing(me->id) : std::nullopt);
             movement_.set_touch_context(me->heights.height, static_cast<std::int32_t>(conn_->zone_id()));
             movement_.set_touch_handler([this](std::uint8_t id) { return touching_switch(id); });
@@ -1093,6 +1092,7 @@ void ClientApp::update_player(float dt) {
         motion_.flying = frame.flying;
         motion_.jumped = motion_.jumped || frame.jumped;
         motion_.land_sound = motion_.land_sound || frame.land_sound;
+        motion_.water_sounds.insert(motion_.water_sounds.end(), frame.water_sounds.begin(), frame.water_sounds.end());
         if (frame.fall_damage && !motion_.fall_damage) motion_.fall_damage = frame.fall_damage;
         yaw_ = frame.yaw;
 

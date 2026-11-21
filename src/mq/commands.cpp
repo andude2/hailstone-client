@@ -1,5 +1,6 @@
 #include "mq/commands.h"
 
+#include <algorithm>
 #include <cmath>
 #include <format>
 #include <utility>
@@ -107,10 +108,26 @@ Commands::Commands(CommandEnv env) : env_(std::move(env)) {
                 say("There are no spawns matching: (" + mine + ")");
                 return;
             }
-            auto found = find_spawns(args, *ctx.conn, ctx.can_see);
-            // A plain name means someone else, not the player (MQ skips you unless asked for).
+            SearchSources sources = sources_of(*ctx.conn);
+            sources.can_see = ctx.can_see;
+            const SpawnSearch search = parse_spawn_search(args, sources.guild);
+            const auto found = search_spawns(search, world, sources);
             for (const game::Spawn* s : found) {
+                // MQ normally skips the local player when there is another match.
                 if (s->id == world.player_id && found.size() > 1) continue;
+                // EQEmu prefixes a mount's name with the rider's, so the mount can win a nearest-name search.
+                // Not MQ's rule (its Target takes the nearest match), but RoF2's own /target
+                // (Send_OP_TargetCommand_004e9790 -> GetNearestSpawnMaybe 0x5a04e0) asks
+                // PlayerManagerClient::GetSpawnByName 0x599b40 for an exact name first, which finds the rider.
+                if (search.kind == SpawnSearch::Kind::Any && !search.id && !search.name.empty() &&
+                    !s->is_corpse && game::Spawn::GetSpawnType(s) == game::eSpawnType::MOUNT) {
+                    const auto player = std::find_if(found.begin(), found.end(), [&search](const game::Spawn* candidate) {
+                        return !candidate->is_npc && !candidate->is_corpse &&
+                               (iequals(candidate->name, search.name) ||
+                                game::display_name_iequals(candidate->name, search.name));
+                    });
+                    if (player != found.end()) s = *player;
+                }
                 env_.set_target(s->id);
                 return;
             }
@@ -205,8 +222,13 @@ void Commands::run_nested(std::string_view args) {
                                   kMaxNestedCommands));
         return;
     }
+    // The outer line was parsed (or left as written) before its command got it: its rest is not parsed again, or a
+    // value holding "${" would be read after all (docs/plugins.md "MQ commands"). A one-line flag rather than
+    // noparse_, so that a bind's own mq.cmd lines under /docommand are still parsed.
     ++nested_;
+    nested_parsed_ = true;
     env_.run(std::string(args));
+    nested_parsed_ = false; // a run that did not reach the filters
     --nested_;
 }
 
@@ -223,11 +245,12 @@ Commands::~Commands() {
 
 void Commands::filter(std::string& line, plugin::Flow& flow) {
     // The line this filter sent on itself (below): parsed and checked already; final_check has it last.
+    const bool parsed = std::exchange(nested_parsed_, false);
     if (std::exchange(redispatched_, false)) return;
     std::string word = first_word(line);
     // ${...} (a read: scripts and plugins need the read permission) unless /noparse is running the line or a window
     // sends it (LiteralLine).
-    if (!noparse_ && g_literal_lines == 0 && !iequals(word, "/noparse") && line.find("${") != std::string::npos) {
+    if (!parsed && !noparse_ && g_literal_lines == 0 && !iequals(word, "/noparse") && line.find("${") != std::string::npos) {
         if ((plugin::caller_caps() & plugin::kCapRead) == 0) {
             if (env_.echo) env_.echo(std::format("[MQ] {}: ${{...}} needs the server's 'read' permission", plugin::caller_name()));
             flow = plugin::Flow::Drop;
