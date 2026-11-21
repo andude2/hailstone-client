@@ -1,7 +1,7 @@
 #pragma once
 
-// The GUI side of D2 (docs/research/drive-headless.md): connect to the headless's observe pipe, take its snapshot,
-// and hand a normal GameConnection the live zone packets and periodic local state. Observe only: sends go nowhere.
+// Connect the GUI mirror to the headless snapshot and live feed. The mirror
+// never forwards game packets. Crew interaction uses typed actions on the pipe.
 
 #include <filesystem>
 #include <memory>
@@ -19,6 +19,7 @@ struct DriveObserveFile {
     std::string character;
     std::string profile;
     std::string game_dir;
+    bool interactive = false;
 };
 
 std::optional<DriveObserveFile> read_drive_observe_file(const std::filesystem::path& path, std::string& error);
@@ -35,6 +36,7 @@ public:
     // One Session for the GameConnection; a zone change asks for another, and both read the same live queue.
     std::unique_ptr<net::Session> make_session();
     net::DriveSnapshot take_snapshot();
+    void send_action(const net::DriveAction& action);
     // The latest local state, if a State message arrived since the last call.
     std::optional<net::DriveSnapshot> take_local_state();
     void pump();

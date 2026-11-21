@@ -30,13 +30,14 @@ struct DriveClient::Impl {
         : pipe(std::move(p)), file(std::move(f)) {}
 
     void pump() {
-        if (!pipe || closed) return;
+        if (!pipe || closed || local) return;
         if (pipe->closed()) {
             closed = true;
             error = pipe->error();
             return;
         }
         while (auto message = pipe->receive_message(0)) {
+            if (message->empty()) continue;
             const std::span<const std::byte> bytes(message->data(), message->size());
             ByteReader r(bytes);
             const auto kind = static_cast<DriveObserveMessage>(r.le<std::uint8_t>());
@@ -52,8 +53,12 @@ struct DriveClient::Impl {
                     next.velocity = state->velocity;
                     next.moving = state->moving;
                     next.target = state->target;
-                    if (state->inventory_packet) next.inventory_packet = *state->inventory_packet;
+                    if (state->inventory_packet) next.inventory_packet = std::move(*state->inventory_packet);
+                    next.ui = std::move(state->ui);
                     local = std::move(next);
+                    // GameConnection consumes the queued packets, then the
+                    // state. A newer packet must wait until this state lands.
+                    break;
                 }
             }
         }
@@ -102,6 +107,7 @@ std::optional<DriveObserveFile> read_drive_observe_file(const std::filesystem::p
         else if (key == "character") file.character = value;
         else if (key == "profile") file.profile = value;
         else if (key == "game_dir") file.game_dir = value;
+        else if (key == "interactive") file.interactive = value == "1";
     }
     if (file.endpoint.empty() || file.token.empty()) {
         error = path.string() + " has no endpoint/token";
@@ -123,7 +129,7 @@ std::unique_ptr<DriveClient> DriveClient::connect(const DriveObserveFile& file, 
     }
     auto impl = std::make_shared<Impl>(std::move(pipe), file);
     const auto message = impl->pipe->receive_message(10000);
-    if (!message) {
+    if (!message || message->empty()) {
         error = "the drive observer sent no snapshot";
         return nullptr;
     }
@@ -156,6 +162,11 @@ std::optional<net::DriveSnapshot> DriveClient::take_local_state() {
     std::optional<net::DriveSnapshot> state = std::move(impl_->local);
     impl_->local.reset();
     return state;
+}
+
+void DriveClient::send_action(const net::DriveAction& action) {
+    if (impl_->file.interactive && !impl_->closed)
+        impl_->pipe->send_message(encode_drive_action(action), 50);
 }
 
 void DriveClient::pump() { impl_->pump(); }

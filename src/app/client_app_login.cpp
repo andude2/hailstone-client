@@ -1089,11 +1089,19 @@ void ClientApp::update_connection() {
     if (!connection_frontend(*conn_, pending_ui_pack_,
         [this](const std::string& skin) { use_ui_pack(skin, std::exchange(ui_reload_pending_, false)); },
         [this](net::GameConnection::QuitRequest request) {
+            if (viewing_observe_) {
+                release_observe();
+                return;
+            }
             log::info("{}: quitting", request == net::GameConnection::QuitRequest::Exit ? "/exit" : "/quit");
             conn_->disconnect();
             quit_ = true;
         },
         [this] {
+            if (viewing_observe_) {
+                release_observe();
+                return;
+            }
             if (auto kind = conn_->camped_out()) camp_finished(*kind);
             else if (conn_->link_death()) update_link_death();
             else back_to_login(conn_->error(), true);

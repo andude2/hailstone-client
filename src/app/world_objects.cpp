@@ -96,9 +96,16 @@ void WorldObjects::set_zone(const assets::Zone* zone, std::shared_ptr<const asse
     vk_.wait_idle();
     renderer_.reset();
     renderer_ = std::make_unique<render::ObjectRenderer>(vk_, shader_dir_);
+    reset_view();
     models_.clear();
     zone_assets_.clear();
     zone_assets_loaded_ = false;
+}
+
+void WorldObjects::reset_view() {
+    for (const auto& entry : doors_) note_flora(entry.second);
+    for (const auto& entry : objects_) note_flora(entry.second);
+    for (const auto& entry : placed_) note_flora(entry.second);
     doors_.clear();
     objects_.clear();
     placed_.clear();
@@ -111,6 +118,8 @@ void WorldObjects::set_zone(const assets::Zone* zone, std::shared_ptr<const asse
     object_actors_.clear();
     object_transforms_.clear();
     prepared_ = false;
+    ++floor_generation_;
+    ++visual_generation_;
 }
 
 void WorldObjects::reset_game_files() {

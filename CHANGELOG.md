@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Crew switches within the same zone instance reuse the loaded scene. Workers started with interaction enabled can accept inventory, augment, and confirmation clicks from the Crew window.
+
 - A GM's /kill now drops you to -10000 HP, as in the original client, until the server next updates your HP (it only played the sound and printed the line)
 - Door clicks use the distance to the spot you clicked, fixing long-range zoning through the Guild Lobby entrance. The Plane of Fire orb in Plane of Tranquility can also be clicked.
 - A key or lockpick on the cursor is no longer offered for dropping when a click in the world misses a door or the door refuses it, as in the original

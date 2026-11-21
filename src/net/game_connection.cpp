@@ -267,6 +267,84 @@ void GameConnection::apply_local_state(const DriveSnapshot& local) {
     set_player_motion(local.position, local.heading, local.velocity, local.moving);
     set_player_drawn(local.position, local.heading);
     if (local.inventory_packet.opcode != 0) handle_zone(local.inventory_packet);
+    if (!local.ui) return;
+    drive_ui_ = local.ui;
+    quantity_ = local.ui->quantity;
+    if (const auto& question = local.ui->question) {
+        Confirmation c;
+        c.id = question->kind;
+        c.text = question->text;
+        c.plain_text = question->plain_text;
+        c.ok_only = question->ok_only;
+        c.drive_id = question->id;
+        confirmation_ = std::move(c);
+    } else {
+        confirmation_.reset();
+    }
+    confirm_queue_.clear();
+}
+
+DriveUiState GameConnection::capture_drive_ui() const {
+    DriveUiState ui;
+    ui.zone_generation = xtargets_.zone;
+    ui.inventory_revision = inventory_.revision();
+    if (confirmation_) {
+        const auto& c = *confirmation_;
+        ui.question = DriveQuestion{c.drive_id, c.id, c.text, c.plain_text, c.ok_only};
+    }
+    if (quantity_ && quantity_->op == QuantityOp::Inventory) ui.quantity = quantity_;
+    return ui;
+}
+
+bool GameConnection::relay_drive_action(DriveAction action) {
+    if (!drive_input_) return drive_ui_.has_value();
+    if (drive_ui_) {
+        action.zone_generation = drive_ui_->zone_generation;
+        action.inventory_revision = drive_ui_->inventory_revision;
+        if (confirmation_) action.dialog = confirmation_->drive_id;
+        if (action.kind == DriveActionKind::Quantity && quantity_) action.slot = quantity_->slot;
+        if (action.kind != DriveActionKind::Quantity || quantity_) drive_input_(action);
+    }
+    return true;
+}
+
+bool GameConnection::apply_drive_action(const DriveAction& action) {
+    if (state_ != ConnectionState::InZone || action.zone_generation != xtargets_.zone ||
+        action.inventory_revision != inventory_.revision()) return false;
+    if (action.kind == DriveActionKind::Answer) {
+        if (!confirmation_ || !action.dialog || confirmation_->drive_id != action.dialog || action.argument > 1)
+            return false;
+        answer_confirmation(action.argument != 0);
+        return true;
+    }
+    if (pstatus_.dead || confirmation_) return false;
+    const ItemSlot& slot = action.slot;
+    if (slot.type != kInvPossessions || slot.slot < 0 || slot.slot > kSlotCursor ||
+        slot.sub < -1 || slot.aug != -1) return false;
+    if (!slot.top_level()) {
+        const Item* bag = inventory_.at(slot.parent());
+        if (!bag || !bag->is_bag() || slot.sub >= bag->bag_slots) return false;
+    }
+    if (action.kind == DriveActionKind::Quantity) {
+        if (!quantity_ || quantity_->op != QuantityOp::Inventory || !quantity_->slot.same(slot) ||
+            action.argument > quantity_->max || inventory_.cursor()) return false;
+        finish_quantity(action.argument);
+        return true;
+    }
+    if (quantity_) return false;
+    if (action.kind == DriveActionKind::InventoryClick && action.argument <= 3) {
+        click_slot(slot, (action.argument & 1) != 0, (action.argument & 2) != 0);
+        return true;
+    }
+    const Item* item = inventory_.at(slot);
+    if (!item || item->serial != action.item_serial || action.socket < 0 || action.socket >= game::kAugSockets) return false;
+    if (action.kind == DriveActionKind::AugmentClick) augment_click(*item, action.socket);
+    else if (action.kind == DriveActionKind::AugmentMenu &&
+             (action.argument == game::kAugMenuRemove || action.argument == game::kAugMenuSwap ||
+              action.argument == game::kAugMenuDestroy))
+        augment_menu_select(*item, action.socket, action.argument);
+    else return false;
+    return true;
 }
 
 void GameConnection::connect_world(bool zoning) {

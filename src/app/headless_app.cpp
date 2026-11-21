@@ -12,7 +12,11 @@
 #include <thread>
 
 #include "app/automation.h"
+#include "app/actions_ui.h"
+#include "app/ability_bulk.h"
 #include "app/drive_observe.h"
+#include "app/lua_ui.h"
+#include "core/config.h"
 #include "app/navigator.h"
 #include "app/player_movement.h"
 #include "app/zone_move_world.h"
@@ -101,6 +105,7 @@ HeadlessArgs parse_headless_args(const std::vector<std::string_view>& args) {
         else if (a == "--status-file") out.options.status_file = need(a);
         else if (a == "--no-collision") out.options.load_collision = false;
         else if (a == "--drive-observe") out.options.drive_observe = true;
+        else if (a == "--drive-interact") out.options.drive_interact = true;
         else if (a == "--drive-file") out.options.drive_file = need(a);
         else if (!out.error.empty()) break;
         else out.error = "unknown argument: " + std::string(a);
@@ -110,6 +115,8 @@ HeadlessArgs parse_headless_args(const std::vector<std::string_view>& args) {
         out.error = "--drive-observe is for a single character; a crew sets observe=1 in [crew]";
     if (out.error.empty() && out.options.drive_observe && out.options.drive_file.empty())
         out.error = "--drive-observe needs --drive-file (the viewer reads its endpoint and token there)";
+    if (out.error.empty() && out.options.drive_interact && !out.options.drive_observe)
+        out.error = "--drive-interact needs --drive-observe";
     if (out.error.empty() && !out.options.drive_file.empty() && !out.options.drive_observe)
         out.error = "--drive-file needs --drive-observe";
     if (out.error.empty() && out.options.crew_file.empty() && out.options.account.empty()) {
@@ -133,6 +140,7 @@ CrewFile parse_crew_file(std::string_view text) {
     if (auto a = ini.get("crew", "autoload")) out.autoload = *a;
     out.chat_log = ini.get_int("crew", "chat_log", out.chat_log ? 1 : 0) != 0;
     out.stagger = ini.get_int("crew", "stagger", out.stagger);
+    out.interact = ini.get_int("crew", "interact", 0) != 0;
     out.observe = ini.get_int("crew", "observe", out.observe ? 1 : 0) != 0;
     out.drive_dir = ini.get_string("crew", "drive_dir");
     for (const auto& section : ini.sections()) {
@@ -150,6 +158,7 @@ CrewFile parse_crew_file(std::string_view text) {
         m.chat_log = ini.get_int(section, "chat_log", -1);
         m.seconds = ini.get_int(section, "seconds", 0);
         m.stagger = ini.get_int(section, "stagger", -1);
+        m.interact = ini.get_int(section, "interact", -1);
         m.observe = ini.get_int(section, "observe", -1);
         if (m.server.empty() || m.account.empty()) {
             out.error = "crew member [" + section + "] needs server= and account=";
@@ -320,6 +329,8 @@ int run_crew(const HeadlessOptions& options) {
             std::error_code ec;
             std::filesystem::remove(r.drive_file, ec); // a relaunch may find the old file
             args.emplace_back("--drive-observe");
+            if (r.crew.interact >= 0 ? r.crew.interact != 0 : crew.interact)
+                args.emplace_back("--drive-interact");
             args.insert(args.end(), {"--drive-file", r.drive_file});
         }
         std::string error;
@@ -516,6 +527,17 @@ int run_headless(HeadlessOptions options) {
     };
     env.profile_name = [&server_label] { return server_label; };
     env.connection = [&conn] { return conn.get(); };
+    Config ability_config;
+    ActionsUi ability_actions(ability_config, {});
+    UiHost ability_host;
+    ability_host.actions = &ability_actions;
+    env.ability = [&](mq::AbilityKind kind, std::string_view name) {
+        return ability_state(ability_host, kind, name);
+    };
+    env.ability_bulk = [&] { return ability_bulk_rows(ability_host); };
+    env.use_ability = [&](mq::AbilityKind kind, std::string_view name) {
+        return use_ability(ability_host, kind, name);
+    };
     env.window_open = [](std::string_view) { stub_once("window"); return false; };
     env.face = [](double, bool) { stub_once("face"); };
     env.keypress = [](std::string_view, int) { stub_once("keypress"); return false; };
@@ -531,6 +553,16 @@ int run_headless(HeadlessOptions options) {
         auto it = w.spawns.find(id);
         if (!me || it == w.spawns.end()) return std::nullopt;
         return collision->line_of_sight(me->position, it->second.position);
+    };
+    ability_host.run_button = [&](const game::HotButton& button) {
+        if (!conn || !ability_host.character) return;
+        AbilityView view;
+        if (const auto* me = conn->world().player()) {
+            view.position = me->position;
+            view.heading = me->heading;
+        }
+        view.can_see_target = env.can_see(conn->target()).value_or(false);
+        ability_actions.run_button(*conn, ability_host.character, view, button);
     };
     // Navigation (app/navigator.h) as the graphical client wires it, minus the
     // doors' models (no WorldObjects headless: the mesh runs through doorways,
@@ -579,7 +611,7 @@ int run_headless(HeadlessOptions options) {
     std::unique_ptr<DriveObserveServer> observe;
     if (options.drive_observe) {
         try {
-            observe = std::make_unique<DriveObserveServer>(platform::make_local_pipe_session());
+            observe = std::make_unique<DriveObserveServer>(platform::make_local_pipe_session(), options.drive_interact);
         } catch (const std::exception& e) {
             log::error("headless: --drive-observe could not start: {}", e.what());
             return 1;
@@ -617,6 +649,7 @@ int run_headless(HeadlessOptions options) {
     game::mechanics::GameTables tables;
     if (!tables.load(game)) log::warn("headless: BaseData/SkillCaps missing; character values will be 0");
     std::unique_ptr<game::mechanics::CharacterSheet> sheet;
+    std::unique_ptr<game::mechanics::Character> character;
     core::StepClock step_clock;
     step_clock.set_fixed(true);
     const auto start = Clock::now();
@@ -751,6 +784,11 @@ int run_headless(HeadlessOptions options) {
             conn->set_game_steps(std::move(at));
         }
         conn->update();
+        if (observe && options.drive_interact) {
+            for (const auto& action : observe->take_actions()) {
+                if (!conn->apply_drive_action(action)) break;
+            }
+        }
         if (observe && conn->in_zone()) {
             if (!drive_file_written && !drive_file_failed) {
                 const std::string character = !options.character.empty() ? options.character : conn->character_name();
@@ -758,7 +796,8 @@ int run_headless(HeadlessOptions options) {
                                          "token=" + observe->session().token + "\n" +
                                          "character=" + character + "\n" +
                                          "profile=" + saved_profile_id + "\n" +
-                                         "game_dir=" + options.game_dir + "\n";
+                                         "game_dir=" + options.game_dir + "\n" +
+                                         "interactive=" + (options.drive_interact ? "1\n" : "0\n");
                 if (platform::write_private_file(options.drive_file, text)) {
                     drive_file_written = true;
                     log::info("headless: drive observe file {} written", options.drive_file);
@@ -784,6 +823,7 @@ int run_headless(HeadlessOptions options) {
                     last_inventory_revision = revision;
                     state.inventory_packet = local.inventory_packet;
                 }
+                if (options.drive_interact) state.ui = conn->capture_drive_ui();
                 observe->publish_state(state);
             }
         }
@@ -809,6 +849,25 @@ int run_headless(HeadlessOptions options) {
                     collision.reset();
                 }
             }
+        }
+        ability_host.conn = conn.get();
+        ability_host.in_game = conn->state() == net::ConnectionState::InZone;
+        ability_host.character = nullptr;
+        character.reset();
+        if (ability_host.in_game && conn->world().player() && conn->profile()) {
+            conn->refresh_worn_stats_disabled();
+            if (!sheet) sheet = std::make_unique<game::mechanics::CharacterSheet>();
+            game::mechanics::build_sheet_into(
+                *sheet, *conn->profile(), conn->inventory(), conn->spell_state(), conn->live_state(),
+                [&conn](std::vector<game::mechanics::SheetAbility>& out) { conn->aa_sheet_abilities_into(out); },
+                conn->zone_info() ? &*conn->zone_info() : nullptr, &conn->world());
+            sheet->prestige_limit = conn->game_feature(0x13);
+            character = std::make_unique<game::mechanics::Character>(
+                *sheet, tables, game::mechanics::spell_lookup(conn->spell_table()));
+            character->process_all_stats();
+            ability_host.character = character.get();
+            const std::int64_t items = character->stats().hp_bonus;
+            conn->set_own_hp_items(sheet->vitals.cur_hp ? 0 : items, sheet->vitals.max_hp ? 0 : items);
         }
         automation.frame();
         if (automation.plugin_consent() && !consent_logged) {
@@ -854,29 +913,6 @@ int run_headless(HeadlessOptions options) {
                 movement_ready = true;
                 zone_line.reset();
                 if (zone) (void)zone_line.update(feet, zone->regions);
-            }
-            // The full Character, as the GUI's StatsUi builds it every frame
-            // (sheet from profile, inventory, buffs and owned AA, then
-            // process_all_stats): its TotalEffect values -- AA and worn-item
-            // effects and the formula-modified buff totals, not just the
-            // buffs' base values -- drive the movement SPAs below. Without
-            // it PlayerMovement falls back to those base sums alone, and a
-            // character whose speed comes from AA or items travels slower
-            // headless than it does in the graphical client.
-            std::unique_ptr<game::mechanics::Character> character;
-            if (movement_ready && conn->profile()) {
-                conn->refresh_worn_stats_disabled();
-                if (!sheet) sheet = std::make_unique<game::mechanics::CharacterSheet>();
-                game::mechanics::build_sheet_into(
-                    *sheet, *conn->profile(), conn->inventory(), conn->spell_state(), conn->live_state(),
-                    [&conn](std::vector<game::mechanics::SheetAbility>& out) { conn->aa_sheet_abilities_into(out); },
-                    conn->zone_info() ? &*conn->zone_info() : nullptr, &conn->world());
-                sheet->prestige_limit = conn->game_feature(0x13);
-                character = std::make_unique<game::mechanics::Character>(
-                    *sheet, tables, game::mechanics::spell_lookup(conn->spell_table()));
-                character->process_all_stats();
-                const std::int64_t items = character->stats().hp_bonus;
-                conn->set_own_hp_items(sheet->vitals.cur_hp ? 0 : items, sheet->vitals.max_hp ? 0 : items);
             }
             if (movement_ready) {
                 for (const auto& st : steps) {

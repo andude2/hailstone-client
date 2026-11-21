@@ -33,7 +33,7 @@ using net::GameConnection;
 
 struct Types {
     const Type *spawn, *character, *cls, *race, *heading, *spell, *buff, *timestamp, *item, *zone, *group, *member,
-        *everquest, *window, *plugin, *time, *gametime, *navigation, *stick;
+        *everquest, *window, *plugin, *time, *gametime, *navigation, *stick, *aura;
 };
 
 Types g; // set once by register_game_tlos (the types live in the registry that registered them)
@@ -437,6 +437,11 @@ void register_spawn() {
     spawn_member("Ducking", [](const Context&, const game::Spawn& s, std::string_view) { return V::boolean(s.stand_state == 111); });
     spawn_member("Feigning", [](const Context&, const game::Spawn& s, std::string_view) { return V::boolean(s.stand_state == 115); });
     spawn_member("Dead", [](const Context&, const game::Spawn& s, std::string_view) { return V::boolean(s.is_corpse); });
+    spawn_member("PctAggro", [](const Context& ctx, const game::Spawn& s, std::string_view) -> V {
+        const auto& a = ctx.conn->aggro();
+        return s.id == a.target_id && a.received[net::kAggroPlayer]
+            ? V::integer(a.pct[net::kAggroPlayer]) : V::nil();
+    });
     spawn_member("Targetable", [](const Context&, const game::Spawn& s, std::string_view) { return V::boolean(s.targetable); });
     // The buffs: the player's own, or the target's as OP_TargetBuffs gave them. A server sends those only for some
     // players (EQEmu: GMs, the Inspect Buffs AA or leadership, or its AlwaysSendTargetsBuffs rule), so a script asks
@@ -628,6 +633,39 @@ void register_character() {
     me_member("AAPointsSpent", [](const Context&, const GameConnection& c, std::string_view) {
         return c.profile() ? V::integer(c.profile()->aa_points_spent) : V::nil();
     });
+    me_member("Aura", [](const Context&, const GameConnection& c, std::string_view index) -> V {
+        const auto& auras = c.auras();
+        std::int64_t n = 0;
+        if (index.empty() || parse_int(index, n)) {
+            if (n == 0 && index.empty()) n = 1;
+            return n > 0 && static_cast<std::uint64_t>(n) <= auras.size() ? V::object(g.aura, 0, 0,
+                auras[static_cast<std::size_t>(n - 1)].name) : V::nil();
+        }
+        auto normalized = [](std::string_view name) {
+            std::string result(name);
+            for (std::size_t at = 0; (at = result.find("'s", at)) != std::string::npos;)
+                result.erase(at, 1);
+            return result;
+        };
+        const auto wanted = normalized(index);
+        for (const auto& aura : auras)
+            if (aura.name.size() >= index.size() && iequals(std::string_view(aura.name).substr(0, index.size()), index))
+                return V::object(g.aura, 0, 0, aura.name);
+            else if (iequals(normalized(aura.name), wanted)) return V::object(g.aura, 0, 0, aura.name);
+        return V::nil();
+    });
+    add(g.aura, "Name", [](const Context&, const Value& v, std::string_view) { return V::string(v.s); });
+    me_member("Invited", [](const Context&, const GameConnection& c, std::string_view) {
+        return V::boolean(!c.group().inviter.empty());
+    });
+    me_member("Inviter", [](const Context&, const GameConnection& c, std::string_view) -> V {
+        return c.group().inviter.empty() ? V::nil() : V::string(c.group().inviter);
+    });
+    me_member("PctAggro", [](const Context&, const GameConnection& c, std::string_view) -> V {
+        const auto& a = c.aggro();
+        return a.target_id && a.target_id == c.target() && a.received[net::kAggroPlayer]
+            ? V::integer(a.pct[net::kAggroPlayer]) : V::nil();
+    });
     me_member("Buff", [](const Context& ctx, const GameConnection&, std::string_view index) -> V {
         if (index.empty()) return V::integer(static_cast<std::int64_t>(buff_slots(ctx, false).size()));
         return buff_by_index(ctx, index, false);
@@ -659,6 +697,28 @@ void register_character() {
         }
         return V::nil();
     });
+    me_member("GemTimer", [](const Context& ctx, const GameConnection& c, std::string_view index) -> V {
+        const auto& state = c.spell_state();
+        std::int64_t slot = 0;
+        if (!parse_int(index, slot)) {
+            for (int i = 0; i < game::kSpellGems; ++i)
+                if (const auto* spell = spell_data(ctx, state.gems[static_cast<std::size_t>(i)].spell);
+                    spell && iequals(spell->name, index)) { slot = i + 1; break; }
+        }
+        if (slot < 1 || slot > c.usable_gems()) return V::nil();
+        const auto& gem = state.gems[static_cast<std::size_t>(slot - 1)];
+        const auto* spell = spell_data(ctx, gem.spell);
+        if (!spell) return V::nil();
+        const auto until = [](std::uint32_t end, std::uint32_t now) -> std::int64_t {
+            return end > now ? static_cast<std::int64_t>(end - now) : 0;
+        };
+        auto left = until(gem.ready, GameConnection::eq_time());
+        const auto timer = spell->reuse_timer_index;
+        if (timer > 0 && static_cast<std::size_t>(timer) < state.linked_ready.size())
+            left = std::max(left, until(state.linked_ready[static_cast<std::size_t>(timer)],
+                static_cast<std::uint32_t>(std::time(nullptr))) * 1000);
+        return V::object(g.timestamp, left);
+    });
     me_member("NumGems", [](const Context&, const GameConnection& c, std::string_view) { return V::integer(c.usable_gems()); });
     me_member("Book", [](const Context& ctx, const GameConnection& c, std::string_view index) -> V {
         const auto& book = c.spell_state().book;
@@ -688,6 +748,9 @@ void register_character() {
         if (gem < 0 || gem >= game::kSpellGems || st.gems[static_cast<std::size_t>(gem)].spell == game::kNoSpell)
             return V::boolean(false);
         return V::boolean(st.gem_castable(gem, GameConnection::eq_time()) && !st.casting.casting());
+    });
+    me_member("ActiveDisc", [](const Context& ctx, const GameConnection& c, std::string_view) -> V {
+        return c.discipline_active() ? spell_value(ctx, c.spell_state().buffs.back().spell) : V::nil();
     });
     me_member("Casting", [](const Context& ctx, const GameConnection& c, std::string_view) -> V {
         const auto& cast = c.spell_state().casting;
@@ -765,6 +828,17 @@ std::optional<AbilityState> ability(const Context& c, AbilityKind kind, std::str
 }
 
 void register_abilities() {
+    add(g.character, "Ability", [](const Context& c, const Value&, std::string_view name) {
+        return V::boolean(ability(c, AbilityKind::Skill, name).has_value());
+    });
+    add(g.character, "CombatAbility", [](const Context& c, const Value&, std::string_view name) -> V {
+        const auto st = ability(c, AbilityKind::Discipline, name);
+        return st && st->id >= 0 ? V::integer(static_cast<std::int64_t>(st->id) + 1) : V::nil();
+    });
+    add(g.character, "AbilityTimerTotal", [](const Context& c, const Value&, std::string_view name) -> V {
+        const auto st = ability(c, AbilityKind::Skill, name);
+        return st ? V::object(g.timestamp, st->reuse_ms) : V::nil();
+    });
     struct Ready { const char* name; AbilityKind kind; };
     for (Ready r : {Ready{"AbilityReady", AbilityKind::Skill}, Ready{"CombatAbilityReady", AbilityKind::Discipline},
                     Ready{"AltAbilityReady", AbilityKind::AltAbility}}) {
@@ -1103,10 +1177,63 @@ void register_misc_types() {
 
     Type& win = const_cast<Type&>(*g.window);
     win.to_value = [](const Context& c, const Value& v) {
-        return V::string(c.window_open && c.window_open(v.s) ? "TRUE" : "FALSE");
+        return V::string(v.i != 0 || (c.window_open && c.window_open(v.s)) ? "TRUE" : "FALSE");
     };
     add(g.window, "Open", [](const Context& c, const Value& v, std::string_view) {
+        if (c.conn) {
+            if (iequals(v.s, "CastingWindow")) return V::boolean(c.conn->spell_state().casting.casting());
+            if (iequals(v.s, "TradeWnd")) return V::boolean(c.conn->trade() && c.conn->trade()->open);
+            if (iequals(v.s, "ConfirmationDialogBox")) return V::boolean(c.conn->confirmation().has_value());
+        }
         return V::boolean(c.window_open && c.window_open(v.s));
+    });
+    add(g.window, "Child", [](const Context& c, const Value& v, std::string_view index) -> V {
+        if (!c.conn) return V::nil();
+        if (iequals(v.s, "TradeWnd") && c.conn->trade() && c.conn->trade()->open) {
+            if (iequals(index, "TRDW_HisName") || iequals(index, "TRDW_Trade_Button"))
+                return V::object(g.window, 1, 0, std::string(index));
+            for (int i = 0; i < 8; ++i)
+                if (iequals(index, "TRDW_TradeSlot" + std::to_string(i)))
+                    return V::object(g.window, 2, i, std::string(index));
+            for (int i = 0; i < 4; ++i)
+                if (iequals(index, "TRDW_MyMoney" + std::to_string(i)))
+                    return V::object(g.window, 3, i, std::string(index));
+        }
+        if (iequals(v.s, "ConfirmationDialogBox") && c.conn->confirmation() &&
+            (iequals(index, "CD_TextOutput") || iequals(index, "Yes_Button") || iequals(index, "OK_Button")))
+            return V::object(g.window, 4, 0, std::string(index));
+        return V::nil();
+    });
+    add(g.window, "Text", [](const Context& c, const Value& v, std::string_view) -> V {
+        if (!c.conn) return V::nil();
+        if (v.i == 4 && iequals(v.s, "CD_TextOutput") && c.conn->confirmation())
+            return V::string(c.conn->confirmation()->text);
+        const auto& trade = c.conn->trade();
+        if (!trade || !trade->open) return V::nil();
+        if (v.i == 1 && iequals(v.s, "TRDW_HisName")) return V::string(trade->partner_name);
+        if (v.i == 3) return V::string(std::to_string(trade->my_coins[static_cast<std::size_t>(v.f)]));
+        return V::nil();
+    });
+    add(g.window, "Tooltip", [](const Context& c, const Value& v, std::string_view) -> V {
+        if (!c.conn || v.i != 2 || !c.conn->trade() || !c.conn->trade()->open) return V::nil();
+        const auto* item = c.conn->inventory().at({net::kInvTrade, static_cast<std::int16_t>(v.f)});
+        return V::string(item ? item->name : "");
+    });
+    add(g.window, "Enabled", [](const Context& c, const Value& v, std::string_view) {
+        if (c.conn && v.i == 4 && c.conn->confirmation()) {
+            const auto& q = *c.conn->confirmation();
+            const bool offer = q.id == net::kConfirmTranslocate || q.id == net::kConfirmSharedTask ||
+                               q.id == net::kConfirmFellowshipInvite || q.id == net::kConfirmDzInvite;
+            return V::boolean(offer && iequals(v.s, q.ok_only ? "OK_Button" : "Yes_Button"));
+        }
+        return V::boolean(c.conn && v.i == 1 && iequals(v.s, "TRDW_Trade_Button") &&
+            c.conn->trade() && c.conn->trade()->open && !c.conn->trade()->with_npc && !c.conn->trade()->my_ready);
+    });
+    add(g.window, "HisTradeReady", [](const Context& c, const Value& v, std::string_view) {
+        return V::boolean(c.conn && iequals(v.s, "TradeWnd") && c.conn->trade() && c.conn->trade()->their_ready);
+    });
+    add(g.window, "MyTradeReady", [](const Context& c, const Value& v, std::string_view) {
+        return V::boolean(c.conn && iequals(v.s, "TradeWnd") && c.conn->trade() && c.conn->trade()->my_ready);
     });
     add(g.window, "Name", [](const Context&, const Value& v, std::string_view) { return V::string(v.s); });
 
@@ -1472,6 +1599,7 @@ void register_game_tlos(Registry& r) {
     g.spell = &r.type("spell");
     g.buff = &r.type("buff");
     g.timestamp = &r.type("timestamp");
+    g.aura = &r.type("aura");
     g.item = &r.type("item");
     g.zone = &r.type("zone");
     g.group = &r.type("group");

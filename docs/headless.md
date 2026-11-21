@@ -150,7 +150,7 @@ Log in once in the graphical client with **Save password** ticked for
 each account first; a missing saved password is reported, never asked
 for on the command line.
 
-## Observing a headless character
+## Viewing and interacting with a headless character
 
 Character A, already running in the graphical client, can show a headless
 character's UI in the same window. Give the single-character headless run
@@ -167,25 +167,27 @@ keeps playing, and the token admits one viewer at a time.
 
 In A's window, type `/crew`. The Crew window lists the `drive-*.txt` files in
 `<data dir>/run` with their character names; **View** switches the window to
-that character. A is parked: its connection stays alive in the background, but
-its zone and UI are unloaded and saved to its own character files. L's snapshot,
-zone and UI are loaded in the same window. **View** on another member switches
-straight from L to that character: A stays parked and only the observe view is
-replaced. **Release** in the Crew window unloads the observed character and
-puts A back, reloading A's zone and UI layout. A and L must use the same game
-folder and server files, as a crew normally does; the window has one asset
-folder.
+that character. A is parked with its connection alive in the background.
+The window loads L's snapshot and UI layout. **View** on another member swaps
+the observed character while A stays parked. **Release** restores A. A switch
+within the same server profile, zone, and instance can keep the loaded scene
+and model cache. A different zone or instance takes the full load path. The
+window uses a shared game folder and server asset files.
 
-Every packet the viewer would send is dropped, so it cannot move, speak or
-change the character; the headless keeps its own plugins and scripts, and the
-viewer does not autoload any. The viewer follows the headless's position,
-target and possessions about ten times a second and the server's live packets
-as they arrive.
+**View** is read-only. Add `--drive-interact` alongside `--drive-observe`
+for a standalone worker, or use `interact=1` with `observe=1` in the crew
+file. A member can override the crew's interaction setting. The Crew window
+then offers **Interact** for that worker. You can click possessions and bag
+slots, split stacks, use item augment sockets, and answer the worker's
+confirmation dialogs. The worker checks the zone, inventory revision, or
+prompt identity before applying an action. The viewer refreshes from the
+worker's inventory and dialog state.
 
-`--drive-observe` is one character, not a crew supervisor; the viewer is
-read-only (the control lease is a later feature), and the same-window switch
-has not yet been run live. `hailstone --drive-file F` still exists as a
-separate diagnostic viewer for the same stream.
+The worker keeps its own plugins and scripts running. The viewer follows
+live server packets and the worker's position and state about ten times a
+second. Movement, chat, casting, bank and trade actions, and full character
+control are outside this mode. The standalone `hailstone --drive-file F`
+diagnostic viewer stays read-only.
 
 ## Rules and consent
 

@@ -765,6 +765,8 @@ private:
     void outputfile_command(const std::string& args);
     void load_zone(const std::string& short_name);
     void unload_zone();
+    bool can_reuse_observe_scene(const net::GameConnection& next, std::string_view profile) const;
+    void rebind_observe_scene();
     // The precipitation's definitions (Resources/Precipitation/default.ini) and textures, and the sky's colour maps
     // (Resources/Sky), once the asset folder is known.
     void load_precipitation();
@@ -796,7 +798,7 @@ private:
     // --drive-file: connect to the headless observe server, install its snapshot, and start in the loading screen.
     bool start_drive();
     // The same-window swap: park A's connection and view, show L, and put A back on release.
-    bool switch_to_observe(const std::filesystem::path& file);
+    bool switch_to_observe(const std::filesystem::path& file, bool interact = false);
     void release_observe();
     void pump_parked_connection();
     void draw_crew_window();
@@ -1279,6 +1281,7 @@ private:
     std::filesystem::path parked_ui_character_dir_;
     std::string parked_layout_for_, parked_files_profile_, parked_server_name_;
     bool viewing_observe_ = false;
+    bool interacting_observe_ = false;
     bool crew_window_open_ = false;
     Clock::time_point crew_entries_at_{};
     std::vector<DriveObserveFile> crew_entries_;

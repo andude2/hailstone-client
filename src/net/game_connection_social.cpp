@@ -159,6 +159,33 @@ void GameConnection::send_command(const std::string& typed) {
         game::next_cmd_arg(rest);
         while (!rest.empty() && rest.front() == ' ') rest.remove_prefix(1);
         if (group_command(word, std::string(rest)) || item_command(word, std::string(rest))) return;
+        if (word == "/notify") {
+            const auto window = game::next_cmd_arg(rest);
+            const auto child = game::next_cmd_arg(rest);
+            const auto event = game::next_cmd_arg(rest);
+            if (iequals(event, "leftmouseup") && state_ == ConnectionState::InZone) {
+                if (iequals(window, "TradeWnd") && iequals(child, "TRDW_Trade_Button")) {
+                    if (trade_ && trade_->open && !trade_->with_npc && trade_->their_ready && !trade_->my_ready) {
+                        const bool coins = std::any_of(trade_->my_coins.begin(), trade_->my_coins.end(),
+                                                       [](auto amount) { return amount != 0; });
+                        const bool items = std::any_of(inventory_.items().begin(), inventory_.items().end(),
+                            [](const auto& entry) { return entry.first.first == kInvTrade; });
+                        if (!coins && !items) trade_accept();
+                        else ui_message("Trade acceptance refused: the outgoing side is not empty.");
+                    } else ui_message("Trade acceptance refused: no ready player trade.");
+                    return;
+                }
+                if (iequals(window, "ConfirmationDialogBox") && confirmation_ &&
+                    iequals(child, confirmation_->ok_only ? "OK_Button" : "Yes_Button")) {
+                    const auto id = confirmation_->id;
+                    if (id == kConfirmTranslocate || id == kConfirmSharedTask ||
+                        id == kConfirmFellowshipInvite || id == kConfirmDzInvite) {
+                        answer_confirmation(true);
+                        return;
+                    }
+                }
+            }
+        }
         // Hailstone's own windows (the client's handlers, by a name not in the original's table).
         if (word == "/abilitybook" && client_commands_ && client_commands_("Hailstone_abilitybook", std::string(rest)))
             return;

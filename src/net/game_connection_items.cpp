@@ -495,6 +495,11 @@ void GameConnection::item_moved_sound() {
 }
 
 void GameConnection::click_slot(const ItemSlot& slot, bool shift, bool ctrl) {
+    DriveAction action{};
+    action.kind = DriveActionKind::InventoryClick;
+    action.slot = slot;
+    action.argument = (shift ? 1u : 0u) | (ctrl ? 2u : 0u);
+    if (relay_drive_action(action)) return;
     if (state_ != ConnectionState::InZone || pstatus_.dead) return;
     if (slot.type == kInvCorpse) {
         loot_item(slot.slot, false, shift, ctrl);
@@ -631,7 +636,17 @@ void GameConnection::click_slot(const ItemSlot& slot, bool shift, bool ctrl) {
     if (move_item(cursor, slot, 0)) item_moved_sound();
 }
 
+void GameConnection::cancel_quantity() {
+    DriveAction action{};
+    action.kind = DriveActionKind::Quantity;
+    if (!relay_drive_action(action)) quantity_.reset();
+}
+
 void GameConnection::finish_quantity(std::uint32_t quantity) {
+    DriveAction action{};
+    action.kind = DriveActionKind::Quantity;
+    action.argument = quantity;
+    if (relay_drive_action(action)) return;
     // CInvSlot::SliderComplete @00695270: 0 does nothing; less than the
     // stack clones the item with that count onto the cursor, takes it off
     // the source and sends OP_MoveItem {slot, cursor, quantity}; the whole

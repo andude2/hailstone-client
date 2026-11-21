@@ -51,6 +51,8 @@ public:
     // Forgets the archives opened and the on-demand index (Resources/OnDemandResources.txt), which last across
     // zones: the game files' layers changed (another server's assets folder). Call with no zone set.
     void reset_game_files();
+    // Retain the model cache for another view of the same zone.
+    void reset_view();
 
     // Follows the connection's doors and ground objects: loads new models
     // and computes this frame's transforms. Call once per frame after the

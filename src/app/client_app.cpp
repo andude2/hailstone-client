@@ -139,7 +139,7 @@ int ClientApp::run() {
         // events on).
         window_.set_swap_mouse_buttons(conn_ && !conn_->client_option(game::ClientOption::MouseRightHanded));
         update_lap.mark("browser, window");
-        if (automation_) automation_->frame();
+        if (automation_ && !viewing_observe_) automation_->frame();
         update_lap.mark("automation");
         if (conn_ && world_objects_ && screen_ == Screen::InGame && player_ready_) {
             world_objects_->update(*conn_);
@@ -1335,10 +1335,14 @@ void ClientApp::pump_parked_connection() {
     if (parked_conn_) parked_conn_->update();
 }
 
-bool ClientApp::switch_to_observe(const std::filesystem::path& file) {
+bool ClientApp::switch_to_observe(const std::filesystem::path& file, bool interact) {
     const bool from_observe = viewing_observe_;
     if (from_observe && !parked_conn_) {
         log::warn("crew: the parked character is gone; release this view first");
+        return false;
+    }
+    if (!from_observe && (!conn_ || conn_->state() != net::ConnectionState::InZone)) {
+        log::warn("crew: observing requires the current character to be in a zone");
         return false;
     }
     std::string error;
@@ -1346,6 +1350,14 @@ bool ClientApp::switch_to_observe(const std::filesystem::path& file) {
     if (!info) {
         log::error("crew: {}", error);
         return false;
+    }
+    if (interact && !info->interactive) return false;
+    if (from_observe && conn_ && drive_client_ && drive_client_->info().endpoint == info->endpoint &&
+        drive_client_->info().token == info->token) {
+        if (interact) conn_->set_drive_input([this](const net::DriveAction& action) { drive_client_->send_action(action); });
+        else conn_->set_drive_input({});
+        interacting_observe_ = interact;
+        return true;
     }
     // Connect the new character before tearing down the one on screen: a failed attach leaves the current view
     // unchanged.
@@ -1355,12 +1367,31 @@ bool ClientApp::switch_to_observe(const std::filesystem::path& file) {
         return false;
     }
     auto snapshot = client->take_snapshot();
+    if (snapshot.truncated) {
+        log::warn("crew: {} has an incomplete zone snapshot", info->character);
+        return false;
+    }
+    net::ConnectionOptions options;
+    options.profile_id = info->profile;
+    options.diagnostic_chat_log = false;
+    options.session_factory = [pipe = client.get()] { return pipe->make_session(); };
+    auto next = std::make_unique<net::GameConnection>(game_, std::move(options));
+    next->start_observe(client->make_session());
+    next->apply_snapshot(snapshot);
+    if (!next->world().player()) {
+        log::warn("crew: {} has no player in its snapshot", info->character);
+        return false;
+    }
+    std::error_code path_error;
+    const bool same_assets = !info->game_dir.empty() &&
+        std::filesystem::equivalent(game_.base_root(), info->game_dir, path_error);
+    const bool reuse_scene = same_assets && can_reuse_observe_scene(*next, info->profile);
+    if (interact) next->set_drive_input([pipe = client.get()](const net::DriveAction& action) {
+        pipe->send_action(action);
+    });
+    if (conn_) conn_->set_door_particles(nullptr);
 
     if (!from_observe) {
-        if (!conn_ || conn_->state() != net::ConnectionState::InZone) {
-            log::warn("crew: cannot observe {} while this window is not in a zone", info->character);
-            return false;
-        }
         // Park A: its connection keeps running, its view and per-character paths are kept for the return.
         save_chat_history(true);
         parked_conn_ = std::move(conn_);
@@ -1370,10 +1401,9 @@ bool ClientApp::switch_to_observe(const std::filesystem::path& file) {
         parked_layout_for_ = std::exchange(layout_for_, {});
         parked_files_profile_ = std::exchange(files_profile_, {});
         parked_server_name_ = std::exchange(char_view_.server_name, {});
-        unload_zone();
+        if (!reuse_scene) unload_zone();
     } else {
-        // L is being replaced by D in the same parked-A session. A stays parked; only L's scene and connection go.
-        unload_zone();
+        if (!reuse_scene) unload_zone();
         conn_.reset();
         drive_client_.reset();
         game_view_ = {};
@@ -1388,25 +1418,22 @@ bool ClientApp::switch_to_observe(const std::filesystem::path& file) {
     drive_client_ = std::move(client);
     files_profile_ = info->profile;
     char_view_.server_name = info->profile;
-    net::ConnectionOptions options;
-    options.profile_id = info->profile;
-    options.diagnostic_chat_log = false;
-    options.session_factory = [this] { return drive_client_->make_session(); };
-    conn_ = std::make_unique<net::GameConnection>(game_, std::move(options));
-    conn_->start_observe(drive_client_->make_session());
-    conn_->apply_snapshot(snapshot);
+    conn_ = std::move(next);
+    if (reuse_scene) rebind_observe_scene();
     if (!conn_->character_name().empty())
         use_character_settings(character_files(files_profile(), char_view_.server_name, conn_->character_name()).dir);
     loading_view_.title = "Observing";
     loading_view_.detail = info->character.empty() ? conn_->character_name() : info->character;
     viewing_observe_ = true;
+    interacting_observe_ = interact;
     log::info("crew: observing {} in this window", conn_->character_name());
     return true;
 }
 
 void ClientApp::release_observe() {
     if (!viewing_observe_) return;
-    unload_zone();
+    const bool reuse_scene = parked_conn_ && can_reuse_observe_scene(*parked_conn_, parked_files_profile_);
+    if (!reuse_scene) unload_zone();
     conn_.reset();
     drive_client_.reset();
 
@@ -1419,10 +1446,12 @@ void ClientApp::release_observe() {
     player_ready_ = false;
     screen_ = Screen::Loading;
     viewing_observe_ = false;
+    interacting_observe_ = false;
     loading_view_.title = "Returning";
     loading_view_.detail = conn_ ? conn_->character_name() : std::string();
     if (conn_) {
-        if (auto pending = conn_->take_zone_to_load()) load_zone(*pending);
+        if (reuse_scene) rebind_observe_scene();
+        else if (auto pending = conn_->take_zone_to_load()) load_zone(*pending);
         else if (const auto& current = conn_->zone_info()) load_zone(current->zone_short_name);
         log::info("crew: back to {}", conn_->character_name());
     }

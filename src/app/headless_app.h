@@ -59,6 +59,7 @@ struct HeadlessOptions {
     // --drive-observe: serve the character to an observe viewer over the local token pipe; --drive-file: write
     // its endpoint and token to a new private file for the viewer to read.
     bool drive_observe = false;
+    bool drive_interact = false;
     std::string drive_file;
 };
 
@@ -125,6 +126,7 @@ struct CrewMember {
     int chat_log = -1;     // print chat lines (< 0: the shared one)
     int seconds = 0;       // camp after this long (0: until stopped)
     int stagger = -1;      // seconds to wait before launching this member (< 0: the shared one)
+    int interact = -1;     // permit inventory and confirmation input from /crew
     int observe = -1;      // serve this member to /crew (< 0: the shared one)
 };
 struct CrewFile {
@@ -133,6 +135,7 @@ struct CrewFile {
     std::string autoload = "*"; // [crew] autoload (the plugins every member loads)
     bool chat_log = false; // [crew] chat_log: a crew's children do not print chat unless asked
     int stagger = 10;      // seconds between launches, [crew] stagger
+    bool interact = false;
     bool observe = false;  // [crew] observe: every member gets --drive-observe and a file in drive_dir
     std::string drive_dir; // [crew] drive_dir: where those files go (empty: <data dir>/run)
     std::vector<CrewMember> members;

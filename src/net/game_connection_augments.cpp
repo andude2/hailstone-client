@@ -115,10 +115,23 @@ void GameConnection::run_augment_request(const game::AugmentRequest& r) {
 }
 
 void GameConnection::augment_click(const Item& window_item, int socket) {
+    DriveAction action{};
+    action.kind = DriveActionKind::AugmentClick;
+    action.slot = window_item.slot;
+    action.item_serial = window_item.serial;
+    action.socket = socket;
+    if (relay_drive_action(action)) return;
     run_augment_request(game::augment_socket_click(window_item, socket, augment_context()));
 }
 
 void GameConnection::augment_menu_select(const Item& window_item, int socket, std::uint32_t id) {
+    DriveAction action{};
+    action.kind = DriveActionKind::AugmentMenu;
+    action.slot = window_item.slot;
+    action.item_serial = window_item.serial;
+    action.socket = socket;
+    action.argument = id;
+    if (relay_drive_action(action)) return;
     game::AugmentContext c = augment_context();
     if (id == game::kAugMenuRemove) run_augment_request(game::remove_augment_request(window_item, socket, c));
     else if (id == game::kAugMenuSwap) run_augment_request(game::swap_augment_request(window_item, socket, c));

@@ -680,6 +680,7 @@ std::optional<mq::AbilityState> ability_state(UiHost& h, mq::AbilityKind kind, s
     if (!found) return std::nullopt;
     mq::AbilityState st;
     st.name = found->name;
+    st.id = found->id;
     st.ready = found->ready();
     st.remaining_ms = std::int64_t{std::max(found->remaining, 0)} * 1000;
     st.reuse_ms = std::int64_t{std::max(found->reuse, 0)} * 1000;
@@ -688,8 +689,10 @@ std::optional<mq::AbilityState> ability_state(UiHost& h, mq::AbilityKind kind, s
 
 bool use_ability(UiHost& h, mq::AbilityKind kind, std::string_view name) {
     const std::optional<Entry> e = by_name(h, kind, name);
-    if (!e || e->passive) return false;
+    if (!e || e->passive || !h.in_game) return false;
     log::info("script uses {} ({})", e->name, e->key);
+    if (kind == mq::AbilityKind::AltAbility) return h.conn->aa_activate(static_cast<std::uint32_t>(e->id));
+    if (kind == mq::AbilityKind::Discipline) return h.conn->do_combat_ability(h.conn->combat_ability(e->id));
     return use(h, *e);
 }
 

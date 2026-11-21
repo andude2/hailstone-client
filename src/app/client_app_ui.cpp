@@ -431,7 +431,8 @@ void ClientApp::draw_crew_window() {
         return;
     }
     if (viewing_observe_) {
-        ImGui::Text("Observing %s", conn_ ? conn_->character_name().c_str() : "");
+        ImGui::Text("%s %s", interacting_observe_ ? "Interacting with" : "Observing",
+                    conn_ ? conn_->character_name().c_str() : "");
         ImGui::SameLine();
         if (ImGui::Button("Release")) release_observe();
         ImGui::Separator();
@@ -449,6 +450,11 @@ void ClientApp::draw_crew_window() {
             else ImGui::Text("(%s)", entry.profile.c_str());
             ImGui::SameLine();
             if (ImGui::Button(("View##" + std::to_string(i)).c_str())) switch_to_observe(crew_entry_paths_[i]);
+            if (entry.interactive) {
+                ImGui::SameLine();
+                if (ImGui::Button(("Interact##" + std::to_string(i)).c_str()))
+                    switch_to_observe(crew_entry_paths_[i], true);
+            }
         }
     }
     ImGui::End();

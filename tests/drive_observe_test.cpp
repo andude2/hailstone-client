@@ -69,6 +69,29 @@ bool has_chat_containing(GameConnection& conn, std::string_view text) {
 
 } // namespace
 
+TEST_CASE("drive observe: typed actions reject truncated messages and unknown kinds") {
+    DriveAction action;
+    action.kind = DriveActionKind::AugmentClick;
+    action.slot = ItemSlot::possessions(kSlotPrimary);
+    action.socket = 2;
+    action.zone_generation = 3;
+    action.inventory_revision = 4;
+    action.item_serial = "0000000000000001";
+    auto bytes = app::encode_drive_action(action);
+    auto read = app::decode_drive_action(bytes);
+    REQUIRE(read);
+    CHECK(read->kind == action.kind);
+    CHECK(read->slot.same(action.slot));
+    CHECK(read->socket == action.socket);
+    CHECK(read->zone_generation == action.zone_generation);
+    CHECK(read->inventory_revision == action.inventory_revision);
+    CHECK(read->item_serial == action.item_serial);
+    for (std::size_t size = 0; size < bytes.size(); ++size)
+        CHECK_FALSE(app::decode_drive_action(std::span(bytes).first(size)));
+    bytes[1] = std::byte{255};
+    CHECK_FALSE(app::decode_drive_action(bytes));
+}
+
 TEST_CASE("drive observe: a viewer follows the headless snapshot and live state") {
     MockEqServer server;
     EmptyGameDir dir;
@@ -127,5 +150,8 @@ TEST_CASE("drive observe: a viewer follows the headless snapshot and live state"
         return has_chat_containing(viewer, "hello viewer");
     }));
 
+    REQUIRE(viewer_pipe->send_message(app::encode_drive_action({})));
+    // A passive endpoint drains client input without offering it to the game thread.
+    CHECK(observe.take_actions().empty());
     viewer_pipe->close();
 }

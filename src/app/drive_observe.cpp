@@ -55,6 +55,40 @@ std::optional<net::AppPacket> decode_drive_packet(std::span<const std::byte> bod
     }
 }
 
+std::vector<std::byte> encode_drive_action(const net::DriveAction& action) {
+    ByteWriter w;
+    w.le(static_cast<std::uint8_t>(DriveObserveMessage::Action));
+    w.le(static_cast<std::uint8_t>(action.kind));
+    net::write_slot(w, action.slot);
+    w.le(action.argument);
+    w.le(action.socket);
+    w.le(action.zone_generation);
+    w.le(action.inventory_revision);
+    w.le(action.dialog);
+    w.fixed_string(action.item_serial, 17);
+    return w.take();
+}
+
+std::optional<net::DriveAction> decode_drive_action(std::span<const std::byte> body) {
+    try {
+        ByteReader r(body);
+        if (static_cast<DriveObserveMessage>(r.le<std::uint8_t>()) != DriveObserveMessage::Action) return std::nullopt;
+        net::DriveAction action;
+        action.kind = static_cast<net::DriveActionKind>(r.le<std::uint8_t>());
+        action.slot = net::read_slot(r);
+        action.argument = r.le<std::uint32_t>();
+        action.socket = r.le<std::int32_t>();
+        action.zone_generation = r.le<std::uint32_t>();
+        action.inventory_revision = r.le<std::uint64_t>();
+        action.dialog = r.le<std::uint64_t>();
+        action.item_serial = r.fixed_string(17);
+        if (!r.empty() || action.kind > net::DriveActionKind::Quantity) return std::nullopt;
+        return action;
+    } catch (const std::out_of_range&) {
+        return std::nullopt;
+    }
+}
+
 std::vector<std::byte> encode_drive_state(const DriveLocalState& state) {
     ByteWriter w;
     w.f32(state.position.x);
@@ -68,6 +102,23 @@ std::vector<std::byte> encode_drive_state(const DriveLocalState& state) {
     w.le(state.target);
     w.le(static_cast<std::uint8_t>(state.inventory_packet ? 1 : 0));
     if (state.inventory_packet) put_packet(w, *state.inventory_packet);
+    if (const auto& ui = state.ui) {
+        w.le(ui->zone_generation);
+        w.le(ui->inventory_revision);
+        w.le(static_cast<std::uint8_t>(ui->question.has_value()));
+        if (const auto& q = ui->question) {
+            w.le(q->id);
+            w.le(q->kind);
+            w.le(static_cast<std::uint8_t>((q->plain_text ? 1 : 0) | (q->ok_only ? 2 : 0)));
+            w.fixed_string(q->text, q->text.size() + 1);
+        }
+        w.le(static_cast<std::uint8_t>(ui->quantity.has_value()));
+        if (const auto& q = ui->quantity) {
+            net::write_slot(w, q->slot);
+            w.le(q->max);
+            w.le(q->start);
+        }
+    }
     return w.take();
 }
 
@@ -93,6 +144,29 @@ std::optional<DriveLocalState> decode_drive_state(std::span<const std::byte> bod
             packet.data.assign(data.begin(), data.end());
             state.inventory_packet = std::move(packet);
         }
+        if (!r.empty()) {
+            net::DriveUiState ui;
+            ui.zone_generation = r.le<std::uint32_t>();
+            ui.inventory_revision = r.le<std::uint64_t>();
+            if (r.le<std::uint8_t>()) {
+                net::DriveQuestion q;
+                q.id = r.le<std::uint64_t>();
+                q.kind = r.le<std::uint32_t>();
+                const auto flags = r.le<std::uint8_t>();
+                q.plain_text = (flags & 1) != 0;
+                q.ok_only = (flags & 2) != 0;
+                q.text = r.cstring();
+                ui.question = std::move(q);
+            }
+            if (r.le<std::uint8_t>()) {
+                net::QuantityRequest q;
+                q.slot = net::read_slot(r);
+                q.max = r.le<std::uint32_t>();
+                q.start = r.le<std::uint32_t>();
+                ui.quantity = q;
+            }
+            state.ui = std::move(ui);
+        }
         if (!r.empty()) return std::nullopt;
         return state;
     } catch (...) {
@@ -112,8 +186,12 @@ struct DriveObserveServer::Impl {
     std::deque<std::pair<DriveObserveMessage, std::vector<std::byte>>> queue;
     std::size_t queued_bytes = 0;
     bool client_active = false;
+    bool queue_overflow = false;
+    const bool interactive;
+    std::vector<net::DriveAction> actions;
 
-    explicit Impl(platform::LocalPipeSession s) : server(s), session(server.session()) {
+    explicit Impl(platform::LocalPipeSession s, bool allow_input)
+        : server(s), session(server.session()), interactive(allow_input) {
         thread = std::thread([this] { run(); });
     }
 
@@ -142,10 +220,9 @@ struct DriveObserveServer::Impl {
                 std::unique_lock lock(mutex);
                 wake.wait(lock, [this] { return stop.load() || snapshot.has_value(); });
                 if (stop.load()) return;
-                initial = snapshot;
-                client_active = true;
-                queue.clear();
-                queued_bytes = 0;
+                initial = std::move(snapshot);
+                snapshot.reset();
+                snapshot_requested.store(false);
             }
             if (!send(*client, DriveObserveMessage::Snapshot, encode_drive_snapshot(*initial))) {
                 std::lock_guard lock(mutex);
@@ -154,15 +231,22 @@ struct DriveObserveServer::Impl {
             }
 
             while (!stop.load() && !client->closed()) {
+                if (auto input = client->receive_message(0); input && interactive) {
+                    if (auto action = decode_drive_action(*input)) {
+                        std::lock_guard lock(mutex);
+                        if (actions.size() < 16) actions.push_back(*action);
+                    }
+                }
                 std::optional<std::pair<DriveObserveMessage, std::vector<std::byte>>> message;
                 {
                     std::unique_lock lock(mutex);
+                    if (queue_overflow) break;
                     if (!queue.empty()) {
                         message = std::move(queue.front());
                         queue.pop_front();
                         queued_bytes -= message->second.size();
                     } else {
-                        wake.wait_for(lock, std::chrono::milliseconds(50));
+                        wake.wait_for(lock, std::chrono::milliseconds(20));
                     }
                 }
                 if (message && !send(*client, message->first, message->second)) break;
@@ -171,6 +255,7 @@ struct DriveObserveServer::Impl {
             {
                 std::lock_guard lock(mutex);
                 client_active = false;
+                actions.clear();
                 queue.clear();
                 queued_bytes = 0;
             }
@@ -180,22 +265,19 @@ struct DriveObserveServer::Impl {
     void enqueue(DriveObserveMessage kind, std::vector<std::byte> body) {
         std::lock_guard lock(mutex);
         if (!client_active) return;
-        if (queued_bytes + body.size() > kObserveQueueLimit) return; // a stalled viewer misses packets, does not grow us
-        queued_bytes += body.size();
-        if (kind == DriveObserveMessage::State && !queue.empty() &&
-            queue.back().first == DriveObserveMessage::State) {
-            queued_bytes -= queue.back().second.size();
-            queue.back().second = std::move(body);
-            queued_bytes += queue.back().second.size();
-        } else {
-            queue.emplace_back(kind, std::move(body));
+        if (queued_bytes + body.size() > kObserveQueueLimit) {
+            queue_overflow = true; // disconnect rather than advance the view past a missing packet
+            wake.notify_one();
+            return;
         }
+        queued_bytes += body.size();
+        queue.emplace_back(kind, std::move(body));
         wake.notify_one();
     }
 };
 
-DriveObserveServer::DriveObserveServer(platform::LocalPipeSession session)
-    : impl_(std::make_unique<Impl>(std::move(session))) {}
+DriveObserveServer::DriveObserveServer(platform::LocalPipeSession session, bool interactive)
+    : impl_(std::make_unique<Impl>(std::move(session), interactive)) {}
 
 DriveObserveServer::~DriveObserveServer() { stop(); }
 
@@ -207,6 +289,10 @@ void DriveObserveServer::set_snapshot(net::DriveSnapshot snapshot) {
     {
         std::lock_guard lock(impl_->mutex);
         impl_->snapshot = std::move(snapshot);
+        impl_->queue.clear(); // this snapshot includes everything through the current game-thread tick
+        impl_->queued_bytes = 0;
+        impl_->queue_overflow = false;
+        impl_->client_active = true;
         impl_->snapshot_requested.store(false);
     }
     impl_->wake.notify_all();
@@ -218,6 +304,11 @@ void DriveObserveServer::publish_zone_packet(const net::AppPacket& packet) {
 
 void DriveObserveServer::publish_state(const DriveLocalState& state) {
     impl_->enqueue(DriveObserveMessage::State, encode_drive_state(state));
+}
+
+std::vector<net::DriveAction> DriveObserveServer::take_actions() {
+    std::lock_guard lock(impl_->mutex);
+    return std::exchange(impl_->actions, {});
 }
 
 void DriveObserveServer::stop() {

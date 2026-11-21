@@ -336,6 +336,40 @@ void ClientApp::update_zone_settle() {
     zone_entered_ = now;
 }
 
+bool ClientApp::can_reuse_observe_scene(const net::GameConnection& next, std::string_view profile) const {
+    return !profile.empty() && profile == files_profile() && world_geometry_scene_current() &&
+           next.state() == net::ConnectionState::InZone && next.world().player() &&
+           next.zone_id() != 0 && next.zone_id() == conn_->zone_id() &&
+           next.zone_instance() == conn_->zone_instance() &&
+           next.world().zone_short_name == conn_->world().zone_short_name;
+}
+
+void ClientApp::rebind_observe_scene() {
+    // Keep the static zone and its buffers. Dynamic objects and transient
+    // effects belong to the connection that supplied their spawn IDs.
+    (void)conn_->take_zone_to_load();
+    retire_world_geometry();
+    zone_settle_.cancel();
+    if (nav_) nav_->stop("Crew view changed");
+    world_objects_->reset_view();
+    missiles_.clear();
+    if (sound_events_) sound_events_->reset();
+    if (spell_particles_) spell_particles_->clear();
+    if (spell_bolts_) spell_bolts_->clear();
+    if (actor_emitters_) actor_emitters_->clear();
+    if (switch_particles_) {
+        switch_particles_->clear();
+        conn_->set_door_particles(&door_particles_);
+    }
+    weather_.clear_particles();
+    point_shadows_.reset();
+    vk_.reset_history();
+    conn_->reground();
+    world_scene_ = {conn_.get(), world_epoch_, conn_->zone_id(), conn_->zone_instance(),
+                    conn_->world().zone_short_name};
+    log::info("crew: reused scene for {}", world_scene_.short_name);
+}
+
 void ClientApp::unload_zone() {
     retire_world_geometry();
     zone_settle_.cancel();

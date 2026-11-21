@@ -494,6 +494,13 @@ Still open for D2:
   files (the usual crew case), because `ClientApp` has one `GameDir`;
 - no live headless run yet (D5).
 
+### Limited Crew interaction
+
+Workers can opt into typed possessions, augment and confirmation actions.
+The worker applies them to its own connection, with stale zone, inventory and
+prompt checks. This keeps the worker's automation active. The full control
+lease below remains separate. Same-instance switches reuse the loaded scene.
+
 ### D3 — Control lease
 
 - Freeze the headless, lend the sessions, relay packets both ways, apply the

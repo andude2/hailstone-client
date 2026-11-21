@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -14,8 +15,37 @@
 #include <glm/glm.hpp>
 
 #include "net/packet.h"
+#include "net/commerce.h"
 
 namespace hailstone::net {
+
+enum class DriveActionKind : std::uint8_t { InventoryClick, AugmentClick, AugmentMenu, Answer, Quantity };
+
+struct DriveAction {
+    DriveActionKind kind{};
+    ItemSlot slot;
+    std::uint32_t argument = 0;
+    std::int32_t socket = 0;
+    std::uint32_t zone_generation = 0;
+    std::uint64_t inventory_revision = 0;
+    std::uint64_t dialog = 0;
+    std::string item_serial;
+};
+
+struct DriveQuestion {
+    std::uint64_t id = 0;
+    std::uint32_t kind = 0;
+    std::string text;
+    bool plain_text = false;
+    bool ok_only = false;
+};
+
+struct DriveUiState {
+    std::uint32_t zone_generation = 0;
+    std::uint64_t inventory_revision = 0;
+    std::optional<DriveQuestion> question;
+    std::optional<QuantityRequest> quantity;
+};
 
 struct DriveSnapshot {
     std::string character;          // the name the own-spawn packets are matched against
@@ -27,6 +57,7 @@ struct DriveSnapshot {
     bool moving = false;
     std::uint32_t target = 0;
     bool truncated = false;
+    std::optional<DriveUiState> ui;
 };
 
 // The journal's bound: a zone-in burst is a few MiB; a long session's journal can grow, and a truncated snapshot

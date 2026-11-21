@@ -346,6 +346,8 @@ void GameConnection::surname_command(const std::string& args) {
 }
 
 void GameConnection::ask(Confirmation c) {
+    if (drive_input_ || drive_ui_) return; // the Crew mirror displays the source's question
+    c.drive_id = ++drive_question_sequence_;
     if (confirmation_) confirm_queue_.push_back(std::move(c));
     else confirmation_ = std::move(c);
 }
@@ -389,6 +391,10 @@ void GameConnection::discard_questions(const std::function<bool(const Confirmati
 }
 
 void GameConnection::answer_confirmation(bool yes) {
+    DriveAction action{};
+    action.kind = DriveActionKind::Answer;
+    action.argument = yes ? 1u : 0u;
+    if (relay_drive_action(action)) return;
     // ConfirmationDialog_HandleResponse @0x52d540: 0x6f sends OP_Surname and
     // prints eqstr 9051; 0x75 sends an empty OP_ClearSurname; 0x7a equips the
     // attuneable cursor item.

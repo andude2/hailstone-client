@@ -112,6 +112,7 @@ struct AbilityState {
     bool ready = false;            // its reuse timer has run out; its costs are the script's to check
     std::int64_t remaining_ms = 0; // until it is ready
     std::int64_t reuse_ms = 0;
+    std::int32_t id = -1;
 };
 
 struct Context {

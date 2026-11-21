@@ -161,6 +161,7 @@ struct Confirmation {
     bool plain_text = false; // escape extension/user text before rendering the confirmation as STML
     bool ok_only = false; // flags 1: an OK button alone (a refusal to read), else Yes / No (0xc)
     std::uint32_t data = 0, data2 = 0; // what the yes acts on (a corpse slot, an ability, an item id, ...)
+    std::uint64_t drive_id = 0;
 };
 inline constexpr std::uint32_t kConfirmSurname = 0x6f, kConfirmClearSurname = 0x75, kConfirmGuildDelete = 0x6d,
                                kConfirmAttune = 0x7a, kConfirmVeteranReward = 0x7e;
@@ -495,6 +496,9 @@ public:
     // The local half alone (position, target, possessions), for a viewer's periodic state message.
     DriveSnapshot capture_local_state() const;
     void apply_snapshot(const DriveSnapshot& snapshot);
+    void set_drive_input(std::function<void(const DriveAction&)> input) { drive_input_ = std::move(input); }
+    DriveUiState capture_drive_ui() const;
+    bool apply_drive_action(const DriveAction& action);
     // Observe mode (docs/research/drive-headless.md, D2): receive zone packets over `zone_session` and apply the
     // local state that the server does not echo. Nothing this connection sends leaves it.
     void start_observe(std::unique_ptr<Session> zone_session);
@@ -1768,7 +1772,7 @@ public:
     // cursor (OP_MoveItem with the count) or, for all of it, moves it whole.
     const std::optional<QuantityRequest>& quantity_request() const { return quantity_; }
     void finish_quantity(std::uint32_t quantity);
-    void cancel_quantity() { quantity_.reset(); }
+    void cancel_quantity();
     // Destroys the cursor item (PcZoneClient::DestroyHeldItemOrMoney).
     void destroy_cursor();
     // The inventory window's Destroy button (CInventoryWnd::DestroyHeld @0x692340, game/item_options.h): with Fast
@@ -3962,6 +3966,10 @@ private:
     // Server offers waiting behind the question on screen (one ConfirmationDialog at a time).
     std::deque<Confirmation> confirm_queue_;
     void ask(Confirmation c);
+    bool relay_drive_action(DriveAction action);
+    std::function<void(const DriveAction&)> drive_input_;
+    std::optional<DriveUiState> drive_ui_;
+    std::uint64_t drive_question_sequence_ = 0;
     // Drops the questions `which` picks (all of them without one), on screen and waiting, without answering: the state
     // an open question holds (the loot window's popup flag, an augment's pending request, ...) is taken back as a no
     // would, but nothing is sent. The next waiting question that stays takes the screen.
