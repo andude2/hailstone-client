@@ -23,6 +23,7 @@
 #include "mq/tlo.h"
 #include "nav/nav_control.h"
 #include "net/game_connection.h"
+#include "net/item_click.h"
 
 namespace hailstone::mq {
 
@@ -655,6 +656,9 @@ void register_character() {
         return V::nil();
     });
     add(g.aura, "Name", [](const Context&, const Value& v, std::string_view) { return V::string(v.s); });
+    me_member("RaidInviter", [](const Context&, const GameConnection& c, std::string_view) {
+        return V::string(c.raid().inviter);
+    });
     me_member("Invited", [](const Context&, const GameConnection& c, std::string_view) {
         return V::boolean(!c.group().inviter.empty());
     });
@@ -773,6 +777,15 @@ void register_character() {
     });
     me_member("Feigning", [](const Context&, const GameConnection& c, std::string_view) {
         return V::boolean(c.player_status().stand_state == 115);
+    });
+    me_member("RezPending", [](const Context&, const GameConnection& c, std::string_view) {
+        if (const auto& offer = c.confirmation(); offer && offer->id == net::kConfirmRezz) return V::boolean(true);
+        const auto& window = c.respawn_window();
+        if (c.respawn_ready() && window && !window->options.empty()) {
+            const auto id = window->options.back().id;
+            if (c.respawn_option_is_resurrection(id) && c.respawn_option_available(id)) return V::boolean(true);
+        }
+        return V::boolean(false);
     });
     me_member("Dead", [](const Context&, const GameConnection& c, std::string_view) { return V::boolean(c.player_status().dead); });
     me_member("Stunned", [](const Context&, const GameConnection& c, std::string_view) { return V::boolean(c.stunned()); });
@@ -1024,12 +1037,18 @@ void register_item() {
     m("Charges", [](const Context&, const Value&, const net::Item& it, std::string_view) {
         return V::integer(it.charges == 0xffffffffu ? -1 : static_cast<std::int64_t>(it.charges));
     });
+    m("Clicky", [](const Context& c, const Value&, const net::Item& it, std::string_view) -> V {
+        const auto& click = net::item_click_source(it).effects[net::kEffectClick];
+        const auto* spell = c.conn && click.present() ? c.conn->spell_table().get(static_cast<std::uint32_t>(click.effect)) : nullptr;
+        return spell ? V::string(spell->name) : V::nil();
+    });
     m("TimerReady", [](const Context& c, const Value&, const net::Item& it, std::string_view) -> V {
         // MQ2ItemType's TimerReady: an int, the seconds left (GetItemTimer: GetItemRecastTimer less the fast time,
         // 0 once passed), NULL for an item without a click effect. MQ gives 0 for a click without a recast type
         // (TimerID -1); here the item's own timer still counts, as GetItemRecastTimer reads it.
-        if (!c.conn || !it.effects[net::kEffectClick].present()) return V::nil();
-        const auto ready_at = static_cast<std::int64_t>(c.conn->item_recast_timer(&it));
+        const auto& source = net::item_click_source(it);
+        if (!c.conn || !source.effects[net::kEffectClick].present()) return V::nil();
+        const auto ready_at = static_cast<std::int64_t>(c.conn->item_recast_timer(&source));
         const auto now = static_cast<std::int64_t>(std::time(nullptr));
         return V::integer(ready_at > now ? ready_at - now : 0);
     });
@@ -1228,6 +1247,12 @@ void register_misc_types() {
         }
         return V::boolean(c.conn && v.i == 1 && iequals(v.s, "TRDW_Trade_Button") &&
             c.conn->trade() && c.conn->trade()->open && !c.conn->trade()->with_npc && !c.conn->trade()->my_ready);
+    });
+    add(g.window, "Requester", [](const Context& c, const Value& v, std::string_view) -> V {
+        if (!c.conn) return V::nil();
+        if (iequals(v.s, "ConfirmationDialogBox")) return V::string(c.conn->confirmation_requester());
+        if (iequals(v.s, "TradeWnd") && c.conn->trade()) return V::string(c.conn->trade()->partner_name);
+        return V::nil();
     });
     add(g.window, "HisTradeReady", [](const Context& c, const Value& v, std::string_view) {
         return V::boolean(c.conn && iequals(v.s, "TradeWnd") && c.conn->trade() && c.conn->trade()->their_ready);

@@ -1,6 +1,8 @@
 // mq/tlo.h, mq/spawn_search.h and mq/parse.h: MacroQuest's TLOs over a small world (tests/mq_test_world.h).
 #include <doctest/doctest.h>
 
+#include <ctime>
+
 #include "manual_clock.h"
 #include "mq/parse.h"
 #include "mq/spawn_search.h"
@@ -128,6 +130,45 @@ TEST_CASE("TLO: spells, gems and buffs") {
     CHECK(f.p("${Spell[11].Level}") == "3"); // the cleric's level column
     CHECK(f.p("${Spell[200].Level}") == "1");
     CHECK(f.p("${Spell[99999]}") == "NULL");
+}
+
+TEST_CASE("TLO: Sentinel reads aura updates and distinguishes learned skills, disciplines and timers") {
+    Fixture f;
+    auto& c = *f.world.conn;
+    CHECK(f.p("${Me.Aura[Disciple's Aura].Name}") == "NULL");
+    c.receive_zone_packet_for_test(net::encode(net::AuraUpdate{net::kAuraAdd, 1, 1234, 77, "Disciples Aura"}));
+    CHECK(f.p("${Me.Aura[Disciple's Aura].Name}") == "Disciples Aura");
+    CHECK(f.p("${Me.Aura[1].Name}") == "Disciples Aura");
+    CHECK(f.p("${Me.Aura[Myrmidon's Aura].Name}") == "NULL");
+    c.receive_zone_packet_for_test(net::encode(net::AuraUpdate{net::kAuraRemove, 0, 1234, 0, {}}));
+    CHECK(f.p("${Me.Aura[1].Name}") == "NULL");
+
+    f.ctx.ability = [](mq::AbilityKind kind, std::string_view name) -> std::optional<mq::AbilityState> {
+        if (kind == mq::AbilityKind::Skill && name == "Mend") return mq::AbilityState{"Mend", true, 0, 6000, 35};
+        if (kind == mq::AbilityKind::Discipline && name == "Disciple's Aura")
+            return mq::AbilityState{"Disciple's Aura", false, 3000, 6000, 0};
+        return std::nullopt;
+    };
+    CHECK(f.p("${Me.Ability[Mend]} ${Me.Ability[Disciple's Aura]}") == "TRUE FALSE");
+    CHECK(f.p("${Me.CombatAbility[Disciple's Aura]} ${Me.CombatAbility[Mend]}") == "1 NULL");
+    CHECK(f.p("${Me.CombatAbilityReady[Disciple's Aura]} ${Me.CombatAbilityTimer[Disciple's Aura]}") == "FALSE 3000");
+    CHECK(f.p("${Me.AbilityTimerTotal[Mend]}") == "6000");
+    CHECK(f.p("${Me.GemTimer[Minor Healing]} ${Me.GemTimer[Missing Spell]}") == "0 NULL");
+    auto& spells = net::GameConnectionTestAccess::spells(c);
+    spells.linked_ready[1] = static_cast<std::uint32_t>(std::time(nullptr)) + 60;
+    CHECK(std::stoll(f.p("${Me.GemTimer[Minor Healing]}")) > 0);
+    CHECK(f.p("${Window[CastingWindow].Open}") == "FALSE");
+    spells.casting.spell = 200;
+    CHECK(f.p("${Window[CastingWindow].Open} ${Me.Casting.ID}") == "TRUE 200");
+
+    CHECK(f.p("${Me.PctAggro} ${Target.PctAggro}") == "NULL NULL");
+    c.receive_zone_packet_for_test(net::encode(net::AggroTargetInfo{0, 10}));
+    c.receive_zone_packet_for_test(net::encode(net::AggroUpdate{std::nullopt, {{net::kAggroPlayer, 60}}}));
+    CHECK(f.p("${Me.PctAggro} ${Target.PctAggro}") == "60 60");
+    c.set_target(11);
+    CHECK(f.p("${Me.PctAggro} ${Target.PctAggro}") == "NULL NULL");
+    c.receive_zone_packet_for_test(net::encode(net::DzInvite{"Friend", "Training", false, {}, 2, 0}));
+    CHECK(f.p("${Window[ConfirmationDialogBox].Requester}") == "Friend");
 }
 
 TEST_CASE("TLO: Target, Spawn, SpawnCount, NearestSpawn and the search words") {
@@ -476,6 +517,30 @@ TEST_CASE("TLO: an item's TimerReady, its own and its recast type's click reuse,
 
     conn.reset_all_item_recast_timers();
     CHECK(f.p("${FindItem[=Fixture Clicky].TimerReady}") == "0");
+}
+
+TEST_CASE("TLO: a socketed click effect uses the augment's recast on its carrier") {
+    Fixture f;
+    auto& conn = *f.world.conn;
+    auto& inventory = net::GameConnectionTestAccess::inventory(conn);
+    auto* item = inventory.at(net::ItemSlot::possessions(net::kSlotGeneral1 + 1, 0));
+    REQUIRE(item);
+    item->name = "Fixture Blade";
+    const auto* spell = conn.spell_table().find_by_name("Minor Healing");
+    REQUIRE(spell);
+    net::Item augment;
+    augment.effects[net::kEffectClick].effect = static_cast<std::int32_t>(spell->id);
+    augment.effects[net::kEffectClick].type = 4;
+    augment.effects[net::kEffectClick].extra[3] = 17;
+    item->contents.push_back({3, augment});
+    CHECK(f.p("${FindItem[=Fixture Blade].Clicky}") == "Minor Healing");
+    CHECK(f.p("${FindItem[=Fixture Blade].TimerReady}") == "0");
+    conn.set_item_recast_timer(item->content(3), 120, -1);
+    CHECK(std::stoi(f.p("${FindItem[=Fixture Blade].TimerReady}")) > 0);
+    conn.reset_all_item_recast_timers();
+    CHECK(f.p("${FindItem[=Fixture Blade].TimerReady}") == "0");
+    item->contents.clear();
+    CHECK(f.p("${FindItem[=Fixture Blade].TimerReady}") == "NULL");
 }
 
 TEST_CASE("TLO: Math, If and Range follow MQ's") {

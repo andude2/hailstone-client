@@ -139,7 +139,7 @@ int ClientApp::run() {
         // events on).
         window_.set_swap_mouse_buttons(conn_ && !conn_->client_option(game::ClientOption::MouseRightHanded));
         update_lap.mark("browser, window");
-        if (automation_ && !viewing_observe_) automation_->frame();
+        if (automation_) automation_->frame();
         update_lap.mark("automation");
         if (conn_ && world_objects_ && screen_ == Screen::InGame && player_ready_) {
             world_objects_->update(*conn_);
@@ -1332,7 +1332,11 @@ void ClientApp::update_guide() {
 
 
 void ClientApp::pump_parked_connection() {
-    if (parked_conn_) parked_conn_->update();
+    if (!parked_conn_) return;
+    parked_conn_->update();
+    parked_stats_->draw(*parked_conn_); // Closed window: update the parked player's ability and spell data.
+    parked_ability_host_.in_game = parked_conn_->in_zone();
+    parked_ability_host_.character = parked_stats_->character();
 }
 
 bool ClientApp::switch_to_observe(const std::filesystem::path& file, bool interact) {
@@ -1401,6 +1405,9 @@ bool ClientApp::switch_to_observe(const std::filesystem::path& file, bool intera
         parked_layout_for_ = std::exchange(layout_for_, {});
         parked_files_profile_ = std::exchange(files_profile_, {});
         parked_server_name_ = std::exchange(char_view_.server_name, {});
+        parked_stats_ = std::make_unique<StatsUi>(game_);
+        parked_ability_host_.conn = parked_conn_.get();
+        automation_->set_parked_character(parked_conn_.get(), parked_server_name_);
         if (!reuse_scene) unload_zone();
     } else {
         if (!reuse_scene) unload_zone();
@@ -1443,6 +1450,16 @@ void ClientApp::release_observe() {
     layout_for_.clear(); // the return loads A's layout again
     files_profile_ = std::move(parked_files_profile_);
     char_view_.server_name = std::move(parked_server_name_);
+    automation_->set_parked_character(nullptr);
+    ui_host_.conn = conn_.get();
+    ui_host_.in_game = conn_ && conn_->in_zone();
+    if (parked_stats_) {
+        parked_stats_->set_open(stats_ui_ && stats_ui_->is_open());
+        stats_ui_.swap(parked_stats_);
+    }
+    ui_host_.character = stats_ui_ ? stats_ui_->character() : nullptr;
+    parked_ability_host_ = {};
+    parked_stats_.reset();
     player_ready_ = false;
     screen_ = Screen::Loading;
     viewing_observe_ = false;

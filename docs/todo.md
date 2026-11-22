@@ -819,6 +819,9 @@ Fog, weather, sky, EQG surfaces, lighting and spell particles are a look-and-fee
 
 ## Headless client (docs/headless.md)
 
+- [x] Sentinel host parity for ability and aura queries, linked timers, aggro, and trusted invitation and trade actions.
+- [ ] Live Sentinel aura cast, server update, and retention check with a configured discipline aura.
+
 - [x] Crew same-instance scene reuse and opt-in inventory, augment and confirmation interactions.
 - [ ] Live Crew check on a display, including click-to-frame timing, item moves, augment confirmation, and switching back to the original character.
 

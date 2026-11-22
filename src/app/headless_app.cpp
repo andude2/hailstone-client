@@ -791,10 +791,10 @@ int run_headless(HeadlessOptions options) {
         }
         if (observe && conn->in_zone()) {
             if (!drive_file_written && !drive_file_failed) {
-                const std::string character = !options.character.empty() ? options.character : conn->character_name();
+                const std::string character_name = !options.character.empty() ? options.character : conn->character_name();
                 const std::string text = "endpoint=" + observe->session().endpoint + "\n" +
                                          "token=" + observe->session().token + "\n" +
-                                         "character=" + character + "\n" +
+                                         "character=" + character_name + "\n" +
                                          "profile=" + saved_profile_id + "\n" +
                                          "game_dir=" + options.game_dir + "\n" +
                                          "interactive=" + (options.drive_interact ? "1\n" : "0\n");

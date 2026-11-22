@@ -35,6 +35,7 @@
 #include "game/server_ext_chain.h"
 #include "game/spells.h"
 #include "game/zone_names.h"
+#include "game/task_window.h"
 #include "mq/lua_script.h"
 #include "net/game_connection.h"
 #include "net/social_packets.h"
@@ -1001,6 +1002,66 @@ int l_menu(lua_State* L) {
 
 // ---------------------------------------------------------------- read
 
+int l_tasks_revision(lua_State* L) {
+    need_cap(L, plugin::kCapRead, "hailstone.tasks_revision");
+    const auto* c = readable(Script::of(L));
+    if (!c || !c->in_zone()) return 0;
+    lua_pushinteger(L, c->tasks().revision);
+    return 1;
+}
+
+int l_tasks(lua_State* L) {
+    need_cap(L, plugin::kCapRead, "hailstone.tasks");
+    const auto* c = readable(Script::of(L));
+    if (!c || !c->in_zone()) return 0;
+    auto& text = plugin::lua_keep<std::string>(L);
+    const auto& tasks = c->tasks();
+    lua_createtable(L, static_cast<int>(tasks.tasks.size()), 0);
+    lua_Integer row = 1;
+    for (const auto& task : tasks.tasks) {
+        if (!task.task_id) continue;
+        lua_createtable(L, 0, 7);
+        set_int(L, "id", task.task_id);
+        set_int(L, "type", task.type);
+        set_str(L, "title", task.title);
+        set_int(L, "duration", task.duration);
+        set_int(L, "left", task.duration ? game::task_seconds_left(task, net::GameConnection::now_ms()) : 0);
+        if (task.type == game::kTaskTypeShared) {
+            set_str(L, "leader", tasks.shared_leader);
+            set_int(L, "members", static_cast<lua_Integer>(tasks.shared_members.size()));
+        }
+        lua_createtable(L, static_cast<int>(task.elements.size()), 0);
+        lua_Integer objective = 1;
+        for (const auto& [slot, element] : task.elements) {
+            (void)slot;
+            if (element.type == 0) continue;
+            lua_createtable(L, 0, 9);
+            set_int(L, "id", element.activity_id);
+            set_int(L, "group", element.step);
+            const bool hidden = element.hidden || element.type == -1;
+            set_bool(L, "hidden", hidden);
+            if (!hidden) {
+                set_int(L, "count", element.done_count);
+                set_int(L, "goal", element.goal_count);
+                set_bool(L, "done", element.done());
+                set_bool(L, "optional", element.optional);
+                plugin::cxx_guard(L, [&] { text = c->task_element_text(element); });
+                set_str(L, "text", text);
+                plugin::cxx_guard(L, [&] {
+                    text = game::task_zone_names(element.zones, [](std::uint32_t id) {
+                        return std::string(game::zone_long_name(id));
+                    });
+                });
+                set_str(L, "zone", text);
+            }
+            lua_rawseti(L, -2, objective++);
+        }
+        lua_setfield(L, -2, "objectives");
+        lua_rawseti(L, -2, row++);
+    }
+    return 1;
+}
+
 int l_player(lua_State* L) {
     need_cap(L, plugin::kCapRead, "hailstone.player");
     const net::GameConnection* c = readable(Script::of(L));
@@ -1629,6 +1690,8 @@ void register_hailstone(lua_State* L) {
              {"option", l_option},
              {"menu", l_menu},
              {"player", l_player},
+             {"tasks", l_tasks},
+             {"tasks_revision", l_tasks_revision},
              {"spawn", l_spawn},
              {"spawns", l_spawns},
              {"spell", l_spell},

@@ -27,6 +27,7 @@
 #include "core/process_serial.h"
 #include "game/targeting.h"
 #include "net/item_packets.h"
+#include "net/item_click.h"
 #include "core/sha256.h"
 #include "game/chat_text.h"
 #include "game/combat.h"
@@ -862,7 +863,7 @@ HailstoneItem item_struct(const net::Item& it) {
     v.stack_count = it.stack_count;
     v.charges = it.charges;
     auto spell = [](std::int32_t id) { return id > 0 ? static_cast<std::uint32_t>(id) : 0u; };
-    v.click_spell = spell(it.effects[net::kEffectClick].effect);
+    v.click_spell = spell(net::item_click_source(it).effects[net::kEffectClick].effect);
     v.scroll_spell = spell(it.effects[net::kEffectScroll].effect);
     // The serialized record is decoded completely or rejected. Missing
     // children therefore mean known empty positions, not unreadable sockets.

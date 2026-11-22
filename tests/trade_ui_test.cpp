@@ -16,6 +16,7 @@
 #include "app/lua_ui.h"
 #include "mock_server/harness.h"
 #include "mq_test_world.h"
+#include "mq/parse.h"
 #include "net/trade_packets.h"
 #include "ui/lua/lua_host.h"
 #include "scratch_dir.h"
@@ -88,6 +89,43 @@ TEST_CASE("Give shortcut hides for NPCs that refuse direct hand-ins") {
     world.target_id = 12; // a player trade still has a shortcut
     CHECK(give_shown());
     ImGui::DestroyContext(ctx);
+}
+
+TEST_CASE("Sentinel trade: the host rechecks recipient and the outgoing side on notification") {
+    Rig rig;
+    REQUIRE(rig.to_zone());
+    auto& c = rig.conn;
+    auto& world = c.world_for_test();
+    REQUIRE(world.player());
+    game::Spawn pc;
+    pc.id = 4100;
+    pc.name = "Friend";
+    pc.position = world.player()->position;
+    world.spawns[pc.id] = pc;
+    c.receive_zone_packet_for_test(net::encode_trade_request({world.player_id, pc.id}));
+    c.receive_zone_packet_for_test(net::encode(net::TradeAccept{pc.id, 1}));
+    REQUIRE(c.trade());
+    REQUIRE(c.trade()->their_ready);
+    mq::Registry registry;
+    mq::register_game_tlos(registry);
+    mq::Context ctx;
+    ctx.registry = &registry;
+    ctx.conn = &c;
+    auto parse = [&](std::string_view text) { return mq::parse_macro_data(ctx, text); };
+    CHECK(parse("${Window[TradeWnd].Open} ${Window[TradeWnd].Requester}") == "TRUE Friend");
+    CHECK(parse("${Window[TradeWnd].Child[TRDW_TradeSlot0]}") == "TRUE");
+    CHECK(parse("${Window[TradeWnd].Child[TRDW_TradeSlot0].Tooltip}") == "");
+    const auto slot = net::ItemSlot{net::kInvTrade, 0};
+    auto& inv = net::GameConnectionTestAccess::inventory(c);
+    inv.put(slot, make_item(1001, "Outgoing item", 0));
+    CHECK(parse("${Window[TradeWnd].Child[TRDW_TradeSlot0].Tooltip}") == "Outgoing item");
+    c.send_command("/notify TradeWnd TRDW_Trade_Button leftmouseup Friend");
+    CHECK_FALSE(c.trade()->my_ready);
+    inv.take(slot);
+    c.send_command("/notify TradeWnd TRDW_Trade_Button leftmouseup Different");
+    CHECK_FALSE(c.trade()->my_ready);
+    c.send_command("/notify TradeWnd TRDW_Trade_Button leftmouseup Friend");
+    CHECK(c.trade()->my_ready);
 }
 
 TEST_CASE("Trade window (modern): the partner's accept and ours show in the window") {

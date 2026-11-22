@@ -1167,6 +1167,10 @@ CastSpell(gem 12, the item) when nothing is being cast or the class is Bard; pot
 undone. That CastSpell sends nothing (send argument 0, @0x4bff60): it only sets the recast timer or cast bar. The
 server already cast the item on OP_ItemVerifyRequest; a second OP_CastSpell would cast an instant clicky twice.
 
+For a socketed click that the server chooses through the carrier, the request still uses the carrier's slot.
+The click effect and reuse timer come from the carrier's own click or the first clickable augment in socket
+order (EQEmu's ItemVerifyRequest handler). The local cast from the reply uses that same source.
+
 CastSpell's item checks refuse silently for an item cast:
 
 - click level (block 0 +4, the wire's level2) above the level (136);

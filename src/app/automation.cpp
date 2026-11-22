@@ -64,13 +64,22 @@ struct Automation::Impl {
     std::vector<plugin::NativePlugins::Info> dev_plugins;
     std::optional<std::chrono::steady_clock::time_point> dev_plugins_at;
 
-    net::GameConnection* conn() const { return env.connection ? env.connection() : nullptr; }
+    net::GameConnection* parked = nullptr;
+    std::string parked_server_name;
+
+    net::GameConnection* conn() const {
+        return parked ? parked : (env.connection ? env.connection() : nullptr);
+    }
+
+    std::string server_name() const {
+        return parked ? parked_server_name : (env.server_name ? env.server_name() : std::string());
+    }
 
     const mq::Context& context() {
         ctx.registry = &registry;
         ctx.conn = conn();
         ctx.nav = env.nav ? env.nav() : nullptr;
-        ctx.server_name = env.server_name ? env.server_name() : std::string();
+        ctx.server_name = server_name();
         return ctx;
     }
 
@@ -148,7 +157,7 @@ struct Automation::Impl {
     // The server as the player knows it: the saved server's name, else the world's.
     std::string server_label() const {
         std::string s = env.profile_name ? env.profile_name() : std::string();
-        if (s.empty() && env.server_name) s = env.server_name();
+        if (s.empty()) s = server_name();
         return s.empty() ? std::string("this server") : s;
     }
     void dev_window();
@@ -326,6 +335,11 @@ void Automation::answer_plugin_consent(std::optional<bool> allow) {
     if (impl_->plugins) impl_->plugins->answer_consent(allow);
 }
 
+void Automation::set_parked_character(net::GameConnection* connection, std::string server_name) {
+    impl_->parked = connection;
+    impl_->parked_server_name = std::move(server_name);
+}
+
 void Automation::frame() {
     Impl& m = *impl_;
     m.sync_policy();
@@ -342,15 +356,19 @@ void Automation::frame() {
 
 void Automation::imgui(bool dev) {
     Impl& m = *impl_;
-    m.scripts->imgui();
-    m.plugins->imgui();
-    m.hooks.imgui();
+    if (!m.parked) {
+        m.scripts->imgui();
+        m.plugins->imgui();
+        m.hooks.imgui();
+    }
     if (!ui::lua::replaces("PluginConsent")) m.consent_window();
-    if (dev) m.dev_window();
+    if (dev && !m.parked) m.dev_window();
     ui::lua::raise_guarded_windows(); // the question above every window drawn this frame
 }
 
-bool Automation::world_wanted() const { return impl_->plugins && impl_->plugins->world_wanted(); }
+bool Automation::world_wanted() const {
+    return !impl_->parked && impl_->plugins && impl_->plugins->world_wanted();
+}
 
 void Automation::world_frame(HailstoneWorldFrame frame, plugin::WorldQueries queries) {
     if (impl_->plugins) impl_->plugins->world_frame(frame, std::move(queries));

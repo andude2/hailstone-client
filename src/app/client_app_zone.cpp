@@ -633,16 +633,16 @@ void ClientApp::enter_zone() {
     use_character_settings(files.dir); // (taken over at the entry into the world: the same, unless the name differs)
     actions_ui_->enter_zone(files.hot_buttons());
     // The character's autorun scripts (the Scripts window; the same file at each zone-in starts nothing again).
-    if (automation_) automation_->scripts().set_autorun_file(files.scripts_ini());
+    if (automation_ && !parked_conn_) automation_->scripts().set_autorun_file(files.scripts_ini());
     // The UI's window layout is the character's (ui-<pack>.txt), its other settings shared.
     ui_character_dir_ = files.dir;
     if (lua_ui_) lua_ui_->set_character_settings(files.ui_settings(ui_name_));
     conn_->set_character_ini(
         [this](std::string_view section, std::string_view key, int fallback) {
-            return actions_ui_ ? actions_ui_->char_ini_int(section, key, fallback) : fallback;
+            return !parked_conn_ && actions_ui_ ? actions_ui_->char_ini_int(section, key, fallback) : fallback;
         },
         [this](std::string_view section, std::string_view key, const std::string& value) {
-            if (actions_ui_) actions_ui_->write_char_ini(section, key, value);
+            if (!parked_conn_ && actions_ui_) actions_ui_->write_char_ini(section, key, value);
         });
     conn_->load_name_change_flags();
     conn_->restore_blocked_buffs();

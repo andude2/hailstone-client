@@ -278,7 +278,8 @@ An item in a slot. Its plain value is the item's name.
 | `Stackable` | bool | |
 | `StackSize` | int | the largest stack |
 | `Charges` | int | -1 for unlimited |
-| `TimerReady` | int | seconds left on its click reuse (the later of its own timer and its recast type's), 0 when ready; NULL for an item without a click effect |
+| `Clicky` | string | spell cast by the item or its first clickable socketed augment |
+| `TimerReady` | int | seconds left on the effective click reuse, including a click supplied by a socketed augment, or 0 when ready; NULL with no click effect |
 | `Weight` | float | |
 | `Value` | int | in copper |
 | `Type` | string | `Container`, `1H Slashing`, `Armor`, `Food`, `Scroll`, `Augmentation`, ... |
@@ -933,6 +934,12 @@ plus `cooldown` (0..1 of the recast left) on the slot readers while a recast run
 | ListHeaderClick | (name, child, column) → ok | Click a column header (0-based) | actions |
 
 #### Active tasks and quest journal (lua_ui_progress.cpp)
+
+MQ scripts on graphical and headless clients can call `require('hailstone').tasks()`
+and `tasks_revision()` with the read capability. Both return nil outside the
+zone. The snapshot has task IDs, types, titles, duration, seconds left, shared
+member counts and leader, and objective progress. Hidden objectives return
+their ID, group, and hidden flag. Reading the snapshot sends no game packets.
 
 | Function | Args → returns | What | Cap |
 |---|---|---|---|

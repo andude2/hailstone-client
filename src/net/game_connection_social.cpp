@@ -133,6 +133,21 @@ void GameConnection::reset_social_for_zone() {
 
 // ---------------------------------------------------------------- the interpreter
 
+std::string GameConnection::confirmation_requester() const {
+    if (!confirmation_) return {};
+    const auto& question = *confirmation_;
+    if (question.id == kConfirmTranslocate) {
+        if (auto offer = decode_translocate(question.offer)) return offer->caster;
+    } else if (question.id == kConfirmSharedTask) {
+        if (auto offer = decode_shared_task_invite(question.offer)) return offer->inviter;
+    } else if (question.id == kConfirmFellowshipInvite && fellowship_.invite) {
+        return fellowship_.invite->inviter_name;
+    } else if (question.id == kConfirmDzInvite && expedition_.invite) {
+        return expedition_.invite->inviter;
+    }
+    return {};
+}
+
 void GameConnection::say(const std::string& text) { send_command(text); }
 
 void GameConnection::send_command(const std::string& typed) {
@@ -163,9 +178,11 @@ void GameConnection::send_command(const std::string& typed) {
             const auto window = game::next_cmd_arg(rest);
             const auto child = game::next_cmd_arg(rest);
             const auto event = game::next_cmd_arg(rest);
+            const auto expected = game::next_cmd_arg(rest);
             if (iequals(event, "leftmouseup") && state_ == ConnectionState::InZone) {
                 if (iequals(window, "TradeWnd") && iequals(child, "TRDW_Trade_Button")) {
-                    if (trade_ && trade_->open && !trade_->with_npc && trade_->their_ready && !trade_->my_ready) {
+                    if (trade_ && trade_->open && !trade_->with_npc && trade_->their_ready && !trade_->my_ready &&
+                        (expected.empty() || iequals(trade_->partner_name, expected))) {
                         const bool coins = std::any_of(trade_->my_coins.begin(), trade_->my_coins.end(),
                                                        [](auto amount) { return amount != 0; });
                         const bool items = std::any_of(inventory_.items().begin(), inventory_.items().end(),
@@ -178,8 +195,9 @@ void GameConnection::send_command(const std::string& typed) {
                 if (iequals(window, "ConfirmationDialogBox") && confirmation_ &&
                     iequals(child, confirmation_->ok_only ? "OK_Button" : "Yes_Button")) {
                     const auto id = confirmation_->id;
-                    if (id == kConfirmTranslocate || id == kConfirmSharedTask ||
-                        id == kConfirmFellowshipInvite || id == kConfirmDzInvite) {
+                    if ((id == kConfirmTranslocate || id == kConfirmSharedTask ||
+                         id == kConfirmFellowshipInvite || id == kConfirmDzInvite) &&
+                        (expected.empty() || iequals(confirmation_requester(), expected))) {
                         answer_confirmation(true);
                         return;
                     }

@@ -689,7 +689,7 @@ std::optional<mq::AbilityState> ability_state(UiHost& h, mq::AbilityKind kind, s
 
 bool use_ability(UiHost& h, mq::AbilityKind kind, std::string_view name) {
     const std::optional<Entry> e = by_name(h, kind, name);
-    if (!e || e->passive || !h.in_game) return false;
+    if (!e || e->passive || !e->ready() || !h.in_game || h.conn->interface_locked()) return false;
     log::info("script uses {} ({})", e->name, e->key);
     if (kind == mq::AbilityKind::AltAbility) return h.conn->aa_activate(static_cast<std::uint32_t>(e->id));
     if (kind == mq::AbilityKind::Discipline) return h.conn->do_combat_ability(h.conn->combat_ability(e->id));

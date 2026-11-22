@@ -20,6 +20,7 @@
 #include "game/mechanics/sheet_builder.h"
 #include "game/race_models.h"
 #include "net/game_connection.h"
+#include "net/item_click.h"
 #include "net/spell_packets.h"
 
 namespace hailstone::net {
@@ -321,7 +322,8 @@ public:
     std::int32_t item_spell_cast_time(std::int32_t) override { return item_ ? click().cast_time() : 0; }
     std::int32_t item_spell_recast_type(std::int32_t) override { return item_ ? click().recast_type() : 0; }
     void set_item_recast_timer(std::int32_t time, std::int32_t type) override {
-        c_.set_item_recast_timer(item_ ? c_.inventory_.at(item_slot_) : nullptr, time, type);
+        Item* carrier = item_ ? c_.inventory_.at(item_slot_) : nullptr;
+        c_.set_item_recast_timer(carrier ? &item_click_source(*carrier) : nullptr, time, type);
     }
 
     // The item a cast comes from (cast_item): its record, where it is, and CastSpell's view of it.
@@ -538,17 +540,18 @@ void GameConnection::cast_spell_slot(int gem, std::uint32_t id, const ItemSlot* 
     a.send_packet = send ? 1 : 0;
     cast::Item view{};
     if (item_slot) {
-        if (const Item* item = inventory_.at(*item_slot)) {
+        if (const Item* carrier = inventory_.at(*item_slot)) {
+            const Item& item = item_click_source(*carrier);
             // ItemGlobalIndex as the InventorySlot it goes out as: u32 location, slot | sub << 16, aug.
             const ItemSlot& s = *item_slot;
             a.item_location = {static_cast<std::uint32_t>(static_cast<std::uint16_t>(s.type)),
                                static_cast<std::uint32_t>(static_cast<std::uint16_t>(s.slot)) |
                                    static_cast<std::uint32_t>(static_cast<std::uint16_t>(s.sub)) << 16,
                                static_cast<std::uint32_t>(static_cast<std::uint16_t>(s.aug))};
-            view.charges = static_cast<std::int32_t>(item->charges);
-            view.attuned = static_cast<std::int32_t>(item->attuned);
+            view.charges = static_cast<std::int32_t>(item.charges);
+            view.attuned = static_cast<std::int32_t>(item.attuned);
             a.item = &view;
-            q.set_item(item, s, &view);
+            q.set_item(&item, s, &view);
         }
     }
     cast::Spawn* const target_before = st.target;

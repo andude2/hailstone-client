@@ -8,6 +8,8 @@
 #include "core/byte_io.h"
 #include "game/coords.h"
 #include "mock_server/harness.h"
+#include "mq/parse.h"
+#include "mq/tlo.h"
 #include "net/item_packets.h"
 #include "net/notice_packets.h"
 #include "net/packet_io.h"
@@ -184,6 +186,25 @@ TEST_CASE("Hover respawn: /rez accepts the offer and selects the resurrection ro
     CHECK(c.respawn_chosen());
     hover_barrier(h.rig);
     CHECK(MockEqServer::count(h.rig.server.zone_log, Op::RespawnWindow) == 1);
+}
+
+TEST_CASE("Resurrection offer: a living character at bind can detect and accept a rez") {
+    HoverRig h;
+    REQUIRE(h.rig.to_zone());
+    auto& c = h.rig.conn;
+    mq::Registry registry;
+    mq::register_game_tlos(registry);
+    mq::Context context;
+    context.conn = &c;
+    context.registry = &registry;
+    CHECK(mq::parse_macro_data(context, "${Me.Dead}") == "FALSE");
+    CHECK(mq::parse_macro_data(context, "${Me.RezPending}") == "FALSE");
+    c.receive_zone_packet_for_test(rez_offer(100, 3, 0));
+    CHECK(mq::parse_macro_data(context, "${Me.RezPending}") == "TRUE");
+    c.send_command("/rez");
+    hover_barrier(h.rig);
+    CHECK(MockEqServer::count(h.rig.server.zone_log, Op::RezzAnswer) == 1);
+    CHECK(mq::parse_macro_data(context, "${Me.RezPending}") == "FALSE");
 }
 
 TEST_CASE("Hover respawn: /rez answers another zone's offer at once") {

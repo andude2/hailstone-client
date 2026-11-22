@@ -13,6 +13,7 @@
 #include "app/addon_requirements.h"
 #include "mq/lua_mq.h"
 #include "mq_test_world.h"
+#include "net/task_packets.h"
 #include "core/sha256.h"
 #include "plugin/policy.h"
 #include "plugin/ui_bridge.h"
@@ -70,6 +71,96 @@ TEST_CASE("Automation: /foreground raises this client window") {
     std::string line = "/foreground";
     CHECK(h.automation->hooks().command(line));
     CHECK(h.window_raises == 1);
+}
+
+TEST_CASE("Automation: crew view preserves the parked native plugin's pulses and XTargets") {
+    mq_test::World graphical{"crew_automation_graphical"};
+    mq_test::World observer{"crew_automation_observer"};
+    using Access = net::GameConnectionTestAccess;
+    Access::set_server_rules(*graphical.conn, plugin::Rules{});
+    Access::xtargets(*graphical.conn).slots = {{1, 2, 10, "a_rat01"}};
+    Access::xtargets(*observer.conn).slots = {{1, 2, 11, "Fippy_Darkpaw000"}};
+
+    const auto data = graphical.dir / "data";
+    const fs::path built = HAILSTONE_PROBE_PLUGIN;
+    fs::create_directories(data / "plugins");
+    fs::copy_file(built, data / "plugins" / built.filename());
+    auto* displayed = graphical.conn.get();
+    std::string server = "Original";
+    app::AutomationEnv env;
+    env.data_dir = data;
+    env.connection = [&] { return displayed; };
+    env.server_name = [&] { return server; };
+    app::Automation automation(std::move(env));
+
+    // The pulse's command goes through the actual native host's XTarget bulk accessor.
+    std::vector<const net::GameConnection*> pulses;
+    automation.hooks().on_pulse(plugin::Hooks::kClient, [&] {
+        const auto& context = automation.context();
+        pulses.push_back(context.conn);
+        CHECK(context.server_name == "Original");
+        std::string command = "/probextargets";
+        CHECK(automation.hooks().command(command));
+    });
+    const auto check_xtarget = [&] {
+        bool match = false;
+        while (const auto event = graphical.conn->poll_chat())
+            match = match || event->text.find("spawn 10, aggro") != std::string::npos;
+        CHECK(match);
+        CHECK_FALSE(observer.conn->poll_chat().has_value());
+    };
+
+    automation.frame();
+    check_xtarget();
+    automation.set_parked_character(graphical.conn.get(), server);
+    displayed = observer.conn.get();
+    server = "Observed";
+    automation.frame();
+    check_xtarget();
+    displayed = graphical.conn.get();
+    server = "Original";
+    automation.set_parked_character(nullptr);
+    automation.frame();
+    check_xtarget();
+    CHECK(pulses == std::vector<const net::GameConnection*>(3, graphical.conn.get()));
+}
+
+TEST_CASE("Automation: Lua reads task progress without a graphical task window") {
+    AutomationHost h;
+    auto& c = *h.world.conn;
+    game::Task quest;
+    quest.task_id = 123;
+    quest.title = "Snapshot Quest";
+    c.receive_zone_packet_for_test(net::encode_task_description(quest));
+
+    net::TaskActivity activity;
+    activity.task_id = quest.task_id;
+    activity.type = quest.type;
+    activity.element.type = 2;
+    activity.element.hidden = false;
+    activity.element.description = "Test objective";
+    activity.element.goal_count = 5;
+    activity.element.done_count = 2;
+    c.receive_zone_packet_for_test(net::encode(activity));
+    activity.element.activity_id = 1;
+    activity.element.type = -1;
+    activity.element.hidden = true;
+    c.receive_zone_packet_for_test(net::encode(activity));
+
+    h.write("task_snapshot.lua", R"lua(
+        local hs = require('hailstone')
+        local t = hs.tasks()
+        assert(hs.tasks_revision() > 0 and #t == 1)
+        assert(t[1].id == 123 and t[1].title == 'Snapshot Quest')
+        assert(t[1].objectives[1].count == 2 and t[1].objectives[1].goal == 5)
+        assert(t[1].objectives[2].hidden and t[1].objectives[2].text == nil)
+        hs.chat("headless task snapshot OK")
+    )lua");
+    h.automation->frame();
+    REQUIRE(h.automation->scripts().run("task_snapshot", {}));
+    h.automation->frame();
+    const auto lines = h.chat();
+    CHECK(std::find(lines.begin(), lines.end(), "headless task snapshot OK") != lines.end());
 }
 
 TEST_CASE("Automation: a script holds autoskill off while it runs; stopping it lets go") {

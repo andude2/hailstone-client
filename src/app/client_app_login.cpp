@@ -534,7 +534,7 @@ ui::lua::LuaUi::ClipboardCheck ClientApp::lua_clipboard_check() {
 }
 
 void ClientApp::sync_plugin_windows() {
-    plugin::UiBridge* bridge = automation_ ? &automation_->plugin_ui() : nullptr;
+    plugin::UiBridge* bridge = automation_ && !parked_conn_ ? &automation_->plugin_ui() : nullptr;
     ui_host_.plugin_ui = bridge;
     const auto now = std::chrono::steady_clock::now();
     const bool same_sources = bridge ? bridge->folders() == plugin_ui_sources_ : plugin_ui_sources_.empty();
@@ -900,7 +900,9 @@ void ClientApp::start_game(const net::WorldTicket& ticket) {
     asset_rules_serial_ = 0;
     pre_game_failed_ = false;
     apply_connection_settings();
-    conn_->set_client_commands([this](std::string_view h, const std::string& args) { return client_command(h, args); });
+    conn_->set_client_commands([this](std::string_view h, const std::string& args) {
+        return !parked_conn_ && client_command(h, args);
+    });
     // The UI ini's [ChatManager] (/autojoin and the chat server's auto join) and the chat windows' text (/report).
     conn_->set_ui_ini(
         [](std::string_view section, std::string_view key) -> std::optional<std::string> {

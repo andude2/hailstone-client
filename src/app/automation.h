@@ -121,6 +121,9 @@ public:
     void answer_plugin_consent(std::optional<bool> allow);
     // A running script holds the Ability Book's autoskill off (hailstone.hold_autoskill); a stopped one's hold goes.
     bool autoskill_held();
+    // Keep callbacks on the live character while the graphical window borrows a crew member's view.
+    // Clear this binding after restoring the normal connection and before destroying the parked one.
+    void set_parked_character(net::GameConnection* connection, std::string server_name = {});
     // Once a frame after the connection's update: the server's rules, OnPulse, the scripts.
     void frame();
     // Inside the ImGui frame: the scripts' and plugins' windows, the server plugins' question when no UI pack window

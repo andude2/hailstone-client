@@ -3,6 +3,7 @@
 // (Handle_OP_ItemVerifyReply @0x4bf800) eats, drinks, applies a poison or casts the item's click effect (read
 // from the disassembly).
 #include "net/game_connection.h"
+#include "net/item_click.h"
 
 #include <algorithm>
 #include <cctype>
@@ -146,7 +147,7 @@ bool GameConnection::use_item(const ItemSlot& slot) {
     if (!item || item->item_class != 0) return false;
     // An item with a click spell that cannot be cast sitting: stand up (the auto-stand option 0xde0d5b), else
     // 12441 (300 for a skill) and, feigning, 12368; nothing is sent then.
-    const ItemEffect& click = item->effects[kEffectClick];
+    const ItemEffect& click = item_click_source(*item).effects[kEffectClick];
     if (const game::SpellData* s = click.effect > 0 ? spell_table_->get(static_cast<std::uint32_t>(click.effect)) : nullptr;
         s && !s->cast_not_standing) {
         if (pstatus_.stand_state == 110 && client_option(game::ClientOption::AllowAutoStand)) set_stand_state(100);
@@ -242,7 +243,7 @@ void GameConnection::handle_item_verify_reply(const ItemVerifyReply& r) {
     // (@0x43c7b3: CMP byte [esp+0xb0],0), is 0. The cast runs locally (the recast timer, the cast bar) and
     // nothing is sent: the server cast the item when it took OP_ItemVerifyRequest (EQEmu's
     // Handle_OP_ItemVerifyRequest), and a second OP_CastSpell would cast an instant clicky again.
-    if (spell == 0) spell = item->effects[kEffectClick].effect;
+    if (spell == 0) spell = item_click_source(*item).effects[kEffectClick].effect;
     if (spell > 0 && spell_table_->get(static_cast<std::uint32_t>(spell))) {
         const bool charm_off = item->charm_file_id != 0 && static_cast<std::int32_t>(item->scaled_value) < 1;
         if ((!spells_.casting.casting() || visible_class() == 8) && !charm_off) {
@@ -367,8 +368,11 @@ void GameConnection::reset_all_item_recast_timers() {
         Item* item = inventory_.at(ItemSlot::possessions(slot));
         if (!item) continue;
         item->last_cast_time = 0;
-        if (!item->is_bag()) continue;
-        for (auto& c : item->contents) c.item.last_cast_time = 0;
+        for (auto& child : item->contents) {
+            child.item.last_cast_time = 0;
+            if (item->is_bag() && !child.item.is_bag())
+                for (auto& socket : child.item.contents) socket.item.last_cast_time = 0;
+        }
     }
     item_recast_timers_.fill(0);
 }
@@ -383,7 +387,10 @@ ItemSlot GameConnection::cast_item_slot() const {
     return s;
 }
 
-Item* GameConnection::cast_item() { return spells_.casting.is_item_cast() ? inventory_.at(cast_item_slot()) : nullptr; }
+Item* GameConnection::cast_item() {
+    Item* carrier = spells_.casting.is_item_cast() ? inventory_.at(cast_item_slot()) : nullptr;
+    return carrier ? &item_click_source(*carrier) : nullptr;
+}
 
 Item* GameConnection::valid_cast_item() {
     Item* item = cast_item();

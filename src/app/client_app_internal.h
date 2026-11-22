@@ -451,7 +451,7 @@ public:
         nenv.assist_follow = config_.get_bool("nav.follow", true);
         nav_ = std::make_unique<Navigator>(std::move(nenv));
         AutomationEnv aenv;
-        aenv.nav = [this]() -> nav::NavControl* { return nav_.get(); };
+        aenv.nav = [this]() -> nav::NavControl* { return parked_conn_ ? nullptr : nav_.get(); };
         aenv.web = web_service_.get();
         aenv.install_dir = platform::install_dir();
         aenv.data_dir = platform::data_dir();
@@ -462,45 +462,49 @@ public:
         aenv.server_name = [this] { return char_view_.server_name; };
         aenv.server_profile = [this] { return server_profile_.id; };
         aenv.profile_name = [this] { return server_profile_.name; };
-        aenv.window_open = [this](std::string_view w) { return ui_api_ && ui_api_->shown(w); };
-        aenv.face = [this](double degrees, bool) { face_degrees(degrees); };
-        aenv.keypress = [this](std::string_view command, int mode) { return script_keypress(command, mode); };
+        aenv.window_open = [this](std::string_view w) { return !parked_conn_ && ui_api_ && ui_api_->shown(w); };
+        aenv.face = [this](double degrees, bool) { if (!parked_conn_) face_degrees(degrees); };
+        aenv.keypress = [this](std::string_view command, int mode) { return !parked_conn_ && script_keypress(command, mode); };
         aenv.max_camera_distance = [this] { return max_camera_distance_; };
         aenv.set_max_camera_distance = [this](float d) {
+            if (parked_conn_) return;
             max_camera_distance_ = d;
             camera_distance_ = std::min(camera_distance_, d);
         };
         aenv.hot_button = [this](int bar, int page, int button) -> std::optional<std::string> {
-            return actions_ui_ ? actions_ui_->hot_button_spec(bar, page, button) : std::nullopt;
+            return !parked_conn_ && actions_ui_ ? actions_ui_->hot_button_spec(bar, page, button) : std::nullopt;
         };
         aenv.set_hot_button = [this](int bar, int page, int button, const std::string& spec) {
-            return actions_ui_ && actions_ui_->set_hot_button_spec(bar, page, button, spec);
+            return !parked_conn_ && actions_ui_ && actions_ui_->set_hot_button_spec(bar, page, button, spec);
         };
-        aenv.hot_bar_page = [this](int bar) { return actions_ui_ ? actions_ui_->hot_bar_page(bar) : -1; };
+        aenv.hot_bar_page = [this](int bar) { return !parked_conn_ && actions_ui_ ? actions_ui_->hot_bar_page(bar) : -1; };
         aenv.set_hot_bar_page = [this](int bar, int page) {
-            if (actions_ui_) actions_ui_->set_hot_bar_page(bar, page);
+            if (!parked_conn_ && actions_ui_) actions_ui_->set_hot_bar_page(bar, page);
         };
         aenv.ability = [this](mq::AbilityKind kind, std::string_view name) {
-            return ability_state(ui_host_, kind, name);
+            return ability_state(automation_ability_host(), kind, name);
         };
-        aenv.autoskill_list = [this] { return autoskill_list(ui_host_); };
-        aenv.use_ability = [this](mq::AbilityKind kind, std::string_view name) { return use_ability(ui_host_, kind, name); };
-        aenv.ability_bulk = [this] { return ability_bulk_rows(ui_host_); };
+        aenv.autoskill_list = [this] {
+            return parked_conn_ ? decltype(autoskill_list(ui_host_)){} : autoskill_list(ui_host_);
+        };
+        aenv.use_ability = [this](mq::AbilityKind kind, std::string_view name) {
+            return use_ability(automation_ability_host(), kind, name);
+        };
+        aenv.ability_bulk = [this] { return ability_bulk_rows(automation_ability_host()); };
         aenv.spell_description = [this](const game::SpellData& s) {
-            return ui_host_.conn ? spell_description(s, ui_host_.conn->strings(),
-                                                     description_player(*ui_host_.conn, ui_host_.character))
+            const UiHost& h = automation_ability_host();
+            return h.conn ? spell_description(s, h.conn->strings(), description_player(*h.conn, h.character))
                                  : std::string();
         };
         aenv.can_see = [this](std::uint32_t id) -> std::optional<bool> {
-            return conn_ ? can_see_spawn(id) : std::nullopt;
+            return !parked_conn_ && conn_ ? can_see_spawn(id) : std::nullopt;
         };
         aenv.line_of_sight = [this](const std::array<float, 3>& a, const std::array<float, 3>& b) -> std::optional<bool> {
-            if (!collision_) return std::nullopt;
+            if (parked_conn_ || !collision_) return std::nullopt;
             return collision_->line_of_sight(glm::vec3(a[0], a[1], a[2]), glm::vec3(b[0], b[1], b[2]));
         };
         aenv.raise_window = [this] { window_.raise(); };
         automation_ = std::make_unique<Automation>(aenv);
-        ui_host_.nameplates = &automation_->nameplates();
         lua_ui_->add_ui_api([this](lua_State* L) { register_ui_api(L); });
         automation_->hooks().add_command(plugin::Hooks::kClient, "/lighting",
                                          [this](std::string_view args) { lighting_command(args); });
@@ -1277,6 +1281,9 @@ private:
     bool drive_mode_ = false;
     // A parked while an observe view is shown in the same window.
     std::unique_ptr<net::GameConnection> parked_conn_;
+    std::unique_ptr<StatsUi> parked_stats_;
+    UiHost parked_ability_host_;
+    UiHost& automation_ability_host() { return parked_conn_ ? parked_ability_host_ : ui_host_; }
     ui::InGameView parked_game_view_;
     std::filesystem::path parked_ui_character_dir_;
     std::string parked_layout_for_, parked_files_profile_, parked_server_name_;

@@ -2679,6 +2679,7 @@ public:
     void right_click_player(std::uint32_t spawn_id);
     // ConfirmationDialog questions (/surname) and their answer.
     const std::optional<Confirmation>& confirmation() const { return confirmation_; }
+    std::string confirmation_requester() const;
     void answer_confirmation(bool yes);
     // The bandolier (PcBase +0x6d7c): the sets, how many may be used, and its buttons.
     const std::vector<game::BandolierSet>& bandolier() const { return bandolier_; }

@@ -386,6 +386,25 @@ TEST_CASE("item clicks: the reply casts without OP_CastSpell; the server cast it
     CHECK(conn.spell_state().casting.cast_time == 3000);
 }
 
+TEST_CASE("item clicks: activating a carrier sends the parent slot for a socketed effect") {
+    Item socketed = make_item(1304, "Socketed Weapon", 13);
+    Item augment = make_item(1305, "Click Augment", 13);
+    augment.item_type = 54;
+    augment.charges = 1;
+    augment.effects[kEffectClick].effect = 500;
+    augment.effects[kEffectClick].type = 4;
+    socketed.contents.push_back({3, augment});
+    Rig rig(with_items({socketed}));
+    REQUIRE(rig.to_zone());
+    rig.conn.send_command("/useitem 13");
+    REQUIRE(rig.until([&] { return last_of(rig.server.zone_log, Op::ItemVerifyRequest); }));
+    const auto* request = last_of(rig.server.zone_log, Op::ItemVerifyRequest);
+    REQUIRE(request->data.size() == kItemVerifyRequestSize);
+    CHECK(u32_at(*request, 0) == 0);
+    CHECK(u32_at(*request, 4) == (13u | 0xffffu << 16));
+    CHECK(MockEqServer::count(rig.server.zone_log, Op::CastSpell) == 0);
+}
+
 TEST_CASE("auto inventory: worn stacks first, then a worn slot by the class check alone (AutoInventoryCursorItem)") {
     Item worn;
     worn.id = 8005;

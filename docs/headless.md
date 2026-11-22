@@ -183,11 +183,25 @@ confirmation dialogs. The worker checks the zone, inventory revision, or
 prompt identity before applying an action. The viewer refreshes from the
 worker's inventory and dialog state.
 
-The worker keeps its own plugins and scripts running. The viewer follows
+The worker keeps its own plugins and scripts running. The graphical character's
+plugins and scripts also keep receiving pulses and reading its original
+connection while parked. Their windows and overlays return with **Release**.
+Controls tied to the graphical scene, such as navigation and keypresses,
+are unavailable to the parked character. The viewer follows
 live server packets and the worker's position and state about ten times a
 second. Movement, chat, casting, bank and trade actions, and full character
 control are outside this mode. The standalone `hailstone --drive-file F`
 diagnostic viewer stays read-only.
+
+## Resurrection and item clicks
+
+Sentinel can use `${Me.RezPending}` to find an actionable resurrection
+offer after respawning at bind or while hovering. `/rez` accepts the offer
+or selects the available resurrection destination.
+
+Item click reads use the equipment's own click effect first, followed by
+the first clickable augment in socket order. Use the equipment's name or
+slot to activate a socketed effect.
 
 ## Rules and consent
 
@@ -207,9 +221,9 @@ These report "unavailable" in the log instead of silently pretending:
 - Door models in movement: no `WorldObjects` headless, so a closed door
   does not stop a walk and Navigator's door-in-the-way clicks do not
   trigger (see "Movement").
-- The Ability Book accessors the graphical client serves from its UI host
-  (`AutomationEnv` ability, autoskill list, `use_ability` and the bulk
-  ability read), `/keypress` and `/face`.
+- Automatic skill rules from the graphical Ability Book, `/keypress` and `/face`.
+  Headless plugins can look up and activate skills, disciplines and AAs through
+  the same ability helpers as the graphical client.
 - A crew member ends for good when it camps or fails: only a link
   death relaunches, and only in crew mode.
 

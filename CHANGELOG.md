@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Headless Lua scripts can read active quest progress and task revisions without opening a journal window.
+
+- Sentinel can detect resurrection offers at bind. Items report click effects and reuse timers supplied by inserted augments.
+
+- Crew View keeps plugins attached to the parked graphical character, preserving their data and peer heartbeats across a switch.
+
+- Headless plugins can read and activate skills, disciplines, and AAs. Macro queries expose active auras, linked gem timers, and current aggro readings. 
+
 - Crew switches within the same zone instance reuse the loaded scene. Workers started with interaction enabled can accept inventory, augment, and confirmation clicks from the Crew window.
 
 - A GM's /kill now drops you to -10000 HP, as in the original client, until the server next updates your HP (it only played the sound and printed the line)

@@ -95,7 +95,7 @@ void ClientApp::draw_nameplates(const render::FrameInfo& frame, const glm::mat4&
     if (!plate_layer_) plate_layer_ = std::make_unique<NameplateLayer>(vk_, shader_dir_);
     plate_layer_->begin(frame, dl, glm::vec4(view_area_.x, view_area_.y, view_area_.w, view_area_.h), camera_.near_plane,
                         far_plane);
-    auto* canvas_registry = automation_ ? &automation_->nameplates() : nullptr;
+    auto* canvas_registry = automation_ && !parked_conn_ ? &automation_->nameplates() : nullptr;
     const bool canvas_active = canvas_registry && !canvas_registry->empty() && plate_layer_->supports_canvas();
     NameplateCanvasPaintStyle canvas_style;
     if (canvas_active) {
@@ -410,7 +410,8 @@ void ClientApp::update_ui_host() {
         h.retry_required_addons = [this] { retry_required_addons(); };
     }
     h.web = web_service_.get();
-    h.scripts = automation_ ? &automation_->scripts() : nullptr;
+    h.nameplates = automation_ && !parked_conn_ ? &automation_->nameplates() : nullptr;
+    h.scripts = automation_ && !parked_conn_ ? &automation_->scripts() : nullptr;
     h.registry = automation_ ? &automation_->registry() : nullptr;
     if (!h.tlo_context && automation_) h.tlo_context = [this]() -> const mq::Context& { return automation_->context(); };
     h.in_game = screen_ == Screen::InGame && player_ready_ && conn_;
@@ -539,7 +540,7 @@ void ClientApp::update_ui_host() {
             };
             // Lua socials (game/lua_social.h): their Lua runs in the script host with the modifiers held now.
             hooks.press_lua_social = [this](std::int32_t social, int bar, int button) {
-                if (!automation_ || !actions_ui_) return;
+                if (parked_conn_ || !automation_ || !actions_ui_) return;
                 const game::Social& s = actions_ui_->hot_buttons().social(social);
                 mq::ButtonPress p;
                 p.social = social;
@@ -554,11 +555,11 @@ void ClientApp::update_ui_host() {
                 automation_->scripts().press_button(p);
             };
             hooks.stop_lua_social = [this](std::int32_t social) {
-                return automation_ && automation_->scripts().stop_button(social);
+                return !parked_conn_ && automation_ && automation_->scripts().stop_button(social);
             };
             hooks.edit_lua_social = [&h](std::int32_t social) { h.lua_social_edit = social; };
             hooks.forget_lua_social = [this](std::int32_t social) {
-                if (automation_) automation_->scripts().forget_button(social);
+                if (automation_ && !parked_conn_) automation_->scripts().forget_button(social);
             };
             actions_ui_->set_hooks(std::move(hooks));
         }
