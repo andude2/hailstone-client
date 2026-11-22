@@ -3530,9 +3530,9 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
         auto remove_ui = p.table.remove_ui_contribution;
         static_assert(remove_offset == set_offset + sizeof(set_ui));
         static_assert(sizeof(remove_ui) == sizeof(p.table.loot_corpse));
-        auto* bytes = reinterpret_cast<std::byte*>(&p.table);
-        std::memcpy(bytes + set_offset, &set_ui, sizeof(set_ui));
-        std::memcpy(bytes + remove_offset, &remove_ui, sizeof(remove_ui));
+        auto* table_bytes = reinterpret_cast<std::byte*>(&p.table);
+        std::memcpy(table_bytes + set_offset, &set_ui, sizeof(set_ui));
+        std::memcpy(table_bytes + remove_offset, &remove_ui, sizeof(remove_ui));
         p.table.abi = 3;
         p.table.size = remove_offset + sizeof(remove_ui);
     }
