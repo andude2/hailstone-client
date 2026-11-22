@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Lua scripts can exchange a carried item with a worn slot through `hailstone.exchange_item`.
+
 - Headless Lua scripts can read active quest progress and task revisions without opening a journal window.
 
 - Sentinel can detect resurrection offers at bind. Items report click effects and reuse timers supplied by inserted augments.

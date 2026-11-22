@@ -163,6 +163,57 @@ TEST_CASE("Automation: Lua reads task progress without a graphical task window")
     CHECK(std::find(lines.begin(), lines.end(), "headless task snapshot OK") != lines.end());
 }
 
+TEST_CASE("Automation: a Lua charm exchange uses the carried bag and respects an occupied cursor") {
+    AutomationHost h;
+    auto& inventory = net::GameConnectionTestAccess::inventory(*h.world.conn);
+    const auto charm = net::ItemSlot::possessions(net::kSlotCharm);
+    const auto bag_slot = net::ItemSlot::possessions(net::kSlotGeneral1);
+    const auto bag_cell = net::ItemSlot::possessions(net::kSlotGeneral1, 0);
+    const auto cursor = net::ItemSlot::possessions(net::kSlotCursor);
+    net::Item guardian;
+    guardian.id = 7001;
+    guardian.name = "Guardian Charm";
+    guardian.classes = 0xffff;
+    guardian.equip_slots = 1;
+    net::Item ultimate = guardian;
+    ultimate.id = 7002;
+    ultimate.name = "Ultimate Charm VI";
+    net::Item bag;
+    bag.item_class = 1;
+    bag.bag_slots = 1;
+    bag.bag_size = 10;
+    REQUIRE(inventory.put(charm, guardian));
+    REQUIRE(inventory.put(bag_slot, bag));
+    REQUIRE(inventory.put(bag_cell, ultimate));
+    REQUIRE(inventory.put(cursor, guardian));
+
+    h.write("charm.lua", R"lua(
+        local hs = require('hailstone')
+        local mq = require('mq')
+        assert(not hs.exchange_item('Ultimate Charm VI', 65536))
+        assert(not hs.exchange_item('Ultimate Charm', 0))
+        assert(not hs.exchange_item('Ultimate Charm VI', 0))
+        mq.delay(0)
+        assert(hs.exchange_item('ultimate charm vi', 0))
+        assert(mq.TLO.Me.Inventory('charm').Name() == 'Ultimate Charm VI')
+        hs.chat('charm exchange OK')
+    )lua");
+    h.automation->frame();
+    REQUIRE(h.automation->scripts().run("charm", {}));
+    h.automation->frame();
+    REQUIRE(inventory.at(charm)->id == guardian.id);
+    REQUIRE(inventory.at(bag_cell)->id == ultimate.id);
+    REQUIRE(inventory.take(cursor));
+    h.automation->frame();
+    REQUIRE(inventory.at(charm));
+    CHECK(inventory.at(charm)->id == ultimate.id);
+    REQUIRE(inventory.at(bag_cell));
+    CHECK(inventory.at(bag_cell)->id == guardian.id);
+    CHECK(inventory.cursor() == nullptr);
+    const auto lines = h.chat();
+    CHECK(std::find(lines.begin(), lines.end(), "charm exchange OK") != lines.end());
+}
+
 TEST_CASE("Automation: a script holds autoskill off while it runs; stopping it lets go") {
     AutomationHost h;
     h.automation->frame();

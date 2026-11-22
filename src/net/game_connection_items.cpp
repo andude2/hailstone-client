@@ -8,6 +8,7 @@
 #include <fstream>
 #include <sstream>
 
+#include "core/ascii_case.h"
 #include "core/atomic_file.h"
 #include "core/log.h"
 #include "core/sha256.h"
@@ -669,6 +670,55 @@ void GameConnection::click_slot(const ItemSlot& slot, bool shift, bool ctrl) {
         return;
     }
     if (move_item(cursor, slot, 0)) item_moved_sound(worn_context(cursor, slot));
+}
+
+bool GameConnection::exchange_item(std::string_view name, int worn_slot) {
+    if (name.empty() || worn_slot < 0 || worn_slot >= kEquipmentSlots || drive_input_ ||
+        item_job_ || confirmation_ || !item_job_blocked(ItemJobScope::Inventory).empty())
+        return false;
+
+    const auto dest = ItemSlot::possessions(static_cast<std::int16_t>(worn_slot));
+    const Item* worn = inventory_.at(dest);
+    if (worn && core::iequals(worn->name, name)) return true;
+    const Item* primary = inventory_.at(ItemSlot::possessions(kSlotPrimary));
+    const Item* secondary = inventory_.at(ItemSlot::possessions(kSlotSecondary));
+    const bool dual_wield = profile_ && profile_->skills.size() > 22 && profile_->skills[22] > 0;
+    const bool allow_all = server_ext().can_use_all_items(*this);
+    const bool available = inv_slot_available(worn_slot);
+
+    // Check both destinations before picking anything up. Leave items requiring
+    // attunement to a manual equip so the action cannot leave a pending dialog.
+    auto eligible = [&](const Item& item) {
+        return core::iequals(item.name, name) && !item.stackable() &&
+            !(item.attuneable && item.attuned == 0) &&
+            game::can_go_in_equip_slot(item, worn_slot, primary, secondary, dual_wield, available) &&
+            (allow_all || game::can_use_class(item, player_class_mask()));
+    };
+    std::optional<ItemSlot> source;
+    for (const auto& [key, item] : inventory_.items()) {
+        if (key.first != kInvPossessions || key.second < kSlotGeneral1 || key.second > kSlotGeneral10) continue;
+        if (eligible(item)) {
+            source = ItemSlot::possessions(key.second);
+            break;
+        }
+        if (!item.is_bag() || (worn && game::bag_fit(item, *worn) != 1)) continue;
+        const auto found = std::find_if(item.contents.begin(), item.contents.end(), [&](const auto& child) {
+            return child.index < item.bag_slots && eligible(child.item);
+        });
+        if (found != item.contents.end()) {
+            source = ItemSlot::possessions(key.second, static_cast<std::int16_t>(found->index));
+            break;
+        }
+    }
+    if (!source) return false;
+
+    click_slot(*source);
+    const Item* held = inventory_.cursor();
+    if (!held || !core::iequals(held->name, name)) return false;
+    click_slot(dest);
+    if (inventory_.cursor()) click_slot(*source);
+    const Item* equipped = inventory_.at(dest);
+    return equipped && core::iequals(equipped->name, name) && !inventory_.cursor();
 }
 
 void GameConnection::cancel_quantity() {

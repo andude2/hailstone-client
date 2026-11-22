@@ -1654,6 +1654,16 @@ int l_right_click_item(lua_State* L) {
     return 0;
 }
 
+int l_exchange_item(lua_State* L) {
+    net::GameConnection* c = acting(L, "hailstone.exchange_item");
+    std::size_t length = 0;
+    const char* name = luaL_checklstring(L, 1, &length);
+    const auto slot = luaL_checkinteger(L, 2);
+    lua_pushboolean(L, c && slot >= 0 && slot < net::kEquipmentSlots &&
+        c->exchange_item(std::string_view(name, length), static_cast<int>(slot)));
+    return 1;
+}
+
 int l_close_spell_book(lua_State* L) {
     if (net::GameConnection* c = acting(L, "hailstone.close_spell_book")) c->close_spell_book();
     return 0;
@@ -1777,6 +1787,7 @@ void register_hailstone(lua_State* L) {
              {"use_ability", l_use_ability},
              {"character_dir", l_character_dir},
              {"right_click_item", l_right_click_item},
+             {"exchange_item", l_exchange_item},
              {"close_spell_book", l_close_spell_book},
              {"clear_spell_recovery", l_clear_spell_recovery},
              {"set_window_pet", l_set_window_pet},

@@ -518,6 +518,7 @@ code. A script that registers any of these stays loaded after its main chunk ret
 | `train_aa(group)` | buys the next rank of an AA as `/alternateadv buy` does, if the AA window's own check allows it; false (and nothing sent) otherwise |
 | `hold_autoskill(on)` | stops the Ability Book's autoskill from using anything while held. The hold ends when the script stops |
 | `right_click_item(slot [, class])` | the client's own right click on an item; `class` makes the casting check see that class |
+| `exchange_item(name, worn_slot)` | equips an exact, case-insensitive item name from carried inventory or a carried bag and returns the old item to its source slot. Uses a numeric worn slot (0 is charm). Returns false if the move is blocked, including when the cursor is occupied, the old item cannot fit, or the new item needs attunement. |
 | `close_spell_book()`, `clear_spell_recovery()` | |
 | `set_window_pet(id)` | shows another of the player's pets in the pet window (only on this client; the server is not told) |
 | `inspect_item(id [, augments])` | opens an item's display as a click on its link would |

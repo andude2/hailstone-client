@@ -1780,6 +1780,8 @@ public:
     // Ctrl with a bag at the slot moves the cursor item, or a cursor bag's contents, into that bag with
     // OP_MoveMultipleItems; an Attuneable item going into a worn slot asks first (confirmation 0x7a, eqstr 5912).
     void click_slot(const ItemSlot& slot, bool shift = false, bool ctrl = false);
+    // Exchange a carried item with a worn slot, returning the old item to the source.
+    bool exchange_item(std::string_view name, int worn_slot);
     // The quantity dialog (CQuantityWnd) for picking up part of a stack:
     // Accept → CInvSlot::SliderComplete(quantity) splits the stack onto the
     // cursor (OP_MoveItem with the count) or, for all of it, moves it whole.
