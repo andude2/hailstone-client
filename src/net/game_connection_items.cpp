@@ -679,7 +679,7 @@ bool GameConnection::exchange_item(std::string_view name, int worn_slot) {
 
     const auto dest = ItemSlot::possessions(static_cast<std::int16_t>(worn_slot));
     const Item* worn = inventory_.at(dest);
-    if (worn && core::iequals(worn->name, name)) return true;
+    if (worn && iequals(worn->name, name)) return true;
     const Item* primary = inventory_.at(ItemSlot::possessions(kSlotPrimary));
     const Item* secondary = inventory_.at(ItemSlot::possessions(kSlotSecondary));
     const bool dual_wield = profile_ && profile_->skills.size() > 22 && profile_->skills[22] > 0;
@@ -689,7 +689,7 @@ bool GameConnection::exchange_item(std::string_view name, int worn_slot) {
     // Check both destinations before picking anything up. Leave items requiring
     // attunement to a manual equip so the action cannot leave a pending dialog.
     auto eligible = [&](const Item& item) {
-        return core::iequals(item.name, name) && !item.stackable() &&
+        return iequals(item.name, name) && !item.stackable() &&
             !(item.attuneable && item.attuned == 0) &&
             game::can_go_in_equip_slot(item, worn_slot, primary, secondary, dual_wield, available) &&
             (allow_all || game::can_use_class(item, player_class_mask()));
@@ -714,11 +714,11 @@ bool GameConnection::exchange_item(std::string_view name, int worn_slot) {
 
     click_slot(*source);
     const Item* held = inventory_.cursor();
-    if (!held || !core::iequals(held->name, name)) return false;
+    if (!held || !iequals(held->name, name)) return false;
     click_slot(dest);
     if (inventory_.cursor()) click_slot(*source);
     const Item* equipped = inventory_.at(dest);
-    return equipped && core::iequals(equipped->name, name) && !inventory_.cursor();
+    return equipped && iequals(equipped->name, name) && !inventory_.cursor();
 }
 
 void GameConnection::cancel_quantity() {
