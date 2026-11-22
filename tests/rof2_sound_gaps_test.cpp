@@ -11,6 +11,8 @@
 #include "app/lua_ui.h"
 #include "app/lua_ui_windows.h"
 #include "app/player_movement.h"
+#include "app/sound_events.h"
+#include "audio/individual_sounds.h"
 #include "assets/regions.h"
 #include "core/byte_io.h"
 #include "core/game_dir.h"
@@ -31,7 +33,150 @@ std::vector<std::int32_t> wave_cues(net::GameConnection& c) {
     return out;
 }
 
+// The context each Wave cue carries (Hailstone: what the Individual Sounds volumes are picked from).
+std::vector<net::SoundCue::Context> context_cues(net::GameConnection& c) {
+    std::vector<net::SoundCue::Context> out;
+    for (const net::SoundCue& cue : c.take_sound_cues())
+        if (cue.kind == net::SoundCue::Kind::Wave) out.push_back(cue.context);
+    return out;
+}
+
+constexpr std::int16_t kHatPackSlot = net::kSlotGeneral1 + 2, kOtherPackSlot = net::kSlotGeneral1 + 3;
+constexpr std::uint32_t kHatItemId = 6001;
+constexpr std::uint32_t kBagType = 7; // a bag type with the bag's own open wave
+constexpr std::uint32_t kPetOwnerId = 99, kNoOwner = 0;
+
+net::Item make_hat() {
+    net::Item hat;
+    hat.name = "Hat";
+    hat.id = kHatItemId;
+    hat.equip_slots = 1u << net::kSlotHead;
+    hat.classes = 0xffff;
+    return hat;
+}
+
 } // namespace
+
+TEST_CASE("Individual sounds: an item put on or taken off carries the ItemWorn context, a move between packs none") {
+    mq_test::World w("sound_equip_group");
+    auto& c = *w.conn;
+    using A = net::GameConnectionTestAccess;
+    using X = net::SoundCue::Context;
+    auto poss = [](std::int16_t s) { return net::ItemSlot::possessions(s); };
+    REQUIRE(A::inventory(c).put(poss(kHatPackSlot), make_hat()));
+    c.take_sound_cues();
+    c.click_slot(poss(kHatPackSlot));        // picked up from a pack
+    CHECK(context_cues(c) == std::vector<X>{X::None});
+    c.click_slot(poss(net::kSlotHead));      // put on
+    CHECK(context_cues(c) == std::vector<X>{X::ItemWorn});
+    c.click_slot(poss(net::kSlotHead));      // taken off
+    CHECK(context_cues(c) == std::vector<X>{X::ItemWorn});
+    c.click_slot(poss(kOtherPackSlot));      // put into a pack: nothing carries over from the move before
+    CHECK(context_cues(c) == std::vector<X>{X::None});
+}
+
+TEST_CASE("Individual sounds: /autoinventory into a worn slot gives both of its cues the ItemWorn context") {
+    mq_test::World w("sound_equip_autoinventory");
+    auto& c = *w.conn;
+    using A = net::GameConnectionTestAccess;
+    using X = net::SoundCue::Context;
+    REQUIRE(A::inventory(c).put(net::ItemSlot::possessions(net::kSlotCursor), make_hat()));
+    c.take_sound_cues();
+    // AutoInventoryCursorItem's own wave, then cmd_autoinventory's: both are an item put on, so both are silenced
+    // together by the Equip volume (a second cue with no context used to play at full volume).
+    A::item_command(c, "/autoinventory", "");
+    REQUIRE(A::inventory(c).at(net::ItemSlot::possessions(net::kSlotHead)));
+    CHECK(context_cues(c) == std::vector<X>{X::ItemWorn, X::ItemWorn});
+
+    // The paper doll's drop (CInventoryWnd::HandleLButtonUp) is the same: it equips, then plays its own wave.
+    REQUIRE(A::inventory(c).put(net::ItemSlot::possessions(net::kSlotCursor), make_hat()));
+    static_cast<void>(A::inventory(c).take(net::ItemSlot::possessions(net::kSlotHead)));
+    c.take_sound_cues();
+    A::drop_on_doll(c);
+    REQUIRE(A::inventory(c).at(net::ItemSlot::possessions(net::kSlotHead)));
+    CHECK(context_cues(c) == std::vector<X>{X::ItemWorn, X::ItemWorn});
+
+    // Into the packs: neither cue is an equip sound.
+    net::Item rock;
+    rock.name = "Rock";
+    rock.id = kHatItemId + 1;
+    rock.item_class = 0;
+    REQUIRE(A::inventory(c).put(net::ItemSlot::possessions(net::kSlotCursor), rock));
+    c.take_sound_cues();
+    A::item_command(c, "/autoinventory", "");
+    CHECK(context_cues(c) == std::vector<X>{X::None});
+}
+
+TEST_CASE("Individual sounds: /autoinventory merging part of a stack into a worn slot still counts as equipping") {
+    constexpr std::uint32_t kArrowId = 8005, kArrowType = 27, kMaxStack = 100, kWornCount = 90, kHeldCount = 15;
+    mq_test::World w("sound_equip_partial_merge");
+    auto& c = *w.conn;
+    using A = net::GameConnectionTestAccess;
+    using X = net::SoundCue::Context;
+    net::Item worn;
+    worn.id = kArrowId;
+    worn.name = "Field Point Arrow";
+    worn.item_type = kArrowType;
+    worn.max_stack = kMaxStack;
+    worn.stack_count = kWornCount;
+    worn.classes = 0xffff;
+    worn.equip_slots = 1u << net::kSlotAmmo;
+    net::Item held = worn;
+    held.stack_count = kHeldCount;
+    REQUIRE(A::inventory(c).put(net::ItemSlot::possessions(net::kSlotAmmo), worn));
+    REQUIRE(A::inventory(c).put(net::ItemSlot::possessions(net::kSlotCursor), held));
+    c.take_sound_cues();
+    // The 10 that fit go onto the worn stack, the other 5 into a pack: the wave that follows is an equip sound.
+    A::item_command(c, "/autoinventory", "");
+    REQUIRE_FALSE(A::inventory(c).cursor());
+    CHECK(context_cues(c) == std::vector<X>{X::ItemWorn});
+}
+
+TEST_CASE("Individual sounds: a bag opens in the BagOpen context, in a bank slot BankBagOpen") {
+    mq_test::World w("sound_bag_group");
+    auto& c = *w.conn;
+    using X = net::SoundCue::Context;
+    c.take_sound_cues();
+    c.container_sound(kBagType, true);
+    c.container_sound(kBagType, true, true);
+    c.container_sound(kBagType, false); // closing has no volume of its own
+    c.container_sound(kBagType, false, true);
+    CHECK(context_cues(c) == std::vector<X>{X::BagOpen, X::BankBagOpen, X::None, X::None});
+}
+
+TEST_CASE("Individual sounds: the group of a Wave cue and of a spawn's footsteps") {
+    using G = audio::SoundGroup;
+    net::SoundCue cue;
+    cue.kind = net::SoundCue::Kind::Wave;
+    cue.spell = static_cast<std::uint32_t>(game::kSoundCoin);
+    CHECK(app::wave_cue_group(cue) == G::Money);
+    cue.spell = static_cast<std::uint32_t>(game::kSoundItemMoved);
+    CHECK(app::wave_cue_group(cue) == G::None);
+    cue.context = net::SoundCue::Context::ItemWorn;
+    CHECK(app::wave_cue_group(cue) == G::Equip);
+    cue.context = net::SoundCue::Context::BagOpen;
+    CHECK(app::wave_cue_group(cue) == G::OpenBag);
+    cue.context = net::SoundCue::Context::BankBagOpen;
+    CHECK(app::wave_cue_group(cue) == G::OpenBank);
+
+    game::Spawn player;                 // another player: not an NPC, whatever its owner field says
+    player.is_npc = false;
+    player.pet_owner_id = kPetOwnerId;
+    game::Spawn pet;                    // an NPC with an owner
+    pet.is_npc = true;
+    pet.pet_owner_id = kPetOwnerId;
+    game::Spawn npc;                    // an NPC without one
+    npc.is_npc = true;
+    npc.pet_owner_id = kNoOwner;
+    CHECK(app::footstep_group(player, true) == G::OwnFootsteps);
+    CHECK(app::footstep_group(player, false) == G::OtherFootsteps);
+    CHECK(app::footstep_group(pet, false) == G::PetFootsteps);
+    CHECK(app::footstep_group(npc, false) == G::OtherFootsteps);
+
+    // Every group the options list has a wave to test with; the others have none.
+    for (const audio::IndividualSound& sound : audio::individual_sounds()) CHECK(app::test_wave(sound.group) > 0);
+    CHECK(app::test_wave(G::None) == 0);
+}
 
 TEST_CASE("Item sound: every click that moves an item plays 0x92, MoveItem itself plays nothing") {
     mq_test::World w("sound_item_moved");

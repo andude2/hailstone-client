@@ -8,6 +8,7 @@
 #include <tuple>
 #include <vector>
 
+#include "app/world_objects.h"
 #include "assets/eqg_character.h"
 #include "assets/model.h"
 #include "assets/pfs.h"
@@ -15,12 +16,15 @@
 #include "game_files.h"
 #include "game/collision.h"
 #include "game/doors.h"
+#include "game/targeting.h"
 #include "game/tradeskill.h"
 #include "game/mechanics/floor_height.h"
 #include "game/swept_sphere.h"
 #include "game/object_collision.h"
+#include "game/world_state.h"
 #include "net/door_packets.h"
 #include "net/opcodes.h"
+#include "render/camera.h"
 
 using namespace hailstone;
 using namespace hailstone::net;
@@ -811,6 +815,29 @@ TEST_CASE("a closed door blocks the doorway; swung open it does not") {
     CHECK(game::blocks(shape, open, glm::inverse(open), 1.0f, {95.0f, 195.0f, 5.0f}, {95.0f, 205.0f, 5.0f}));
 }
 
+TEST_CASE("NPC targeting through a doorway follows the door's current geometry") {
+    const auto shape = game::ObjectShape::from_mesh(box_mesh({-0.5f, 0.0f, 0.0f}, {0.5f, 10.0f, 12.0f}));
+    game::Door door;
+    door.y = 100.0f;
+    door.x = 200.0f;
+    render::FlyCamera camera;
+    camera.position = {95.0f, 205.0f, 5.0f};
+    const auto view_projection = camera.projection(1920, 1080, 100.0f) * camera.view();
+    game::Spawn npc;
+    npc.position = {105.0f, 205.0f, 5.0f};
+    npc.heights.avatar_height = 3.0f;
+    npc.heights.view_height = 6.0f;
+    const auto clear_door = [&](const glm::vec3& to) {
+        const auto transform = game::door_transform(door);
+        return !game::blocks(shape, transform, glm::inverse(transform), door.scale(), camera.position, to);
+    };
+    CHECK_FALSE(game::npc_in_target_view(npc, &view_projection, clear_door));
+    CHECK_FALSE(game::npc_in_target_view(npc, nullptr, clear_door));
+    CHECK(game::npc_in_target_view(npc, &view_projection, {}));
+    door.heading = 128.0f;
+    CHECK(game::npc_in_target_view(npc, &view_projection, clear_door));
+}
+
 TEST_CASE("UseSwitch measures a mouse click to the hit point in 3D") {
     game::Door d;
     d.type = 58;
@@ -838,6 +865,27 @@ TEST_CASE("a passable door model's triangles are available for picking without c
     mesh.parts.front().solid = true;
     const auto solid_shape = game::ObjectShape::from_mesh(mesh, true);
     CHECK(solid_shape.pick_triangles(true).data() == solid_shape.records.data());
+}
+
+TEST_CASE("a ground object made only of passable triangles is picked by them, a placed object is not") {
+    using Source = app::WorldObjects::PickSource;
+    CHECK(app::WorldObjects::picks_passable(Source::Door));
+    CHECK(app::WorldObjects::picks_passable(Source::GroundObject));
+    CHECK_FALSE(app::WorldObjects::picks_passable(Source::Placed));
+
+    // A dropped item's model drawn masked with every part passable: pickable, yet no collision triangle. The
+    // nameplate occlusion asks for the pick without passable triangles (pick_triangles(false)), so it meets none.
+    auto mesh = box_mesh({-0.5f, -0.5f, 0.0f}, {0.5f, 0.5f, 0.2f});
+    mesh.materials.front().blend = assets::BlendMode::Masked;
+    mesh.parts.front().solid = false;
+    const auto shape = game::ObjectShape::from_mesh(mesh, true);
+    const auto picked = shape.pick_triangles(app::WorldObjects::picks_passable(Source::GroundObject));
+    REQUIRE(picked.size() == 12);
+    for (const auto& t : picked) CHECK((t.flags & game::kTrianglePassable) != 0);
+    CHECK(shape.pick_triangles(app::WorldObjects::picks_passable(Source::Placed)).empty());
+    CHECK(shape.pick_triangles(false).empty());
+    CHECK(shape.records.empty());
+    CHECK(shape.tris.empty());
 }
 
 TEST_CASE("Plane of Fire's passable orb has a pick mesh" * doctest::skip(!test::game_dir())) {

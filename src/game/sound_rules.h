@@ -109,8 +109,12 @@ struct AnimationSoundState {
 struct AnimationSounds {
     std::vector<std::int32_t> play;            // played at the spawn (PlaySound), in order
     std::optional<std::int32_t> loop;          // SetCurrentLoopSound(id) (0 = Loop3d)
+    bool loop_is_step = false;                 // `loop` is the spawn's own walk or run sound (a footstep), not its ambient loop
     bool only_if_not_playing = false;          // local player: skipped while the same wave plays
 };
+// Whether an animation's sound is a footstep in the sense of the "Individual Sounds" volumes: walking, running,
+// jumping, crouch walking, climbing, swimming and treading water (the animations with a step, jump or stroke).
+bool is_movement_animation(std::int32_t action);
 // `random(low, high)` is RandomNumberLowHigh.
 using RandomLowHigh = std::function<std::int32_t(std::int32_t, std::int32_t)>;
 AnimationSounds animation_sounds(const SpawnSounds& s, const AnimationSoundInput& in, AnimationSoundState& st,
@@ -172,11 +176,15 @@ inline constexpr std::uint32_t kFirstOwnBagType = 6;
 inline constexpr std::size_t kOwnBagTypeCount = 17;
 std::int32_t container_sound(std::uint32_t bag_type, bool open);
 
+// The four step sounds a walking spawn picks from (StepWlkR, StepWlkL, StepWlk2, StepWlk3).
+inline constexpr std::int32_t kWalkSteps[4] = {0x5d, 0x5c, 0x97, 0x98};
+
 // ---- other events ----------------------------------------------------------
 
 inline constexpr std::int32_t kSoundLevelUp = 0x8b;     // LevelUp.WAV, 2D
 inline constexpr std::int32_t kSoundJumpLand = 0x72;    // jumpland.WAV
 inline constexpr std::int32_t kSoundFallHurt = 0x73;    // fall_hit.WAV
+inline constexpr std::int32_t kSoundCoin = 0x8a;        // the cash register: every sale, purchase, loot and coin move
 inline constexpr std::int32_t kSoundTeleport = 0x89;    // Teleport.WAV
 inline constexpr std::int32_t kSoundItemMoved = 0x92;   // wearclth.WAV, 2D: an item moved by a click (0x697148)
 inline constexpr std::int32_t kSoundEndQuest = 0x8d;    // EndQuest.WAV, 2D (0x4207a7 won, 0x4c7ff6 coin)

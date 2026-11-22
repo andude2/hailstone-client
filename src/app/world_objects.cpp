@@ -718,12 +718,14 @@ void WorldObjects::touch_overlap(game::SphereSweep& sweep, std::vector<DoorHit>&
 }
 
 void WorldObjects::pick_actors(std::vector<game::PickActor>& actors, std::vector<PickRef>& refs,
-                               bool include_passable_doors) const {
-    auto add = [&](const Placed& p, bool is_door, std::uint32_t id) {
+                               bool include_passable) const {
+    auto add = [&](const Placed& p, PickSource source, std::uint32_t id) {
         if (!p.model) return;
-        // The DLL's actor pick tests a model's passable triangles too, whatever the switch type (passes 1 and 2,
-        // docs/mechanics.md "The four passes"); here only for a door with no solid triangle (docs/unknowns.md).
-        const bool allow_proxy = include_passable_doors && is_door;
+        // The DLL's actor pick tests a model's passable triangles too, whatever the actor is (passes 1 and 2,
+        // docs/mechanics.md "The four passes"); here only for a door or ground object with no solid triangle
+        // (docs/unknowns.md).
+        const bool is_door = source == PickSource::Door;
+        const bool allow_proxy = include_passable && picks_passable(source);
         const auto triangles = p.model->shape.pick_triangles(allow_proxy);
         if (triangles.empty()) return;
         game::PickActor a;
@@ -748,11 +750,11 @@ void WorldObjects::pick_actors(std::vector<game::PickActor>& actors, std::vector
         actors.push_back(std::move(a));
         refs.push_back({is_door, id});
     };
-    for (const auto& [id, p] : doors_) add(p, true, id);
-    for (const auto& [id, p] : objects_) add(p, false, id);
+    for (const auto& [id, p] : doors_) add(p, PickSource::Door, id);
+    for (const auto& [id, p] : objects_) add(p, PickSource::GroundObject, id);
     for (const auto& [key, p] : placed_) {
         std::size_t before = refs.size();
-        add(p, false, 0);
+        add(p, PickSource::Placed, 0);
         if (refs.size() > before) {
             refs.back().is_placed = true;
             refs.back().re = static_cast<std::uint32_t>(key >> 32);

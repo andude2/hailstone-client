@@ -339,6 +339,12 @@ Containers& containers() {
     return c;
 }
 
+// Hailstone: a bag in a personal or shared bank slot opens with the bank-bag volume (audio.open_bank). Conservative
+// fallback: only those two slot types count. A slot of any other type, or one this classifier does not know, opens
+// with the ordinary bag volume (audio.open_bag), so a bag never goes quiet on a volume it was not meant for. The
+// bank window opening itself has no known sound to put on a volume (docs/todo.md, docs/unknowns.md).
+bool in_bank_slot(const net::ItemSlot& s) { return s.type == net::kInvBank || s.type == net::kInvSharedBank; }
+
 // Opens or closes a bag's window (CInvSlot::HandleRButtonUp: an open container closes, else
 // CContainerMgr::OpenContainer @0x65cae0). A tradeskill bag opens in the tradeskill window instead of its own when
 // GameConnection::container_opens_tradeskill says so (the TradeskillCtrlClick option, CtrlBypass: by default a right
@@ -361,12 +367,12 @@ void toggle_container(UiHost& host, const net::ItemSlot& s) {
     if (bag && host.conn && host.conn->container_opens_tradeskill(s, ctrl())) {
         // The right click's sound comes from CContainerMgr::OpenContainer @0x65cae0 before the window choice, so a
         // bag that opens in the tradeskill window sounds too.
-        host.conn->container_sound(bag->bag_type, true);
+        host.conn->container_sound(bag->bag_type, true, in_bank_slot(s));
         host.conn->open_tradeskill_bag(s);
         return;
     }
     cs.add(s, bag ? bag->bag_type : 0);
-    if (bag && host.conn) host.conn->container_sound(bag->bag_type, true);
+    if (bag && host.conn) host.conn->container_sound(bag->bag_type, true, in_bank_slot(s));
 }
 
 bool container_open(const net::ItemSlot& s) { return containers().find(s) != nullptr; }
@@ -425,7 +431,7 @@ void toggle_all_bank_bags(UiHost& host) {
                 const net::Item* bag = host.conn->inventory().at(s);
                 if (bag && bag->is_bag() && bag->placeable_flags() == 0 && !container_open(s)) {
                     cs.add(s, bag->bag_type);
-                    host.conn->container_sound(bag->bag_type, true);
+                    host.conn->container_sound(bag->bag_type, true, true);
                 }
             }
         };

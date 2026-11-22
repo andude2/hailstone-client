@@ -19,6 +19,7 @@
 #include "mq/parse.h"
 #include "platform/tcp_socket.h"
 #include "plugin/native_nameplates.h"
+#include "plugin/ui_bridge.h"
 #include "plugin/native_plugins.h"
 #include "mq_test_world.h"
 #include "plugin_consent_helper.h"
@@ -58,7 +59,8 @@ struct Host {
 
     // own_folder: the binary in the plugin's own folder, plugins/MQ2Example/, not directly in plugins/.
     // `built`: the plugin to put in the folder (the example; tests/plugins/HostProbe.cpp ...).
-    explicit Host(bool own_folder = false, plugin::WebAccess* web = nullptr, fs::path built = HAILSTONE_EXAMPLE_PLUGIN) {
+    explicit Host(bool own_folder = false, plugin::WebAccess* web = nullptr, fs::path built = HAILSTONE_EXAMPLE_PLUGIN,
+                  plugin::UiBridge* ui = nullptr) {
         fs::path dir = own_folder ? plugin_dir / "MQ2Example" : plugin_dir;
         fs::create_directories(dir);
         file = dir / built.filename();
@@ -85,6 +87,7 @@ struct Host {
         ne.cache_dir = world.dir / "cache";
         ne.config_dir = world.dir / "config";
         ne.web = web;
+        ne.ui = ui;
         ne.connection = [this] { return world.conn.get(); };
         ne.extensions = extensions.get();
         ne.nameplates = &canvas;
@@ -656,12 +659,21 @@ TEST_CASE("native plugins: map policy accepts old aligned prefixes and changes a
         h.run("/probemapset 7 "+std::to_string(format)+" 42");
         const auto policy=current();CHECK(policy.flags==7);CHECK(policy.name=="Probe map");CHECK(policy.revision!=0);
         CHECK(lifecycle()==initial_lifecycle); // map-only content and optional record format do not retire Tracking
-        for(const int size:{72,80,88}) {
+        for(const int size:{72,80,88,96}) {
             h.run("/probemapprefix "+std::to_string(size));
             CHECK(h.printed_line("[Probe] map prefix "+std::to_string(size)+" result 1 flags 7 canary 1 revision "+
-                (size>=80?"1":"0")+" context "+(size>=88?"1":"0")));
+                (size>=80?"1":"0")+" context "+(size>=88?"1":"0")+" server find 0"));
         }
     }
+    h.run("/probemapset 3 9 42");
+    CHECK(current().npc_find_server_only());
+    h.run("/probemapprefix 96");
+    CHECK(h.printed_line("[Probe] map prefix 96 result 1 flags 3 canary 1 revision 1 context 1 server find 1"));
+    h.run("/probemapprefix 88");
+    CHECK(h.printed_line("[Probe] map prefix 88 result 1 flags 7 canary 1 revision 1 context 1 server find 0"));
+    h.run("/probemapset 7 9 42");
+    CHECK_FALSE(current().npc_find_enabled());
+    CHECK_FALSE(current().npc_find_server_only());
     auto before=current().revision;CHECK(current().revision==before);
     h.run("/probemapset 7 0 43");CHECK(current().revision!=before);CHECK(lifecycle()==initial_lifecycle);
     before=current().revision;h.run("/probemapcycle");CHECK(current().revision!=before);CHECK(lifecycle()!=initial_lifecycle);
@@ -712,7 +724,8 @@ TEST_CASE("native plugins: off before the zone-in; free without a hailstone.cfg;
 // hailstone_plugin_set_host and nmsc_plugin_set_host only, and reads the host table by the released positions. The
 // table grows at its end, so it loads and its calls land where its header put them.
 TEST_CASE("native plugins: a plugin built against the 0.7.1 SDK loads and finds its released host entries") {
-    Host h(false, nullptr, HAILSTONE_SDK071_PLUGIN);
+    plugin::UiBridge ui;
+    Host h(false, nullptr, HAILSTONE_SDK071_PLUGIN, &ui);
     h.approve(plugin::kCapAll);
     std::string why;
     REQUIRE_MESSAGE(h.plugins->load("Sdk071Plugin", &why), why);
@@ -720,6 +733,11 @@ TEST_CASE("native plugins: a plugin built against the 0.7.1 SDK loads and finds 
     h.run("/sdk071");
     // Whole 16-byte xtarget records (remainder 0): the call reached get_xtarget_data_bulk, not a later entry.
     CHECK(h.printed_line("[Sdk071] abi 3 table 1 name Sdk071Plugin xtarget 0"));
+    h.run("/sdk071ui");
+    REQUIRE(ui.contributions().size() == 1);
+    CHECK(ui.contributions().front().text == "ABI 3 notice");
+    h.run("/sdk071ui clear");
+    CHECK(ui.contributions().empty());
 }
 
 TEST_CASE("native plugins: MQ callbacks, commands and TLOs, then unloaded cleanly") {

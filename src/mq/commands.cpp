@@ -35,6 +35,35 @@ double heading_between(const glm::vec3& a, const glm::vec3& b) {
     return deg < 0 ? deg + 360.0 : deg;
 }
 
+// An untyped /target with a name follows RoF2's choice among the matches, not MQ's (its Target takes the nearest).
+// RoF2's /target (Send_OP_TargetCommand_004e9790) calls GetNearestSpawnMaybe 0x5a04e0 twice, for players only (spawn
+// Type 0) and for any type, and each call first asks PlayerManagerClient::GetSpawnByName 0x599b40 for the exact name
+// (case-insensitive, any type), so an exact name wins outright: a rider over the mount EQEmu names after them.
+// `found` is nearest first, the lower id at an equal distance (RoF2 keeps its spawn list's first there: docs/unknowns.md).
+// Which spawns match is still MQ's (a part of the name, not RoF2's prefix).
+const game::Spawn* rof2_target_choice(const std::vector<const game::Spawn*>& found, std::string_view name,
+                                      const game::WorldState& world) {
+    // The display form ("#Lord_Bob00" as "Lord Bob") is Hailstone's: RoF2 compares the internal name only.
+    for (const game::Spawn* s : found)
+        if (iequals(s->name, name) || game::display_name_iequals(s->name, name)) return s;
+    // No exact name: the nearest player, unless the nearest match of any type is 50 or more units nearer (3D, from
+    // the local player; CalcDistanceBetweenSpawns 0x5941d0, compared after a square root at 0x4e97fc).
+    // A deliberate change: RoF2 counts the local player too, but MQ's part-of-a-name match would find your own name
+    // far more often than RoF2's prefix does, so the player is skipped while there is another match, as MQ does.
+    const game::Spawn *nearest = nullptr, *player = nullptr;
+    for (const game::Spawn* s : found) {
+        if (s->id == world.player_id && found.size() > 1) continue;
+        if (!nearest) nearest = s;
+        if (!player && !s->is_npc && !s->is_corpse) player = s; // RoF2's Type 0: a PC, not a corpse, pet or merc
+    }
+    const game::Spawn* me = world.player();
+    if (!player || !me) return player ? player : nearest;
+    const glm::vec3 from = spawn_position(*me);
+    if (glm::distance(from, spawn_position(*nearest)) + 50.0f <= glm::distance(from, spawn_position(*player)))
+        return nearest;
+    return player;
+}
+
 bool allowed(std::uint32_t need, const CommandEnv& env, std::string_view what) {
     std::uint32_t have = plugin::caller_caps();
     if ((have & need) == need) return true;
@@ -112,24 +141,18 @@ Commands::Commands(CommandEnv env) : env_(std::move(env)) {
             sources.can_see = ctx.can_see;
             const SpawnSearch search = parse_spawn_search(args, sources.guild);
             const auto found = search_spawns(search, world, sources);
-            for (const game::Spawn* s : found) {
-                // MQ normally skips the local player when there is another match.
-                if (s->id == world.player_id && found.size() > 1) continue;
-                // EQEmu prefixes a mount's name with the rider's, so the mount can win a nearest-name search.
-                // Not MQ's rule (its Target takes the nearest match), but RoF2's own /target
-                // (Send_OP_TargetCommand_004e9790 -> GetNearestSpawnMaybe 0x5a04e0) asks
-                // PlayerManagerClient::GetSpawnByName 0x599b40 for an exact name first, which finds the rider.
-                if (search.kind == SpawnSearch::Kind::Any && !search.id && !search.name.empty() &&
-                    !s->is_corpse && game::Spawn::GetSpawnType(s) == game::eSpawnType::MOUNT) {
-                    const auto player = std::find_if(found.begin(), found.end(), [&search](const game::Spawn* candidate) {
-                        return !candidate->is_npc && !candidate->is_corpse &&
-                               (iequals(candidate->name, search.name) ||
-                                game::display_name_iequals(candidate->name, search.name));
-                    });
-                    if (player != found.end()) s = *player;
+            if (search.kind == SpawnSearch::Kind::Any && !search.id && !search.name.empty()) {
+                if (const game::Spawn* s = rof2_target_choice(found, search.name, world)) {
+                    env_.set_target(s->id);
+                    return;
                 }
-                env_.set_target(s->id);
-                return;
+            } else {
+                for (const game::Spawn* s : found) {
+                    // MQ skips the local player when there is another match.
+                    if (s->id == world.player_id && found.size() > 1) continue;
+                    env_.set_target(s->id);
+                    return;
+                }
             }
             say(std::format("There are no spawns matching: ({})", args));
         },

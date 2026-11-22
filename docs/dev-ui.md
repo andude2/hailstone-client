@@ -274,6 +274,7 @@ Each entry names the window and what is particular to it; the `hs.*` calls behin
 #### HUD windows
 
 - **PlayerWindow**: level badge, health / mana / endurance, experience and AA experience, and the spell being cast (the game's CastingWindow). While auto attack is on: a pulsing red ring (`T.Panel`'s `glowWidth`), a red wash and a red level badge.
+  In the Modern frame's right-click menu, **Mana readout** and **Endurance readout** each offer **None** (the default), **Percentage**, **Value** (current / maximum), and **Both**. The choices are saved separately in the Modern pack settings (`player.manaReadout` and `player.enduranceReadout`). Hovering either bar still shows its current and maximum values.
   The Modern frame's right-click menu has **Always show cast bar** (off by default). It keeps the empty cast bar visible between casts so the frame stays the same height. The choice is saved in the Modern pack settings (`player.alwaysShowCastBar`).
 
 - **TargetWindow**: con colour, health, target's target, the aggro meter (AggroMeterWnd's gauge 149 and labels 302..307; `aggro.lua` keeps the game's window hidden, and the EQ menu has no Aggro Meter row), and buffs with Spell Info on a right click.
@@ -303,6 +304,7 @@ Each entry names the window and what is particular to it; the `hs.*` calls behin
 
 - **MapViewWnd** (`map.lua`, over `hs.DrawZoneMap`):
   - resizable; wheel zoom around the cursor (around the player while following); drag to pan;
+  - the Zone and World views keep their zoom and centre when the map closes, until zoning or logging out;
   - Fit / Follow / Labels / Auto Z, and your own markers per zone in `map.markers.<zone>`;
   - right click: Find a path here (`hs.FindMapLocation`), the cursor's /loc and distance; Edit opens the map toolbar;
   - the side panel's Find page is Hailstone's Find window (`app/lua_ui_find.cpp`, docs/navigation.md "Find"); its NPCs button marks the listed NPCs on the map.
@@ -504,6 +506,7 @@ Its search field filters the open tab:
 
 - **LoadskinWnd** (`/loadskin`): this client's user interfaces, Keep your layout.
 - **LayoutCopyWindow** (`/copylayout`), **VideoModesWindow** (EQ menu; the modern Options' Resolution list does the same).
+- **Import character settings** (`/import`) shows the source files, category selection, slot preview, and confirmation for apply or restore.
 - **NameChangeWnd** / **NameChangePetWnd** / **NameChangeMercWnd** (`/changename`, `/changepetname`, `/changemercname`): one script, `namechange.lua`.
 
 ### Other shared windows
@@ -745,6 +748,13 @@ MapViewWnd, MapToolbarWnd and EditLabelWnd (`map.lua`, `maptoolbar.lua`, `editla
 - `on, above, below = hs.MapAutoZ([on [, above [, below]]])` (`above` alone sets both). Kept as `AutoZ` / `AutoZAbove` / `AutoZBelow` in `[MapViewWnd]`; an older single `AutoZRange` is read as both.
 - The stock layout has no button for it; the modern map (arrow beside Auto Z) and minimap (frame menu) have range sliders.
 
+**Map overlays.** `hs.UI.map.RegisterOverlay` (`app/lua_ui_map_overlay.cpp`) is the client-owned drawing layer of
+`hs.DrawZoneMap` and `hs.DrawMinimap`: the callbacks run at the end of each drawn view, after the client's own lines,
+labels, marks and player and before the pack's own additions, so they draw in whichever add-on's window called the
+method. The registry is kept per UI VM, as the named window extensions are; a view's geometry is one plain table
+(screen rectangle or disc, scale, centre, player, zone). A callback runs as its registered source, under that source's
+ceiling, and a failed one retires like a named extension's. The complete API is in `docs/ui-api.md` "Map overlays".
+
 **Paths and the atlas.** The find path (`game/player_path.h`; `hs.FindMapLocation(x, y)` as the stock right click, `hs.FindPathShown()`, `hs.EndFind()`), the atlas page (`game/atlas.h`, `hs.DrawAtlas`), and `hs.DrawZoneMap` for another zone's map. The modern World view and zone finder (docs/navigation.md "Zone atlas"; `ui/modern/lib/atlas.lua`) use `hs.AtlasIndex()`, `hs.AtlasPageData(file)`, `hs.AtlasTexture(file)`, `hs.ZoneLinks()` (asks the server once a session), `hs.ZoneRoute(to [, from])`, `hs.ZoneExits()`, `hs.ZoneExitWalk(zone)` (a `/nav` walk to that zone's nearest line), `hs.ShowZoneMap([zone])` and `hs.MapZoneShown()`.
 
 #### `lua_ui_player.cpp`
@@ -786,6 +796,7 @@ LoadskinWnd (/loadskin) and LayoutCopyWindow (/copylayout).
 
 - LayoutCopyWindow copies another character's UI.ini or defaults.ini, for a screen size its keys keep, over this character's windowed places; characters played last come first.
 - Hailstone adds LC_CopyChatCheckBox / LC_CopyOptionsCheckBox (chat.ini, options.ini) and a first-entry offer: activate(0) at the zone-in of a character with no UI.ini, when hailstone.ini ui.offer_layout_copy (option offer_layout_copy, on by default) is on and another character has a layout. LC_FirstVisitText and LC_OfferCheckBox show only then.
+- **Key Bindings** (`LC_CopyKeysCheckBox`) replaces the character's primary and alternate keyboard mappings with those from the selected character's `hailstone.ini`. The mappings include the source's default movement scheme and any keys it cleared. The copy takes effect immediately. The first-entry offer preselects this option when the source has saved client settings.
 
 #### `lua_ui_names.cpp`
 

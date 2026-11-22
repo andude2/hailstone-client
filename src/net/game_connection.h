@@ -43,6 +43,7 @@
 #include "game/bazaar.h"
 #include "game/chat_text.h"
 #include "game/client_options.h"
+#include "game/character_property_sets.h"
 #include "game/combat.h"
 #include "game/doors.h"
 #include "game/eq_names.h"
@@ -274,6 +275,15 @@ struct SoundCue {
     std::uint8_t door_type = 0, door_state = 0;
     glm::vec3 position{0.0f};
     bool environment = false; // a Hit from an environmental type (0xf3..0xfd) or a spell: Hit1..4 only, no FlshHit
+    // Hailstone: what a Wave cue is for, where its wave alone does not say (the item-moved wave serves every move, the
+    // bag wave opening and closing); the app picks the Individual Sounds volume from it.
+    enum class Context : std::uint8_t {
+        None,
+        BagOpen,     // a bag in a carried slot opening
+        BankBagOpen, // a bag in a bank or shared bank slot opening
+        ItemWorn,    // an item put into or taken out of a worn slot
+    };
+    Context context = Context::None;
 };
 
 // A spell effect stage to play (SpellEffect_SpawnStageEmitters): the cast
@@ -535,7 +545,8 @@ public:
     std::vector<SoundCue> take_sound_cues();
     // CContainerMgr::OpenContainer / CloseContainer's sound for a bag of `bag_type`: a 2D wave cue
     // (game/sound_rules.h container_sound). The windows and the bag keys call it; nothing is sent.
-    void container_sound(std::uint32_t bag_type, bool open);
+    // `in_bank`: the bag sits in a bank slot (Hailstone: its opening has its own volume).
+    void container_sound(std::uint32_t bag_type, bool open, bool in_bank = false);
     // What spells landing on the player changed that the movement owns
     // (EQ_Character::HitBySpell, game/hit_landing.h): taken once a frame.
     struct LandingEffects {
@@ -745,6 +756,7 @@ public:
     // set_stand_state(110 / 100).
     void set_sitting(bool sitting);
     bool sitting() const { return pstatus_.stand_state == 110; }
+    bool sitting_or_mounted() const { return sitting() || mount_id() != 0; }
     // ---- the spell book (CSpellBookWnd's open/close rules, game/spell_book.h) ----
     // The UI calls open_spell_book() when the book is about to show (false:
     // the original refuses and the window must stay closed) and
@@ -879,9 +891,8 @@ public:
     bool find_spawn(std::uint32_t spawn_id);
     bool npc_find_enabled() const;
     bool npc_find_allowed(std::uint32_t spawn_id) const;
-    // npc_find_allowed for one row of many, the map policy already read (npc_find_enabled) by the caller for them
-    // all: an NPC that is not a corpse and that every server extension lets Find show.
-    bool npc_find_visible(std::uint32_t spawn_id) const;
+    // Per-row visibility after the caller has read the map policy for the whole Find list.
+    bool npc_find_visible(std::uint32_t spawn_id, bool server_only) const;
     // PlayerPath_FindMapLocation (MapViewMap::HandleRButtonDown): the path to a point of the map, world coordinates
     // at the player's height.
     void find_map_location(const glm::vec3& at);
@@ -911,6 +922,7 @@ public:
     // The original's find window listed them (Handle_OP_SendFindableNPCs); the Find window here does too
     // (game/useful_npcs.h).
     const std::unordered_map<std::uint32_t, FindableNpc>& findable_npcs() const { return findable_npcs_; }
+    std::uint64_t findable_npcs_revision() const { return findable_npcs_revision_; }
     // The zone's quest NPCs from Hailstone's server script (net/quest_npc_packets.h), by their names as shown
     // (game::display_name, ASCII lower case): kQuestNpcItems / kQuestNpcTalks. Asked once a zone, the first time the
     // Find window wants them (request_quest_npcs); empty without the script. Cleared on zoning.
@@ -1477,6 +1489,7 @@ public:
     }
     // eqstr_us.txt / dbstr_us.txt (spell descriptions are dbstr type 6).
     const game::EqStrings& strings() const { return strings_; }
+    const game::CharacterPropertySets& character_property_sets() const { return character_property_sets_; }
     // The player's classes as a bit mask: server_class_mask(), else the profile's class.
     std::uint32_t player_class_mask() const;
     // player_class_mask() where the server extension tests those class checks over the player's classes
@@ -1779,7 +1792,9 @@ public:
     // Item Destroy the cursor's item or coin goes at once, else it asks first (2043 / 2061, 10 s).
     void destroy_held();
     // Puts the cursor item into the first free general slot or bag slot; false when it stays on the cursor.
-    bool auto_inventory();
+    // `equipped`, when given, tells whether the item went into a worn slot (its stack merged into one, or it was put
+    // on): the callers' own item-moved wave is then an equip sound too.
+    bool auto_inventory(bool* equipped = nullptr);
     // auto_inventory's last steps only: the first free general slot, else the first bag with room; never a worn slot
     // (Hailstone's bulk withdraw, which is not the original's and must not equip what it takes from the bank).
     bool stow_cursor_in_packs();
@@ -2117,6 +2132,10 @@ public:
     // ---- skills and abilities (app/actions_ui.cpp, net/ability_packets.h) ----
     // Sends a zone packet the abilities code built (UseSkill's requests).
     void send_zone_packet(const AppPacket& p) { send_zone(p); }
+    // PlayerClient::SetHeldModel(held, model, 0, 1) @0x5923f0 for the local player, as DoAttack and DoRangedAttack
+    // call it (game::mechanics::SkillResult::held_models): held slot 7 or 8 shows the model of the item in
+    // possessions slot `item_slot` (-1: nothing) and OP_WearChange tells the zone.
+    void set_held_model(int held, int item_slot);
     void send_world_packet(const AppPacket& p) { send_world(p); }
     // What plugins and scripts may do on this server (plugin/policy.h: its hailstone.cfg, or no rules), set once the
     // zone-in has checked the server's files and kept while in the world; the serial changes with it.
@@ -3064,7 +3083,9 @@ private:
     // False when the inventory refused the swap (nothing moved, nothing sent).
     bool move_item(const ItemSlot& from, const ItemSlot& to, std::uint32_t count);
     // The item-moved wave 0x92 (game::kSoundItemMoved), 2D: queued by the callers that play it in the original.
-    void item_moved_sound();
+    // `context`: ItemWorn when the move touched a worn slot (worn_context), given by each caller.
+    void item_moved_sound(SoundCue::Context context = SoundCue::Context::None);
+    SoundCue::Context worn_context(const ItemSlot& from, const ItemSlot& to) const;
     void refresh_worn_slot(int slot);
     // PcClient_RefreshWornSlotVisual's instrument bit (0x5923f0): the local player's PlayerState bit 0x10, set when
     // the primary or secondary hand holds an instrument (item types 23..26).
@@ -3375,6 +3396,8 @@ private:
     ZoneChange zone_change_request_; // the pending request, for "not ready" retries
     std::chrono::steady_clock::time_point zone_change_started_{}, zone_change_sent_{}, zone_change_retry_at_{};
     game::EqStrings strings_;
+    std::size_t npc_tint_count_ = 0;
+    game::CharacterPropertySets character_property_sets_;
 
     // Movement sending.
     glm::vec3 position_{0.0f};
@@ -3897,6 +3920,7 @@ private:
     std::optional<FailedFind> failed_find_;
     std::uint32_t find_replies_ = 0;
     std::unordered_map<std::uint32_t, FindableNpc> findable_npcs_;
+    std::uint64_t findable_npcs_revision_ = 0;
     std::unordered_map<std::string, std::uint8_t> quest_npcs_;
     bool quest_npcs_asked_ = false;
     bool hailstone_script_ = false;   // a zone answered OP_HailstoneSettingsRequest

@@ -47,6 +47,7 @@
 #include <stdint.h>
 #include "hailstone_follow.h"
 #include "hailstone_nameplates.h"
+#include "hailstone_ui_contribution.h"
 #include "hailstone_world_geometry.h"
 
 #ifdef __cplusplus
@@ -678,6 +679,7 @@ typedef struct HailstoneMapSpawn {
 #define HAILSTONE_MAP_POLICY_CUSTOM_SPAWNS 1u
 #define HAILSTONE_MAP_POLICY_HIDE_STOCK_NPCS 2u
 #define HAILSTONE_MAP_POLICY_DISABLE_NPC_FIND 4u
+#define HAILSTONE_NPC_FIND_SERVER_ONLY 1u
 typedef struct HailstoneMapPolicy {
     uint32_t size;
     uint32_t flags;
@@ -687,6 +689,9 @@ typedef struct HailstoneMapPolicy {
      * context is host-issued connection/zone/player lifetime, ignored in provider answers. */
     uint64_t revision;
     uint64_t context;
+    /* Zero is stock. HAILSTONE_NPC_FIND_SERVER_ONLY limits NPC Find to the server's advertised list and path.
+     * DISABLE_NPC_FIND takes precedence. Only write this field when the caller supplies the 96-byte record. */
+    uint64_t npc_find_mode;
 } HailstoneMapPolicy;
 
 typedef struct HailstoneSpell {
@@ -1184,6 +1189,11 @@ typedef struct PluginHostApi {
      * question is another one (the loot question may be queued behind it: ask again later) or
      * there is none. Added in ABI 4: test HAILSTONE_HOST_HAS(host, answer_loot_confirmation). */
     int (*answer_loot_confirmation)(void* host, int yes);
+    /* Add or replace this plugin's contribution by ID, or remove it. Both need UI and EXTEND. Return 1 on
+     * success, 0 on refusal (remove also returns 0 for an absent ID). Contributions go on deactivation,
+     * permission loss or unload. Check HAILSTONE_HOST_HAS before using the ABI 4 slots below. */
+    int (*set_ui_contribution)(void* host, const HailstoneUiContribution* entry);
+    int (*remove_ui_contribution)(void* host, const char* id);
 } PluginHostApi;
 /* What use_ability and ability_state take: the kinds of ability the Ability Book lists. The values are stable. */
 enum HS_AbilityKinds {

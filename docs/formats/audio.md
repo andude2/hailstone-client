@@ -344,6 +344,7 @@ The synthesiser is TinySoundFont with `synthusr.sf2`, so it will not sound ident
 | `audio.enabled` | open a device |
 | `audio.master`, `audio.music`, `audio.effects` | 0..100 |
 | `audio.npc_hits` | 0..100, default 100 (note 1) |
+| `audio.own_footsteps`, `audio.pet_footsteps`, `audio.other_footsteps`, `audio.open_bag`, `audio.open_bank`, `audio.money`, `audio.thunder`, `audio.equip`, `audio.creature_ambient` | 0..100, default 100 (note 4) |
 | `audio.mute` | |
 | `audio.environment` | the zone's user-disableable emitters |
 | `audio.soundfont` | an SF2 path; default the game's `synthusr.sf2` |
@@ -359,6 +360,33 @@ The synthesiser is TinySoundFont with `synthusr.sf2`, so it will not sound ident
 2. In RoF2 ReverseSound (0xde0d48) is only stored and saved, so it has no effect; acting on it is Hailstone's.
    Checked: Cmd_reversesound.
 3. The output's buffer, `audio::mix_ahead_ms` = clamp(n, 4, 96) x 8 ms. Changing it opens the device again.
+4. The Individual Sounds volumes are Hailstone's, not in the original. Each scales one kind of sound linearly on top of
+   `audio.effects` (`audio::option_volume_factor`; 0 plays nothing). `app::SoundEvents` and the connection's sound cues
+   pick the volume (`audio::SoundGroup`, `audio/individual_sounds.h` lists the names; the connection's cues carry only a
+   context, `net::SoundCue::Context`, and `app::wave_cue_group` and `app::footstep_group` classify). The Options window's Individual
+   Sounds window edits them (`hs.Option` / `hs.SetOption`) and its Test button plays the sound once (`hs.PlaySoundTest`).
+   The gamepad pack has a Sounds page instead: left and right step a volume by 5, A plays the sound, a last row resets.
+   - `own_footsteps`: the sounds of the local player's walk, run, jump, crouch walk, climb, swim and tread-water
+     animations (`game::is_movement_animation`), and the jump-landing and fall-hurt sounds. The splash of entering or
+     leaving water is not included.
+   - `pet_footsteps`: the same animations of an NPC spawn with an owner (`pet_owner_id` set); `other_footsteps`: of
+     every other spawn. A creature whose walk sound is a loop of its own (`AnimationSounds::loop_is_step`) has that loop
+     at the same volume; its ambient loop is not touched.
+   - `open_bag`: the open wave (0x86 or 0x91) of a bag in a carried slot; `open_bank`: of a bag in a bank or shared
+     bank slot. No sound for the bank window itself opening is known (a quick search of the
+     decompiled client found none, docs/unknowns.md), so the bank volume is that of its bags. Closing a bag is not covered.
+   - `money`: wave 0x8a (the cash register: merchant, trader, barter, loot, split and coin moves). The quest reward's
+     coin sound (0x8d) is not.
+   - `thunder`: the storm's thunder (0x8f, 0x90). The "struck down" thunder of a GM kill is not.
+   - `creature_ambient`: every loop and idle sound of a spawn that is not its footsteps (a spectre's `SpecLoop.wav`,
+     racedata.txt race 85). Which creatures players find tiresome is not narrowed down: this covers every non-step loop.
+   - The Test button of a footstep plays the walk steps in turn. Thunder and rain can be silent in an install whose
+     `thunder1.wav` and `thunder2.wav` are 80-byte files without samples.
+   - `equip`: the item-moved wave (0x92) after a move that took an item out of or into a worn slot, the callers of an
+     auto-equip (`/autoinventory`, a drop on the paper doll) included. The same wave for moves between packs, bank and
+     trade slots stays at full volume.
+   - A pet is an NPC with an owner; another player is never one. A walk loop follows the spawn's footstep group as it
+     is each frame.
 
 Running without sound:
 

@@ -125,11 +125,38 @@ TEST_CASE("Animation sounds: footsteps every 500 ms, jumps, attacks, loops of ot
     a = animation_sounds(h, o, other, 6000, rnd);
     CHECK(a.play.empty());
     CHECK(a.loop == 3001);
+    CHECK(a.loop_is_step); // its walk loop is a footstep (the Individual Sounds volumes)
 
     // Race 0x7f makes no animation sounds.
     in.race = 0x7f;
     in.action = 4;
     CHECK(animation_sounds(h, in, st, 7000, rnd).play.empty());
+}
+
+TEST_CASE("Individual sounds: which animations are footsteps, and which loops") {
+    // OP_Animation numbers: walk, run, the two jumps, crouch walk, climb, swim, tread water.
+    constexpr std::int32_t kMovement[] = {0x11, 0x12, 0x13, 0x14, 0x16, 0x17, 0x19, 0x25};
+    // Not movement: nothing, attacks, drown, death, idle, stand, sit, a kick.
+    constexpr std::int32_t kOther[] = {0, 1, 5, 0x0f, 0x10, 0x1a, 0x20, 0x21, 0x2a};
+    for (std::int32_t action : kMovement) CHECK(is_movement_animation(action));
+    for (std::int32_t action : kOther) CHECK_FALSE(is_movement_animation(action));
+
+    constexpr std::int32_t kHumanRace = 1, kIdle = 0x1a, kWalk = 0x11;
+    constexpr std::uint32_t kFirstMs = 1000, kSecondMs = 2000, kThirdMs = 3000;
+    auto races = human();
+    SpawnSounds h = spawn_sounds(races, kHumanRace, 0);
+    auto rnd = [](std::int32_t low, std::int32_t) { return low; };
+    AnimationSoundState st;
+    AnimationSoundInput in;
+    in.race = kHumanRace;
+    in.action = kIdle; // the loop is the ambient one, not a step
+    CHECK_FALSE(animation_sounds(h, in, st, kFirstMs, rnd).loop_is_step);
+    in.action = kWalk; // another spawn walking: its walk sound is the loop that replaces Loop3d
+    AnimationSoundState walker;
+    CHECK(animation_sounds(h, in, walker, kSecondMs, rnd).loop_is_step);
+    in.local = true;   // the local player's steps are played, never looped
+    AnimationSoundState local;
+    CHECK_FALSE(animation_sounds(h, in, local, kThirdMs, rnd).loop_is_step);
 }
 
 TEST_CASE("Held item kinds (SetHeldModel's RightHolding)") {

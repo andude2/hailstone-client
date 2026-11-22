@@ -27,7 +27,8 @@ struct ObjectShape {
     std::vector<CollisionTriangle> records;
     // Drawn opaque/masked triangles, including passable parts, kept separately from movement collision.
     std::vector<CollisionTriangle> visual;
-    // A model with no solid triangle: its passable ones, for the doors' mouse pick (from_mesh's keep_pick_proxy).
+    // A model with no solid triangle: its passable ones, for the mouse pick of doors and ground objects
+    // (from_mesh's keep_pick_proxy).
     std::vector<CollisionTriangle> pick_proxy;
     glm::vec3 lo{0.0f}, hi{0.0f}; // bounds of the solid triangles
     float radius = 0.0f;          // largest vertex distance from the model origin

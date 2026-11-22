@@ -62,6 +62,7 @@ struct GameConnectionTestAccess {
         return c.item_command(command, args);
     }
     static std::optional<GameConnection::LootSession>& loot(GameConnection& c) { return c.loot_; }
+    static void drop_on_doll(GameConnection& c) { c.drop_on_doll(); }
     static void apply_spawn(GameConnection& c, const Spawn& s) { c.apply_spawn(s); }
     // How often the evolving transfer's item list was built, and its pair compared with the snapshots.
     static std::pair<std::uint64_t, std::uint64_t> evolving_cache_work(const GameConnection& c) {
