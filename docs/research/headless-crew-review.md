@@ -97,6 +97,11 @@ shown").
 In short, the swap was built as **observe + park + full zone reload**. It was
 never intended to keep two characters simultaneously live, and it does not.
 
+A test now pins the first part down: the zone stream, extended targets among it, survives both hand-offs
+(`tests/drive_control_test.cpp`, "extended targets survive the lease and the hand-back"). So the loss the player
+sees is the scene and plugin-window presentation being torn down and rebuilt, not the connection's own data —
+which is why D6 is the fix.
+
 ## The design that makes it work
 
 Three pieces, in this order.

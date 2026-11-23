@@ -16,6 +16,20 @@ using namespace hailstone;
 using namespace hailstone::net;
 using namespace hailstone::test;
 
+namespace {
+// OP_XTargetResponse {max, count, slot, status, id, name}: one slot holding a spawn.
+net::AppPacket xtarget_slot(std::uint32_t slot, std::uint32_t id, const std::string& name) {
+    ByteWriter w;
+    w.le<std::uint32_t>(5);
+    w.le<std::uint32_t>(1);
+    w.le<std::uint32_t>(slot);
+    w.le<std::uint8_t>(1);
+    w.le<std::uint32_t>(id);
+    w.fixed_string(name, name.size() + 1);
+    return net::AppPacket(net::to_wire(net::Op::XTargetResponse), w.take());
+}
+} // namespace
+
 TEST_CASE("drive control: a live zone session is lent to another connection and taken back") {
     MockEqServer server;
     EmptyGameDir dir;
@@ -77,6 +91,45 @@ TEST_CASE("drive control: a live zone session is lent to another connection and 
     const int messages2 = MockEqServer::count(server.zone_log, Op::ChannelMessage);
     resumed.send_command("/say back again");
     REQUIRE(pump(resumed_step, [&] { return MockEqServer::count(server.zone_log, Op::ChannelMessage) > messages2; }));
+}
+
+TEST_CASE("drive control: extended targets survive the lease and the hand-back") {
+    // The reported symptom was extended targets dropping when the graphical character returned; they are part of
+    // the zone stream, so the snapshot journal must carry them through both hand-offs.
+    MockEqServer server;
+    EmptyGameDir dir;
+    GameDir game(dir.path());
+    net::ConnectionOptions options = quick_options();
+    options.snapshot_journal = true;
+
+    net::GameConnection owner(game, options);
+    auto step = [&] {
+        owner.update();
+        server.poll();
+    };
+    owner.start(server.ticket());
+    REQUIRE(pump(step, [&] { return owner.state() == ConnectionState::CharacterSelect; }));
+    owner.enter_world("Gennro");
+    REQUIRE(pump(step, [&] { return owner.state() == ConnectionState::InZone; }));
+    REQUIRE(pump(step, [&] { return owner.player_status().max_hp != 0; }));
+    owner.receive_zone_packet_for_test(xtarget_slot(0, 101, "a_rat01"));
+    REQUIRE(pump(step, [&] { return owner.xtargets().slots.size() > 0 && owner.xtargets().slots[0].spawn_id == 101; }));
+
+    const DriveSnapshot lent = owner.capture_snapshot();
+    auto [world, zone] = owner.release_sessions();
+    net::GameConnection viewer(game, options);
+    viewer.adopt_sessions(std::move(world), std::move(zone));
+    viewer.apply_snapshot(lent);
+    REQUIRE(viewer.xtargets().slots.size() > 0);
+    CHECK(viewer.xtargets().slots[0].spawn_id == 101);
+
+    const DriveSnapshot returned = viewer.capture_snapshot();
+    auto [world2, zone2] = viewer.release_sessions();
+    net::GameConnection resumed(game, options);
+    resumed.adopt_sessions(std::move(world2), std::move(zone2));
+    resumed.apply_snapshot(returned);
+    REQUIRE(resumed.xtargets().slots.size() > 0);
+    CHECK(resumed.xtargets().slots[0].spawn_id == 101);
 }
 
 TEST_CASE("drive control: the lease pipe drives the headless character's live zone session") {
