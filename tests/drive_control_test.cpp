@@ -101,12 +101,12 @@ TEST_CASE("drive control: a snapshot larger than one pipe message crosses the le
     const std::vector<std::byte> payload(48 * 1024, std::byte{0x5a});
     for (int i = 0; i < 512; ++i)
         big.packets.push_back(net::AppPacket(static_cast<std::uint16_t>(0x1234), payload));
-    relay.set_snapshot(big);
-
     std::string error;
     auto client = app::DriveControlClient::connect(relay.session(), 10000, error);
     REQUIRE_MESSAGE(client != nullptr, error);
     REQUIRE(pump([] {}, [&] { return relay.viewer_connected(); }, std::chrono::milliseconds(2000)));
+    relay.pump(); // the new viewer resets the lease state, as the headless loop does before it sets a snapshot
+    relay.set_snapshot(big);
     std::optional<net::DriveSnapshot> taken;
     for (int i = 0; i < 2000 && !taken; ++i) {
         relay.pump();
@@ -122,6 +122,29 @@ TEST_CASE("drive control: a snapshot larger than one pipe message crosses the le
     REQUIRE(pump([&] { relay.pump(); }, [&] { return relay.released(); }, std::chrono::seconds(10)));
     const net::DriveSnapshot returned = relay.take_release();
     CHECK(returned.packets.size() == big.packets.size());
+    // The released pipe is closed: it must not count as a viewer, or the headless would lend to it again.
+    CHECK_FALSE(relay.viewer_connected());
+
+    // A second viewer replaces the closed pipe, so the same character can be driven again.
+    std::string error2;
+    auto client2 = app::DriveControlClient::connect(relay.session(), 10000, error2);
+    REQUIRE_MESSAGE(client2 != nullptr, error2);
+    REQUIRE(pump([] {}, [&] { return relay.viewer_connected(); }, std::chrono::milliseconds(2000)));
+    relay.pump(); // the new viewer resets the lease state again
+    net::DriveSnapshot again;
+    again.character = "Gennro";
+    again.packets.push_back(net::AppPacket(static_cast<std::uint16_t>(0x1234),
+                                           std::vector<std::byte>(1024, std::byte{0x11})));
+    relay.set_snapshot(again);
+    std::optional<net::DriveSnapshot> second;
+    for (int i = 0; i < 500 && !second; ++i) {
+        relay.pump();
+        client2->pump();
+        second = client2->take_snapshot();
+        if (!second) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(second);
+    CHECK(second->packets.size() == again.packets.size());
 }
 
 TEST_CASE("drive control: extended targets survive the lease and the hand-back") {
@@ -187,7 +210,6 @@ TEST_CASE("drive control: the lease pipe drives the headless character's live zo
     auto [world, zone] = owner.release_sessions();
     CHECK_FALSE(world); // in a zone the world session is gone
     relay.adopt(2, std::move(zone));
-    relay.set_snapshot(owner.capture_snapshot());
 
     std::string error;
     auto client = app::DriveControlClient::connect(relay.session(), 10000, error);
@@ -195,9 +217,11 @@ TEST_CASE("drive control: the lease pipe drives the headless character's live zo
     // The viewer's sessions exist before it pumps: a State message for an id it has not made yet would be dropped.
     auto mirror_world = client->make_session(); // the world, id 1
     auto mirror_zone = client->make_session();  // the zone, id 2
-    // The accept thread stores the accepted pipe just after the handshake; wait for it, then exchange the snapshot
-    // (which crosses loopback TCP, so it may take a moment).
+    // The accept thread stores the accepted pipe just after the handshake; a new viewer resets the lease state, so
+    // set the snapshot after the reset (the headless loop sets it once viewer_connected() is true).
     REQUIRE(pump([] {}, [&] { return relay.viewer_connected(); }, std::chrono::milliseconds(2000)));
+    relay.pump();
+    relay.set_snapshot(owner.capture_snapshot());
     std::optional<net::DriveSnapshot> snapshot;
     for (int i = 0; i < 500 && !snapshot; ++i) {
         relay.pump();

@@ -132,6 +132,7 @@ struct DriveRelay::Impl {
     bool released_flag = false;
     std::optional<net::DriveSnapshot> release;
     SnapshotReader release_in;
+    std::atomic<bool> new_viewer{false};
     net::SessionOptions options;
     std::unordered_map<std::uint64_t, Link> links;
 
@@ -156,7 +157,12 @@ struct DriveRelay::Impl {
             auto accepted = server.accept(200);
             if (!accepted) continue;
             std::lock_guard lock(mutex);
-            if (!pipe) pipe = std::shared_ptr<platform::LocalPipeConnection>(std::move(accepted));
+            // A released lease's pipe is closed but still kept: a new viewer replaces it, so the same character
+            // can be driven again without restarting the headless.
+            if (!pipe || pipe->closed()) {
+                pipe = std::shared_ptr<platform::LocalPipeConnection>(std::move(accepted));
+                new_viewer.store(true);
+            }
         }
     }
 
@@ -218,6 +224,14 @@ struct DriveRelay::Impl {
     void pump() {
         auto p = current_pipe();
         if (!p) return;
+        if (new_viewer.exchange(false)) {
+            // A new lease starts empty: the caller sets a fresh snapshot below.
+            snapshot.reset();
+            snapshot_sent = false;
+            release_in.reset();
+            release.reset();
+            released_flag = false;
+        }
         if (!snapshot_sent && snapshot) {
             if (!send_snapshot(*p, DriveLeaseMessage::Snapshot, net::encode_drive_snapshot(*snapshot))) return;
             snapshot_sent = true;
@@ -254,7 +268,10 @@ DriveRelay::~DriveRelay() = default;
 
 const platform::LocalPipeSession& DriveRelay::session() const { return impl_->session; }
 
-bool DriveRelay::viewer_connected() const { return impl_->current_pipe() != nullptr; }
+bool DriveRelay::viewer_connected() const {
+    auto p = impl_->current_pipe();
+    return p && !p->closed();
+}
 
 void DriveRelay::set_snapshot(net::DriveSnapshot snapshot) {
     std::lock_guard lock(impl_->mutex);
