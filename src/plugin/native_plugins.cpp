@@ -3628,38 +3628,23 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
     p.table.nameplate_measure_text = main_only<h_nameplate_measure_text>;
     p.table.nameplate_spell_icon = main_only<h_nameplate_spell_icon>;
     p.table.get_spells_data_bulk = main_only<h_get_spells_data_bulk>;
+    p.table.set_ui_contribution = main_only<h_set_ui_contribution>;
+    p.table.remove_ui_contribution = main_only<h_remove_ui_contribution>;
+    p.table.get_spells_by_name_data_bulk = main_only<h_get_spells_by_name_data_bulk>;
+    p.table.acquire_bulk_buffer = acquire_bulk_buffer_entry;
+    p.table.release_bulk_buffer = main_only<h_release_bulk_buffer>;
+    // ABI 5: this branch's own calls, appended after upstream's table so its layout never moves.
     p.table.get_loot_data_bulk = main_only<h_get_loot_data_bulk>;
     p.table.loot_corpse = main_only<h_loot_corpse>;
     p.table.loot_item = main_only<h_loot_item>;
     p.table.loot_all = main_only<h_loot_all>;
     p.table.end_loot = main_only<h_end_loot>;
     p.table.answer_confirmation = main_only<h_answer_confirmation>;
-    p.table.answer_loot_confirmation = main_only<h_answer_loot_confirmation>;
     p.table.free_inventory_slots = main_only_or<h_free_inventory_slots, -1>; // off the thread "unknown", not 0 ("no room")
     p.table.can_loot_corpse = main_only_or<h_can_loot_corpse, -1>; // off the thread "unknown", not 0 ("too far")
     p.table.loot_item_modifiers = main_only<h_loot_item_modifiers>;
-    p.table.set_ui_contribution = main_only<h_set_ui_contribution>;
-    p.table.remove_ui_contribution = main_only<h_remove_ui_contribution>;
+    p.table.answer_loot_confirmation = main_only<h_answer_loot_confirmation>;
     p.table.inventory_rows = main_only_or<h_inventory_rows, -1>;
-    if (got <= 3) {
-        // Upstream ABI 3 extended the common prefix with its two UI functions.
-        // Headless ABI 4 already uses those offsets for loot. Each plugin
-        // receives the layout selected by its exported ABI.
-        constexpr auto set_offset = offsetof(PluginHostApi, get_loot_data_bulk);
-        constexpr auto remove_offset = offsetof(PluginHostApi, loot_corpse);
-        auto set_ui = p.table.set_ui_contribution;
-        auto remove_ui = p.table.remove_ui_contribution;
-        static_assert(remove_offset == set_offset + sizeof(set_ui));
-        static_assert(sizeof(remove_ui) == sizeof(p.table.loot_corpse));
-        auto* table_bytes = reinterpret_cast<std::byte*>(&p.table);
-        std::memcpy(table_bytes + set_offset, &set_ui, sizeof(set_ui));
-        std::memcpy(table_bytes + remove_offset, &remove_ui, sizeof(remove_ui));
-        p.table.abi = 3;
-        p.table.size = remove_offset + sizeof(remove_ui);
-    }
-    p.table.get_spells_by_name_data_bulk = main_only<h_get_spells_by_name_data_bulk>;
-    p.table.acquire_bulk_buffer = acquire_bulk_buffer_entry;
-    p.table.release_bulk_buffer = main_only<h_release_bulk_buffer>;
     Hooks& hooks = *m.env.hooks;
     Loaded* lp = &p;
     // Each callback runs with the plugin's capabilities and counts as the plugin being busy (no unloading under it).

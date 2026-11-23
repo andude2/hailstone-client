@@ -27,11 +27,11 @@
  * Compatibility: the tables only grow at their end and carry their size. A plugin built for an older ABI loads in a
  * newer client; one built for a newer ABI does not load in an older client.
  *
- * This SDK's ABI 4 keeps this branch's published order: the loot and inventory entries (get_loot_data_bulk through
- * inventory_rows) follow get_spells_data_bulk, ahead of the UI contribution pair, and the calls added upstream later
- * (get_spells_by_name_data_bulk and the bulk buffer pair) come at the very end. A plugin that reports ABI 3 is handed
- * the upstream ABI 3 table instead (the UI contribution pair where it always was, the table ending there), so its
- * released positions still hold. Test HAILSTONE_HOST_HAS before any call past that ABI 3 prefix.
+ * This SDK's ABI 4 is upstream's: the UI contribution pair and the later get_spells_by_name/acquire/release calls,
+ * in the order upstream added them. ABI 5 appends this branch's own loot and inventory calls (get_loot_data_bulk
+ * through inventory_rows) after them, so nothing upstream placed has moved. A plugin that reports ABI 3 is handed the
+ * same append-only table, so its released positions still hold; test HAILSTONE_HOST_HAS before any call past the
+ * prefix you were built for.
  *
  * Plain C, no C++ types across the boundary: build with any compiler. Every string the client passes is valid only
  * during the call; strings the plugin returns are copied by the client before the call returns.
@@ -60,7 +60,7 @@
 extern "C" {
 #endif
 
-#define HAILSTONE_PLUGIN_ABI 4
+#define HAILSTONE_PLUGIN_ABI 5
 
 #if defined(_WIN32)
 #define HAILSTONE_EXPORT __declspec(dllexport)
@@ -1166,8 +1166,32 @@ typedef struct PluginHostApi {
      * HAILSTONE_HOST_HAS(host, get_spells_data_bulk) first. */
     int32_t (*get_spells_data_bulk)(void* host, const int32_t* ids, int32_t id_count, unsigned char* out,
                                     int32_t out_size);
+    /* Add or replace this plugin's contribution by ID, or remove it. Both need UI and EXTEND. Return 1 on
+     * success, 0 on refusal (remove also returns 0 for an absent ID). Contributions go on deactivation,
+     * permission loss or unload. Check HAILSTONE_HOST_HAS before use on older ABI 3 hosts. */
+    int (*set_ui_contribution)(void* host, const HailstoneUiContribution* entry);
+    int (*remove_ui_contribution)(void* host, const char* id);
+    /* Every spell named `name` (HAILSTONE_CAP_READ; case-insensitive, lowest id first), laid out as
+     * get_spells_data_bulk's: an int32_t count, then one record per spell of that name, as many whole records as fit.
+     * Bytes written; 0 without `read` or when out_size cannot hold the count. The count alone (0) with no game
+     * connection, a NULL name or one no spell has. Added later in ABI 3: test
+     * HAILSTONE_HOST_HAS(host, get_spells_by_name_data_bulk) first. */
+    int32_t (*get_spells_by_name_data_bulk)(void* host, const char* name, unsigned char* out, int32_t out_size);
+    /* The plugin's own bulk buffer: HS_BULK_BUFFER_SIZE (2 MiB) bytes to pass the *_data_bulk reads as `out`, so it
+     * need not allocate its own. Each plugin has its own, made at its first acquire and freed when it unloads.
+     * acquire returns it and sets *size (size may be NULL), or returns NULL with *size 0 when called outside the
+     * plugin's own callbacks (from another thread among them). The pointer may be used from acquire until
+     * release_bulk_buffer, the end of the callback it was acquired in, or the plugin's unload, whichever comes first.
+     * Asked again meanwhile, from a callback of the plugin's nested inside that one too, it returns the same buffer,
+     * and a release in such a nested callback does nothing: the outer callback keeps it (the nested one's reads still
+     * overwrite what the outer read). Never zeroed: it holds whatever the plugin last left. No permission needed (the
+     * reads still need theirs). Added later in ABI 3: test HAILSTONE_HOST_HAS(host, acquire_bulk_buffer) first. */
+    unsigned char* (*acquire_bulk_buffer)(void* host, int32_t* size);
+    void (*release_bulk_buffer)(void* host);
+    /* ---- ABI 5: this branch's own calls, appended after upstream's ABI 4 table (set_ui_contribution through
+     * release_bulk_buffer above). Nothing there moved; test HAILSTONE_HOST_HAS before using any of these. ---- */
     /* READ. The open loot session (a corpse's items and coin) as records, as get_raid_data_bulk lays its list
-     * out. Added in ABI 4: test HAILSTONE_HOST_HAS(host, get_loot_data_bulk) first. */
+     * out. Added in ABI 5: test HAILSTONE_HOST_HAS(host, get_loot_data_bulk) first. */
     int32_t (*get_loot_data_bulk)(void* host, unsigned char* out, int32_t out_size);
     /* ACTIONS. Ask the server to open corpse `corpse_id` for looting (the loot window's own request). Nonzero:
      * the request went out. The session's items arrive after; read them with get_loot_data_bulk. */
@@ -1186,52 +1210,31 @@ typedef struct PluginHostApi {
      * slots inside the bags there, as ${Me.FreeInventory} counts them. An empty general slot counts one; a
      * filled one counts its bag's empty slots, not the slot the bag occupies. An item's size against a bag's
      * cap is not considered, so a tight bag may still refuse what this counts room for. -1 when the plugin
-     * lacks `read`, the client has no connection, or the call is off its thread. Added in ABI 4: test
+     * lacks `read`, the client has no connection, or the call is off its thread. Added in ABI 5: test
      * HAILSTONE_HOST_HAS(host, free_inventory_slots) first. */
     int (*free_inventory_slots)(void* host);
     /* READ. Whether `loot_corpse` would open the corpse now: in a zone, alive, no loot session open, and
      * the corpse within the client's reach (its AvatarHeight * 1.6 + 14, at z scale 1.2, so a giant's
-     * reach is much longer than a normal corpse's). 1 yes, 0 no, -1 off the client's thread. Added in ABI 4: test HAILSTONE_HOST_HAS(host, can_loot_corpse) first. */
+     * reach is much longer than a normal corpse's). 1 yes, 0 no, -1 off the client's thread. Added in ABI 5: test HAILSTONE_HOST_HAS(host, can_loot_corpse) first. */
     int (*can_loot_corpse)(void* host, uint32_t corpse_id);
     /* ACTIONS. `loot_item` with the loot window's modifier keys held: `shift` takes the whole stack at
      * once, with no quantity question (a shift-click), and `ctrl` takes one. 0 without an open session,
-     * as loot_item. Added in ABI 4: test HAILSTONE_HOST_HAS(host, loot_item_modifiers) first. */
+     * as loot_item. Added in ABI 5: test HAILSTONE_HOST_HAS(host, loot_item_modifiers) first. */
     int (*loot_item_modifiers)(void* host, int32_t slot, int auto_loot, int shift, int ctrl);
     /* READ. A zone's long name ("South Qeynos") by id, the name the windows show: as zone_name, -1 for an
-     * unknown id. Added in ABI 4: test HAILSTONE_HOST_HAS(host, zone_long_name) first. */
+     * unknown id. Added in ABI 5: test HAILSTONE_HOST_HAS(host, zone_long_name) first. */
     int (*zone_long_name)(void* host, uint32_t zone_id, char* out, size_t out_size);
     /* ACTIONS. answer_confirmation for the loot window's no-drop question alone: answers only when
      * that is the question being asked now, so a caller mid-loot can never accept an unrelated
      * question (an invite, an offer) by mistake. Nonzero when it answered; 0 when the current
      * question is another one (the loot question may be queued behind it: ask again later) or
-     * there is none. Added in ABI 4: test HAILSTONE_HOST_HAS(host, answer_loot_confirmation). */
+     * there is none. Added in ABI 5: test HAILSTONE_HOST_HAS(host, answer_loot_confirmation). */
     int (*answer_loot_confirmation)(void* host, int yes);
-    /* Add or replace this plugin's contribution by ID, or remove it. Both need UI and EXTEND. Return 1 on
-     * success, 0 on refusal (remove also returns 0 for an absent ID). Contributions go on deactivation,
-     * permission loss or unload. Check HAILSTONE_HOST_HAS before using the ABI 4 slots below. */
-    int (*set_ui_contribution)(void* host, const HailstoneUiContribution* entry);
-    int (*remove_ui_contribution)(void* host, const char* id);
     /* READ. Copy equipped items, carried items and their bag contents. Returns the total row
      * count, even if capacity was smaller; pass NULL and 0 to size the buffer. Returns -1
-     * before entering a zone or without read permission. Test HAILSTONE_HOST_HAS first. */
+     * before entering a zone or without read permission. Test HAILSTONE_HOST_HAS first.
+     * Added in ABI 5. */
     int (*inventory_rows)(void* host, HailstoneInventoryRow* out, uint32_t capacity);
-    /* Every spell named `name` (HAILSTONE_CAP_READ; case-insensitive, lowest id first), laid out as
-     * get_spells_data_bulk's: an int32_t count, then one record per spell of that name, as many whole records as fit.
-     * Bytes written; 0 without `read` or when out_size cannot hold the count. The count alone (0) with no game
-     * connection, a NULL name or one no spell has. Added later in ABI 3: test
-     * HAILSTONE_HOST_HAS(host, get_spells_by_name_data_bulk) first. */
-    int32_t (*get_spells_by_name_data_bulk)(void* host, const char* name, unsigned char* out, int32_t out_size);
-    /* The plugin's own bulk buffer: HS_BULK_BUFFER_SIZE (2 MiB) bytes to pass the *_data_bulk reads as `out`, so it
-     * need not allocate its own. Each plugin has its own, made at its first acquire and freed when it unloads.
-     * acquire returns it and sets *size (size may be NULL), or returns NULL with *size 0 when called outside the
-     * plugin's own callbacks (from another thread among them). The pointer may be used from acquire until
-     * release_bulk_buffer, the end of the callback it was acquired in, or the plugin's unload, whichever comes first.
-     * Asked again meanwhile, from a callback of the plugin's nested inside that one too, it returns the same buffer,
-     * and a release in such a nested callback does nothing: the outer callback keeps it (the nested one's reads still
-     * overwrite what the outer read). Never zeroed: it holds whatever the plugin last left. No permission needed (the
-     * reads still need theirs). Added later in ABI 3: test HAILSTONE_HOST_HAS(host, acquire_bulk_buffer) first. */
-    unsigned char* (*acquire_bulk_buffer)(void* host, int32_t* size);
-    void (*release_bulk_buffer)(void* host);
 } PluginHostApi;
 /* What use_ability and ability_state take: the kinds of ability the Ability Book lists. The values are stable. */
 enum HS_AbilityKinds {

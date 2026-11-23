@@ -62,19 +62,21 @@ static_assert(offsetof(PluginHostApi, select_raid_member) == offsetof(PluginHost
 static_assert(offsetof(PluginHostApi, set_class_name) == offsetof(PluginHostApi, get_map_policy) + sizeof(PluginHostApi::caps));
 static_assert(offsetof(PluginHostApi, get_spells_data_bulk) ==
               offsetof(PluginHostApi, nameplate_spell_icon) + sizeof(PluginHostApi::caps));
-// ABI 4: this branch's loot and inventory block at its published offsets, then the calls upstream added after its ABI 3
-// UI pair, at the table's end.
-static_assert(offsetof(PluginHostApi, get_loot_data_bulk) == offsetof(PluginHostApi, caps) + 111 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, answer_confirmation) == offsetof(PluginHostApi, caps) + 116 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, free_inventory_slots) == offsetof(PluginHostApi, caps) + 117 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, can_loot_corpse) == offsetof(PluginHostApi, caps) + 118 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, loot_item_modifiers) == offsetof(PluginHostApi, caps) + 119 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, set_ui_contribution) == offsetof(PluginHostApi, caps) + 122 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, remove_ui_contribution) == offsetof(PluginHostApi, caps) + 123 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, inventory_rows) == offsetof(PluginHostApi, caps) + 124 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, get_spells_by_name_data_bulk) == offsetof(PluginHostApi, caps) + 125 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, acquire_bulk_buffer) == offsetof(PluginHostApi, caps) + 126 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, release_bulk_buffer) == offsetof(PluginHostApi, caps) + 127 * sizeof(PluginHostApi::caps));
+// ABI 4 is upstream's: the UI contribution pair where upstream put it, then the later spell and bulk-buffer calls.
+// ABI 5 appends this branch's loot and inventory block after them, at fixed offsets.
+static_assert(offsetof(PluginHostApi, set_ui_contribution) == offsetof(PluginHostApi, caps) + 111 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, remove_ui_contribution) == offsetof(PluginHostApi, caps) + 112 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, get_spells_by_name_data_bulk) == offsetof(PluginHostApi, caps) + 113 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, acquire_bulk_buffer) == offsetof(PluginHostApi, caps) + 114 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, release_bulk_buffer) == offsetof(PluginHostApi, caps) + 115 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, get_loot_data_bulk) == offsetof(PluginHostApi, caps) + 116 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, answer_confirmation) == offsetof(PluginHostApi, caps) + 121 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, free_inventory_slots) == offsetof(PluginHostApi, caps) + 122 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, can_loot_corpse) == offsetof(PluginHostApi, caps) + 123 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, loot_item_modifiers) == offsetof(PluginHostApi, caps) + 124 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, zone_long_name) == offsetof(PluginHostApi, caps) + 125 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, answer_loot_confirmation) == offsetof(PluginHostApi, caps) + 126 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, inventory_rows) == offsetof(PluginHostApi, caps) + 127 * sizeof(PluginHostApi::caps));
 static_assert(sizeof(HS_BulkLootHeader) == HS_BULK_LOOT_HEADER_SIZE);
 static_assert(sizeof(HS_BulkLootRecord) == HS_BULK_LOOT_RECORD_SIZE);
 

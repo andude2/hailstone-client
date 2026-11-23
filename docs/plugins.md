@@ -918,17 +918,17 @@ Several plugins may extend the client at once: they are asked in load order and 
 
 **Compatibility.** The host table and the hook table carry their size and only grow at their end.
 
-- A plugin built for an older ABI loads in a newer client, not the reverse. This SDK reports ABI 4 (which moved the
-  client to Dear ImGui 1.93.0: no `OnUpdateImGui`, `imgui_context` or `web_view` for a plugin of ABI 3 or before). ABI 3
+- A plugin built for an older ABI loads in a newer client, not the reverse. This SDK reports ABI 5. ABI 4 moved the
+  client to Dear ImGui 1.93.0: no `OnUpdateImGui`, `imgui_context` or `web_view` for a plugin of ABI 3 or before. ABI 3
   added the web pages, `web_*`, "Web pages" below.
-- This branch's ABI 4 keeps the published headless loot and long zone name offsets: those entries follow
-  `get_spells_data_bulk`, before the UI contribution pair. The calls added upstream after that pair
-  (`get_spells_by_name_data_bulk`, `acquire_bulk_buffer`, `release_bulk_buffer`) sit at the table's end. A plugin
-  reporting ABI 3 is given the upstream ABI 3 layout instead: the UI contribution pair immediately after
-  `get_spells_data_bulk`, and the table ending there.
-- Calls added since keep ABI 3: test `HAILSTONE_HOST_HAS(host, open_bank)` before such a call, since an older client
-  has a shorter table. `use_ability`, `ability_state`, `get_ability_data_bulk` and the other calls under "added later
-  in ABI 3" in `sdk/hailstone_plugin.h` are such calls.
+- ABI 4 is upstream's layout unchanged: the UI contribution pair sits straight after `get_spells_data_bulk`, then the
+  later spell and bulk-buffer calls (`get_spells_by_name_data_bulk`, `acquire_bulk_buffer`, `release_bulk_buffer`).
+  This branch's ABI 5 appends its own loot and inventory calls after those, so nothing upstream placed has moved. A
+  plugin reporting ABI 3 gets the same append-only table, and only a plugin built for ABI 5 sees the loot calls.
+- Calls added since keep the ABI they were added in: test `HAILSTONE_HOST_HAS(host, open_bank)` before such a call,
+  since an older client has a shorter table. `use_ability`, `ability_state`, `get_ability_data_bulk` and the other
+  calls under "added later in ABI 3" in `sdk/hailstone_plugin.h` are ABI 3; "Added in ABI 5" marks this branch's
+  loot and inventory calls.
 - The structs a plugin passes to be filled (`HailstonePlayer`, `HailstoneSpawn`, ..., `HailstoneWebState`) carry
   their size too. `HailstoneWebState`'s `size` is a `size_t` (as ABI 3 shipped it), the others' a `uint32_t`.
 
@@ -970,7 +970,7 @@ Both need `actions`, as `/destroy` does. The id is a plain decimal number above 
 
 #### Inventory rows
 
-`inventory_rows(host, out, capacity)` is an append-only ABI 4 read call. Check it with
+`inventory_rows(host, out, capacity)` is an append-only ABI 5 read call. Check it with
 `HAILSTONE_HOST_HAS`. It returns the number of equipped, carried and carried-bag item rows while in a zone.
 A null output and zero capacity give the count for allocation. A smaller buffer receives its first rows and
 still returns the total. `HailstoneInventoryRow` has the possessions slot and subslot, item ID, icon, quantity,
@@ -988,9 +988,7 @@ The calls: `get_buff_data_bulk(host, out, out_size)`, `get_pet_buff_data_bulk(ho
 `get_spells_by_name_data_bulk(host, name, out, out_size)`.
 
 - They need `read`; without it they return 0 and say so in the chat window.
-- They came later in ABI 3, with the loot read added in ABI 4; in this branch's ABI 4 layout
-  `get_spells_by_name_data_bulk` is at the table's end, after the loot and UI contribution entries. Test
-  `HAILSTONE_HOST_HAS(host, <field>)` first.
+- They came later in ABI 3, except the loot read, which is ABI 5. Test `HAILSTONE_HOST_HAS(host, <field>)` first.
 - `out` is an `unsigned char*`, `out_size` an `int32_t`. They return the bytes written.
 
 **The records' layout.** The SDK's packed structs (`#pragma pack(push, 1)`): `HS_Bulk_BuffData`,
@@ -1514,14 +1512,13 @@ member, in roster order, as many whole records as fit.
   records as fit, laid out as above. A name no spell has, or a NULL one, gives the count alone (0), as does no game
   connection; below 4 bytes nothing is written and 0 comes back, and a plugin without `read` gets 0 bytes. Size
   `out` as for `get_spells_data_bulk`, about 1500 bytes per spell of the name. Added later in ABI 3: test
-  `HAILSTONE_HOST_HAS(host, get_spells_by_name_data_bulk)` first. In this branch's ABI 4 layout it is at the table's
-  end, so only a plugin built for ABI 4 sees it.
+  `HAILSTONE_HOST_HAS(host, get_spells_by_name_data_bulk)` first.
 
 ### Loot records and actions
 
 The loot window's session is a plugin's to read and drive: corpses are found as spawns
 (`get_spawns_data_bulk` and the spawn searches; a corpse's `is_corpse`), and the session the client holds
-for the corpse being looted is read and acted on here. Added in ABI 4: test
+for the corpse being looted is read and acted on here. Added in ABI 5: test
 `HAILSTONE_HOST_HAS(host, get_loot_data_bulk)` first.
 
 - `get_loot_data_bulk(host, out, out_size)` (with `read`): an `HS_BulkLootHeader`
@@ -1571,7 +1568,7 @@ for the corpse being looted is read and acted on here. Added in ABI 4: test
   way: a no-drop item (flag 2 above) and a stack's quantity ask first instead of going out at once.
 - `loot_item_modifiers(slot, auto_loot, shift, ctrl)` (with `actions`) is `loot_item` with the loot
   window's modifier keys held: `shift` takes the whole stack at once, with no quantity question (a
-  headless caller has no dialog to answer), and `ctrl` takes one. Added in ABI 4: test
+  headless caller has no dialog to answer), and `ctrl` takes one. Added in ABI 5: test
   `HAILSTONE_HOST_HAS(host, loot_item_modifiers)` first.
 - `answer_confirmation(yes)` (with `actions`) answers the confirmation question the client is asking now;
   `answer_loot_confirmation(yes)` answers only when that question is the loot window's no-drop one, so
@@ -1587,13 +1584,13 @@ by its id. `free_inventory_slots(host)` (with `read`) says how much room the pla
 item: the empty general slots (23..32) plus the empty slots inside the bags there, as `${Me.FreeInventory}`
 counts them. An empty general slot counts one; a bag counts its empty slots, not the slot the bag itself
 occupies. A bag's size cap is not considered, so a tight bag may still refuse what this counts room for.
-It returns -1 without `read`, with no connection, or off the client's thread. Added in ABI 4: test
+It returns -1 without `read`, with no connection, or off the client's thread. Added in ABI 5: test
 `HAILSTONE_HOST_HAS(host, free_inventory_slots)` first.
 
 `can_loot_corpse(corpse_id)` (with `read`) says whether `loot_corpse` would open that corpse now, the
 same check a right click on it makes: in a zone, alive, no loot session open, and within the corpse's
 reach. That reach is its `AvatarHeight * 1.6 + 14` at z scale 1.2, so a giant's corpse opens from much
-further than a rat's. 1 yes, 0 no, -1 off the client's thread. Added in ABI 4: test
+further than a rat's. 1 yes, 0 no, -1 off the client's thread. Added in ABI 5: test
 `HAILSTONE_HOST_HAS(host, can_loot_corpse)` first.
 
 ### Connections (ABI 2)
@@ -2072,7 +2069,7 @@ The page and its owner talk through `window.hailstone`.
 
 A page cannot run commands or read the game. What a message does is up to its owner, within the owner's permissions.
 
-| | Lua scripts and Lua plugins | A plugin's windows (UI pack) | Compiled plugins (ABI 4) |
+| | Lua scripts and Lua plugins | A plugin's windows (UI pack) | Compiled plugins (ABI 5) |
 |---|---|---|---|
 | open | `mq.web.open(url [, w, h])` | `hs.WebOpen(url [, w, h])` | `web_open(host, url, w, h)` |
 | go to an address | `mq.web.navigate(tab, url)` | `hs.WebNavigate` | `web_navigate` |

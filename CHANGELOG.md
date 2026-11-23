@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Plugin authors:** the SDK is ABI 5. ABI 4 is upstream's layout unchanged; the loot, long-zone-name and inventory calls this branch adds now sit after it, so rebuild a plugin that used them from ABI 4. ABI 3 and ABI 4 plugins load unchanged.
 - Modern Inventory's paper doll has an equipment Compare tab with the updated MQACNet add-on. The inventory window is resizable, and the Compare table gives long item names the room. Advanced Inventory can search and browse equipped, carried and bagged items across connected Hailstone characters that share their inventory.
 - Fixed a crash while closing the client or after a failed connect: plugins and scripts now stop while the connection and the UI are still alive, instead of a plugin's shutdown printing to a freed connection.
 

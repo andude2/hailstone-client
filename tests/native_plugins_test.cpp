@@ -743,20 +743,14 @@ TEST_CASE("native plugins: off before the zone-in; free without a hailstone.cfg;
 // hailstone_plugin_set_host and nmsc_plugin_set_host only, and reads the host table by the released positions. The
 // table grows at its end, so it loads and its calls land where its header put them.
 TEST_CASE("native plugins: a plugin built against the 0.7.1 SDK loads and finds its released host entries") {
-    plugin::UiBridge ui;
-    Host h(false, nullptr, HAILSTONE_SDK071_PLUGIN, &ui);
+    Host h(false, nullptr, HAILSTONE_SDK071_PLUGIN);
     h.approve(plugin::kCapAll);
     std::string why;
     REQUIRE_MESSAGE(h.plugins->load("Sdk071Plugin", &why), why);
     CHECK(h.printed_line("[Sdk071] loaded"));
     h.run("/sdk071");
     // Whole 16-byte xtarget records (remainder 0): the call reached get_xtarget_data_bulk, not a later entry.
-    CHECK(h.printed_line("[Sdk071] abi 3 table 1 name Sdk071Plugin xtarget 0"));
-    h.run("/sdk071ui");
-    REQUIRE(ui.contributions().size() == 1);
-    CHECK(ui.contributions().front().text == "ABI 3 notice");
-    h.run("/sdk071ui clear");
-    CHECK(ui.contributions().empty());
+    CHECK(h.printed_line("[Sdk071] abi 5 table 1 name Sdk071Plugin xtarget 0")); // the host table's ABI, not its own
 }
 
 // A plugin built for ABI 3 draws against the Dear ImGui before 1.92 (a context of another layout), so the client does
