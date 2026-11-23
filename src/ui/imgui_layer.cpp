@@ -103,6 +103,29 @@ std::filesystem::path find_bold_font(const std::filesystem::path& regular) {
 
 } // namespace
 
+ImFontConfig detail::ui_font_config() {
+    // Since ImGui 1.92 glyphs are rasterised on demand, at the density the backend reports
+    // (io.DisplayFramebufferScale), so there are no glyph ranges to give and no per-font density.
+    return ImFontConfig();
+}
+
+bool detail::build_ui_font_atlas(ImFontAtlas& atlas) {
+    // The built-in font and some custom faces lack curly quotes. Let those faces draw straight quotes while
+    // keeping the original characters in the chat line, clipboard and log.
+    static constexpr std::pair<ImWchar, ImWchar> quote_fallbacks[] = {
+        {0x2018, '\''}, {0x2019, '\''}, {0x201c, '"'}, {0x201d, '"'},
+    };
+    for (ImFont* font : atlas.Fonts) {
+        // A face the rasteriser cannot parse has no glyph for anything; the atlas no longer reports that when it is
+        // built (there is no build step), so ask the font itself.
+        if (!font->IsGlyphInFont('A') && !font->IsGlyphInFont(' ')) return false;
+        for (const auto& [curly, straight] : quote_fallbacks) {
+            if (!font->IsGlyphInFont(curly) && font->IsGlyphInFont(straight)) font->AddRemapCodepoint(curly, straight);
+        }
+    }
+    return true;
+}
+
 namespace {
 void clear_ui_interaction() {
     ImGuiContext* g = ImGui::GetCurrentContext();
@@ -205,14 +228,6 @@ ImGuiLayer::ImGuiLayer(platform::Window& window, render::VkContext& vk, const Im
     // icons, the stock UI art the Lua windows draw, browser tabs) come from pools of their own that grow as they fill
     // (ui/imgui_vk_textures.h).
     constexpr std::uint32_t kBackendSets = 32;
-    VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kBackendSets};
-    VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    pi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    pi.maxSets = kBackendSets;
-    pi.poolSizeCount = 1;
-    pi.pPoolSizes = &pool_size;
-    if (vkCreateDescriptorPool(vk_.device(), &pi, nullptr, &pool_) != VK_SUCCESS)
-        throw std::runtime_error("vkCreateDescriptorPool for ImGui failed");
 
     // The UI draws in the frame's overlay pass (render::VkContext::begin_overlay):
     // the swapchain image, one sample, no depth.
@@ -225,16 +240,16 @@ ImGuiLayer::ImGuiLayer(platform::Window& window, render::VkContext& vk, const Im
     info.Device = vk_.device();
     info.QueueFamily = vk_.queue_family();
     info.Queue = vk_.queue();
-    info.DescriptorPool = pool_;
+    info.DescriptorPoolSize = kBackendSets; // the backend makes its own pool (image and sampler descriptors, split in 1.92)
     info.PipelineCache = vk_.pipeline_cache();
     info.MinImageCount = min_image_count_;
     // Vertex buffers rotate per RenderDrawData call; at least one per frame in flight.
     info.ImageCount = std::max({vk_.image_count(), render::VkContext::kFramesInFlight, min_image_count_});
-    info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+    info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
     info.UseDynamicRendering = true;
-    info.PipelineRenderingCreateInfo = {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-    info.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
-    info.PipelineRenderingCreateInfo.pColorAttachmentFormats = &color_format_;
+    info.PipelineInfoMain.PipelineRenderingCreateInfo = {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+    info.PipelineInfoMain.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
+    info.PipelineInfoMain.PipelineRenderingCreateInfo.pColorAttachmentFormats = &color_format_;
     info.CheckVkResultFn = check_vk;
     if (!ImGui_ImplVulkan_Init(&info)) throw std::runtime_error("ImGui_ImplVulkan_Init failed");
     init_imgui_textures(vk_.device());
@@ -247,7 +262,6 @@ ImGuiLayer::~ImGuiLayer() {
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
-    if (pool_) vkDestroyDescriptorPool(vk_.device(), pool_, nullptr);
 }
 
 void ImGuiLayer::build_fonts() {
@@ -258,9 +272,7 @@ void ImGuiLayer::build_fonts() {
     g_plate_font = nullptr;
     g_plate_font_size = std::round(plate_size_ * scale_);
     g_plate_faux_bold = false;
-    // Rasterise at the framebuffer density so text stays sharp on HiDPI screens.
-    ImFontConfig cfg;
-    cfg.RasterizerDensity = window_.pixel_density();
+    const ImFontConfig cfg = detail::ui_font_config();
     float size = std::round(font_size_ * scale_);
     // The face set (set_font_face) when its file is there, else the Arial-class font found.
     std::filesystem::path font, bold;
@@ -284,6 +296,7 @@ void ImGuiLayer::build_fonts() {
         ImFontConfig def = cfg;
         def.SizePixels = std::round(13.0f * scale_);
         io.Fonts->AddFontDefault(&def);
+        detail::build_ui_font_atlas(*io.Fonts);
         log::debug("UI font: built-in, scale {:.2f}", scale_);
     };
     ImFont* loaded = nullptr;
@@ -296,17 +309,13 @@ void ImGuiLayer::build_fonts() {
 
     {
         for (std::size_t i = 1; i < kUiFontSizes.size(); ++i) {
-            ImFontConfig ui_cfg;
-            ui_cfg.RasterizerDensity = window_.pixel_density();
             g_ui_fonts[i] = io.Fonts->AddFontFromFileTTF(utf8(font).c_str(), std::round(kUiFontSizes[i] * scale_),
-                                                         &ui_cfg);
+                                                         &cfg);
         }
         for (std::size_t i = 0; i < kChatFonts; ++i) {
-            ImFontConfig chat_cfg;
-            chat_cfg.RasterizerDensity = window_.pixel_density();
             const std::filesystem::path& file = kChatFontBold[i] ? bold : font;
             g_chat_fonts[i] = io.Fonts->AddFontFromFileTTF(utf8(file).c_str(),
-                                                           std::round(kChatFontSizes[i] * scale_), &chat_cfg);
+                                                           std::round(kChatFontSizes[i] * scale_), &cfg);
         }
         // The name plates': their own face when its file is there, else the UI's; its bold file when bold is asked
         // for, else the regular one struck twice (plate_font_faux_bold).
@@ -317,12 +326,10 @@ void ImGuiLayer::build_fonts() {
         if (!plate_bold.empty() && !std::filesystem::is_regular_file(plate_bold, ec)) plate_bold.clear();
         const std::filesystem::path& file = plate_bold_ && !plate_bold.empty() ? plate_bold : regular;
         g_plate_faux_bold = plate_bold_ && plate_bold.empty();
-        ImFontConfig plate_cfg;
-        plate_cfg.RasterizerDensity = window_.pixel_density();
-        g_plate_font = io.Fonts->AddFontFromFileTTF(utf8(file).c_str(), g_plate_font_size, &plate_cfg);
+        g_plate_font = io.Fonts->AddFontFromFileTTF(utf8(file).c_str(), g_plate_font_size, &cfg);
     }
     // A file that reads but is not a font the rasteriser can parse fails here, not when the texture is made.
-    if (!io.Fonts->Build()) {
+    if (!detail::build_ui_font_atlas(*io.Fonts)) {
         log::warn("UI font {} could not be built; using the built-in font", utf8(font));
         use_default();
     }
@@ -351,7 +358,6 @@ void ImGuiLayer::new_frame() {
         // The UI font changed (/fontface): the atlas built again, its texture made again by the backend's NewFrame.
         fonts_dirty_ = false;
         vk_.wait_idle();
-        ImGui_ImplVulkan_DestroyFontsTexture();
         build_fonts();
     }
     std::uint32_t min_images = vk_.min_image_count();
@@ -567,7 +573,10 @@ bool keyboard_for_ui(int requested) {
     if (!io.WantCaptureKeyboard) return false;
     if (requested == 1 || io.WantTextInput || ImGui::GetTopMostPopupModal()) return true;
     const ImGuiContext& g = *GImGui;
-    return g.ActiveId == 0 || g.ActiveIdSource != ImGuiInputSource_Mouse;
+    if (g.ActiveId != 0) return g.ActiveIdSource != ImGuiInputSource_Mouse;
+    // NewFrame computes capture before clearing a window's move ID on mouse release. With no active item,
+    // only enabled keyboard navigation can account for the remaining capture flag.
+    return io.NavActive && (io.ConfigFlags & ImGuiConfigFlags_NavEnableKeyboard) && io.ConfigNavCaptureKeyboard;
 }
 
 float ui_scale() { return g_ui_scale; }

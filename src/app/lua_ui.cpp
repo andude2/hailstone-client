@@ -456,6 +456,23 @@ struct UiApi::Impl {
         return it->second;
     }
 
+    void store_visibility() {
+        // A new connection at character select has no in-game window state to save for the last character.
+        if (!host.in_game || !layout.loaded()) return;
+        for (auto& w : windows) {
+            const std::string& name = w->screen();
+            if (name.rfind("Bag", 0) == 0) continue; // shown by its own rules
+            const ui::WindowIniInfo& info = ini_info(name);
+            if (!(info.flags & 0x100)) continue;
+            bool shown = w->shown(host);
+            auto [it, inserted] = last_shown.try_emplace(name, shown);
+            if (!inserted && it->second != shown) {
+                layout.store_shown(info, shown);
+                it->second = shown;
+            }
+        }
+    }
+
     // A window's list as hs.ListInfo, hs.ListRow and hs.WindowList read it: StockWindow::list once a frame per
     // window and list, since most windows build the list again on each call (reading n rows was n builds). What a
     // call returns points into the window, so it stays valid; a list asked for later that comes back in the same
@@ -1497,7 +1514,8 @@ int HotButtonState(lua_State* L) {
 // info = hs.HotButtonInfo(name, child [, into [, y0, y1]])   -- what hs.HotButton, hs.HotButtonFace and
 // hs.HotButtonState give, in one call (each of those works the button out again): the table `into` (kept by the caller
 // from frame to frame) filled, or a new one. Fields: kind, label (hs.HotButton's), tex, u0, v0, u1, v1 (its icon, nil
-// when none); social (true where hs.HotButtonFace gives a face) and with it color = {r, g, b}, lua, running, enabled,
+// when none); stackCount (total carried for a stackable item link, current stack for an inventory slot, nil
+// otherwise); social (true where hs.HotButtonFace gives a face) and with it color = {r, g, b}, lua, running, enabled,
 // faceCooldown (the face's cooldown), overlay, tooltip (nil otherwise); state (true where hs.HotButtonState gives
 // one: not empty) and with it checked, left, cooldown, top (with y0 / y1), and the spell gem's tint = {r, g, b,
 // iconAlpha} with iconAlpha (nil otherwise). The cool-down's colour is hs.CoolDownColor()'s. The color and tint
@@ -1515,10 +1533,16 @@ int HotButtonInfoFn(lua_State* L) {
     if (w) hb = w->hot_button(m.host, child);
     const HotButtonInfo empty;
     const HotButtonInfo& info = hb ? *hb : empty;
-    record::push(L, 3, 24);
+    record::push(L, 3, 25);
     // (the strings only when changed: no new ones each frame for a record the caller keeps)
     plugin::set_string_field(L, "kind", info.kind.c_str());
     plugin::set_string_field(L, "label", info.label.c_str());
+    if (info.stack_count > 0) {
+        lua_pushinteger(L, static_cast<lua_Integer>(info.stack_count));
+        lua_setfield(L, -2, "stackCount");
+    } else {
+        set_nil(L, "stackCount");
+    }
     if (info.icon) {
         push_cell(L, *info.icon);
         set_art_fields(L, 5);
@@ -2649,7 +2673,7 @@ int GameMenus(lua_State* L) {
     auto& m = Impl::of(L);
     const float scale = std::clamp(static_cast<float>(luaL_optnumber(L, 1, 1.0)), 0.5f, 3.0f);
     ImFont* font = ui::ui_font(2);
-    const float fs = (font ? font->FontSize : ImGui::GetFontSize()) * scale;
+    const float fs = (font ? font->LegacySize : ImGui::GetFontSize()) * scale;
     const float width = static_cast<float>(luaL_optnumber(L, 2, 0.0));
     const float row_height = static_cast<float>(luaL_optnumber(L, 3, fs));
     const float separator_height = static_cast<float>(luaL_optnumber(L, 4, 1.0));
@@ -2898,16 +2922,7 @@ void UiApi::begin_frame() {
     for (auto& [name, place] : m.last_place)
         m.layout.store(m.ini_info(name), place.first, static_cast<int>(ds.x), static_cast<int>(ds.y), place.second);
     m.last_place.clear();
-    for (auto& w : m.windows) {
-        const std::string& name = w->screen();
-        if (name.rfind("Bag", 0) == 0) continue; // shown by its own rules
-        const ui::WindowIniInfo& info = m.ini_info(name);
-        if (!(info.flags & 0x100)) continue;
-        bool shown = w->shown(m.host);
-        auto it = m.last_shown.find(name);
-        if (it != m.last_shown.end() && it->second != shown) m.layout.store_shown(info, shown);
-        m.last_shown[name] = shown;
-    }
+    m.store_visibility();
     m.layout.save_if_due(std::chrono::steady_clock::now());
 }
 
@@ -2924,15 +2939,19 @@ void UiApi::load_layout(const std::filesystem::path& defaults, const std::filesy
         const std::string& name = w->screen();
         if (name.rfind("Bag", 0) == 0) continue;
         const ui::WindowIniInfo& info = m.ini_info(name);
-        if (auto s = m.layout.shown(info)) w->set_shown(m.host, *s);
-        else if (info.flags & 0x100) w->set_shown(m.host, (info.flags & 0x200) != 0); // bInitVisibility
+        if (!(info.flags & 0x100)) continue;
+        w->set_shown(m.host, m.layout.shown(info).value_or((info.flags & 0x200) != 0)); // bInitVisibility
+        m.last_shown.emplace(name, w->shown(m.host));
     }
     for (auto& w : m.windows) w->ini_loaded(m.host, m.layout, file.parent_path());
     chat_layout_loaded(m.layout, m.host, file.parent_path());
     log::info("ui: window places from {} (defaults {})", file.string(), defaults.string());
 }
 
-void UiApi::save_layout() { impl_->layout.save(); }
+void UiApi::save_layout() {
+    impl_->store_visibility();
+    impl_->layout.save();
+}
 
 const std::filesystem::path& UiApi::layout_file() const { return impl_->layout_file; }
 

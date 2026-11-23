@@ -372,6 +372,9 @@ TEST_CASE("drive pipe: a GameConnection plays through a two-process relay") {
     set_env("HAILSTONE_DRIVE_PIPE_ENDPOINT", relay_session.endpoint);
     set_env("HAILSTONE_DRIVE_PIPE_TOKEN", relay_session.token);
     set_env("HAILSTONE_DRIVE_PIPE_CHILD", "1");
+    // The relay child is spawned to run one named case, not a shard of the list. Under ctest it would inherit
+    // HAILSTONE_TEST_SHARD and leave that case out, then exit without connecting.
+    clear_env("HAILSTONE_TEST_SHARD");
     platform::ChildProcesses child;
     std::string start_error;
     REQUIRE_MESSAGE(child.start_tracked("drive-relay", {exe->string(), "-tc=drive_pipe_relay_child"}, start_error),

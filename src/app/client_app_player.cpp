@@ -137,8 +137,7 @@ void ClientApp::update_mouse_look() {
         last_mouse_look_ = Clock::now();
         return;
     }
-    const std::uint32_t stand = conn_->player_status().stand_state;
-    const bool can_move = (stand == net::kStandStanding || stand == net::kStandCrouching) && !conn_->stunned();
+    const bool can_move = can_turn_controlled_actor(*conn_);
     if (camera_type_ == game::kCameraFirstPerson && !can_move) return;
     const float k = mouse_look_scale();
     if (camera_type_ != game::kCameraFirstPerson && !camera6) {
@@ -929,14 +928,15 @@ void ClientApp::update_player(float dt) {
         // The zone objects' moving parts where their animation has them at this step.
         if (animated_objects_) animated_objects_->set_time(zone_animation_ms(st.ms));
         {
-            // CharacterZoneClient::DoPassageOfTime (0x45dc59): the target changed since the last frame (0xb827f8) while
-            // auto attack is on: the red con context tip (game/targeting.h), unless we are in a group that has the
-            // target (CharacterZoneClient_IsSelfOrGroupMember); then auto attack and auto fire go off.
+            // Hailstone keeps combat active on a target change by default. The optional guard follows
+            // DoPassageOfTime (0x45dc59): warn about a red-con target outside the group and stop combat.
             const auto& w = conn_->world();
             if (w.target_id != frame_target_) {
+                frame_target_ = w.target_id;
                 const game::Spawn* me = w.player();
                 auto t = w.spawns.find(w.target_id);
-                if (me && t != w.spawns.end() && conn_->auto_attack()) {
+                if (me && t != w.spawns.end() && conn_->auto_attack() &&
+                    config_.get_bool("combat.red_con_attack_guard", false)) {
                     const auto& g = conn_->group();
                     const std::string& name = t->second.name;
                     bool grouped = g.active && (g.has_member(game::display_name(name)) || g.has_member(name));
@@ -946,7 +946,6 @@ void ClientApp::update_player(float dt) {
                         conn_->set_auto_fire(false);
                     }
                 }
-                frame_target_ = w.target_id;
             }
         }
         // Melee (game/mechanics/melee.h): DoPassageOfTime's swing timers set the ready flags, ProcessControls (in the

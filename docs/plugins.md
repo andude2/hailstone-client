@@ -379,7 +379,8 @@ The server sends target buffs only to some players (stock EQEmu: GMs, Inspect Bu
 - `Target.Buff[n|name]` (a buff: `.Duration`, `.Caster`, `.ID` the slot ...), `.BuffCount`, `.BuffDuration[name]`;
 - `.MyBuff[name]` and `.MyBuffDuration[name]` (cast by the player);
 - the state a buff puts it in, by spell effect (EQEmu's spdat.h): `.Mezzed` (SPA 31), `.Charmed` (22), `.Feared`
-  (23), `.Rooted` (99), `.Snared` (3, negative), `.Slowed` (11, under 100%).
+  (23), `.Rooted` (99), `.Snared` (3, negative), `.Slowed` (11, under 100%); `.Poisoned` (36), `.Diseased` (35),
+  `.Cursed` (116), `.Corrupted` (369), a buff with counters of that kind.
 
 #### Spawn searches
 
@@ -399,10 +400,19 @@ Spawn searches use MQ's words and rules (ParseSearchSpawn and SpawnMatchesSearch
   `noalert N`, `nearalert N`, `notnearalert N`
 - names: words that are no keyword make a partial name, matched in the name as sent or cleaned. `=Name` or
   `name =Name` asks for the whole cleaned name (MQ keeps the `#` of a `#Name` there, so `=` never finds one)
+- `/target`'s `next` / `prev`: the match after / before the current target in distance order, instead of the
+  nearest; the last word wins
 
-Results come nearest first (3D, from the player). `targetable` is the game's own test, as in MQ: the Targetable flag
-on and body type not 11 (EQEmu's NoTarget, given to portal and trigger NPCs). `Spawn.Targetable` is the flag alone,
-as in MQ, so a script filtering spawns itself checks `BodyType` too.
+Results come nearest first (3D, from the player). `/target`'s `next` and `prev` walk that list from the current
+target; other callers ignore them and take the nearest (`next` and `prev` do not filter), so `SpawnCount` counts
+every match and `NearestSpawn[N]` can take the Nth. With no target, or one the zone no longer has, both directions
+take the nearest valid match: the nearest, with you left out while another spawn matches. A bare-name `/target`
+without `next` or `prev` is not the same: RoF2's choice (`docs/commands.md`) takes your exact name even then. A
+current target that is no match starts from its own distance: `next` takes the first match farther away and `prev`
+the last one nearer. Past either end of the list there is none: it does not start again at the other end.
+`targetable` is the game's own test, as in MQ: the Targetable flag on and body type not 11 (EQEmu's NoTarget, given
+to portal and trigger NPCs). `Spawn.Targetable` is the flag alone, as in MQ, so a script filtering spawns itself
+checks `BodyType` too.
 
 Differences from MQ:
 
@@ -410,7 +420,12 @@ Differences from MQ:
 - No alert lists are kept, so `nearalert` finds nothing and the other alert words ask nothing (as MQ with no list).
 - `fellowship` matches the server-supplied roster, including expanded rosters of up to 64 members.
 - `los` keeps a spawn while the zone's collision is not loaded.
-- `next` and `prev` (MQ's target cycling) are accepted and do nothing yet.
+- `/target next` and `/target prev` measure `radius`, `zradius` and `nopcnear` from the player, where MQ measures them
+  from the old target. Both walk the spawns nearest the player first, but MQ sorts by flat (XY) distance
+  (`UpdateMQ2SpawnSort`, refreshed every pulse) and Hailstone by 3D distance, as its other searches do.
+- `/target` leaves you out while another spawn matches, in every direction: a typed search, `next` and `prev` alike.
+  A bare name without `next` or `prev` is the exception, because RoF2's choice takes your exact name even then. That
+  is Hailstone's own rule, not MQ's.
 
 Not yet:
 
@@ -420,7 +435,8 @@ Not yet:
 
 ### MQ commands
 
-`/echo`, `/target` (`id N`, `clear`, `mycorpse`, or a spawn search), `/face` (target, `id`, `heading H`, `loc y,x`,
+`/echo`, `/target` (`id N`, `clear`, `mycorpse`, `myself`, or a spawn search; with nothing, yourself; `next` / `prev`
+walk the search's matches), `/face` (target, `id`, `heading H`, `loc y,x`,
 a search; `fast`), `/keypress <command> [hold|release]` (the game's key command names: `forward`, `jump`, `hot1_1`, ...),
 `/squelch <cmd>`, `/docommand <cmd>`, `/noparse <cmd>`, `/lua ...`, `/plugin ...`. `/nav` (MQ2Nav's commands),
 `/moveto` and `/stick` are built in (`docs/navigation.md`).
@@ -742,8 +758,10 @@ cl /LD /I path\to\hailstone\sdk MyPlugin.c                                    # 
 MacroQuest's plugin sources do not build as they are: they read the game executable's memory layouts
 (`pLocalPlayer`, `PSPAWNINFO`, ...). Port them to TLO reads (`ParseMacroData`) and the callbacks above.
 
-A plugin that draws with Dear ImGui must be built with the client's Dear ImGui version and call
-`ImGui::SetCurrentContext(host->imgui_context(host->host))`.
+A plugin that draws with Dear ImGui must be built with the client's Dear ImGui version (1.93.0 since ABI 4) and call
+`ImGui::SetCurrentContext(host->imgui_context(host->host))`. Dear ImGui 1.92 changed the context's layout (fonts, textures,
+the draw callbacks), so the client does not call `OnUpdateImGui` of a plugin built for an older ABI (it logs that when the
+plugin loads), and `imgui_context` and `web_view` give such a plugin nothing. Rebuild it against this SDK.
 
 ### Server extensions (ABI 2)
 
@@ -862,6 +880,8 @@ The bulk reads give packed records (Buff, spawn, extended target, ability and ra
 | `get_spawns_data_bulk` | every spawn in the zone |
 | `get_raid_data_bulk` | the raid roster |
 | `get_spells_data_bulk` | spells by id, with their effects as text |
+| `get_spells_by_name_data_bulk` | every spell of a name, laid out as `get_spells_data_bulk`'s |
+| `acquire_bulk_buffer`, `release_bulk_buffer` | the plugin's own 2 MiB buffer for the reads above |
 
 #### Actions
 
@@ -898,8 +918,15 @@ Several plugins may extend the client at once: they are asked in load order and 
 
 **Compatibility.** The host table and the hook table carry their size and only grow at their end.
 
-- A plugin built for an older ABI loads in a newer client, not the reverse. This SDK reports ABI 4. The loader keeps the published headless loot and long zone name offsets for ABI 4 plugins and appends the new UI contribution calls. Plugins reporting ABI 3 get the upstream layout with its UI contribution calls immediately after `get_spells_data_bulk`.
-- For calls appended within ABI 3, test `HAILSTONE_HOST_HAS(host, open_bank)` before such a call, since an older client
+- A plugin built for an older ABI loads in a newer client, not the reverse. This SDK reports ABI 4 (which moved the
+  client to Dear ImGui 1.93.0: no `OnUpdateImGui`, `imgui_context` or `web_view` for a plugin of ABI 3 or before). ABI 3
+  added the web pages, `web_*`, "Web pages" below.
+- This branch's ABI 4 keeps the published headless loot and long zone name offsets: those entries follow
+  `get_spells_data_bulk`, before the UI contribution pair. The calls added upstream after that pair
+  (`get_spells_by_name_data_bulk`, `acquire_bulk_buffer`, `release_bulk_buffer`) sit at the table's end. A plugin
+  reporting ABI 3 is given the upstream ABI 3 layout instead: the UI contribution pair immediately after
+  `get_spells_data_bulk`, and the table ending there.
+- Calls added since keep ABI 3: test `HAILSTONE_HOST_HAS(host, open_bank)` before such a call, since an older client
   has a shorter table. `use_ability`, `ability_state`, `get_ability_data_bulk` and the other calls under "added later
   in ABI 3" in `sdk/hailstone_plugin.h` are such calls.
 - The structs a plugin passes to be filled (`HailstonePlayer`, `HailstoneSpawn`, ..., `HailstoneWebState`) carry
@@ -957,11 +984,13 @@ The calls: `get_buff_data_bulk(host, out, out_size)`, `get_pet_buff_data_bulk(ho
 `get_target_buff_data_bulk(host, out, out_size)`, `get_avail_aa_data_bulk(host, out, out_size)`,
 `get_avail_disc_data_bulk(host, out, out_size)`, `get_buff_name_data_bulk(host, out, out_size)`,
 `get_ability_data_bulk(host, out, out_size)`, `get_raid_data_bulk(host, out, out_size)`,
-`get_loot_data_bulk(host, out, out_size)` and
-`get_spells_data_bulk(host, ids, id_count, out, out_size)`.
+`get_loot_data_bulk(host, out, out_size)`, `get_spells_data_bulk(host, ids, id_count, out, out_size)` and
+`get_spells_by_name_data_bulk(host, name, out, out_size)`.
 
 - They need `read`; without it they return 0 and say so in the chat window.
-- They came later in ABI 3, with the loot read added in ABI 4. Test `HAILSTONE_HOST_HAS(host, <field>)` first.
+- They came later in ABI 3, with the loot read added in ABI 4; in this branch's ABI 4 layout
+  `get_spells_by_name_data_bulk` is at the table's end, after the loot and UI contribution entries. Test
+  `HAILSTONE_HOST_HAS(host, <field>)` first.
 - `out` is an `unsigned char*`, `out_size` an `int32_t`. They return the bytes written.
 
 **The records' layout.** The SDK's packed structs (`#pragma pack(push, 1)`): `HS_Bulk_BuffData`,
@@ -986,6 +1015,36 @@ Hailstone runs on), unaligned.
   raid read, whose `HS_Bulk_RaidHeader` has `count` and `total` meaning the same;
 - write nothing and return 0 below the header's size. With nothing to list, the header alone goes out, `count` 0 and
   `total` 0.
+
+**The bulk buffer.** `acquire_bulk_buffer(host, &size)` lends the plugin its own bulk buffer, `HS_BULK_BUFFER_SIZE`
+(2 MiB) bytes, to pass the reads as `out`, so it need not allocate a buffer of its own for each read.
+`release_bulk_buffer(host)` ends the loan.
+
+- Each plugin has its own: made at its first `acquire_bulk_buffer`, kept between calls, freed when the plugin unloads.
+  No plugin waits on another.
+- Outside the plugin's own callbacks, from another thread among them, `acquire_bulk_buffer` returns NULL and sets
+  `size` to 0. `size` may be NULL.
+- The pointer is the plugin's from `acquire_bulk_buffer` until the first of: `release_bulk_buffer`, the end of the
+  callback it was acquired in, or the plugin's unload. Never keep it past that.
+- Asked again meanwhile it gives the same buffer, also in one of the plugin's callbacks nested inside that one (its
+  own command run with `DoCommand`, say). A `release_bulk_buffer` in such a nested callback does nothing: the outer
+  callback still holds it. The nested callback's reads do write into the same bytes, so copy out what the outer one
+  still needs before running code that may read into it.
+- To keep two reads' results side by side, give the second the rest of the buffer: read the first into `buf`, then
+  the second into `buf + n` with `size - n`, where `n` is the bytes the first returned.
+- It is never zeroed: it holds whatever the plugin last left. Zero what you need zeroed yourself.
+- It needs no permission; the reads still need `read`.
+- It came later in ABI 3: test `HAILSTONE_HOST_HAS(host, acquire_bulk_buffer)` first.
+
+```c
+int32_t size = 0;
+unsigned char* buf = host->acquire_bulk_buffer(host->host, &size);
+if (buf) {
+    int32_t n = host->get_spells_by_name_data_bulk(host->host, "Third Spire of Necromancy", buf, size);
+    /* ... read the n bytes ... */
+    host->release_bulk_buffer(host->host);
+}
+```
 
 ##### `get_buff_data_bulk`
 
@@ -1445,6 +1504,18 @@ member, in roster order, as many whole records as fit.
   plugin without `read` gets 0 bytes. A record is 265 bytes plus 240 for its 12 effect slots, 16 for its class levels, its texts and lines, a few hundred bytes for a
   stock spell, so about 1500 bytes per id is ample. Added later in ABI 3: test
   `HAILSTONE_HOST_HAS(host, get_spells_data_bulk)` first.
+
+##### `get_spells_by_name_data_bulk`
+
+`get_spells_by_name_data_bulk(host, name, out, out_size)`: every spell named `name` (a C string, matched without
+  regard to case, the whole name only) in one call, so a plugin need not know the ids of a spell's ranks or copies.
+  Several spells often share a name (Third Spire of Necromancy is 16290, 16291 and 16292); they come lowest id first.
+  The bytes are exactly those `get_spells_data_bulk` writes for those ids: an i32 `count`, then as many whole
+  records as fit, laid out as above. A name no spell has, or a NULL one, gives the count alone (0), as does no game
+  connection; below 4 bytes nothing is written and 0 comes back, and a plugin without `read` gets 0 bytes. Size
+  `out` as for `get_spells_data_bulk`, about 1500 bytes per spell of the name. Added later in ABI 3: test
+  `HAILSTONE_HOST_HAS(host, get_spells_by_name_data_bulk)` first. In this branch's ABI 4 layout it is at the table's
+  end, so only a plugin built for ABI 4 sees it.
 
 ### Loot records and actions
 
@@ -2026,7 +2097,15 @@ An ini file at the top of the server's `client_files/` (`plugin::parse_server_cf
 default; `;` and `#` start comments. A section not listed below is kept for scripts to read (`hailstone.server_rule`),
 for example `[autocombat] hunter = off`.
 
+`[client] deny = on` makes Hailstone stop before completing its first zone-in and show a notice directing the
+player to the server owner. The client checks the policy received through the server's file service on that login.
+When none comes (a server without the script) or the download fails, an earlier login's copy does not count and the
+client goes in. This check relies on successful policy delivery and an up-to-date, unmodified client.
+
 ```ini
+[client]
+deny = off                ; on blocks Hailstone from entering the server (default off)
+
 [scripts]
 player = off              ; the player's own scripts: on / off (default off)
 player_caps = read,ui     ; what they may do when on (default all)

@@ -50,6 +50,8 @@ void ClientApp::load_zone(const std::string& short_name) {
                 revamped_test = game::safe_point_test(game::server_to_world({z->safe_x, z->safe_y, z->safe_z}),
                                                       tested_collision);
         zone_ = assets::load_zone(game_, short_name, {}, revamped_test);
+        // A revamped zone with both files whose test failed loads its .s3d: the mesh the test built is the .eqg's.
+        if (!zone_->from_eqg) tested_collision.reset();
         mark("zone data");
         // The classic ground smoothed for drawing (assets/ground_refine.h, display.smooth_ground); before the flora,
         // which stands on it.

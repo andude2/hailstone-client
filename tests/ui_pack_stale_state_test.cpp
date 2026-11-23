@@ -125,9 +125,7 @@ struct PackRig {
         fs::copy(src, dir / pack, fs::copy_options::recursive);
         ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int w = 0, h = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         s = std::make_unique<Session>(dir, pack);
         s->frames(2);
         L = s->lua.state();
@@ -200,9 +198,7 @@ TEST_CASE("UI packs: blocked bases cannot start or retain a Lua presentation and
 
         PolicyUi() {
             ImGui::GetIO().IniFilename = nullptr;
-            unsigned char* pixels = nullptr;
-            int width = 0, height = 0;
-            ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+            ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
             auto put = [](const fs::path& file, const char* text) {
                 fs::create_directories(file.parent_path());
                 std::ofstream(file) << text;
@@ -588,22 +584,24 @@ end
     }
 }
 
-TEST_CASE("UI packs (gamepad): ending an adventure clears its abandon confirmation") {
+TEST_CASE("UI packs (gamepad): ending or replacing an adventure clears its leave confirmation") {
     PackRig r("gamepad");
     r.run(R"lua(
 fake.shown.AdventureRequestWnd = true
-fake.activeAdventure = true
+fake.adventureToken = '1:1'
 local ChildShown, ChildState, WindowText = hs.ChildShown, hs.ChildState, hs.WindowText
 hs.ChildShown = function(win, child, ...)
-  if win == 'AdventureRequestWnd' then return child ~= 'AdvRqst_LeaveButton' or fake.activeAdventure end
+  if win == 'AdventureRequestWnd' then return child ~= 'AdvRqst_LeaveButton' or fake.adventureToken ~= '' end
   return ChildShown(win, child, ...)
 end
 hs.ChildState = function(win, child, ...)
-  if win == 'AdventureRequestWnd' then return child == 'AdvRqst_LeaveButton' or child == 'AdvRqst_ViewStatsButton' end
+  if win == 'AdventureRequestWnd' then
+    return child == 'AdvRqst_ViewStatsButton' or (child == 'AdvRqst_LeaveButton' and fake.adventureToken ~= '')
+  end
   return ChildState(win, child, ...)
 end
 hs.WindowText = function(win, child, ...)
-  if win == 'AdventureRequestWnd' then return '' end
+  if win == 'AdventureRequestWnd' then return child == 'AdvRqst_LeaveToken' and fake.adventureToken or '' end
   return WindowText(win, child, ...)
 end
 )lua");
@@ -613,7 +611,8 @@ end
     r.button(ImGuiMouseButton_Left, true);
     r.button(ImGuiMouseButton_Left, false);
     CHECK(r.saw("Give up the current adventure?"));
-    r.run("fake.activeAdventure = false seen = {}");
+    SUBCASE("the assignment ends") { r.run("fake.adventureToken = '' seen = {}"); }
+    SUBCASE("a new assignment replaces it") { r.run("fake.adventureToken = '1:2' seen = {}"); }
     r.s->frames(2);
     CHECK_FALSE(r.saw("Give up the current adventure?"));
     CHECK(r.no_errors());

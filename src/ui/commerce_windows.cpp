@@ -59,7 +59,7 @@ bool slot(const char* id, const Item* item, ItemIconCache* icons, float size, bo
         if (hovered) ImGui::SetTooltip("%s", item->name.c_str());
     }
     ImU32 border = highlight ? IM_COL32(120, 230, 120, 255) : hovered ? IM_COL32(220, 200, 120, 255) : IM_COL32(90, 90, 100, 255);
-    dl->AddRect(p, ImVec2(p.x + size, p.y + size), border, 3.0f, 0, highlight ? 2.0f : 1.0f);
+    dl->AddRect(p, ImVec2(p.x + size, p.y + size), border, 3.0f, highlight ? 2.0f : 1.0f, 0);
     ImGui::PopID();
     return clicked;
 }
@@ -203,6 +203,7 @@ CommerceWindowsActions commerce_windows(CommerceWindowsState& st, const Commerce
                 if (slot(std::format("m{}", n).c_str(), mine, icons, cell) && held) act.trade_drop = true;
             }
             coins_line("Your coin:", t->my_coins);
+            if (in.holding_coin && ImGui::Button("Offer held coin")) act.trade_drop_coin = true;
             static constexpr const char* kCoins[] = {"copper", "silver", "gold", "platinum"};
             ImGui::SetNextItemWidth(em * 6.0f);
             ImGui::InputInt("##coin", &st.coin_amount);
@@ -222,15 +223,15 @@ CommerceWindowsActions commerce_windows(CommerceWindowsState& st, const Commerce
         }
         ImGui::End();
         if (!open) act.trade_cancel = true;
-    } else if (held && in.target_id && !in.trade && !(in.merchant && in.merchant->open)) {
-        // A stand-in for dropping the held item on the target (CEverQuest::LeftClickedOnPlayer).
+    } else if ((held || in.holding_coin) && in.target_id && !in.trade && !(in.merchant && in.merchant->open)) {
         ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + vp->WorkSize.y - em * 9.0f),
                                 ImGuiCond_Always, ImVec2(0.5f, 1.0f));
         ImGui::SetNextWindowBgAlpha(0.8f);
         if (ImGui::Begin("##hailstone_give", nullptr,
                          ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
                              ImGuiWindowFlags_NoFocusOnAppearing)) {
-            if (ImGui::Button(std::format("Give {} to {}", held->name, in.target_name).c_str())) act.give_to = in.target_id;
+            if (ImGui::Button(std::format("Give {} to {}", held ? held->name : "coin", in.target_name).c_str()))
+                act.give_to = in.target_id;
         }
         ImGui::End();
     }

@@ -666,8 +666,8 @@ private:
     static int system_font_extent(std::string_view s) {
         ImFont* f = ui::ui_font(2);
         if (!f || !ImGui::GetCurrentContext()) return static_cast<int>(s.size()) * 6;
-        float scale = f->FontSize / 12.0f;
-        return static_cast<int>(std::lround(f->CalcTextSizeA(f->FontSize, FLT_MAX, 0.0f, s.data(), s.data() + s.size()).x / scale));
+        float scale = f->LegacySize / 12.0f;
+        return static_cast<int>(std::lround(f->CalcTextSizeA(f->LegacySize, FLT_MAX, 0.0f, s.data(), s.data() + s.size()).x / scale));
     }
 
     static const game::ItemDisplayCell* heroic(const game::ItemDisplay& d, int n) {

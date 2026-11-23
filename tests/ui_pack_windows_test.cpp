@@ -211,8 +211,7 @@ TEST_CASE("UI packs (gamepad): real window chrome fits resized viewports and exp
         auto& io = ImGui::GetIO(); io.IniFilename = nullptr;
         ImFontConfig font; font.SizePixels = 20.0f * scale;
         io.Fonts->AddFontDefault(&font);
-        unsigned char* pixels = nullptr; int texture_width = 0, texture_height = 0;
-        io.Fonts->GetTexDataAsRGBA32(&pixels, &texture_width, &texture_height);
+        io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         ui::set_ui_scale(scale);
         Session s(dir, "gamepad");
         auto frame = [&](float width, float height) {
@@ -286,8 +285,7 @@ TEST_CASE("UI packs (gamepad): stock Raid and Map stay inside narrow and short n
     fs::copy(fs::path(__FILE__).parent_path().parent_path() / "ui/gamepad", dir / "gamepad", fs::copy_options::recursive);
     std::unique_ptr<ImGuiContext, void(*)(ImGuiContext*)> context(ImGui::CreateContext(), ImGui::DestroyContext);
     auto& io = ImGui::GetIO(); io.IniFilename = nullptr;
-    unsigned char* pixels = nullptr; int width = 0, height = 0;
-    io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+    io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     Session s(dir, "gamepad"); s.lua.set_entry_scripts({"raid.lua", "map.lua"});
     for (int member = 0; member < 72; ++member) {
         net::RaidUpdate update; update.general.action = net::kRaidAddMember;
@@ -339,9 +337,7 @@ TEST_CASE("UI packs: context submenus cascade inward at either screen edge and a
         std::unique_ptr<ImGuiContext, void(*)(ImGuiContext*)> context(ImGui::CreateContext(), ImGui::DestroyContext);
         auto& io = ImGui::GetIO();
         io.IniFilename = nullptr;
-        unsigned char* pixels = nullptr;
-        int width = 0, height = 0;
-        io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+        io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         Session s(dir, pack);
         s.lua.set_entry_scripts({"menus.lua"});
 
@@ -419,9 +415,7 @@ TEST_CASE("UI packs: every script of the shipped UIs loads, and their windows dr
 
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int w = 0, h = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             Session s(dir, pack);
             s.frames(3);
@@ -456,9 +450,7 @@ TEST_CASE("UI packs: evolving transfer reviews server previews and drawn confirm
         io.IniFilename = nullptr;
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
         io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
-        unsigned char* pixels = nullptr;
-        int width = 0, height = 0;
-        io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+        io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             test::Rig rig;
             REQUIRE(rig.to_zone());
@@ -630,9 +622,7 @@ TEST_CASE("UI packs: active discipline shows seconds and its icon cancels on a m
                  fs::copy_options::recursive);
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int w = 0, h = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             Session s(dir, pack);
             auto* L = s.lua.state();
@@ -729,9 +719,7 @@ TEST_CASE("UI packs: the gamepad's first focus is the discipline list, and LB en
     ImGui::GetIO().IniFilename = nullptr;
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
     ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_HasGamepad;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "gamepad");
         auto* L = s.lua.state();
@@ -834,9 +822,7 @@ TEST_CASE("UI packs: offered-task starting-zone hint and explicit preview follow
                  fs::copy_options::recursive);
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int w = 0, h = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             Session s(dir, pack);
             auto* L = s.lua.state();
@@ -1006,9 +992,7 @@ TEST_CASE("UI packs: linked discipline cooldowns show red fills and matching sec
                  fs::copy_options::recursive);
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int w = 0, h = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             Session s(dir, pack);
             auto* L = s.lua.state();
@@ -1129,9 +1113,7 @@ TEST_CASE("UI packs: hover respawn draws available and unavailable choices witho
         fs::copy(src, dir / pack, fs::copy_options::recursive);
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int width = 0, height = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &width, &height);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             test::ManualClock clock;
             clock.hold();
@@ -1178,9 +1160,7 @@ TEST_CASE("UI packs: the respawn window leaves the focus alone for a question th
         fs::copy(src, dir / pack, fs::copy_options::recursive);
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int width = 0, height = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &width, &height);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             test::ManualClock clock;
             clock.hold();
@@ -1224,9 +1204,7 @@ TEST_CASE("UI packs: resurrection keeps the original respawn choices and timer u
             fs::copy(src, dir / pack, fs::copy_options::recursive);
             ImGuiContext* ctx = ImGui::CreateContext();
             ImGui::GetIO().IniFilename = nullptr;
-            unsigned char* px = nullptr;
-            int width = 0, height = 0;
-            ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &width, &height);
+            ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
             {
                 test::ManualClock clock;
                 auto options = test::quick_options();
@@ -1379,9 +1357,7 @@ TEST_CASE("UI packs (modern): login Add-ons opens within narrow and short viewpo
     ImGuiContext* ctx = ImGui::CreateContext();
     auto& io = ImGui::GetIO();
     io.IniFilename = nullptr;
-    unsigned char* pixels = nullptr;
-    int width = 0, height = 0;
-    io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+    io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern", {}, false);
         s.display_size = ImVec2(1280, 720);
@@ -1532,9 +1508,7 @@ TEST_CASE("UI packs: each draws the login, server select and character select sc
         fs::copy(src, dir / pack, fs::copy_options::recursive);
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int w = 0, h = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             Session s(dir, pack);
             s.host.in_game = s.host.ui_ready = false;
@@ -1919,9 +1893,7 @@ TEST_CASE("UI packs: the login screen's More options pick the texture pack (hs.O
         fs::copy(src, dir / pack, fs::copy_options::recursive);
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int w = 0, h = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             Session s(dir, pack);
             s.host.in_game = s.host.ui_ready = false;
@@ -2016,9 +1988,7 @@ TEST_CASE("UI packs: the marketplace draws its shelves, details and pages from a
         fs::copy(src, dir / pack, fs::copy_options::recursive);
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int w = 0, h = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             Session s(dir, pack);
             auto& m = s.conn.marketplace();
@@ -2095,9 +2065,7 @@ TEST_CASE("UI packs: the spell book's sets and set editor draw; hs.SaveSpellSet 
         fs::copy(src, dir / pack, fs::copy_options::recursive);
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int w = 0, h = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             Session s(dir, pack);
             // the book opens only in a zone (CSpellBookWnd::AboutToShow): the mock EQEmu's connection in place of
@@ -2197,9 +2165,7 @@ TEST_CASE("UI packs (modern): an add-on's Remove asks, and its answer removes th
     fs::copy(src, dir / "modern", fs::copy_options::recursive);
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern");
         s.host.in_game = s.host.ui_ready = false;
@@ -2280,9 +2246,7 @@ TEST_CASE("UI packs (modern): no two of the spell book's widgets share an ID") {
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
     ImGui::GetIO().ConfigDebugHighlightIdConflicts = true;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern");
         hailstone::test::Rig rig;
@@ -2310,7 +2274,7 @@ TEST_CASE("UI packs (modern): no two of the spell book's widgets share an ID") {
             for (float x = at.x + 4; x < at.x + size.x; x += 16) {
                 ImGui::GetIO().AddMousePosEvent(x, y);
                 s.frames(1);
-                if (g.DebugDrawIdConflicts != 0) {
+                if (g.DebugDrawIdConflictsId != 0) {
                     ++conflicts;
                     MESSAGE("conflicting ID hovered at " << x - at.x << ", " << y - at.y);
                 }
@@ -2336,9 +2300,7 @@ TEST_CASE("UI packs (modern): the spell book's Memorize replaces the spell of a 
         fs::copy(src, dir / "modern", fs::copy_options::recursive);
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int w = 0, h = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             Session s(dir, "modern");
             hailstone::test::Rig rig;
@@ -2422,9 +2384,7 @@ TEST_CASE("UI packs (modern): crew inventory compares a slot and searches remote
     auto destroy = [](ImGuiContext* context) { ImGui::DestroyContext(context); };
     std::unique_ptr<ImGuiContext, decltype(destroy)> ctx(ImGui::CreateContext(), destroy);
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* pixels = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&pixels, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     Session s(dir, "modern");
     lua_State* L = s.lua.state();
     REQUIRE(luaL_dostring(L, R"lua(
@@ -2509,9 +2469,7 @@ TEST_CASE("UI packs: the inventory's alternate currencies draw, and a row select
 
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int w = 0, h = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             Session s(dir, pack);
             std::vector<net::AltCurrencyEntry> entries{{31, 22000, 1500, 1000, true}, {32, 22001, 1501, 500, true}};
@@ -2551,9 +2509,7 @@ TEST_CASE("UI packs: the Find window draws the zone's NPCs and follows hs.FindOp
 
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int w = 0, h = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             Session s(dir, pack);
             auto& world = s.conn.world_for_test();
@@ -2617,9 +2573,7 @@ end)
 )lua";
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern");
         for (auto [slot, id, name] : {std::tuple{0u, 101u, std::string("a gnoll")}, std::tuple{1u, 102u, std::string("a pup")}}) {
@@ -2670,9 +2624,7 @@ TEST_CASE("UI packs (modern): the extended target window shows empty slots and s
     fs::copy(src, dir / "modern", fs::copy_options::recursive);
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern");
         // Five slots, the first holding a gnoll; the other four empty.
@@ -2725,9 +2677,7 @@ TEST_CASE("UI packs (modern): the extended target window starts six rows tall an
     fs::copy(src, dir / "modern", fs::copy_options::recursive);
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern");
         // Twenty slots: slot 0 and slot 15 hold a spawn.
@@ -2818,9 +2768,7 @@ end)
 )lua";
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern");
         net::PlayerProfile pp;
@@ -2976,9 +2924,7 @@ end)
 )lua";
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* pixels = nullptr;
-    int tw = 0, th = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&pixels, &tw, &th);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern");
         net::PlayerProfile pp;
@@ -3099,9 +3045,7 @@ return table.concat(missing, ", ")
         fs::copy(src, dir / pack, fs::copy_options::recursive);
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int w = 0, h = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             Session s(dir, pack);
             s.frames(1);
@@ -3137,9 +3081,7 @@ TEST_CASE("UI packs: the Lua Scripts window and hs.Scripts*: list, run, pause, s
         std::ofstream(dir / "scripts" / "other" / "init.lua", std::ios::binary) << "print(1)\n";
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int w = 0, h = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             plugin::Hooks hooks;
             plugin::Policy policy;
@@ -3220,9 +3162,7 @@ TEST_CASE("UI packs: the web browser window and hs.Web* with a browser") {
         fs::copy(src, dir / pack, fs::copy_options::recursive);
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int w = 0, h = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             web::BrowserHost browser([] { return web::process_transport({HAILSTONE_MOCK_WEB_HELPER}); });
             Session s(dir, pack);
@@ -3366,9 +3306,7 @@ TEST_CASE("UI packs (modern): the Options window's Window Transparency and a win
     fs::copy(src, dir / "modern", fs::copy_options::recursive);
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern");
         lua_State* L = s.lua.state();
@@ -3407,9 +3345,7 @@ TEST_CASE("UI packs (modern): a resizable dialog's Scale zooms the whole window"
     fs::copy(src, dir / "modern", fs::copy_options::recursive);
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern");
         lua_State* L = s.lua.state();
@@ -3442,9 +3378,7 @@ TEST_CASE("UI packs (modern): an invitation to a group pops up with who sent it"
     fs::copy(src, dir / "modern", fs::copy_options::recursive);
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern");
         lua_State* L = s.lua.state();
@@ -3484,9 +3418,7 @@ TEST_CASE("UI packs: each claims the achievement and reward windows while they a
         fs::copy(src, dir / pack, fs::copy_options::recursive);
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int w = 0, h = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             Session s(dir, pack);
             s.frames(2);
@@ -3510,9 +3442,7 @@ TEST_CASE("UI packs: server shroud catalogs and storage draw in both packs") {
                  fs::copy_options::recursive);
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* pixels = nullptr;
-        int width = 0, height = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             test::Rig rig;
             REQUIRE(rig.to_zone());
@@ -3686,9 +3616,7 @@ TEST_CASE("UI packs: the server plugins' question draws above the loading cover 
         fs::copy(src, dir / pack, fs::copy_options::recursive);
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int w = 0, h = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             Session s(dir, pack, {}, in_game);
             std::optional<plugin::ConsentPrompt> prompt;
@@ -3706,14 +3634,14 @@ TEST_CASE("UI packs: the server plugins' question draws above the loading cover 
             };
             auto draw_index = [](const ImDrawList* list) {
                 const ImDrawData* data = ImGui::GetDrawData();
-                for (int i = 0; i < data->CmdListsCount; ++i)
+                for (int i = 0; i < data->CmdLists.Size; ++i)
                     if (data->CmdLists[i] == list) return i;
                 return -1;
             };
             auto foreground_cover = [&] {
                 const ImDrawList* foreground = ImGui::GetForegroundDrawList();
                 CHECK_FALSE(foreground->VtxBuffer.empty());
-                CHECK(draw_index(foreground) == ImGui::GetDrawData()->CmdListsCount - 1);
+                CHECK(draw_index(foreground) == ImGui::GetDrawData()->CmdLists.Size - 1);
                 CHECK(ImGui::GetBackgroundDrawList()->VtxBuffer.empty());
             };
             s.frames(2, nullptr, &loading);
@@ -3774,9 +3702,7 @@ TEST_CASE("UI packs: the Server add-ons warning shows only for a failure, can be
         fs::copy(src, dir / pack, fs::copy_options::recursive);
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int w = 0, h = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             Session s(dir, pack);
             ui::AddonPolicyView view;
@@ -3875,9 +3801,7 @@ TEST_CASE("UI packs: both plugin answers arm and remain reachable above the load
         fs::copy(src, dir / pack, fs::copy_options::recursive);
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int w = 0, h = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             Session s(dir, pack, {}, in_game);
             ui::LoadingView loading;
@@ -3952,9 +3876,7 @@ TEST_CASE("UI packs (gamepad): an invitation to a group keeps the client's own p
     fs::copy(src, dir / "gamepad", fs::copy_options::recursive);
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "gamepad");
         net::GroupInvite inv;
@@ -3978,9 +3900,7 @@ TEST_CASE("UI packs (modern): a dialog's corner and edge resize it, neither scal
     fs::copy(src, dir / "modern", fs::copy_options::recursive);
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern");
         lua_State* L = s.lua.state();
@@ -4041,9 +3961,7 @@ TEST_CASE("UI packs (modern): a frame's corner resizes it, never scales it") {
     fs::copy(src, dir / "modern", fs::copy_options::recursive);
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern");
         lua_State* L = s.lua.state();
@@ -4106,9 +4024,7 @@ TEST_CASE("UI packs (modern): a dialog rolls up from the button beside its close
     fs::copy(src, dir / "modern", fs::copy_options::recursive);
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern");
         lua_State* L = s.lua.state();
@@ -4262,9 +4178,7 @@ return "ok"
     fs::copy(src, dir / "gamepad", fs::copy_options::recursive);
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "gamepad");
         s.frames(1);
@@ -4293,9 +4207,7 @@ std::string run_gamepad_lib_script(const char* script, const char* scratch_name)
     fs::copy(src, dir / "gamepad", fs::copy_options::recursive);
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     std::string out;
     {
         Session s(dir, "gamepad");
@@ -4466,9 +4378,7 @@ TEST_CASE("UI packs (gamepad): cached window contents follow a change") {
     fs::copy(src, dir / "gamepad", fs::copy_options::recursive);
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "gamepad");
         s.frames(2);
@@ -4606,9 +4516,7 @@ TEST_CASE("UI packs (gamepad): Final Result stays reachable and dispatches only 
     fs::copy(src, dir / "gamepad", fs::copy_options::recursive);
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* pixels = nullptr;
-    int width = 0, height = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "gamepad");
         s.frames(2);
@@ -4696,9 +4604,7 @@ TEST_CASE("UI packs (modern): an item display draws the shown item's stats, and 
     fs::copy(src, dir / "modern", fs::copy_options::recursive);
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern");
         auto item = [](std::uint32_t id, const char* name, int str) {
@@ -4779,9 +4685,7 @@ TEST_CASE("UI packs: the item display compares the item with what you wear") {
         fs::copy(src, dir / pack, fs::copy_options::recursive);
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* px = nullptr;
-        int w = 0, h = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             Session s(dir, pack);
             namespace mech = game::mechanics;
@@ -4897,9 +4801,7 @@ TEST_CASE("UI packs (modern): the inventory, loot, trade, raid, guild, merchant,
            "<Rect X = 60 Y = 0 CX = 50 CY = 50/></Link>";
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern");
         lua_State* L = s.lua.state();
@@ -4960,9 +4862,7 @@ TEST_CASE("UI packs: both guild banner pages draw the catalog and appearance edi
         fs::copy(ui_source / pack, dir / pack, fs::copy_options::recursive);
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* pixels = nullptr;
-        int width = 0, height = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             Session s(dir, pack);
             s.frames(2);
@@ -5023,9 +4923,7 @@ TEST_CASE("UI packs (modern): the raid leader drags a member onto another group"
     fs::copy(src, dir / "modern", fs::copy_options::recursive);
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern");
         hailstone::test::Rig rig;
@@ -5177,9 +5075,7 @@ TEST_CASE("UI packs: raid member context menus and leadership hotkeys are reacha
         std::ofstream(dir / "UI_Test_Server.ini") << "[Tips]\nShowTips=0\nShowTOTD=0\n";
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* pixels = nullptr;
-        int width = 0, height = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             Session s(dir, pack);
             Config gamepad_config;
@@ -5437,9 +5333,7 @@ TEST_CASE("UI packs: leadership names follow received ranks, purchases and train
         std::ofstream(dir / "UI_Test_Server.ini") << "[Tips]\nShowTips=0\nShowTOTD=0\n";
         ImGuiContext* ctx = ImGui::CreateContext();
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* pixels = nullptr;
-        int width = 0, height = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             Session s(dir, pack);
             Config config;
@@ -5651,9 +5545,7 @@ TEST_CASE("UI packs (modern): the Options window's Textures section picks the te
     fs::copy(src, dir / "modern", fs::copy_options::recursive);
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern");
         std::set<std::string> asked;
@@ -5715,9 +5607,7 @@ TEST_CASE("UI packs: Options changes the Find trail style, Tab targeting and res
         std::unique_ptr<ImGuiContext, decltype(destroy_context)> ctx(ImGui::CreateContext(), destroy_context);
         ImGui::SetCurrentContext(ctx.get());
         ImGui::GetIO().IniFilename = nullptr;
-        unsigned char* pixels = nullptr;
-        int width = 0, height = 0;
-        ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
         {
             plugin::UiBridge bridge;
             Session s(dir, pack);
@@ -5936,9 +5826,7 @@ TEST_CASE("UI packs (modern): a resized bag window lays its slots out to its wid
     fs::copy(src, dir / "modern", fs::copy_options::recursive);
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern");
         lua_State* L = s.lua.state();
@@ -6024,9 +5912,7 @@ TEST_CASE("UI packs (modern): a right click on a target's or the pet's buff open
              fs::copy_options::recursive);
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, h = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern");
         auto* L = s.lua.state();
@@ -6144,7 +6030,7 @@ end
     ImGui::DestroyContext(ctx);
 }
 
-TEST_CASE("UI packs (modern): the buff tray can show empty slots and number buff tooltips") {
+TEST_CASE("UI packs (modern): buff tray options preserve the default layout and old slot settings") {
     test::ScratchDir scratch("ui_pack_buff_tray_slots");
     const auto dir = scratch.path();
     fs::create_directories(dir / "game");
@@ -6153,12 +6039,19 @@ TEST_CASE("UI packs (modern): the buff tray can show empty slots and number buff
     ImGuiContext* ctx = ImGui::CreateContext();
     auto& io = ImGui::GetIO();
     io.IniFilename = nullptr;
-    unsigned char* pixels = nullptr;
-    int w = 0, h = 0;
-    io.Fonts->GetTexDataAsRGBA32(&pixels, &w, &h);
+    io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern");
         auto* L = s.lua.state();
+        lua_pushcfunction(L, [](lua_State* state) {
+            const auto* window = ImGui::GetCurrentWindowRead();
+            const std::string_view name = window ? window->Name : "";
+            if (name.ends_with("###modern.BuffWindow")) lua_pushliteral(state, "BuffWindow");
+            else if (name.ends_with("###modern.ShortDurationBuffWindow")) lua_pushliteral(state, "ShortDurationBuffWindow");
+            else lua_pushnil(state);
+            return 1;
+        });
+        lua_setglobal(L, "testTrayWindow");
         auto run = [&](const char* code) {
             const int rc = luaL_dostring(L, code);
             INFO((rc == LUA_OK ? "" : lua_tostring(L, -1)));
@@ -6169,22 +6062,37 @@ TEST_CASE("UI packs (modern): the buff tray can show empty slots and number buff
         };
         run(R"lua(
 hs.ShowWindow('BuffWindow', true)
-ui.SetSetting('test.pos.BuffWindow', '600,160')
+hs.ShowWindow('ShortDurationBuffWindow', true)
+ui.SetSetting('hud.pos.BuffWindow', '600,160')
+ui.SetSetting('hud.pos.ShortDurationBuffWindow', '600,480')
 ui.SetSetting('hud.perRow.BuffWindow', 3)
-local names = { Buff2 = 'Spirit of Wolf', Buff4 = 'Holy Armor', Buff5 = 'Clarity' }
+local names = {
+  BuffWindow = { Buff2 = 'Spirit of Wolf', Buff4 = 'Holy Armor', Buff5 = 'Clarity' },
+  ShortDurationBuffWindow = { Buff0 = 'Chorus of the Singing Grove', Buff1 = 'Psalm' },
+}
 local slot, button, textColored, menuItem = hs.BuffSlot, ui.InvisibleButton, ui.TextColored, ui.MenuItem
+local drawText, drawRect, beginMenu, endMenu = ui.DrawText, ui.DrawRectFilled, ui.BeginMenu, ui.EndMenu
 hs.BuffSlot = function(win, id, overlays)
-  if win == 'BuffWindow' and names[id] then return 11, 60000, names[id], true end
+  local name = names[win] and names[win][id]
+  if name then return 11, id == 'Buff0' and 43000 or 60000, name, true end
   return slot(win, id, overlays)
 end
-buffRects = {}
+buffRects, songRects, menuRows = {}, {}, {}
+function clearTrayDraws()
+  trayText = { BuffWindow = {}, ShortDurationBuffWindow = {} }
+  trayPanel = {}
+end
+clearTrayDraws()
 ui.InvisibleButton = function(id, ...)
   local pressed = button(id, ...)
   local n = tonumber(id:match('^##Buff(%d+)$'))
-  if n then
+  local tray = n and testTrayWindow()
+  if tray == 'BuffWindow' then
     buffRects[n] = { ui.GetItemRect() }
     local _, h = ui.GetWindowSize()
     trayHeight = h
+  elseif tray == 'ShortDurationBuffWindow' then
+    songRects[n] = { ui.GetItemRect() }
   end
   return pressed
 end
@@ -6193,18 +6101,51 @@ ui.TextColored = function(r, g, b, a, label)
   return textColored(r, g, b, a, label)
 end
 ui.MenuItem = function(label, ...)
-  if label == pick then pick = nil; return true end
+  menuRows[label] = true
+  if label == pick then
+    pick = nil
+    ui.CloseCurrentPopup()
+    return true
+  end
   return menuItem(label, ...)
 end
+-- Exercise the layout choices in the live frame popup without depending on the submenu's hover delay.
+local forcedLayout
+ui.BeginMenu = function(label, ...)
+  if label == 'Layout' and (pick == 'Vertical' or pick == 'Horizontal') then
+    forcedLayout = true
+    return true
+  end
+  return beginMenu(label, ...)
+end
+ui.EndMenu = function()
+  if forcedLayout then forcedLayout = false; return end
+  return endMenu()
+end
+ui.DrawText = function(x, y, r, g, b, a, text, ...)
+  local tray = testTrayWindow()
+  if tray then trayText[tray][text] = { x, y } end
+  return drawText(x, y, r, g, b, a, text, ...)
+end
+ui.DrawRectFilled = function(x0, y0, x1, y1, ...)
+  local tray = testTrayWindow()
+  if tray then
+    local x, y = ui.GetWindowPos()
+    local w, h = ui.GetWindowSize()
+    if x0 == x and y0 == y and x1 == x + w and y1 == y + h then trayPanel[tray] = true end
+  end
+  return drawRect(x0, y0, x1, y1, ...)
+end
 )lua");
-        auto point_at_buff = [&] {
-            REQUIRE(luaL_dostring(L, "return buffRects[2][1] + 10, buffRects[2][2] + 10") == LUA_OK);
+        auto point_at_buff = [&](bool song = false) {
+            REQUIRE(luaL_dostring(L, song ? "return songRects[0][1] + 10, songRects[0][2] + 10"
+                                          : "return buffRects[2][1] + 10, buffRects[2][2] + 10") == LUA_OK);
             io.AddMousePosEvent(static_cast<float>(lua_tonumber(L, -2)), static_cast<float>(lua_tonumber(L, -1)));
             lua_settop(L, 0);
         };
-        auto toggle = [&](const char* label) {
+        auto choose = [&](const char* label, bool song = false) {
             run((std::string("pick = '") + label + "'").c_str());
-            point_at_buff();
+            point_at_buff(song);
             io.AddKeyEvent(ImGuiMod_Alt, true);
             io.AddMouseButtonEvent(1, true);
             s.frames(1);
@@ -6225,17 +6166,25 @@ end
         REQUIRE(run(R"lua(
 local a, b, c = buffRects[2], buffRects[4], buffRects[5]
 compactX, compactY, compactHeight, pitch = a[1], a[2], trayHeight, a[1] - b[1]
-return tostring(pitch > 0 and b[1] - c[1] == pitch and a[2] == b[2] and a[2] == c[2])
+local d, e = songRects[0], songRects[1]
+return tostring(pitch == 38 and a[3] - a[1] == 34 and b[1] - c[1] == pitch and a[2] == b[2] and a[2] == c[2]
+  and d[3] - d[1] == 26 and d[1] - e[1] == 30 and d[2] == e[2])
 )lua") == "true");
         CHECK(title() == "Spirit of Wolf");
+        CHECK(run(R"lua(
+local buffs, songs = trayText.BuffWindow, trayText.ShortDurationBuffWindow
+return tostring(buffs['1m'] and songs['1m'] and not buffs['Spirit of Wolf'] and not songs['Chorus of the Singing Grove']
+  and not buffs['#3'] and not buffs.Buffs and not songs.Songs
+  and not trayPanel.BuffWindow and not trayPanel.ShortDurationBuffWindow)
+)lua") == "true");
 
-        toggle("Show slot numbers in tooltips");
+        choose("Show slot numbers in tooltips");
         CHECK(run("return ui.GetSetting('hud.showSlotNumbers.BuffWindow')") == "1");
         CHECK(run("return tostring(buffRects[2][1] == compactX and trayHeight == compactHeight)") == "true");
         CHECK(title() == "Spirit of Wolf - Slot 3");
-        toggle("Show slot numbers in tooltips");
+        choose("Show slot numbers in tooltips");
 
-        toggle("Show empty slots");
+        choose("Show empty slots");
         CHECK(run("return ui.GetSetting('hud.showEmptySlots.BuffWindow')") == "1");
         CHECK(run(R"lua(
 local a, b, c = buffRects[2], buffRects[4], buffRects[5]
@@ -6245,6 +6194,135 @@ return tostring(a[1] == compactX - 2 * pitch and a[2] == compactY
   and buffRects[0] == nil and buffRects[1] == nil and buffRects[3] == nil)
 )lua") == "true");
         CHECK(title() == "Spirit of Wolf");
+        choose("Show empty slots");
+
+        // A bare right click keeps the spell actions. Window options opens the same frame menu as Alt+right-click.
+        run("menuRows = {}; pick = 'Window options'");
+        point_at_buff();
+        io.AddMouseButtonEvent(1, true);
+        s.frames(1);
+        io.AddMouseButtonEvent(1, false);
+        s.frames(2);
+        CHECK(run("return tostring(pick == nil and menuRows['Spell Info'] and menuRows.Remove"
+                  " and menuRows['Allow window resizing'])") == "true");
+        ImGui::ClosePopupsExceptModals();
+        s.frames(2);
+
+        ImGuiWindow* buffs = ImGui::FindWindowByName("Buffs###modern.BuffWindow");
+        ImGuiWindow* songs = ImGui::FindWindowByName("Songs###modern.ShortDurationBuffWindow");
+        REQUIRE(buffs);
+        REQUIRE(songs);
+        const ImVec2 defaultSize = buffs->Size;
+        const ImVec2 songSize = songs->Size;
+        auto drag = [&](ImVec2 start, float dx, float dy) {
+            io.AddMousePosEvent(start.x, start.y);
+            s.frames(2);
+            io.AddMouseButtonEvent(0, true);
+            s.frames(1);
+            for (int i = 1; i <= 4; ++i) {
+                io.AddMousePosEvent(start.x + dx * static_cast<float>(i) / 4,
+                                    start.y + dy * static_cast<float>(i) / 4);
+                s.frames(1);
+            }
+            io.AddMouseButtonEvent(0, false);
+            io.AddMousePosEvent(-1000, -1000);
+            s.frames(3);
+        };
+        auto leftEdge = [&] { return ImVec2(buffs->Pos.x + 2, buffs->Pos.y + buffs->Size.y / 2); };
+        auto bottomEdge = [&] { return ImVec2(buffs->Pos.x + buffs->Size.x / 2, buffs->Pos.y + buffs->Size.y - 2); };
+        drag(leftEdge(), 40, 0);
+        CHECK(run("return ui.GetSetting('hud.size.BuffWindow') or ''") == "");
+        CHECK(buffs->Size.x == defaultSize.x);
+        CHECK(buffs->Size.y == defaultSize.y);
+
+        choose("Allow window resizing");
+        CHECK(run("return ui.GetSetting('hud.buffResize.BuffWindow')") == "1");
+        const float anchoredRight = buffs->Pos.x + buffs->Size.x;
+        drag(leftEdge(), 40, 0);
+        const auto manualSize = run("return ui.GetSetting('hud.size.BuffWindow') or ''");
+        REQUIRE_FALSE(manualSize.empty());
+        CHECK(buffs->Size.x < defaultSize.x);
+        CHECK(buffs->Size.y > defaultSize.y);
+        CHECK(buffs->Pos.x + buffs->Size.x == doctest::Approx(anchoredRight).epsilon(0.002));
+        CHECK(songs->Size.x == songSize.x);
+        CHECK(songs->Size.y == songSize.y);
+        run("ui.SetSetting('hud.lock.BuffWindow', '1')");
+        drag(leftEdge(), -30, 0);
+        CHECK(run("return ui.GetSetting('hud.size.BuffWindow')") == manualSize);
+        CHECK(buffs->Pos.x + buffs->Size.x == doctest::Approx(anchoredRight).epsilon(0.002));
+        run("ui.SetSetting('hud.lock.BuffWindow', '0')");
+        choose("Allow window resizing");
+        const ImVec2 wrapped = buffs->Size;
+        drag(leftEdge(), -30, 0);
+        CHECK(run("return ui.GetSetting('hud.size.BuffWindow')") == manualSize);
+        CHECK(buffs->Size.x == wrapped.x);
+        CHECK(buffs->Size.y == wrapped.y);
+        choose("Reset size");
+        CHECK(run("return ui.GetSetting('hud.size.BuffWindow') or ''") == "");
+        CHECK(buffs->Size.x == defaultSize.x);
+        CHECK(buffs->Size.y == defaultSize.y);
+
+        choose("Vertical");
+        CHECK(run("return ui.GetSetting('hud.buffLayout.BuffWindow')") == "vertical");
+        CHECK(run(R"lua(
+local a, b, c = buffRects[2], buffRects[4], buffRects[5]
+return tostring(a[1] == b[1] and b[1] == c[1] and a[2] < b[2] and b[2] < c[2]
+  and songRects[0][2] == songRects[1][2])
+)lua") == "true");
+        choose("Allow window resizing");
+        drag(bottomEdge(), 0, -43);
+        CHECK(run(R"lua(
+local a, b, c = buffRects[2], buffRects[4], buffRects[5]
+return tostring(a[1] == b[1] and c[1] < a[1] and a[2] < b[2] and c[2] == a[2])
+)lua") == "true");
+
+        choose("Show spell names");
+        choose("Show slot numbers");
+        choose("Show remaining time");
+        choose("Show title bar");
+        CHECK(run("return ui.GetSetting('hud.buffNames.BuffWindow')") == "1");
+        CHECK(run("return ui.GetSetting('hud.buffSlotBadges.BuffWindow')") == "1");
+        CHECK(run("return ui.GetSetting('hud.buffHideTime.BuffWindow')") == "1");
+        CHECK(run("return ui.GetSetting('hud.buffTitleBar.BuffWindow')") == "1");
+        run("clearTrayDraws()");
+        s.frames(2);
+        CHECK(run(R"lua(
+local buffs, songs = trayText.BuffWindow, trayText.ShortDurationBuffWindow
+return tostring(buffs['Spirit of Wolf'] and buffs['#3'] and buffs.Buffs and not buffs['1m']
+  and songs['1m'] and not songs['Chorus of the Singing Grove'] and not songs.Songs and not trayPanel.BuffWindow)
+)lua") == "true");
+        run("pick = 'Show window background'");
+        io.AddMousePosEvent(buffs->Pos.x + buffs->Size.x / 2, buffs->Pos.y + 6);
+        io.AddMouseButtonEvent(1, true);
+        s.frames(1);
+        io.AddMouseButtonEvent(1, false);
+        s.frames(2);
+        CHECK(run("return tostring(pick == nil)") == "true");
+        CHECK(run("return ui.GetSetting('hud.buffBackground.BuffWindow')") == "1");
+        choose("Show title bar");
+        run("clearTrayDraws()");
+        s.frames(2);
+        CHECK(run("return tostring(trayPanel.BuffWindow and not trayText.BuffWindow.Buffs"
+                  " and not trayPanel.ShortDurationBuffWindow)") == "true");
+
+        // Songs can opt into a named horizontal ribbon while Buffs stays a vertical list.
+        choose("Show spell names", true);
+        run("clearTrayDraws()");
+        s.frames(2);
+        CHECK(run(R"lua(
+local a, b = songRects[0], songRects[1]
+return tostring(a[1] > b[1] and a[2] == b[2] and ui.GetSetting('hud.buffLayout.BuffWindow') == 'vertical')
+)lua") == "true");
+        CHECK(run(R"lua(
+local text = trayText.ShortDurationBuffWindow
+local timer, lines = text['43s'], {}
+if not timer then return 'false' end
+for label, pos in pairs(text) do
+  if pos[1] == timer[1] and pos[2] < timer[2] then lines[#lines + 1] = { label, pos[2] } end
+end
+table.sort(lines, function(a, b) return a[2] < b[2] end)
+return tostring(#lines == 2 and lines[1][1] .. ' ' .. lines[2][1] == 'Chorus of the Singing Grove')
+)lua") == "true");
         CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
     }
     ImGui::DestroyContext(ctx);
@@ -6258,9 +6336,7 @@ TEST_CASE("UI packs (modern): the Options search draws every tab, and only the s
              fs::copy_options::recursive);
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* pixels = nullptr;
-    int width = 0, height = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         Session s(dir, "modern");
         // Every option there (at 0), so every row is offered to the search.

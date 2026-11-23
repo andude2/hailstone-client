@@ -116,20 +116,24 @@ Short entries stay on one line.
   - Settle: a server-provided request identifier.
   - Native disables selectors during its ten-second guard. Hailstone deliberately allows choosing a pending category
     and sends only the latest after the previous reply.
-- **Leaving an adventure.**
-  - After a granted OP_LeaveAdventure stock EQEmu sends the client nothing (zone/worldserver.cpp ServerOP_AdventureLeaveReply clears only the zone's copy).
-  - Now: the window keeps showing the adventure, with Leave, until the next OP_AdventureData (usually on zoning).
-  - Unknown: what RoF2 shows after leaving. Its adventure dispatcher (`0x420610`) resets the adventure state
-    (`AdventureMgr_SetState(0)`) on opcode 0x0dcb, which EQEmu's patch_RoF2.conf does not map and no stock server
-    sends; whether that is the leave's answer is not established.
-  - Settle: a capture of a stock RoF2 client leaving against a live server, or a server sending the empty OP_AdventureData.
+- **Delayed offers.** An offer carries no recruiter or request ID. After the eight-second wait expires and a
+  new request is sent, a very late offer can be mistaken for the newer one.
+- **Leave replies on other servers.**
+  - EQEmu reports a granted leave or expiry with an AdventureInfo notice. Hailstone also clears the assignment
+    on an empty AdventureData snapshot.
+  - A server that uses a different reply may require a zone change to refresh the client. Settle with a capture of
+    the server's leave response.
+  - RoF2's adventure dispatcher (`0x420610`) also resets the adventure state (`AdventureMgr_SetState(0)`) on opcode
+    0x0dcb, which EQEmu's patch_RoF2.conf does not map and no stock server sends; whether a live server answered a
+    leave with it is not established.
 - **AdventureData's risk.**
   - RoF2 sets the window's risk choice to risk - 1 (`0x618790`, the 1 normal / 2 high of its own request); stock EQEmu sends 0 normal / 1 high.
   - Now: nonzero shows as high. Right for EQEmu; a server sending RoF2's 1 for normal would show as high.
   - Settle: a capture from the original live servers.
 - **Reserved words.**
   - Unknown: the native meaning of AdventureData's leading/trailing reserved words and leaderboard header +4.
-  - Now: Hailstone follows EQEmu's all-zero adventure clear and ignores the leaderboard reserved word.
+  - Hailstone uses the briefing and timers to distinguish an assignment from a finished-only snapshot and ignores
+    the leaderboard reserved word.
   - Some native actor interaction predicates beyond recruiter class, corpse status and range are not reproduced.
 
 ## Fellowships
@@ -212,6 +216,13 @@ The experimental texture broker (docs/graphics.md "Shared GPU textures", docs/re
   - Sends `OP_CancelInvite`, which stock EQEmu does not handle; the inviter is told only on a server with the Hailstone server script (`server/`).
   - The relay was checked live once, on the NMS test server (docs/todo.md "Network and session"), not yet on a stock server.
   - The stock handler's other step, removing the decliner from its group, is not done.
+- **Group pet targeting: which pet.**
+  - Unknown: RoF2's F1 (ExecuteCmd case TARGETME @0x4d8000) takes the first spawn whose MasterID is the player's and
+    that is not a temporary pet; F2..F6 (case PARTY1..5 @0x4d80c0) take the member's PetID (+0x2b4). How RoF2 fills
+    PetID, and whether a mercenary, an untargetable spawn or a corpse can be either one, is not traced.
+  - Now: both keys and the Modern pet bar take the live, targetable spawn of pet type whose owner id is the member's,
+    skipping temporary pets, mercenaries and corpses (`group_pet_of`, net/game_connection_group.cpp).
+  - Settle: the writers of PetID in the spawn and charm handlers, or a live RoF2 session with a mercenary and a charm.
 - **Login: already online and kick.**
   - EQEmu's login server never answers 302/114. Its "already online" is 111, a plain refusal, and only with
     `World:EnforceCharacterLimitAtLogin`. It has no kick request (0x16) or reply (0x32).
@@ -389,6 +400,10 @@ The experimental texture broker (docs/graphics.md "Shared GPU textures", docs/re
     pass; passable parts of models with solid ones, and every placed real estate object's, are not picked.
   - Settle: tracing which path an S3D or EQG actor model takes (vf4c / vf54 in 0x10046780), or clicking through a
     passable part in the original.
+- **Classic door collision hulls.** A mesh's referenced WLD polyhedron aligns with the visible gate after adding
+  the mesh centre (checked with Nagafen's gate). Hailstone uses that shape for movement and sight when the door's
+  entire render mesh is passable. Native precedence for models with both an authored hull and solid render faces
+  needs a controlled comparison. Hailstone uses the existing solid faces in that case.
 - **Touching switches.**
   - The hit callback runs for each door hit in the doors' order, not the DLL's quad tree order.
   - A switch moving into a player who stands still does nothing until the player moves (as the original's
@@ -428,13 +443,13 @@ The experimental texture broker (docs/graphics.md "Shared GPU textures", docs/re
   - The offline viewers keep the refusal.
   - Settle: testing other servers' zone tables.
 - **Arena and Nektulos with a live folder.**
-  - Now: the `.s3d` wins over the revamped `.eqg` (`is_eqg_zone`); the safe-point test is not asked.
+  - Now: the safe-point test picks between the two files, as for the zones with no `.s3d`; the `.s3d` loads when it
+    fails or before any safe point has come. By name alone (`is_eqg_zone`) the `.s3d` still wins.
   - Yet PEQ runs the revamp there: its only Arena row's safe point stands 4.2 units above the live arena.eqg's floor
     and 51 above arena.s3d's (6 of 6 spawns on the `.eqg`, 1 of 6 on the `.s3d`); Nektulos version 1 (expansion 10
     on) has 400 of 404 spawns on nektulos.eqg and 39 of 404 on nektulos.s3d.
-  - Open: whether a RoF2 folder's own arena.s3d and nektulos.s3d are the live folder's; whether the safe point should
-    also choose between a present `.s3d` and the `.eqg`.
-  - Settle (the first): comparing the files with a RoF2 install.
+  - Open: whether a RoF2 folder's own arena.s3d and nektulos.s3d are the live folder's.
+  - Settle: comparing the files with a RoF2 install.
 - **The local player's fly mode** (docs/mechanics.md "fly mode").
   - The original rebuilds its effect cache, recomputing levitation, whenever something clears the cache flag
     (+0x1a4): OP_Buff in every form, `HitBySpell`, `RemoveAffect`, the buff tick for tick-varying effects, possibly
@@ -524,6 +539,12 @@ The experimental texture broker (docs/graphics.md "Shared GPU textures", docs/re
     slot data have known counters.
   - Settle (to predict from zone-in data): confirm how the profile's count maps to per-effect slots (see "Spell gems and
     buff stacking" in [mechanics.md](mechanics.md)).
+- **The combat flag across a zone change.**
+  - Now: OP_PlayerProfile's rest timer starts the downtime only (PcClient_ApplyPlayerProfileData @0x57a04a), as the
+    original does, and the combat flag (+0x31bc) keeps its last OP_RestState value. A new login starts out of combat.
+    Zoning while in combat leaves the crossed swords up until the next OP_RestState, if EQEmu sends none at zone-in.
+  - Settle: whether the original clears +0x31bc elsewhere on zoning (the PcClient constructor or the zone-in path), or a
+    capture of zoning while in combat against stock EQEmu.
 - **Slam under an illusion.**
   - Now: granted for every race whose innate table has it (Barbarian, Troll, Ogre and their citizen models 90, 92, 93).
   - EQEmu bypasses the Bash skill check only for races 2, 9 and 10, so under a 90 / 92 / 93 illusion a class without
@@ -1245,14 +1266,6 @@ The experimental texture broker (docs/graphics.md "Shared GPU textures", docs/re
 
 ## UI
 
-- **ImGui assertion in the all-pack smoke test.**
-  - With ImGui debug assertions enabled, `ui_pack_windows_test.cpp` ("every script of the shipped UIs loads") aborts in
-    the gamepad pass on `ErrorCheckUsingSetCursorPosToExtendParentBoundaries`, also with the unchanged upstream
-    gamepad UI. The item display is not open in that fixture.
-  - The offending window's cursor layout still needs tracing.
-  - Release-mode Windows tests pass. Keep assertions on when reproducing; do not treat the aborted full Debug
-    sanitizer run as a pass.
-
 - **Quest Journal and Quest Tracker** (modern).
   - Not checked live: quest updates across zoning, timed quest expiry, shared roster updates and membership actions,
     mouse move/resize.
@@ -1305,7 +1318,8 @@ The experimental texture broker (docs/graphics.md "Shared GPU textures", docs/re
 - **File selection** browses folders, not the OS shell namespace.
 - **Context tips.**
   - Hooked: experience, group and guild invitations, consent, red con on the attack key and on a target change while
-    attacking, world containers, interactive objects, the Actions window's page on show, player customization.
+    the Red-Con Attack Guard is on, world containers, interactive objects, the Actions window's page on show,
+    player customization.
   - EQEmu never sends the experience tip's flag (the second dword 2).
   - Not hooked: the Actions window's page keys while it is already shown (0x614510's other callers) and its Abilities
     page function 0x613a20; the Options window's Display / Keyboard pages (COptionsWnd::WndNotification, 6 / 7); the hot

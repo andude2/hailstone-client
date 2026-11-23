@@ -10,6 +10,8 @@
 #include <volk.h>
 
 struct ImFont;
+struct ImFontAtlas;
+struct ImFontConfig;
 
 namespace hailstone::platform { class Window; }
 namespace hailstone::render { class VkContext; struct FrameInfo; }
@@ -17,6 +19,10 @@ namespace hailstone::render { class VkContext; struct FrameInfo; }
 namespace hailstone::ui {
 
 namespace detail {
+// Shared by the default, sized UI, chat and nameplate fonts.
+ImFontConfig ui_font_config();
+bool build_ui_font_atlas(ImFontAtlas& atlas);
+
 // A child window or popup can hold navigation focus for the tracked gamepad window.
 bool pad_window_has_focus(const char* name);
 
@@ -106,7 +112,6 @@ private:
     render::VkContext& vk_;
     std::string ini_path_; // io.IniFilename points into it
     float last_w_ = 0.0f, last_h_ = 0.0f; // the display size of the last frame not minimized
-    VkDescriptorPool pool_ = VK_NULL_HANDLE;
     VkFormat color_format_ = VK_FORMAT_UNDEFINED;
     std::uint32_t min_image_count_ = 0;
     float scale_ = 1.0f;

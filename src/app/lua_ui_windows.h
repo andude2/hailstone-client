@@ -119,6 +119,7 @@ struct HotButtonInfo {
     std::string kind = "empty"; // "spell", "item", "button", "empty"
     std::string label;
     std::optional<ui::UiTextures::Cell> icon;
+    std::uint64_t stack_count = 0;
     // A social's: its text colour (CHotButtonWnd_UpdateButtonStates: GetSocialTextColor), and for a Lua social its
     // face (mq::ButtonFace; the label is the face's when it gives one) and whether its Lua runs.
     std::optional<Rgb> color;

@@ -8,11 +8,14 @@ Lua interfaces (Modern and Gamepad) use the versioned, modular `hs.UI` contract 
 `AlwaysVerticalScrollbar` and `AlwaysHorizontalScrollbar`, with Dear ImGui's values in ordinary and child windows.
 Internal and obsolete flags are not exported; use the window, popup or child functions for those scopes.
 
-The client uses [Dear ImGui](https://github.com/ocornut/imgui) (v1.91.9, fetched by `cmake/Dependencies.cmake`) for a minimal developer UI: log in, pick a server and a character, see basic in-game information. The Lua windows below replace it for play.
+The client uses [Dear ImGui](https://github.com/ocornut/imgui) (v1.93.0, fetched by `cmake/Dependencies.cmake`) for a minimal developer UI: log in, pick a server and a character, see basic in-game information. The Lua windows below replace it for play.
 
 ## Pieces
 
 - `src/ui/imgui_layer.{h,cpp}`: the ImGui context and the SDL3 and Vulkan backends (our volk loader, dynamic rendering, recorded inside the colour + depth rendering `VkContext::begin_frame` started). Fonts follow the display's content scale: Liberation Sans or another common system font, else ImGui's built-in one.
+  The font atlas includes Latin and Unicode General Punctuation for both chat layouts. A face missing a curly quote
+  draws the corresponding straight quote glyph. The displayed glyph choice leaves the original chat text intact for
+  copying and logging.
 - `src/ui/dev_screens.{h,cpp}`: the screens. Each takes a view model and returns the player's action; none does networking:
   - `login_screen`
   - `server_select_screen`
@@ -44,7 +47,7 @@ The screens are `login`, `servers`, `chars`, `nochars`, `loading`, `game` and `i
 
 While the UI has keyboard or mouse focus, the camera ignores that input; holding the right mouse button still turns it.
 
-The UI has the keyboard only while an edit box is typed in, a modal dialog is open, or a window asks (`ui.CaptureKeyboard`). A click or drag on a button, slider, title bar or window background does not take it (`ui::keyboard_for_ui`), so held movement keys stay held, as in the original.
+Text editing, modal dialogs, active keyboard or gamepad controls, and explicit requests (`ui.CaptureKeyboard`) can take the keyboard. A click or drag on a button, slider, title bar or window background leaves the keyboard with the game through mouse release (`ui::keyboard_for_ui`), so held movement keys stay held, as in the original.
 
 ## Using it from an app loop
 
@@ -69,10 +72,11 @@ Windows** every window's IDs and tabs. The menu also has the tab's scrollbar and
 the **Window** layout menu. An overflow button lists all tabs when the strip fills.
 
 Moving a tab keeps its filters, output and scroll position. Background tabs flash in their colour every half second
-for five seconds, then stay highlighted until selected. Highlighting defaults to on in red; with it off, a tab with
-unseen lines shows a dot after its label. Each tab can hide its scrollbar. Groups, names, order, selection and tab
-settings are saved per character. The native model is shared by the Modern controls,
-[`hs.UI.chat`](ui-api.md#chat-tabs-and-windows) and [`/chattabs`](commands.md).
+for five seconds, then stay highlighted until selected. The overflow button takes the highlight colour of a hidden
+tab during its highlighted phase. **Highlight New Messages** defaults to on in red. Turning it off for a tab leaves
+the strip and overflow button visually unchanged when that tab receives new messages. Each tab can hide its
+scrollbar. Groups, names, order, selection and tab settings are saved per character. The native model is shared by
+the Modern controls, [`hs.UI.chat`](ui-api.md#chat-tabs-and-windows) and [`/chattabs`](commands.md).
 
 The menu's first rows are the original's, in its order (Window, Scrollbar, New Chat Window, Rename Window, Always
 Chat Here, the tell menus, Filters, Channel, Language, Hit Modes); the tab rows, highlight settings, Font Size, Use
@@ -286,10 +290,14 @@ Each entry names the window and what is particular to it; the `hs.*` calls behin
 
 - **TargetWindow**: con colour, health, target's target, the aggro meter (AggroMeterWnd's gauge 149 and labels 302..307; `aggro.lua` keeps the game's window hidden, and the EQ menu has no Aggro Meter row), and buffs with Spell Info on a right click.
 
-- **GroupWindow**: member cards and the invite / disband / accept / decline buttons. Solo it shows only with an invitation or a player to invite.
+- **GroupWindow** has member cards and the invite, disband, accept and decline buttons. A left click on `Gauge<n>` selects the member. A left click on `PetGauge<n>`, used by the Modern card's green pet bar, selects their pet. Solo the window shows only with an invitation or a player to invite.
 
-- **BuffWindow** and **ShortDurationBuffWindow**: icon trays (packed unless **Show empty slots** is on), the last ten seconds pulse. Right click: Spell Info, Add to Blocked Buffs, Remove.
-  - Icons fill each row from right to left. Alt-right-click an icon for the tray's layout menu. **Show empty slots** reserves space for gaps up to the last occupied slot; **Show slot numbers in tooltips** adds the slot number after the spell name, counted from 1 in each tray. Both are off by default and saved per tray and character (`hud.showEmptySlots.<window>`, `hud.showSlotNumbers.<window>`; `lib/bufftray.lua`).
+- **BuffWindow** and **ShortDurationBuffWindow**: the defaults are the compact horizontal icon trays with remaining time under each icon, a transparent background, and no title bar or drag resizing. Icons fill from right to left and pulse near expiry.
+  - Right-click an effect for Spell Info, Add to Blocked Buffs, Remove, and **Window options**. Right-click the title bar or an empty spot to open the options directly, or Alt-right-click anywhere in the tray.
+  - **Layout** chooses Horizontal or Vertical. Vertical fills down and continues in columns. **Show spell names**, **Show slot numbers**, and **Show remaining time** can be set independently. **Show empty slots** reserves gaps up to the last occupied slot. **Show slot numbers in tooltips** also works with the visible numbers off. Both kinds of numbering use the effect's one-based slot in its tray.
+  - **Show window background** and **Show title bar** are independent. The frame menu's **Opacity** controls the whole tray.
+  - Turn on **Allow window resizing** to drag the left edge and change the width. A horizontal tray wraps to fit. For vertical icons without names, drag the bottom edge to change how many icons fit in each column. The grip shows on hover. Turning resizing off keeps the size. **Reset size** restores automatic sizing. **Icons per row** also returns horizontal trays to fitting their contents.
+  - The `hud.*` settings are saved per tray and character (`lib/bufftray.lua`).
 
 - **CastSpellWnd**: gem tiles in a row or column, refresh shading, the spell book.
 
@@ -298,7 +306,10 @@ Each entry names the window and what is particular to it; the `hs.*` calls behin
 - **Chat windows**: tabs, the channel chip, the chat menu.
   - A button at the strip's right end folds the window into its tab strip.
   - Always Chat Here (`hs.ChatSetAlwaysHere`, `hs.ChatInfo`'s fifth value) picks the window Enter and '/' start a line in; the main window by default.
-  - Timestamps (`chat.timestamps`) put each line's local arrival time first, `[hh:mm:ss]`.
+  - Right-click a chat window and open **Timestamps** to choose **Off**, 12-hour with seconds (`[09:07:43 PM]`),
+    24-hour without seconds (`[21:07]`), or 24-hour with seconds (`[21:07:43]`). The Modern pack's setting
+    (`chat.timestamps`) applies to all its chat windows, including their existing lines, using each line's local
+    arrival time. Off is the default. Previously enabled timestamps keep the 24-hour format with seconds.
   - Each window and tab keeps its own last 1000 lines (Hailstone's limit).
   - A tell window flashes once when another player's tell comes in (`hs.ChatWindows`' `tellsIn`).
   - A window reads only the lines since its version (`hs.ChatText(slot, version, names, stamps, true)`), and everything again (`reset`) when its lines changed otherwise. Line wrap and height are cached until the width or font change. A word wider than the output (a long name or a run with no space) is broken where the row ends, at a character's start, as ImGui's own wrapped text breaks it.
@@ -601,7 +612,7 @@ One entry per file: the windows it models and what is not obvious from the [func
 
 #### `lua_ui_values.cpp`
 
-Labels and gauges by EQType (`hs.Label`, `hs.Gauge`): the combat timer (label 137 "mm:ss", gauge 29 for the last 30 s, from OP_RestState's downtime); title (74), ATK (23), combat regeneration (212..214); target of target (135); group and extended target mana and endurance (139..148, 171..210); pet buffs (86..115); blocked buffs (550..579, 650..679); aggro names and percents (302..333).
+Labels and gauges by EQType (`hs.Label`, `hs.Gauge`): the combat timer (label 137 "mm:ss", gauge 29 for the last 30 s, initialized by OP_PlayerProfile and updated by OP_RestState); title (74), ATK (23), combat regeneration (212..214); target of target (135); group and extended target mana and endurance (139..148, 171..210); pet buffs (86..115); blocked buffs (550..579, 650..679); aggro names and percents (302..333).
 
 - A second argument `true` to `hs.Label` (1, 28) or `hs.Gauge` (1, 6, 27) adds the name plate's invisibility marks to the name: Hailstone's, the original's captions are plain.
 - `hs.Gauge` and `hs.ChildGauge` return a special value's fill tint as CGaugeWnd::Draw gives it (`gauge_fill`: -2 full in dark red, -110..-10 purple, -2000..-1000 pink); the group frames use it for a member out of zone.
@@ -616,6 +627,7 @@ PlayerWindow, TargetWindow, GroupWindow, BuffWindow, ShortDurationBuffWindow, Ca
 - An empty gem's right click pops the spell select menu (CCastSpellWnd::MakeSpellSelectMenu), each spell in its target type's colour (`game::spell_target_color`); `menus.lua` lifts a colour too close to the panel's brightness. On a gem's button it is the gem's own right click (`UiApi::click_gem`, HandleSpellRightClick).
 - A right click on an AA button (a social of 120 + group) opens the AA window on that ability (`AAWindow`'s `activate`, CAAWnd::ShowAbility).
 - Bars: key map text top-right. Modern bars go vertical when "Buttons per row" makes them taller than wide; dragging an edge or corner changes it. Gamepad bars go vertical when their page number is clicked (`hotbar.vertical.<window>`).
+- Stackable items show their quantity at the bottom of the hotkey, including the Gamepad crossbar. Item links total the carried stacks of that item, including those in bags. Inventory-slot shortcuts show the current stack in that slot. The cursor and bank are excluded.
 - **Lock layout** in a Modern bar's menu saves `hud.lockLayout.<window>` per character. It prevents accidental frame moves and resizes, drag and drop in both directions, slot edits, loading or clearing hotbuttons, and changes to button size and bar shape. Buttons still activate and pages still switch. **Lock this frame** and **Lock all frames** govern frame dragging and resizing independently. The row is Hailstone's: RoF2's window lock only stops a move or resize, and its hotbuttons can still be dragged in and out and cleared, as they are here with Lock layout off.
 - The bar menu, settings and icon selection are in `lua_ui_hotbar.cpp` (scripts `ui/modern/iconselection.lua`, `ui/gamepad/iconselection.lua`).
 - `hs.HotButtonChecked` is true for a pet command button ("Pet <command>") while that toggle is on (`game/pet_buttons.h`). `hs.HotButtonState` follows CHotButtonWnd_UpdateButtonStates (`game/hot_button_state.h`, `app/lua_ui_button_state.cpp`).
@@ -855,7 +867,8 @@ Game fonts are built at the display's content scale (or `--ui-scale`), and the p
 `src/ui/ui_ini.{h,cpp}`: at world entry, windows are placed from `servers/<profile>/characters/<world>/<name>/UI.ini` over the game's `defaults.ini`. The game directory's `UI_<name>_<server>.ini` seeds it and is never written.
 
 - **Place and size**: the XML rectangle, then `Width`/`Height` and `XPos`/`YPos` for 1280x1024 and `...Windowed`. Windowed values are stored for 4096 x 4096 and moved by `ConvertToRes`, whose sums wrap in 32 bits as the original's do.
-- **Shown or not**: `Show` comes from the character's file only (defaults.ini too for HotButtonWnd). Without it a window starts shown when its IniFlags have bit 9 (player, target, group, buffs, songs, gems, compass, chat, EQ button, hot bar 1). Hailstone clears it for the aura window, which RoF2 starts shown.
+- **Shown or not**: `Show` comes from the character's file only (defaults.ini too for HotButtonWnd), and only for a window whose IniFlags have bit 8, as CSidlScreenWnd::LoadIniInfo @0x85dda0 reads it. Without it a window starts shown when its IniFlags have bit 9 (player, target, group, buffs, songs, gems, compass, chat, EQ button, hot bar 1). Hailstone clears it for the aura window, which RoF2 starts shown.
+  - It is read again at each entry into the world, also after a camp back to the same character, whose new connection starts with the Potion Belt closed. Changes are written only while in game, and once more as the layout is saved on leaving, so character select never writes its own state into the last character's file.
 - **Chat windows**: a file with no `[ChatManager] NumWindows` takes defaults.ini's extra chat windows as tabs of the main window; after that only the character's file counts. A deliberate change: through defaults.ini, "Other Chat" came back at every start after the player closed it.
 - Moves, resizes and show / hide are written back to the same keys.
 

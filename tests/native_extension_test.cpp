@@ -465,9 +465,7 @@ TEST_CASE("plugin windows: its ui/<pack>/ folder, hs.Plugin calls, options and m
 
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    unsigned char* px = nullptr;
-    int w = 0, ht = 0;
-    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&px, &w, &ht);
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
     {
         const fs::path pack = h.world.dir / "pack";
         fs::create_directories(pack);

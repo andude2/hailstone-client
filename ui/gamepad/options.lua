@@ -365,7 +365,8 @@ local PAGES = {
         { "Proc cast animations", "cast_animation_fallback" },
         { "Use tell windows", "use_tell_windows" },
         { "Attack until XTarget clear", "attack_until_xtarget_clear" },
-        { "Auto target XTarget attackers", "auto_target_xtarget" }, { "Face target on attack", "face_on_attack" },
+        { "Auto Target Attackers", "auto_target_xtarget" }, { "Face target on attack", "face_on_attack" },
+        { "Red-con attack guard", "red_con_attack_guard" },
         { "Fast camp", "fast_camp" } }) do
       local x = optionRow(o[1], o[2], "bool")
       if x then rows[#rows + 1] = x end

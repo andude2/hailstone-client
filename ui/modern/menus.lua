@@ -89,7 +89,7 @@ local function drawMenus(menus, s)
       end
       ui.SetWindowFontScale(1)
       ui.PopFont()
-      overAny = overAny or ui.IsWindowHovered()
+      overAny = overAny or ui.IsWindowHovered(ui.HoveredFlags.AllowWhenBlockedByActiveItem) -- (MenuItem holds the active item since ImGui 1.92)
       -- Ctrl+wheel over a menu zooms the menus, as it zooms a dialog (the next frame measures at the new size)
       if io.ctrl and (io.wheel or 0) ~= 0 and ui.IsWindowHovered() then
         local ns = math.max(MENU_SCALE_MIN, math.min(MENU_SCALE_MAX, s * 1.1 ^ io.wheel))
@@ -253,7 +253,7 @@ ui.window("EQ Menu", function()
           y = y + ROW
         end
       end
-      overAny = overAny or ui.IsWindowHovered()
+      overAny = overAny or ui.IsWindowHovered(ui.HoveredFlags.AllowWhenBlockedByActiveItem) -- (MenuItem holds the active item since ImGui 1.92)
     end
     ui.End()
   end

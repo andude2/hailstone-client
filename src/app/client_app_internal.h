@@ -259,14 +259,16 @@ public:
                              heaps[i].allocations));
     }
 
-    // The automation goes first: its plugins and scripts shut down in ~Automation, and their ShutdownPlugin and
-    // last line may still print to chat, which reads conn_ and the UI host. conn_, lua_ui_ and the UI host are
-    // declared after automation_, so without this they are destroyed before the plugins unload; an exception out
-    // of run() then crashes here on a freed connection instead of reporting the error. The Lua UI goes next: its
-    // state's finalizers may still reach what the hs.* functions hold (ui_host_, ui_api_, the views), which members
-    // declared after it would already have destroyed.
+    // The automation goes first: its plugins and scripts stop as they do on a clean exit (run() calls shutdown()), and
+    // their ShutdownPlugin and last line may still print to chat, which reads conn_ and the UI host. conn_, lua_ui_ and
+    // the UI host are declared after automation_, so without this they are destroyed before the plugins unload; an
+    // exception out of run() then crashes here on a freed connection instead of reporting the error. The reset then
+    // releases what shutdown stopped, still before the members it reaches. The Lua UI goes next: its state's finalizers
+    // may still reach what the hs.* functions hold (ui_host_, ui_api_, the views), which members declared after it would
+    // already have destroyed.
     ~ClientApp() {
         retire_world_geometry();
+        if (automation_) automation_->shutdown();
         automation_.reset();
         lua_ui_.reset();
     }
@@ -1020,10 +1022,10 @@ private:
     std::int32_t viewer_see_invisible_rank() const;
     std::unordered_set<std::uint32_t> market_hidden_;
     game::PlateFade plate_fade_; // each overlapped name's fade toward its target alpha (game/nameplate_overlap.h)
-    // The spawn not to draw: the player's own in first person (camera 0's activate hides it; no other camera does).
+    // The spawn not to draw: the active view actor in first person.
     std::uint32_t hidden_spawn() const {
         return camera_type_ != game::kCameraFirstPerson || ui_host_.customization_zoom >= 0 ? 0u
-            : (conn_->world().view_id ? conn_->world().view_id : conn_->world().player_id);
+            : conn_->world().view_spawn_id();
     }
     // display.msaa (samples, read at start-up), display.tonemap (auto | none | agx | aces; auto is AgX with the modern
     // lighting and none with the classic), display.exposure (EV), display.shadows (the shadow map's size per cascade,

@@ -27,6 +27,12 @@
  * Compatibility: the tables only grow at their end and carry their size. A plugin built for an older ABI loads in a
  * newer client; one built for a newer ABI does not load in an older client.
  *
+ * This SDK's ABI 4 keeps this branch's published order: the loot and inventory entries (get_loot_data_bulk through
+ * inventory_rows) follow get_spells_data_bulk, ahead of the UI contribution pair, and the calls added upstream later
+ * (get_spells_by_name_data_bulk and the bulk buffer pair) come at the very end. A plugin that reports ABI 3 is handed
+ * the upstream ABI 3 table instead (the UI contribution pair where it always was, the table ending there), so its
+ * released positions still hold. Test HAILSTONE_HOST_HAS before any call past that ABI 3 prefix.
+ *
  * Plain C, no C++ types across the boundary: build with any compiler. Every string the client passes is valid only
  * during the call; strings the plugin returns are copied by the client before the call returns.
  *
@@ -905,7 +911,9 @@ typedef struct PluginHostApi {
     /* The directory for the plugin's own files (created on demand): writes `out` and returns the length. */
     int (*config_dir)(void* host, char* out, size_t out_size);
     /* The client's Dear ImGui context (ImGui::SetCurrentContext; the plugin must be built with the same Dear ImGui
-     * version), or NULL without HAILSTONE_CAP_UI. */
+     * version), or NULL without HAILSTONE_CAP_UI. Since ABI 4 that is Dear ImGui 1.93.0 (the font and texture rework
+     * of 1.92 changed the context's layout): the client neither calls OnUpdateImGui of a plugin built for an older ABI
+     * nor gives it the context, so rebuild such a plugin against this SDK and that Dear ImGui. */
     void* (*imgui_context)(void* host);
 
     /* ---- ABI 2: server extensions (HAILSTONE_CAP_EXTEND) ---- */
@@ -1207,6 +1215,23 @@ typedef struct PluginHostApi {
      * count, even if capacity was smaller; pass NULL and 0 to size the buffer. Returns -1
      * before entering a zone or without read permission. Test HAILSTONE_HOST_HAS first. */
     int (*inventory_rows)(void* host, HailstoneInventoryRow* out, uint32_t capacity);
+    /* Every spell named `name` (HAILSTONE_CAP_READ; case-insensitive, lowest id first), laid out as
+     * get_spells_data_bulk's: an int32_t count, then one record per spell of that name, as many whole records as fit.
+     * Bytes written; 0 without `read` or when out_size cannot hold the count. The count alone (0) with no game
+     * connection, a NULL name or one no spell has. Added later in ABI 3: test
+     * HAILSTONE_HOST_HAS(host, get_spells_by_name_data_bulk) first. */
+    int32_t (*get_spells_by_name_data_bulk)(void* host, const char* name, unsigned char* out, int32_t out_size);
+    /* The plugin's own bulk buffer: HS_BULK_BUFFER_SIZE (2 MiB) bytes to pass the *_data_bulk reads as `out`, so it
+     * need not allocate its own. Each plugin has its own, made at its first acquire and freed when it unloads.
+     * acquire returns it and sets *size (size may be NULL), or returns NULL with *size 0 when called outside the
+     * plugin's own callbacks (from another thread among them). The pointer may be used from acquire until
+     * release_bulk_buffer, the end of the callback it was acquired in, or the plugin's unload, whichever comes first.
+     * Asked again meanwhile, from a callback of the plugin's nested inside that one too, it returns the same buffer,
+     * and a release in such a nested callback does nothing: the outer callback keeps it (the nested one's reads still
+     * overwrite what the outer read). Never zeroed: it holds whatever the plugin last left. No permission needed (the
+     * reads still need theirs). Added later in ABI 3: test HAILSTONE_HOST_HAS(host, acquire_bulk_buffer) first. */
+    unsigned char* (*acquire_bulk_buffer)(void* host, int32_t* size);
+    void (*release_bulk_buffer)(void* host);
 } PluginHostApi;
 /* What use_ability and ability_state take: the kinds of ability the Ability Book lists. The values are stable. */
 enum HS_AbilityKinds {
@@ -1269,6 +1294,7 @@ typedef struct HS_BulkLootRecord {
     /* char name[nameLength] */
 } HS_BulkLootRecord;
 #pragma pack(pop)
+#define HS_BULK_BUFFER_SIZE 2097152 /* acquire_bulk_buffer's buffer, one per plugin: 2 MiB */
 /* raid_action's actions. */
 #define HAILSTONE_RAID_MOVE 1u /* move a member to another group, or out of every group */
 /* Whether this client's host table has `field` (one added after the plugin's ABI) and it is set. */

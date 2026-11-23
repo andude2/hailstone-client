@@ -357,7 +357,10 @@ geometry. A **classic folder** fills them in: another install with the old files
 Live also has new `.eqg` zones under the RoF2 names arena, bazaar, highpasshold, lavastorm and nektulos. Those load as
 `.s3d` when there is one. With a live base and none, the `.eqg` loads only when the server's own files bring it or the
 safe point sent at zone-in (OP_NewZone) has its floor at most 10 units under it (`is_revamped_zone_name`,
-`game/revamped_zone.h`); otherwise the zone is refused rather than loaded as the revamp.
+`game/revamped_zone.h`); otherwise the zone is refused rather than loaded as the revamp. With both files (arena and
+nektulos in a live folder), the same test picks: the `.eqg` when the safe point stands on its floor, the `.s3d` when it
+does not or when no safe point has come (`Zone::from_eqg` records which). A file the server's own assets bring decides
+without the test.
 
 Why: a stock server can run either geometry under one name and the zone-in packets do not say which (PEQ's Bazaar
 version 0, expansions 3 to 8, is the old zone; version 1, expansion 9 on, the revamp). The original loads the `.eqg` by
@@ -366,7 +369,7 @@ no floor under them. Checked: `CDisplay::StartWorldDisplay` (tries `.EQG` first)
 
 Still open:
 
-- Live's arena.s3d and nektulos.s3d still win, although PEQ runs the revamp there (docs/unknowns.md).
+- Whether a RoF2 folder's own arena.s3d and nektulos.s3d are the live folder's (docs/unknowns.md).
 - Live's chapterhouse, clz, crescent, relic, tutoriala and tutorialb differ from RoF2's too (the classic-era client's
   clz and tutorials as well) and may not match the server's maps.
 
@@ -471,6 +474,11 @@ A broken-off download keeps the complete files for the next try and leaves the f
 
 A server without the script does not answer. After 5 s (30 s for a server that sent files before, whose zone may be
 hashing new ones) the zone-in goes on with what is there.
+
+A login without a saved server (a `--user` test login, or a launcher's login) downloads nothing but the server's
+`hailstone.cfg`, at most 1 MB, into `servers/<profile>/.admission/`, only to read `[client] deny` (docs/plugins.md). It
+waits for the list as above, so on a server without the script its first zone-in also takes the 5 s. `hailstone.cfg`
+is hashed again at every login, so a copy edited by hand is replaced by the server's.
 
 #### What it trusts
 
@@ -577,7 +585,7 @@ files are in `servers/<profile>/characters/<world>/<name>/` (`core/character_fil
 | `IgnoreList.txt` | the mail ignore list (the address book's Ignore button), the same format |
 | `GuildNotes.txt` | the guild window's personal notes ("%08X %s %s" lines) |
 | `chat.ini` | chat filters and user colours |
-| `options.ini` | the game options (Options window, /lootnodrop, /trackplayers, /log ...) |
+| `options.ini` | the game options (Options window, /hidecorpses, /lootnodrop, /trackplayers, /log ...) |
 | `<name>.txt` | the chat log (/log; `eqlog` unless named). Kept open while logging, each line written through at once; `/log off` closes it |
 
 The blocked buff lists in `hotbuttons.ini` are `[BlockedSpells]` `BlockedSpellID0..29` and `[BlockedPetSpells]`

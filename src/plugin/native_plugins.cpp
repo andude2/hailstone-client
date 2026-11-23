@@ -272,6 +272,7 @@ struct Loaded {
     int (*incoming_chat)(const char*, std::uint32_t) = nullptr;
     int (*filter_chat)(const char*, std::uint32_t) = nullptr;
     void (*update_imgui)() = nullptr;
+    std::uint32_t built_abi = 0; // the ABI the plugin reported
     int (*packet)(int, int, HailstonePacket*) = nullptr;
     const HailstoneHooks* (*hooks_fn)() = nullptr;
 
@@ -300,6 +301,11 @@ struct Loaded {
     // The packet OnPacket is looking at (resize_packet's target).
     net::AppPacket* current_packet = nullptr;
     int busy = 0;              // inside one of its callbacks
+    // Its own bulk buffer (acquire_bulk_buffer): HS_BULK_BUFFER_SIZE bytes, made at its first acquire, never zeroed,
+    // freed with it. bulk_held_at is the callback depth (busy) it was acquired at, 0 while not held: a release in a
+    // deeper (nested) callback leaves it held, and it goes back when the callback it was acquired in returns (Busy).
+    std::unique_ptr<unsigned char[]> bulk_buffer;
+    int bulk_held_at = 0;
     bool unload_pending = false; // unload asked for while busy: done at the next pulse
     bool host_threw_warned = false; // (host_threw)
     bool map_policy_running = false; // get_map_policy cannot recursively invoke its caller's policy hook
@@ -319,6 +325,8 @@ struct Loaded {
 
     static Loaded& of(void* h) { return *static_cast<Loaded*>(h); }
     bool can(std::uint32_t cap) const { return (caps & cap) == cap; }
+    // Dear ImGui's 1.92 changed the context a plugin shares with the client: ABI 4 is the first built for it.
+    bool imgui_compatible() const { return built_abi >= 4; }
     void denied(const char* what, std::uint32_t cap) const {
         host->say(std::format("[Plugin] {}: {} needs the server's '{}' permission", name, what, caps_text(cap)));
     }
@@ -333,7 +341,10 @@ struct Loaded {
 // Inside a plugin's code: its capabilities, and it stays loaded until this ends.
 struct Busy {
     explicit Busy(Loaded& l) : l_(l), scope_(l.caps, l.name) { ++l_.busy; }
-    ~Busy() { --l_.busy; }
+    ~Busy() {
+        // The callback its bulk buffer was acquired in has returned: the pointer is no longer the plugin's to use.
+        if (--l_.busy < l_.bulk_held_at) l_.bulk_held_at = 0;
+    }
     Busy(const Busy&) = delete;
     Busy& operator=(const Busy&) = delete;
 
@@ -827,7 +838,7 @@ int h_config_dir(void* h, char* out, std::size_t out_size) {
 
 void* h_imgui_context(void* h) {
     Loaded& l = Loaded::of(h);
-    if (!l.can(kCapUi) || !l.host->env.imgui_context) return nullptr;
+    if (!l.can(kCapUi) || !l.imgui_compatible() || !l.host->env.imgui_context) return nullptr;
     return l.host->env.imgui_context();
 }
 
@@ -2466,6 +2477,57 @@ int32_t h_get_spells_data_bulk(void* h, const int32_t* ids, int32_t id_count, un
     return static_cast<int32_t>(bufferSize);
 }
 
+/// <summary>
+/// Every spell named `name` in one call (case-insensitive, SpellTable::find_all_by_name, lowest id first), laid out
+/// as h_get_spells_data_bulk lays out spells by id: those ids are handed to it. A name the table lacks, or a null one,
+/// gives the count alone (0).
+/// </summary>
+/// <param name="h">host</param>
+/// <param name="name">the spell's name</param>
+/// <param name="data">buffer to put data in</param>
+/// <param name="datamax">as h_get_spells_data_bulk's, about 1500 bytes per spell of that name</param>
+/// <returns>bytes written; 0 below 4 bytes</returns>
+int32_t h_get_spells_by_name_data_bulk(void* h, const char* name, unsigned char* data, int32_t datamax)
+{
+    // Asked under this call's name, so a plugin without 'read' is told which call it made (readable says so once).
+    const net::GameConnection* c = readable(Loaded::of(h), "get_spells_by_name_data_bulk");
+    std::vector<int32_t> ids;
+    if (c && name)
+        for (std::uint32_t id : c->spell_table().find_all_by_name(name)) ids.push_back(static_cast<int32_t>(id));
+    return h_get_spells_data_bulk(h, ids.data(), static_cast<int32_t>(ids.size()), data, datamax);
+}
+
+static_assert(HS_BULK_BUFFER_SIZE == 2 * 1024 * 1024);
+
+/// <summary>
+/// The plugin's own bulk buffer, HS_BULK_BUFFER_SIZE bytes for the *_data_bulk reads, so it need not allocate its
+/// own: made at its first acquire and kept until it unloads, never zeroed. Each plugin has its own, so no plugin waits
+/// on another. Null outside the plugin's own callbacks, where nothing would end its hold. Held from the first acquire
+/// until release_bulk_buffer at the same callback depth or the end of that callback; asked again meanwhile (from a
+/// nested callback too) it gives the same buffer.
+/// </summary>
+/// <param name="h">host</param>
+/// <param name="size">set to the buffer's size, 0 when there is none (may be null)</param>
+/// <returns>the buffer, or null</returns>
+unsigned char* h_acquire_bulk_buffer(void* h, int32_t* size)
+{
+    Loaded& l = Loaded::of(h);
+    if (size) *size = 0;
+    if (!l.busy) return nullptr;
+    if (!l.bulk_buffer) l.bulk_buffer.reset(new unsigned char[HS_BULK_BUFFER_SIZE]); // left as it comes: not zeroed
+    if (!l.bulk_held_at) l.bulk_held_at = l.busy;
+    if (size) *size = HS_BULK_BUFFER_SIZE;
+    return l.bulk_buffer.get();
+}
+
+// Ends the hold acquire_bulk_buffer began; nothing when not held, or from a callback nested inside the one that
+// acquired it (that one is still using it).
+void h_release_bulk_buffer(void* h)
+{
+    Loaded& l = Loaded::of(h);
+    if (l.bulk_held_at && l.busy <= l.bulk_held_at) l.bulk_held_at = 0;
+}
+
 int32_t h_get_raid_data_bulk(void* h, unsigned char* data, int32_t datamax) {
     const net::GameConnection* c = readable(Loaded::of(h), "get_raid_data_bulk");
     if (!c || !data || datamax < static_cast<int32_t>(sizeof(HS_BulkRaidHeader))) return 0;
@@ -3034,7 +3096,8 @@ int h_web_state(void* h, std::uint32_t tab, HailstoneWebState* out) {
 int h_web_view(void* h, std::uint32_t tab, float width, float height) {
     Loaded& l = Loaded::of(h);
     WebAccess* w = web_of(l, "web_view");
-    if (!w || !l.can(kCapUi) || !l.host->env.imgui_context || !l.host->env.imgui_context()) return 0;
+    if (!w || !l.can(kCapUi) || !l.imgui_compatible() || !l.host->env.imgui_context || !l.host->env.imgui_context())
+        return 0;
     return w->view(web_owner(l), l.caps, tab, width, height) ? 1 : 0;
 }
 
@@ -3097,6 +3160,13 @@ template <typename R, typename... A, R (*F)(void*, A...), auto Off> struct MainO
     }
 };
 template <auto F, auto Off> constexpr auto main_only_or = &MainOnlyOr<F, Off>::call;
+
+// acquire_bulk_buffer as the table holds it: *size 0 first, so it says 0 for a call main_only refuses (another thread)
+// too.
+unsigned char* acquire_bulk_buffer_entry(void* h, int32_t* size) {
+    if (size) *size = 0;
+    return main_only<h_acquire_bulk_buffer>(h, size);
+}
 
 template <typename F> F symbol(void* lib, const char* name) {
     return reinterpret_cast<F>(platform::library_symbol(lib, name));
@@ -3305,6 +3375,17 @@ std::uint32_t NativePlugins::loaded_caps(std::string_view name) const {
     return l && l->name == name ? l->caps : 0;
 }
 
+std::optional<NativePlugins::BulkBufferState> NativePlugins::bulk_buffer_for_test(std::string_view name) const {
+    const Loaded* l = impl_->find(name);
+    if (!l) return std::nullopt;
+    return BulkBufferState{l->bulk_buffer.get(), l->bulk_held_at != 0};
+}
+
+std::size_t NativePlugins::bulk_buffers_for_test() const {
+    return static_cast<std::size_t>(std::count_if(impl_->loaded.begin(), impl_->loaded.end(),
+                                                  [](const auto& l) { return l->bulk_buffer != nullptr; }));
+}
+
 namespace {
 // Takes a plugin out of the client: its ShutdownPlugin (when `shutdown`), everything it registered, then its library.
 void discard(NativePlugins::Impl& m, std::unique_ptr<Loaded> l, bool shutdown) {
@@ -3411,6 +3492,7 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
         platform::unload_library(p.lib);
         return refuse(std::format("{} was built for plugin ABI {}, this client has {}", name, got, HAILSTONE_PLUGIN_ABI));
     }
+    p.built_abi = got;
     p.initialize = symbol<void (*)()>(p.lib, "InitializePlugin");
     p.shutdown = symbol<void (*)()>(p.lib, "ShutdownPlugin");
     p.pulse = symbol<void (*)()>(p.lib, "OnPulse");
@@ -3423,6 +3505,9 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
     p.incoming_chat = symbol<int (*)(const char*, std::uint32_t)>(p.lib, "OnIncomingChat");
     p.filter_chat = symbol<int (*)(const char*, std::uint32_t)>(p.lib, "OnFilterChat");
     p.update_imgui = symbol<void (*)()>(p.lib, "OnUpdateImGui");
+    if (p.update_imgui && !p.imgui_compatible())
+        log::warn("plugin {}: built for plugin ABI {}, before Dear ImGui 1.92 (ABI 4); its OnUpdateImGui is not called",
+                  name, got);
     p.packet = symbol<int (*)(int, int, HailstonePacket*)>(p.lib, "OnPacket");
     p.hooks_fn = sdk_symbol<const HailstoneHooks* (*)()>(p.lib, "hooks");
 
@@ -3572,6 +3657,9 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
         p.table.abi = 3;
         p.table.size = remove_offset + sizeof(remove_ui);
     }
+    p.table.get_spells_by_name_data_bulk = main_only<h_get_spells_by_name_data_bulk>;
+    p.table.acquire_bulk_buffer = acquire_bulk_buffer_entry;
+    p.table.release_bulk_buffer = main_only<h_release_bulk_buffer>;
     Hooks& hooks = *m.env.hooks;
     Loaded* lp = &p;
     // Each callback runs with the plugin's capabilities and counts as the plugin being busy (no unloading under it).
@@ -3945,7 +4033,7 @@ void NativePlugins::recheck_consent() {
 void NativePlugins::imgui() {
     for (std::size_t i = 0; i < impl_->loaded.size(); ++i) {
         Loaded& l = *impl_->loaded[i];
-        if (!l.update_imgui || !l.can(kCapUi)) continue;
+        if (!l.update_imgui || !l.can(kCapUi) || !l.imgui_compatible()) continue;
         guarded(l, "OnUpdateImGui", [&] { l.update_imgui(); });
     }
 }

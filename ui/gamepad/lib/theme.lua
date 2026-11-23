@@ -140,6 +140,20 @@ function T.textIn(x0, y0, x1, y1, text, c, ax, a)
   ui.PopClipRect()
   return tw, th
 end
+
+-- A hot button's stack count, sized to fit even on small buttons.
+function T.hotbarCount(x0, y0, x1, y1, count, align, alpha)
+  local label = tostring(count)
+  local size = math.min(12, (y1 - y0) / T.S)
+  T.font(size)
+  local tw = ui.CalcTextSize(label)
+  if tw > x1 - x0 then
+    T.unfont()
+    T.font(size * (x1 - x0) / tw)
+  end
+  T.textIn(x0, y0, x1, y1, label, C.text, align, alpha)
+  T.unfont()
+end
 -- Shortens text with "..." to fit `w` pixels: the longest start that fits with the dots after it (at least its first
 -- character). A binary search over the text's length (a start is never narrower than a shorter one), cut only between
 -- UTF-8 characters.
