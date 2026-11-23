@@ -8,10 +8,46 @@
 
 #include "mock_server/harness.h"
 #include "net/game_connection.h"
+#include "plugin/hooks.h"
 
 using namespace hailstone;
 using namespace hailstone::net;
 using namespace hailstone::test;
+
+TEST_CASE("drive snapshot: applying a snapshot does not re-raise the game state or every spawn") {
+    // The connection is new, but its plugins already knew the character was in game: a lease's resume must not look
+    // like a fresh login (OnGameState(InGame) plus OnAddSpawn for every spawn), which resets them.
+    MockEqServer server;
+    EmptyGameDir dir;
+    GameDir game(dir.path());
+    net::ConnectionOptions options = quick_options();
+    options.snapshot_journal = true;
+    plugin::Hooks hooks;
+    int game_states = 0, spawns = 0;
+    hooks.on_game_state(hooks.new_owner("test"), [&](int) { ++game_states; });
+    hooks.on_spawn(hooks.new_owner("test"), [&](std::uint32_t, bool) { ++spawns; });
+    options.hooks = &hooks;
+    net::GameConnection source(game, options);
+    auto step = [&] {
+        source.update();
+        server.poll();
+    };
+    source.start(server.ticket());
+    REQUIRE(pump(step, [&] { return source.state() == ConnectionState::CharacterSelect; }));
+    source.enter_world("Gennro");
+    REQUIRE(pump(step, [&] { return source.state() == ConnectionState::InZone; }));
+    REQUIRE(pump(step, [&] { return source.player_status().max_hp != 0; }));
+    const DriveSnapshot snapshot = source.capture_snapshot();
+    REQUIRE_FALSE(snapshot.packets.empty());
+
+    game_states = 0;
+    spawns = 0;
+    net::GameConnection restored(game, options);
+    restored.apply_snapshot(snapshot);
+    restored.update();
+    CHECK(game_states == 0);
+    CHECK(spawns == 0);
+}
 
 TEST_CASE("drive snapshot: a zone journal replays into a fresh connection") {
     MockEqServer server;

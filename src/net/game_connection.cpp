@@ -270,6 +270,15 @@ void GameConnection::apply_snapshot(const DriveSnapshot& snapshot) {
     set_target(snapshot.target);
     set_player_motion(snapshot.position, snapshot.heading, snapshot.velocity, snapshot.moving);
     set_player_drawn(snapshot.position, snapshot.heading);
+    // This connection is new, but its plugins are not: they already knew the character was in game and which spawns
+    // are here (the old connection raised them). Seed the bookkeeping so the first update raises no game-state or
+    // spawn delta, which looks like a fresh login to a script or plugin and resets it (a lease's resume).
+    hook_state_ = state_;
+    hook_game_state_ = plugin::kGameStateInGame;
+    hook_spawns_.clear();
+    hook_spawns_.reserve(world_.spawns.size());
+    for (const auto& entry : world_.spawns) hook_spawns_.push_back(entry.first);
+    std::sort(hook_spawns_.begin(), hook_spawns_.end());
 }
 
 void GameConnection::start_observe(std::unique_ptr<Session> zone_session) {

@@ -819,6 +819,7 @@ int run_headless(HeadlessOptions options) {
                     control_active = false;
                     movement_ready = false;
                     zone_seen.clear(); // the zone-in lines, collision and movement place again
+                    first_zone = true; // and the --exec lines run again, re-arming a plugin that stopped
                     in_zone_at = Clock::now();
                     log::info("headless: drive control released; back as {}", conn->character_name());
                 } else if (control_relay->closed()) {
@@ -972,6 +973,17 @@ int run_headless(HeadlessOptions options) {
             conn->set_own_hp_items(sheet->vitals.cur_hp ? 0 : items, sheet->vitals.max_hp ? 0 : items);
         }
         automation.frame();
+        // A lease's resume must keep the loop and the plugin frames coming; a line every 10 s says whether it does.
+        {
+            static std::uint64_t frames = 0;
+            static Clock::time_point last_heartbeat{};
+            ++frames;
+            if (const auto now = Clock::now(); now - last_heartbeat > std::chrono::seconds(10)) {
+                last_heartbeat = now;
+                log::info("headless: frame {}: {}, player {}, zone {}", frames, net::to_string(conn->state()),
+                          conn->world().player() ? "yes" : "no", conn->world().zone_short_name);
+            }
+        }
         if (automation.plugin_consent() && !consent_logged) {
             consent_logged = true;
             log::error("headless: a server plugin waits for consent and cannot be asked here; "
