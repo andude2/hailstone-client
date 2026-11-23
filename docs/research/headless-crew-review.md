@@ -176,6 +176,12 @@ the network owner at every stage.
 
 D6 is the remaining work, and it is a per-character view split done in two safe phases.
 
+**Scope note (from the code).** `can_reuse_observe_scene` already keeps the loaded scene when the two characters
+share the profile, zone and instance — the common crew case — so `switch_to_crew` skips `unload_zone()` and both
+directions only `rebind_observe_scene()`. The reload, and the scene loss, is the **cross-zone or cross-instance**
+switch, plus the plugin windows (not drawn while parked) and plugin world batches (retired and re-recorded). Phase 1
+is therefore needed for cross-zone switches; the same-zone path already avoids the reload.
+
 **Phase 1, a scene bundle (no behaviour change).** `unload_zone()` (`src/app/client_app_zone.cpp`) destroys the
 zone's scene: `zone_renderer_`, `world_geometry_renderer_`, `flora_renderer_`, `zone_particles_`,
 `switch_particles_`, `sky_renderer_`, `actor_renderer_` (with `actor_kept_`), `actor_library_`, `collision_`,
