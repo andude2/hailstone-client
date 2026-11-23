@@ -105,8 +105,7 @@ TEST_CASE("drive control: a snapshot larger than one pipe message crosses the le
     auto client = app::DriveControlClient::connect(relay.session(), 10000, error);
     REQUIRE_MESSAGE(client != nullptr, error);
     REQUIRE(pump([] {}, [&] { return relay.viewer_connected(); }, std::chrono::milliseconds(2000)));
-    relay.pump(); // the new viewer resets the lease state, as the headless loop does before it sets a snapshot
-    relay.set_snapshot(big);
+    relay.begin_lease(big);
     std::optional<net::DriveSnapshot> taken;
     for (int i = 0; i < 2000 && !taken; ++i) {
         relay.pump();
@@ -130,12 +129,11 @@ TEST_CASE("drive control: a snapshot larger than one pipe message crosses the le
     auto client2 = app::DriveControlClient::connect(relay.session(), 10000, error2);
     REQUIRE_MESSAGE(client2 != nullptr, error2);
     REQUIRE(pump([] {}, [&] { return relay.viewer_connected(); }, std::chrono::milliseconds(2000)));
-    relay.pump(); // the new viewer resets the lease state again
     net::DriveSnapshot again;
     again.character = "Gennro";
     again.packets.push_back(net::AppPacket(static_cast<std::uint16_t>(0x1234),
                                            std::vector<std::byte>(1024, std::byte{0x11})));
-    relay.set_snapshot(again);
+    relay.begin_lease(again);
     std::optional<net::DriveSnapshot> second;
     for (int i = 0; i < 500 && !second; ++i) {
         relay.pump();
@@ -220,8 +218,7 @@ TEST_CASE("drive control: the lease pipe drives the headless character's live zo
     // The accept thread stores the accepted pipe just after the handshake; a new viewer resets the lease state, so
     // set the snapshot after the reset (the headless loop sets it once viewer_connected() is true).
     REQUIRE(pump([] {}, [&] { return relay.viewer_connected(); }, std::chrono::milliseconds(2000)));
-    relay.pump();
-    relay.set_snapshot(owner.capture_snapshot());
+    relay.begin_lease(owner.capture_snapshot());
     std::optional<net::DriveSnapshot> snapshot;
     for (int i = 0; i < 500 && !snapshot; ++i) {
         relay.pump();

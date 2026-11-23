@@ -832,9 +832,10 @@ int run_headless(HeadlessOptions options) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
             }
-            if (!control_lent && conn && conn->in_zone() && control_relay->viewer_connected()) {
+            if (!control_lent && conn && conn->in_zone() && control_relay->viewer_waiting()) {
                 // Lend: the snapshot first, then the live sessions, and stop updating the headless's own model.
-                control_relay->set_snapshot(conn->capture_snapshot());
+                // Only a newly accepted viewer starts a lease; a released lease is never re-lent to its closing pipe.
+                control_relay->begin_lease(conn->capture_snapshot());
                 auto [world_session, zone_session] = conn->release_sessions();
                 control_relay->adopt(1, std::move(world_session));
                 control_relay->adopt(2, std::move(zone_session));

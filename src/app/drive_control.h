@@ -49,6 +49,11 @@ public:
     const platform::LocalPipeSession& session() const;
     // True once a viewer has authenticated. The snapshot may go then.
     bool viewer_connected() const;
+    // A viewer connected and no lease has started for it yet. The headless lends only then, so a released lease is
+    // never re-lent to its own closing pipe.
+    bool viewer_waiting() const;
+    // Start a lease for the waiting viewer: resets the previous lease's snapshot/release state and stores this one.
+    void begin_lease(net::DriveSnapshot snapshot);
     // The state the viewer starts from (capture_snapshot). Set it before or after the viewer connects; it is sent
     // once, at the next pump().
     void set_snapshot(net::DriveSnapshot snapshot);

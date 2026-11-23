@@ -224,14 +224,6 @@ struct DriveRelay::Impl {
     void pump() {
         auto p = current_pipe();
         if (!p) return;
-        if (new_viewer.exchange(false)) {
-            // A new lease starts empty: the caller sets a fresh snapshot below.
-            snapshot.reset();
-            snapshot_sent = false;
-            release_in.reset();
-            release.reset();
-            released_flag = false;
-        }
         if (!snapshot_sent && snapshot) {
             if (!send_snapshot(*p, DriveLeaseMessage::Snapshot, net::encode_drive_snapshot(*snapshot))) return;
             snapshot_sent = true;
@@ -271,6 +263,17 @@ const platform::LocalPipeSession& DriveRelay::session() const { return impl_->se
 bool DriveRelay::viewer_connected() const {
     auto p = impl_->current_pipe();
     return p && !p->closed();
+}
+
+bool DriveRelay::viewer_waiting() const { return impl_->new_viewer.load(); }
+
+void DriveRelay::begin_lease(net::DriveSnapshot snapshot) {
+    impl_->new_viewer.store(false);
+    impl_->snapshot_sent = false;
+    impl_->release_in.reset();
+    impl_->release.reset();
+    impl_->released_flag = false;
+    impl_->snapshot = std::move(snapshot);
 }
 
 void DriveRelay::set_snapshot(net::DriveSnapshot snapshot) {
