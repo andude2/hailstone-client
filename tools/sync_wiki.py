@@ -96,6 +96,7 @@ PAGES = [
         ("docs/wiki.md", "Wiki"),
         ("docs/research/external-resources.md", "Research-External-Resources"),
         ("docs/research/drive-headless.md", "Research-Drive-Headless"),
+        ("docs/research/headless-crew-review.md", "Research-Headless-Crew-Review"),
         ("docs/research/plugin-v2-inventory.md", "Research-Plugin-v2-Inventory"),
         ("docs/research/shared-asset-memory.md", "Research-Shared-Asset-Memory"),
         ("docs/research/shared-gpu-memory.md", "Research-Shared-GPU-Memory"),
