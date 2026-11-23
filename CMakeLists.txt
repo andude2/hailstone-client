@@ -579,6 +579,7 @@ add_library(hailstone_engine STATIC
   src/app/lua_ui.cpp
   src/app/automation.cpp
   src/app/drive_client.cpp
+  src/app/drive_control.cpp
   src/app/drive_observe.cpp
   src/app/headless_app.cpp
   src/app/navigator.cpp
