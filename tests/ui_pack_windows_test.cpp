@@ -2413,6 +2413,91 @@ TEST_CASE("UI packs (modern): the spell book's Memorize replaces the spell of a 
     }
 }
 
+TEST_CASE("UI packs (modern): crew inventory compares a slot and searches remote bag contents") {
+    const auto src = fs::path(__FILE__).parent_path().parent_path() / "ui" / "modern";
+    hailstone::test::ScratchDir scratch("crew_inventory_ui_test");
+    const auto dir = scratch.path();
+    fs::create_directories(dir / "game");
+    fs::copy(src, dir / "modern", fs::copy_options::recursive);
+    auto destroy = [](ImGuiContext* context) { ImGui::DestroyContext(context); };
+    std::unique_ptr<ImGuiContext, decltype(destroy)> ctx(ImGui::CreateContext(), destroy);
+    ImGui::GetIO().IniFilename = nullptr;
+    unsigned char* pixels = nullptr;
+    int w = 0, h = 0;
+    ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&pixels, &w, &h);
+    Session s(dir, "modern");
+    lua_State* L = s.lua.state();
+    REQUIRE(luaL_dostring(L, R"lua(
+        local get = hs.Plugin
+        hs.Plugin = function(name)
+            if name ~= 'MQACNet' then return get(name) end
+            return {
+                InventorySupported = function() return true end,
+                InventoryPeers = function() return { sharer = 1, missing = 0 } end,
+                InventoryRows = function(key)
+                    if key == 'sharer' then
+                        return { character = 'Sharer', rows = {
+                            {13, -1, 100, 500, 1, 15, 30, 60, 'Remote sword'},
+                            {23, 2, 101, 501, 4,  0,  0,  0, 'Remote gem'},
+                        } }
+                    end
+                end,
+            }
+        end
+        crew_text = {}
+        local text = ui.Text
+        ui.Text = function(value) crew_text[value] = true; text(value) end
+        compare_width = 0
+        local begin_child = ui.BeginChild
+        ui.BeginChild = function(id, w, h, border)
+            if id == '##slot-comparison' then compare_width = w end
+            return begin_child(id, w, h, border)
+        end
+        ui.SetSetting('test.inv.page', 'compare')
+        ui.SetSetting('test.adv.owner', '@all')
+    )lua") == LUA_OK);
+    s.api.show("InventoryWindow", true);
+    s.frames(3);
+    CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
+    REQUIRE(luaL_dostring(L, R"lua(
+        for value in pairs(crew_text) do
+            if value:match('^AC %d') then return false end -- the comparison shows no stats
+        end
+        return crew_text['Remote sword'] and crew_text['Inventory unavailable']
+    )lua") == LUA_OK);
+    CHECK(lua_toboolean(L, -1));
+    lua_pop(L, 1);
+
+    // The window can be widened, and the comparison table takes the extra width for the item names.
+    REQUIRE(luaL_dostring(L, "return compare_width") == LUA_OK);
+    const double narrow = lua_tonumber(L, -1);
+    lua_pop(L, 1);
+    CHECK(narrow > 0);
+    REQUIRE(luaL_dostring(L, "ui.SetSetting('hud.size.InventoryWindow', '900,600')") == LUA_OK);
+    s.frames(3);
+    CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
+    REQUIRE(luaL_dostring(L, "return compare_width") == LUA_OK);
+    CHECK(lua_tonumber(L, -1) > narrow + 100);
+    lua_pop(L, 1);
+
+    s.api.show("InventoryWindow", false);
+    s.api.show("InventoryManagerWnd", true);
+    REQUIRE(luaL_dostring(L, R"lua(
+        crew_text = {}
+        local input = ui.InputTextWithHint
+        ui.InputTextWithHint = function(id, hint, val, limit)
+            if id == '##crewsearch' then val = 'gem' end
+            return input(id, hint, val, limit)
+        end
+    )lua") == LUA_OK);
+    s.frames(3);
+    CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
+    REQUIRE(luaL_dostring(L, "return crew_text['Remote gem'] and crew_text['Sharer'] and "
+                            "crew_text['General 1, bag slot 3'] and not crew_text['Remote sword']") == LUA_OK);
+    CHECK(lua_toboolean(L, -1));
+    lua_pop(L, 1);
+}
+
 TEST_CASE("UI packs: the inventory's alternate currencies draw, and a row selects the stock list's row") {
     for (const char* pack : {"modern", "gamepad"}) {
         INFO(pack);

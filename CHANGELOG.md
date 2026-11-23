@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Modern Inventory's paper doll has an equipment Compare tab with the updated MQACNet add-on. The inventory window is resizable, and the Compare table gives long item names the room. Advanced Inventory can search and browse equipped, carried and bagged items across connected Hailstone characters that share their inventory.
+- Fixed a crash while closing the client or after a failed connect: plugins and scripts now stop while the connection and the UI are still alive, instead of a plugin's shutdown printing to a freed connection.
+
 - Lua scripts can exchange a carried item with a worn slot through `hailstone.exchange_item`.
 
 - Headless Lua scripts can read active quest progress and task revisions without opening a journal window.

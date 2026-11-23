@@ -941,6 +941,15 @@ cursor still holds an item of that id (two items of one id look the same).
 
 Both need `actions`, as `/destroy` does. The id is a plain decimal number above 0; anything else does nothing.
 
+#### Inventory rows
+
+`inventory_rows(host, out, capacity)` is an append-only ABI 4 read call. Check it with
+`HAILSTONE_HOST_HAS`. It returns the number of equipped, carried and carried-bag item rows while in a zone.
+A null output and zero capacity give the count for allocation. A smaller buffer receives its first rows and
+still returns the total. `HailstoneInventoryRow` has the possessions slot and subslot, item ID, icon, quantity,
+base AC, HP and mana, and a NUL-terminated name. The call returns -1 off the client thread, without read
+permission, or outside a zone.
+
 #### Buff, spawn, extended target, ability and raid records
 
 The calls: `get_buff_data_bulk(host, out, out_size)`, `get_pet_buff_data_bulk(host, out, out_size)`,

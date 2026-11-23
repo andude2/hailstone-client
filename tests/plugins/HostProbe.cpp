@@ -965,6 +965,18 @@ HAILSTONE_API void InitializePlugin(void) {
     AddCommand("/probediscs", probe_disc, nullptr);
     AddCommand("/proberaid", probe_raid, nullptr);
     AddCommand("/probecursor", probe_cursor, nullptr);
+    AddCommand("/probeinventoryrows", +[](void*, const char*) {
+        if (!HAILSTONE_HOST_HAS(host, inventory_rows)) return;
+        HailstoneInventoryRow rows[3]{};
+        const int total = host->inventory_rows(host->host, nullptr, 0);
+        const int copied = host->inventory_rows(host->host, rows, 3);
+        WriteChatf("[Probe] inventory %d %d", total, copied);
+        for (int i = 0; i < copied && i < 3; ++i) {
+            const auto& row = rows[i];
+            WriteChatf("[Probe] item %d %d %u %d %d %d %s", row.slot, row.sub,
+                       row.item_id, row.ac, row.hp, row.mana, row.name);
+        }
+    }, nullptr);
     AddCommand("/probefreeinv", probe_free_inventory, nullptr);
     AddCommand("/probecanloot", probe_can_loot, nullptr);
     AddCommand("/probeloot", probe_loot, nullptr);
@@ -1006,6 +1018,7 @@ HAILSTONE_API void ShutdownPlugin(void) {
     RemoveCommand("/probediscs");
     RemoveCommand("/proberaid");
     RemoveCommand("/probecursor");
+    RemoveCommand("/probeinventoryrows");
     RemoveCommand("/probefreeinv");
     RemoveCommand("/probecanloot");
     RemoveCommand("/probebinary");

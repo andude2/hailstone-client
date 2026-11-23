@@ -23,6 +23,7 @@ local API = hs.UI
 local hud = dofile("lib/hud.lua")
 local items = dofile("lib/items.lua")
 local tools = dofile("lib/itemtools.lua")
+local crew = dofile("lib/crewinventory.lua")
 local T = hud.T
 local C = T.color
 local WINDOW = "InventoryManagerWnd"
@@ -1248,6 +1249,93 @@ local DIALOG = {
   keepTitle = true,
 }
 
+local owner = "@self"
+local filter = ""
+
+local function crewItems(x, y, w, h, s, peers)
+  ui.SetCursorScreenPos(x, y)
+  ui.SetNextItemWidth(260 * s)
+  search = ui.InputTextWithHint("##crewsearch", "Search item names", search, 64)
+  ui.SameLine()
+  ui.SetNextItemWidth(120 * s)
+  if ui.BeginCombo("##crewwhere", filter == "" and "Any location" or filter) then
+    for _, place in ipairs({ "Any location", "Equipped", "Carried", "In bags" }) do
+      if ui.Selectable(place, place == filter or (filter == "" and place == "Any location")) then
+        filter = place == "Any location" and "" or place
+      end
+    end
+    ui.EndCombo()
+  end
+
+  local query = search:lower()
+  local rows, ready = {}, 0
+  local function add(name, slot, sub, item, count)
+    local kind = slot < 23 and "Equipped" or (sub < 0 and "Carried" or "In bags")
+    if (filter ~= "" and filter ~= kind) or not item:lower():find(query, 1, true) then return end
+    local location
+    if slot < 23 then location = API.inventory.SlotName(slot) or tostring(slot)
+    else
+      location = ("General %d"):format(slot - 22)
+      if sub >= 0 then location = location .. (", bag slot %d"):format(sub + 1) end
+    end
+    rows[#rows + 1] = { item, name, location, count }
+  end
+  if owner == "@all" then
+    local name = API.character.Label(1) or "My character"
+    for _, r in ipairs(data.rows) do
+      if r.where == "worn" or r.where == "carried" then
+        add(name, r.slot, r.sub, r.item.name, r._count)
+      end
+    end
+  end
+  for _, peer in ipairs(peers) do
+    if peer.snapshot and (owner == "@all" or owner == peer.key) then
+      ready = ready + 1
+      for _, r in ipairs(peer.snapshot.rows) do add(peer.name, r[1], r[2], r[9], r[5]) end
+    end
+  end
+  table.sort(rows, function(a, b)
+    if a[1] ~= b[1] then return a[1] < b[1] end
+    if a[2] ~= b[2] then return a[2] < b[2] end
+    return a[3] < b[3]
+  end)
+  if ready == 0 and owner ~= "@all" then ui.Text("Inventory unavailable"); return end
+  ui.Text(("%d items  |  %d of %d peer inventories available"):format(#rows, ready,
+    owner == "@all" and #peers or 1))
+  local flags = ui.TableFlags.ScrollY | ui.TableFlags.RowBg | ui.TableFlags.Resizable
+  if ui.BeginTable("##crewitems", 4, flags, w, math.max(60 * s, h - 60 * s)) then
+    for _, label in ipairs({ "Item", "Owner", "Location", "Qty" }) do ui.TableSetupColumn(label) end
+    ui.TableSetupScrollFreeze(0, 1)
+    ui.TableHeadersRow()
+    for _, row in ipairs(rows) do
+      ui.TableNextRow()
+      for _, value in ipairs(row) do
+        if ui.TableNextColumn() then ui.Text(tostring(value)) end
+      end
+    end
+    ui.EndTable()
+  end
+end
+
+local function ownerControl(x, y, s, peers)
+  local name = owner == "@self" and "My Character" or "All Connected"
+  local found = owner == "@self" or owner == "@all"
+  for _, peer in ipairs(peers) do
+    if peer.key == owner then name, found = peer.name, true; break end
+  end
+  if not found then owner, name = "@all", "All Connected" end
+  ui.SetCursorScreenPos(x, y)
+  ui.SetNextItemWidth(180 * s)
+  if ui.BeginCombo("##advowner", name) then
+    if ui.Selectable("My Character", owner == "@self") then owner = "@self" end
+    if ui.Selectable("All Connected", owner == "@all") then owner = "@all" end
+    for _, peer in ipairs(peers) do
+      if ui.Selectable(peer.name .. "##" .. peer.key, owner == peer.key) then owner = peer.key end
+    end
+    ui.EndCombo()
+  end
+end
+
 local function body(x, y, w, h, s)
   refresh()
   readSettings()
@@ -1257,6 +1345,16 @@ local function body(x, y, w, h, s)
     readSettings()
     search = q
     selClear()
+  end
+  if crew.Provider() then
+    local peers = crew.Peers()
+    local testOwner = ui.GetSetting("test.adv.owner")
+    if testOwner then owner = testOwner end
+    ownerControl(x, y, s, peers)
+    y, h = y + 34 * s, h - 34 * s
+    if owner ~= "@self" then return crewItems(x, y, w, h, s, peers) end
+  else
+    owner = "@self"
   end
   menuRow = nil
   local v = shownRows()

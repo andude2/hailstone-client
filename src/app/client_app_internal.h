@@ -259,9 +259,17 @@ public:
                              heaps[i].allocations));
     }
 
-    // The Lua UI goes first: its state's finalizers may still reach what the hs.* functions hold (ui_host_, ui_api_,
-    // the views), which members declared after it would already have destroyed.
-    ~ClientApp() { retire_world_geometry(); lua_ui_.reset(); }
+    // The automation goes first: its plugins and scripts shut down in ~Automation, and their ShutdownPlugin and
+    // last line may still print to chat, which reads conn_ and the UI host. conn_, lua_ui_ and the UI host are
+    // declared after automation_, so without this they are destroyed before the plugins unload; an exception out
+    // of run() then crashes here on a freed connection instead of reporting the error. The Lua UI goes next: its
+    // state's finalizers may still reach what the hs.* functions hold (ui_host_, ui_api_, the views), which members
+    // declared after it would already have destroyed.
+    ~ClientApp() {
+        retire_world_geometry();
+        automation_.reset();
+        lua_ui_.reset();
+    }
     ClientApp(const ClientApp&) = delete;
     ClientApp& operator=(const ClientApp&) = delete;
     explicit ClientApp(ClientOptions& options)

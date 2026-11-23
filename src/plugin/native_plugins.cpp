@@ -1726,6 +1726,41 @@ int h_get_item(void* h, const HailstoneItemSlot* slot, HailstoneItem* out) {
     return it ? give(out, item_struct(*it)) : 0;
 }
 
+int h_inventory_rows(void* h, HailstoneInventoryRow* out, std::uint32_t capacity) {
+    const net::GameConnection* c = readable(Loaded::of(h), "inventory_rows");
+    if (!c || !c->in_zone()) return -1;
+    const auto& inventory = c->inventory();
+    std::uint32_t count = 0;
+    auto append = [&](const net::ItemSlot& slot, const net::Item& item) {
+        if (out && count < capacity) {
+            auto& row = out[count];
+            row = {};
+            row.slot = slot.slot;
+            row.sub = slot.sub;
+            row.item_id = item.id;
+            row.icon = item.icon;
+            row.count = item.stackable() ? item.stack_count : 1;
+            row.ac = item.ac;
+            row.hp = item.hp;
+            row.mana = item.mana;
+            std::copy_n(item.name.data(), std::min(item.name.size(), sizeof(row.name) - 1), row.name);
+        }
+        ++count;
+    };
+    for (int i = net::kSlotCharm; i <= net::kSlotGeneral10; ++i) {
+        net::ItemSlot slot{net::kInvPossessions, static_cast<std::int16_t>(i), -1, -1, 0, 0};
+        const auto* item = inventory.at(slot);
+        if (!item) continue;
+        append(slot, *item);
+        if (i < net::kSlotGeneral1 || !item->is_bag()) continue;
+        for (int sub = 0; sub < item->bag_slots; ++sub) {
+            slot.sub = static_cast<std::int16_t>(sub);
+            if (const auto* child = inventory.at(slot)) append(slot, *child);
+        }
+    }
+    return static_cast<int>(count);
+}
+
 std::uint32_t h_cursor_origin(void* h) {
     const net::GameConnection* c = readable(Loaded::of(h), "cursor_origin");
     return c ? c->cursor_origin() : HAILSTONE_CURSOR_ORIGIN_UNKNOWN;
@@ -3520,6 +3555,7 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
     p.table.loot_item_modifiers = main_only<h_loot_item_modifiers>;
     p.table.set_ui_contribution = main_only<h_set_ui_contribution>;
     p.table.remove_ui_contribution = main_only<h_remove_ui_contribution>;
+    p.table.inventory_rows = main_only_or<h_inventory_rows, -1>;
     if (got <= 3) {
         // Upstream ABI 3 extended the common prefix with its two UI functions.
         // Headless ABI 4 already uses those offsets for loot. Each plugin

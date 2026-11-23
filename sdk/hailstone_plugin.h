@@ -863,6 +863,15 @@ typedef struct HailstoneHooks {
 /* WARNING!  ALWAYS APPEND: ORDER MATTERS IN PluginHostApi (see size below) */
 /* WARNING!  ALWAYS APPEND: ORDER MATTERS IN PluginHostApi (see size below) */
 /* WARNING!  ALWAYS APPEND: ORDER MATTERS IN PluginHostApi (see size below) */
+/* One equipped or carried item, including items inside general inventory bags. */
+#define HAILSTONE_SDK_HAS_INVENTORY_ROWS 1
+typedef struct HailstoneInventoryRow {
+    int16_t slot, sub; /* RoF2 possessions indices; sub = -1 for a top-level item */
+    uint32_t item_id, icon, count;
+    int32_t ac, hp, mana;
+    char name[64];
+} HailstoneInventoryRow;
+
 typedef struct PluginHostApi {
     uint32_t abi;  /* HAILSTONE_PLUGIN_ABI */
     uint32_t size; /* sizeof(PluginHostApi) of the client: later ABIs only add fields at the end */
@@ -1194,6 +1203,10 @@ typedef struct PluginHostApi {
      * permission loss or unload. Check HAILSTONE_HOST_HAS before using the ABI 4 slots below. */
     int (*set_ui_contribution)(void* host, const HailstoneUiContribution* entry);
     int (*remove_ui_contribution)(void* host, const char* id);
+    /* READ. Copy equipped items, carried items and their bag contents. Returns the total row
+     * count, even if capacity was smaller; pass NULL and 0 to size the buffer. Returns -1
+     * before entering a zone or without read permission. Test HAILSTONE_HOST_HAS first. */
+    int (*inventory_rows)(void* host, HailstoneInventoryRow* out, uint32_t capacity);
 } PluginHostApi;
 /* What use_ability and ability_state take: the kinds of ability the Ability Book lists. The values are stable. */
 enum HS_AbilityKinds {

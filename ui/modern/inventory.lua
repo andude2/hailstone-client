@@ -1,4 +1,4 @@
--- Inventory: replaces the game's InventoryWindow. The worn slots as a grid with the weapons apart, the character's
+-- Inventory: replaces the game's InventoryWindow. The worn slots around a paper-doll drop area, the character's
 -- numbers beside them (the game's own labels by EQType, in the colours the game gives them), the ten carried slots,
 -- coins, and the game's buttons, with Advanced Inventory (Hailstone: inventorymanager.lua, where the search of
 -- everything you have, Stack / Sort and the item marks are). The Stats page has every number the game gives (each attribute and resist as
@@ -10,21 +10,25 @@ local hud = dofile("lib/hud.lua")
 local items = dofile("lib/items.lua")
 local tools = dofile("lib/itemtools.lua")
 local band = dofile("lib/bandolier.lua")
+local crew = dofile("lib/crewinventory.lua")
 local T = hud.T
 local C = T.color
 local WINDOW = "InventoryWindow"
 
--- Worn slots (hs.Item numbers), as rows of the grid.
-local WORN = {
-  { 1, 2, 3, 4, 5 },        -- ear, head, face, ear, neck
-  { 6, 7, 8, 17, 20 },      -- shoulders, arms, back, chest, waist
-  { 9, 10, 12, 15, 16 },    -- wrists, hands, fingers
-  { 18, 19, 0, 21, 22 },    -- legs, feet, charm, power source, ammo
+-- Equipment surrounds the paper doll, with weapons and ammo along the bottom.
+local DOLL_ROWS = {
+  {  1,     2,     3,  4 },
+  { 17, false, false,  5 },
+  {  7, false, false,  8 },
+  { 20, false, false,  6 },
+  {  9, false, false, 10 },
+  { 18,    12,     0, 19 },
+  { false, 15,    16, 21 },
+  { 13,    14,    11, 22 },
 }
-local WEAPONS = { 13, 14, 11 } -- primary, secondary, range
 local SHORT = { -- names to show in an empty slot (hs.SlotName's are long)
-  [0] = "Charm", [1] = "Ear", [2] = "Head", [3] = "Face", [4] = "Ear", [5] = "Neck", [6] = "Shoulder", [7] = "Arms",
-  [8] = "Back", [9] = "Wrist", [10] = "Wrist", [11] = "Range", [12] = "Hands", [13] = "Primary", [14] = "Offhand",
+  [0] = "Charm", [1] = "Ear", [2] = "Head", [3] = "Face", [4] = "Ear", [5] = "Neck", [6] = "Shldr", [7] = "Arms",
+  [8] = "Back", [9] = "Wrist", [10] = "Wrist", [11] = "Range", [12] = "Hands", [13] = "Main", [14] = "Off",
   [15] = "Ring", [16] = "Ring", [17] = "Chest", [18] = "Legs", [19] = "Feet", [20] = "Waist", [21] = "Power",
   [22] = "Ammo",
 }
@@ -35,9 +39,17 @@ local LEFT_W = 5 * SLOT + 4 * GAP
 local STATS_W = 220
 local W = LEFT_W + 18 + STATS_W
 local HEADER_H, TABS_H = 46, 28
-local BODY_H = 4 * (SLOT + GAP) + 10 + SLOT + 14
+local DOLL_SLOT, DOLL_GAP = 36, 4
+local DOLL_STEP = DOLL_SLOT + DOLL_GAP
+local DOLL_W = #DOLL_ROWS[1] * DOLL_STEP - DOLL_GAP
+local DOLL_H = #DOLL_ROWS * DOLL_STEP - DOLL_GAP
+local BODY_H = DOLL_H + 14
 local FOOT_H = SLOT + 12 + 34 + 2 * 32 + 2
 local H = HEADER_H + TABS_H + BODY_H + FOOT_H
+-- hud.Dialog pads a window's contents by 10 by 8 design pixels on each side; W and H are the contents' size, so the
+-- resizable window starts and stops at exactly the layout it has always had.
+local PAD_W, PAD_H = 20, 16
+local DIALOG_W, DIALOG_H = W + PAD_W, H + PAD_H
 
 local page = "character" -- character, stats, bandolier, currency
 -- the game's tab box pages (it fills some only while shown); the Bandolier page is Hailstone's, the game's Character
@@ -75,37 +87,75 @@ local function pool(x, y, w, s, name, cur, max, color)
   return th + 12 * s
 end
 
-local function characterPage(x, y, s)
-  local sz, gap = SLOT * s, GAP * s
-  -- the doll: the worn grid and the weapons stand for the game's paper doll (IW_CharacterView). An item or coin held
-  -- on the cursor and dropped between the slots goes to the window (CInventoryWnd::HandleLButtonUp: the item is
-  -- equipped or put away, eqstr 5290 when it stays; coin goes back to the purse). The slots, drawn after it, keep
-  -- their own drops.
-  if API.inventory.Item(API.inventory.CursorSlot) or API.cursor.Coin() then
-    local dx1, dy1 = x + LEFT_W * s, y + 4 * (sz + gap) + 10 * s + sz
-    if T.Hit("##doll", x - 4 * s, y - 4 * s, dx1 + 4 * s, dy1 + 4 * s) then
+local compareSlot = 13
+
+local function compareRows(x, y, s, w, h)
+  ui.SetCursorScreenPos(x, y)
+  ui.BeginChild("##slot-comparison", w, h, false)
+  ui.Text(API.inventory.SlotName(compareSlot) or "Equipment")
+  local function row(name, itemName, ready)
+    ui.TableNextRow()
+    ui.TableNextColumn()
+    ui.Text(name)
+    ui.TableNextColumn()
+    ui.Text(itemName or (ready and "Empty slot" or "Inventory unavailable"))
+  end
+  -- One row per character, as the equipped Visual tab's comparison table in EZInventory.
+  local peers = crew.Peers()
+  if ui.BeginTable("##slot-comparison-rows", 2, ui.TableFlags.RowBg | ui.TableFlags.BordersInnerV, 0, 0) then
+    ui.TableSetupColumn("Character", ui.TableColumnFlags.WidthFixed, 100 * s)
+    ui.TableSetupColumn("Item", ui.TableColumnFlags.WidthStretch)
+    ui.TableHeadersRow()
+    local item = API.inventory.Item(compareSlot)
+    if item then row("My Character", item.name, true)
+    else row("My Character", nil, true) end
+    for _, peer in ipairs(peers) do
+      local worn = peer.snapshot and peer.snapshot.worn[compareSlot]
+      if worn then row(peer.name, worn[9], true)
+      else row(peer.name, nil, peer.snapshot ~= nil) end
+    end
+    ui.EndTable()
+  end
+  if #peers == 0 then ui.Text("No connected characters") end
+  ui.EndChild()
+end
+
+local function characterPage(x, y, s, compare, w, h)
+  local dollX = x + (LEFT_W - DOLL_W) * s / 2
+  -- A drop between slots goes through IW_CharacterView, which equips or stows a held item
+  -- or returns a held coin to the purse. Slots drawn after the drop area keep their own drops.
+  if not compare and (API.inventory.Item(API.inventory.CursorSlot) or API.cursor.Coin()) then
+    local x0, y0 = dollX - 2 * s, y - 2 * s
+    local x1, y1 = dollX + (DOLL_W + 2) * s, y + (DOLL_H + 2) * s
+    if T.Hit("##doll", x0, y0, x1, y1) then
       API.windows.ClickChild(WINDOW, "IW_CharacterView", "left")
     end
     if ui.IsItemHovered() then
-      ui.DrawRect(x - 4 * s, y - 4 * s, dx1 + 4 * s, dy1 + 4 * s, C.accent[1], C.accent[2], C.accent[3], 0.6, 6 * s, 1.5 * s)
+      ui.DrawRect(x0, y0, x1, y1, C.accent[1], C.accent[2], C.accent[3], 0.6, 6 * s, 1.5 * s)
     end
   end
-  -- worn grid
-  for r, row in ipairs(WORN) do
+  for r, row in ipairs(DOLL_ROWS) do
     for c, slot in ipairs(row) do
-      items.InvSlot(slot, nil, x + (c - 1) * (sz + gap), y + (r - 1) * (sz + gap), sz, s, SHORT[slot])
+      if slot then
+        local slotX = dollX + (c - 1) * DOLL_STEP * s
+        local slotY = y + (r - 1) * DOLL_STEP * s
+        if compare then
+          items.Slot("##compare-slot" .. slot, slotX, slotY, DOLL_SLOT * s, s, API.inventory.Item(slot),
+            SHORT[slot], API.inventory.SlotName(slot), function(button)
+              if button == "left" then compareSlot = slot end
+            end, { selected = compareSlot == slot })
+        else
+          items.InvSlot(slot, nil, slotX, slotY, DOLL_SLOT * s, s, SHORT[slot])
+        end
+      end
     end
   end
-  -- weapons, centred under the grid
-  local wy = y + 4 * (sz + gap) + 10 * s
-  local wx = x + (LEFT_W * s - (3 * sz + 2 * gap)) / 2
-  ui.DrawLine(x, wy - 6 * s, x + LEFT_W * s, wy - 6 * s, C.ink[1], C.ink[2], C.ink[3], 0.06, 1)
-  for k, slot in ipairs(WEAPONS) do items.InvSlot(slot, nil, wx + (k - 1) * (sz + gap), wy, sz, s, SHORT[slot]) end
 
   -- the numbers
   local sx = x + (LEFT_W + 18) * s
-  local sw = STATS_W * s
-  ui.DrawRectFilled(sx - 9 * s, y - 2 * s, sx - 8 * s, y + BODY_H * s - 14 * s, C.ink[1], C.ink[2], C.ink[3], 0.06)
+  local sw = math.max(STATS_W * s, w - (LEFT_W + 18) * s)
+  if compare then return compareRows(sx, y, s, sw, h) end
+  ui.DrawRectFilled(sx - 9 * s, y - 2 * s, sx - 8 * s, y + h - 14 * s, C.ink[1], C.ink[2], C.ink[3], 0.06)
   local yy = y
   yy = yy + pool(sx, yy, sw, s, "Health", 17, 18, C.hp)
   local _, _, manaRaw = API.character.Gauge(2)
@@ -139,7 +189,7 @@ end
 -- onto the cursor as items, the quantity dialog up to a stack), Reclaim puts the currency item held back into the
 -- count (both OP_AltCurrencyReclaim).
 local CURRENCY_LIST = "AltCurr_PointList"
-local function currencyPage(x, y, s)
+local function currencyPage(x, y, s, w, h)
   local _, gameMissing = API.windows.ChildState(WINDOW, "AltCurr_DisplayMissingButton")
   if (gameMissing == true) ~= showMissing then API.windows.ClickChild(WINDOW, "AltCurr_DisplayMissingButton", "left") end
   local list = API.character.AltCurrencies(showMissing) or {}
@@ -148,7 +198,7 @@ local function currencyPage(x, y, s)
   for _, c in ipairs(list) do if (c.count or 0) > 0 then held = held + 1 end end
   T.Text(x, y, string.format("%d held", held), C.muted, T.font.small)
   local tw = T.TextSize("Show all", T.font.small)
-  if T.Button("##missing", x + W * s - tw - 30 * s, y - 3 * s, x + W * s, y + 21 * s, s, "Show all",
+  if T.Button("##missing", x + w - tw - 30 * s, y - 3 * s, x + w, y + 21 * s, s, "Show all",
       { primary = showMissing, tooltip = "Also the currencies you have none of" }) then
     showMissing = not showMissing
   end
@@ -159,7 +209,7 @@ local function currencyPage(x, y, s)
   local _, _, sel = API.windows.ListInfo(WINDOW, CURRENCY_LIST)
   local wx, wy = ui.GetWindowPos()
   ui.SetCursorPos(x - wx, y + 30 * s - wy)
-  ui.BeginChild("##currencies", W * s, (BODY_H - 30 - 54) * s, false)
+  ui.BeginChild("##currencies", w, h - 84 * s, false)
   local cw = ui.GetContentRegionAvail()
   local cols = 2
   local cardW = (cw - (cols - 1) * 8 * s) / cols
@@ -186,14 +236,14 @@ local function currencyPage(x, y, s)
   end
   ui.EndChild()
   -- Claim and Reclaim, enabled as the game's buttons are; clear of the line over the search field (ty0 - 8)
-  local by = y + (BODY_H - 46) * s
+  local by = y + h - 46 * s
   local bw = 120 * s
   local actions = {
     { "AltCurr_CreateItemButton", "Claim", "Take the selected currency out onto the cursor as items" },
     { "AltCurr_ReclaimButton", "Reclaim", "Put the currency item you hold back into its count" },
   }
   for k, a in ipairs(actions) do
-    local bx1 = x + W * s - (#actions - k) * (bw + 6 * s)
+    local bx1 = x + w - (#actions - k) * (bw + 6 * s)
     local enabled = API.windows.ChildState(WINDOW, a[1])
     if T.Button("##" .. a[1], bx1 - bw, by, bx1, by + 26 * s, s, a[2], { enabled = enabled == true, tooltip = a[3] }) then
       API.windows.ClickChild(WINDOW, a[1], "left")
@@ -205,10 +255,10 @@ end
 -- ---------------------------------------------------------------- bandolier page
 -- The sets on the left, the selected set's weapons and the game's buttons on the right; clear of the line over the
 -- search field (ty0 - 8).
-local function bandolierPage(x, y, s)
+local function bandolierPage(x, y, s, w, h)
   local wx, wy = ui.GetWindowPos()
   ui.SetCursorPos(x - wx, y - wy)
-  ui.BeginChild("##bandolier", W * s, (BODY_H - 16) * s, false)
+  ui.BeginChild("##bandolier", w, h, false)
   local cw, ch = ui.GetContentRegionAvail()
   local listW = math.floor(cw * 0.4)
   band.List(listW, ch)
@@ -284,10 +334,10 @@ local function statTable(x, y, w, rows, s)
   return y
 end
 
-local function statsPage(x, y, s)
+local function statsPage(x, y, s, w, h)
   local wx, wy = ui.GetWindowPos()
   ui.SetCursorPos(x - wx, y - wy)
-  ui.BeginChild("##stats", W * s, BODY_H * s, false)
+  ui.BeginChild("##stats", w, h, false)
   local cx, cy = ui.GetCursorScreenPos()
   local cw = ui.GetContentRegionAvail()
   local colW = (cw - 24 * s) / 2
@@ -374,7 +424,7 @@ local function statsPage(x, y, s)
 end
 
 local PAGES = { { "character", "Character" }, { "stats", "Stats" }, { "bandolier", "Bandolier" },
-  { "currency", "Alt. Currency" } }
+  { "currency", "Alt. Currency" }, { "compare", "Compare" } }
 -- In two rows of three. Advanced Inventory is Hailstone's (InventoryManagerWnd).
 local BUTTONS = {
   { "IW_Skills", "Skills" }, { "IW_AltAdvBtn", "Alt. Advancement" },
@@ -416,12 +466,15 @@ end
 local OPTS = {
   size = function()
     local extra = API.windows.ChildShown(WINDOW, "ShroudProgressButton") == true and 32 or 0
-    return W, H + (hasVitality() and 40 or 0) + extra
+    return DIALOG_W, DIALOG_H + (hasVitality() and 40 or 0) + extra
   end,
   place = function(sw, sh, w, h, s, x, y) return sw - w - 60 * s, sh / 2 - h / 2 end,
   keepTitle = true,
+  resizable = { W, H },
 }
 local function body(x, y, w, h, s)
+  local vitalityShown = hasVitality()
+  local shroudShown = API.windows.ChildShown(WINDOW, "ShroudProgressButton") == true
   -- header: name, level, class, deity
   local name = label(1)
   local last = label(73)
@@ -446,7 +499,10 @@ local function body(x, y, w, h, s)
   -- pages
   local ty = y + HEADER_H * s
   local tx = x
+  local canCompare = crew.Provider() ~= nil
+  if page == "compare" and not canCompare then page = "character" end
   for k, p in ipairs(PAGES) do
+    if p[1] == "compare" and not canCompare then break end
     local tw = T.TextSize(p[2], T.font.small)
     local up = (page == p[1])
     local clicked = T.Hit("##page" .. k, tx - 4 * s, ty, tx + tw + 4 * s, ty + 22 * s)
@@ -463,13 +519,18 @@ local function body(x, y, w, h, s)
   if API.windows.TabPage(WINDOW, "IW_Subwindows") ~= gamePage then API.windows.SetTabPage(WINDOW, "IW_Subwindows", gamePage) end
   local by = ty + TABS_H * s + 4 * s
   tools.ModeBanner("##inv", math.max(tx, x + 260 * s), x + w, ty, s) -- after the tabs
-  if page == "stats" then statsPage(x, by, s)
-  elseif page == "bandolier" then bandolierPage(x, by, s)
-  elseif page == "currency" then currencyPage(x, by, s)
-  else characterPage(x, by, s) end
+  -- The footer stays at the bottom of the window and the page takes the room above it, so a resized window grows the
+  -- page (the Compare table's item column, the Stats columns and the Bandolier and currency lists with it). The
+  -- vitality bars and the shroud button below the six buttons are part of the footer's height here.
+  local footerH = FOOT_H + (vitalityShown and 40 or 0) + (shroudShown and 32 or 0)
+  local fy = y + h - footerH * s
+  local pageH = fy - 8 * s - by
+  if page == "stats" then statsPage(x, by, s, w, pageH)
+  elseif page == "bandolier" then bandolierPage(x, by, s, w, pageH)
+  elseif page == "currency" then currencyPage(x, by, s, w, pageH)
+  else characterPage(x, by, s, page == "compare", w, pageH) end
 
   -- the carried slots
-  local fy = y + (HEADER_H + TABS_H + BODY_H) * s
   ui.DrawLine(x, fy - 8 * s, x + w, fy - 8 * s, C.ink[1], C.ink[2], C.ink[3], 0.06, 1)
   local sz = SLOT * s
   local gap = (w - 10 * sz) / 9
@@ -514,7 +575,7 @@ local function body(x, y, w, h, s)
   end
 
   local btnY = cy + 34 * s
-  if hasVitality() then
+  if vitalityShown then
     local half = (w - 16 * s) / 2
     vitality(x, btnY, half, s, 147, "XP vitality", C.xp)
     if (tonumber((API.character.Label(2))) or 0) >= 51 then
@@ -544,7 +605,7 @@ local function body(x, y, w, h, s)
       else API.windows.ClickChild(WINDOW, b[1], "left") end
     end
   end
-  if API.windows.ChildShown(WINDOW, "ShroudProgressButton") == true then
+  if shroudShown then
     local py = btnY + 64 * s
     if T.Button("##shroudProgress", x, py, x + bw, py + 26 * s, s, "Shroud Progress") then
       API.windows.ClickChild(WINDOW, "ShroudProgressButton", "left")

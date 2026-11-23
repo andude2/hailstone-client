@@ -11,11 +11,6 @@
 #include <utility>
 
 namespace hailstone::app {
-namespace {
-
-class DriveMirrorSession;
-
-} // namespace
 
 struct DriveClient::Impl {
     std::unique_ptr<platform::LocalPipeConnection> pipe;

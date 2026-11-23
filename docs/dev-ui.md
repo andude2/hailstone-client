@@ -156,6 +156,13 @@ The client target copies the UI packs after linking. For a Lua-only edit that do
 
 ## The Lua windows
 
+Modern Inventory arranges equipment around an open paper doll, with weapons and ammo at the bottom. With the
+MQACNet inventory add-on loaded, its Compare tab selects slots on the doll and shows the local item alongside
+the items worn in that slot by connected peers. Advanced Inventory's owner picker offers My Character,
+All Connected and individual peers. Crew results show equipped, carried and bagged items and are read-only.
+An empty equipment slot and an unavailable peer inventory have separate labels.
+
+
 ### UI packs
 
 The windows are Lua scripts drawn with ImGui, grouped into user interfaces: every folder of `ui/` with a `ui.ini` (`src/ui/ui_packs.h`).
@@ -296,7 +303,7 @@ Each entry names the window and what is particular to it; the `hs.*` calls behin
   - A tell window flashes once when another player's tell comes in (`hs.ChatWindows`' `tellsIn`).
   - A window reads only the lines since its version (`hs.ChatText(slot, version, names, stamps, true)`), and everything again (`reset`) when its lines changed otherwise. Line wrap and height are cached until the width or font change. A word wider than the output (a long name or a run with no space) is broken where the row ends, at a character's start, as ImGui's own wrapped text breaks it.
 
-- **InventoryWindow**: the worn grid, numbers by EQType, carried slots, coins. Testing: `test.inv.page=character|stats|bandolier|currency`.
+- **InventoryWindow**: the worn grid, numbers by EQType, carried slots, coins. Resizable (Hailstone's): the page grows with the window, and the Compare table's Item column takes the extra width. Testing: `test.inv.page=character|stats|bandolier|currency|compare`.
   - An item or coin dropped between the worn slots goes to `IW_CharacterView`: CInventoryWnd::HandleLButtonUp's auto-equip (eqstr 5290 when it stays), or the coin back to the purse.
   - Stats page: every attribute and resist as total, base, heroic and cap, item bonuses, and `hs.CharacterStats`'s regeneration, unbuffed pools and defense (`app/lua_ui_stats.cpp`).
   - Bandolier page (Hailstone's: the stock window has none), drawn from `lib/bandolier.lua` over the hidden BandolierWnd.

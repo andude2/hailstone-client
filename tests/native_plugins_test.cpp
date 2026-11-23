@@ -532,6 +532,17 @@ TEST_CASE("native plugins: free_inventory_slots counts the bags' room, not only 
     item.id = 5001;
     item.name = "Something";
     inventory.put(net::ItemSlot::possessions(net::kSlotGeneral1, 0), item);
+    item.id = 5002;
+    item.name = "Worn item";
+    item.ac = 15;
+    item.hp = 30;
+    item.mana = 60;
+    inventory.put(net::ItemSlot::possessions(net::kSlotCharm), item);
+    h.run("/probeinventoryrows");
+    CHECK(h.printed_line("[Probe] inventory 12 12"));
+    CHECK(h.printed_line("[Probe] item 0 -1 5002 15 30 60 Worn item"));
+    CHECK(h.printed_line("[Probe] item 23 -1 17005 0 0 0 Bag"));
+    CHECK(h.printed_line("[Probe] item 23 0 5001 0 0 0 Something"));
     h.run("/probefreeinv");
     CHECK(h.printed_line("[Probe] free inventory 19"));
     // Without read the answer is unknown (-1), so a caller does not take it for no room.
@@ -539,6 +550,8 @@ TEST_CASE("native plugins: free_inventory_slots counts the bags' room, not only 
     h.plugins->policy_changed({});
     h.printed.clear();
     h.run("/probefreeinv");
+    h.run("/probeinventoryrows");
+    CHECK(h.printed_line("[Probe] inventory -1 -1"));
     CHECK(h.printed_line("[Probe] free inventory -1"));
 }
 
