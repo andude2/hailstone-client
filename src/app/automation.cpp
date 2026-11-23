@@ -298,6 +298,10 @@ void Automation::refresh_managed_addons() {
 }
 
 plugin::Hooks& Automation::hooks() { return impl_->hooks; }
+
+std::size_t Automation::loaded_plugin_count() const { return impl_->plugins ? impl_->plugins->loaded_count() : 0; }
+
+std::size_t Automation::pulse_count() const { return impl_->hooks.pulse_calls(); }
 std::shared_ptr<game::ExtensionChain> Automation::extensions() { return impl_->extensions; }
 game::NameplateCanvasRegistry& Automation::nameplates() { return impl_->nameplates; }
 plugin::UiBridge& Automation::plugin_ui() { return impl_->plugin_ui; }

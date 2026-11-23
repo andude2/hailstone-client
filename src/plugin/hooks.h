@@ -106,6 +106,8 @@ public:
     std::uint32_t command_required(std::string_view name) const;
     std::vector<std::string> commands() const;
     void pulse();
+    // How many pulses have run (a lease's resume must keep them coming; the headless's heartbeat reports it).
+    std::size_t pulse_calls() const;
     void game_state(int state);
     void zone(ZonePhase phase);
     void spawn(std::uint32_t spawn_id, bool added);
@@ -116,6 +118,7 @@ public:
 
 private:
     std::unique_ptr<Impl> impl_;
+    std::size_t pulse_calls_ = 0;
 };
 
 } // namespace hailstone::plugin

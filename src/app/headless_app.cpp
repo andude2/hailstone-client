@@ -980,8 +980,9 @@ int run_headless(HeadlessOptions options) {
             ++frames;
             if (const auto now = Clock::now(); now - last_heartbeat > std::chrono::seconds(10)) {
                 last_heartbeat = now;
-                log::info("headless: frame {}: {}, player {}, zone {}", frames, net::to_string(conn->state()),
-                          conn->world().player() ? "yes" : "no", conn->world().zone_short_name);
+                log::info("headless: frame {}: {}, player {}, zone {}, plugins {}, pulses {}", frames,
+                          net::to_string(conn->state()), conn->world().player() ? "yes" : "no",
+                          conn->world().zone_short_name, automation.loaded_plugin_count(), automation.pulse_count());
             }
         }
         if (automation.plugin_consent() && !consent_logged) {

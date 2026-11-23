@@ -3364,6 +3364,8 @@ void NativePlugins::world_unavailable() {
 
 bool NativePlugins::loaded(std::string_view name) const { return impl_->find(name) != nullptr; }
 
+std::size_t NativePlugins::loaded_count() const { return impl_->loaded.size(); }
+
 bool NativePlugins::has_plugin(std::string_view name) const {
     if (impl_->find(name)) return true;
     const auto files = plugin_files(impl_->dirs());

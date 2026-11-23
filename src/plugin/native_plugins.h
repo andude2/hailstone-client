@@ -122,6 +122,8 @@ public:
     bool unload(std::string_view name);
     void unload_all();
     bool loaded(std::string_view name) const;
+    // How many compiled plugins are loaded now (the headless's heartbeat reports it).
+    std::size_t loaded_count() const;
     // Whether a compiled plugin has this name (any case): loaded, or a file in the folders (the server's too). Scans
     // the folders without hashing anything.
     bool has_plugin(std::string_view name) const;

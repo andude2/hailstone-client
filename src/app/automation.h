@@ -86,6 +86,9 @@ public:
     Automation& operator=(const Automation&) = delete;
 
     plugin::Hooks& hooks();
+    // Diagnostics for the headless heartbeat: loaded compiled plugins, and how many hook pulses have run.
+    std::size_t loaded_plugin_count() const;
+    std::size_t pulse_count() const;
     // The plugins' server extensions as one (game/server_ext_chain.h): a connection asks it
     // (net::ConnectionOptions::plugins).
     std::shared_ptr<game::ExtensionChain> extensions();

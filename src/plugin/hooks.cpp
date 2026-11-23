@@ -296,11 +296,14 @@ std::vector<std::string> Hooks::commands() const {
 }
 
 void Hooks::pulse() {
+    ++pulse_calls_;
     impl_->each(kPulse, [](Entry& e) {
         std::get<std::function<void()>>(e.fn)();
         return false;
     });
 }
+
+std::size_t Hooks::pulse_calls() const { return pulse_calls_; }
 
 void Hooks::game_state(int state) {
     impl_->each(kState, [&](Entry& e) {
