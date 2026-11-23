@@ -24,6 +24,7 @@
 #include "app/client_app.h"
 #include "app/close_camp.h"
 #include "app/drive_client.h"
+#include "app/drive_control.h"
 #include "app/login_token_session.h"
 #include "app/input_script.h"
 #include "app/zone_settle.h"
@@ -822,8 +823,11 @@ private:
     void enter_zone();
     // --drive-file: connect to the headless observe server, install its snapshot, and start in the loading screen.
     bool start_drive();
-    // The same-window swap: park A's connection and view, show L, and put A back on release.
+    // The same-window swap: park A's connection and view, show L, and put A back on release. Control is the D3
+    // lease: L's sessions are lent to this window and its sends go out for real; release hands the state back.
     bool switch_to_observe(const std::filesystem::path& file, bool interact = false);
+    bool switch_to_control(const std::filesystem::path& file);
+    bool switch_to_crew(const std::filesystem::path& file, bool interact, bool control);
     void release_observe();
     void pump_parked_connection();
     void draw_crew_window();
@@ -1303,6 +1307,7 @@ private:
     std::mt19937 picture_rng_{std::random_device{}()};
     // Before conn_: its sessions keep shared state, but the factory captures drive_client_.get().
     std::unique_ptr<DriveClient> drive_client_;
+    std::unique_ptr<DriveControlClient> control_client_; // the D3 control lease, while a control view is shown
     std::unique_ptr<net::GameConnection> conn_;
     bool drive_mode_ = false;
     // A parked while an observe view is shown in the same window.
@@ -1313,7 +1318,8 @@ private:
     ui::InGameView parked_game_view_;
     std::filesystem::path parked_ui_character_dir_;
     std::string parked_layout_for_, parked_files_profile_, parked_server_name_;
-    bool viewing_observe_ = false;
+    bool viewing_observe_ = false; // a crew view (observe or control) is shown for A
+    bool viewing_control_ = false; // ... and it is a control lease, not an observe viewer
     bool interacting_observe_ = false;
     bool crew_window_open_ = false;
     Clock::time_point crew_entries_at_{};

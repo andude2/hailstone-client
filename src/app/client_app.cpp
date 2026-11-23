@@ -1351,13 +1351,19 @@ void ClientApp::pump_parked_connection() {
 }
 
 bool ClientApp::switch_to_observe(const std::filesystem::path& file, bool interact) {
-    const bool from_observe = viewing_observe_;
-    if (from_observe && !parked_conn_) {
+    return switch_to_crew(file, interact, false);
+}
+
+bool ClientApp::switch_to_control(const std::filesystem::path& file) { return switch_to_crew(file, false, true); }
+
+bool ClientApp::switch_to_crew(const std::filesystem::path& file, bool interact, bool control) {
+    const bool from_crew = viewing_observe_ || viewing_control_;
+    if (from_crew && !parked_conn_) {
         log::warn("crew: the parked character is gone; release this view first");
         return false;
     }
-    if (!from_observe && (!conn_ || conn_->state() != net::ConnectionState::InZone)) {
-        log::warn("crew: observing requires the current character to be in a zone");
+    if (!from_crew && (!conn_ || conn_->state() != net::ConnectionState::InZone)) {
+        log::warn("crew: a crew view requires the current character to be in a zone");
         return false;
     }
     std::string error;
@@ -1366,9 +1372,17 @@ bool ClientApp::switch_to_observe(const std::filesystem::path& file, bool intera
         log::error("crew: {}", error);
         return false;
     }
+    if (control && !info->control) {
+        log::warn("crew: {} serves an observe view, not a control lease", info->character);
+        return false;
+    }
+    if (!control && info->control) {
+        log::warn("crew: {} serves a control lease; use Control", info->character);
+        return false;
+    }
     if (interact && !info->interactive) return false;
-    if (from_observe && conn_ && drive_client_ && drive_client_->info().endpoint == info->endpoint &&
-        drive_client_->info().token == info->token) {
+    if (from_crew && !control && conn_ && drive_client_ &&
+        drive_client_->info().endpoint == info->endpoint && drive_client_->info().token == info->token) {
         if (interact) conn_->set_drive_input([this](const net::DriveAction& action) { drive_client_->send_action(action); });
         else conn_->set_drive_input({});
         interacting_observe_ = interact;
@@ -1376,23 +1390,54 @@ bool ClientApp::switch_to_observe(const std::filesystem::path& file, bool intera
     }
     // Connect the new character before tearing down the one on screen: a failed attach leaves the current view
     // unchanged.
-    auto client = DriveClient::connect(*info, error);
-    if (!client) {
-        log::error("crew: {}", error);
-        return false;
-    }
-    auto snapshot = client->take_snapshot();
-    if (snapshot.truncated) {
-        log::warn("crew: {} has an incomplete zone snapshot", info->character);
-        return false;
-    }
+    std::unique_ptr<DriveClient> client;
+    std::unique_ptr<DriveControlClient> control_client;
+    std::unique_ptr<net::GameConnection> next;
     net::ConnectionOptions options;
     options.profile_id = info->profile;
     options.diagnostic_chat_log = false;
-    options.session_factory = [pipe = client.get()] { return pipe->make_session(); };
-    auto next = std::make_unique<net::GameConnection>(game_, std::move(options));
-    next->start_observe(client->make_session());
-    next->apply_snapshot(snapshot);
+    if (control) {
+        control_client = DriveControlClient::connect({info->endpoint, info->token}, 10000, error);
+        if (!control_client) {
+            log::error("crew: {}", error);
+            return false;
+        }
+        // The viewer's sessions exist before it pumps (a State for an unknown id is dropped), and the relay's
+        // snapshot and Connected state have to arrive before the connection can be built.
+        auto world = control_client->make_session();
+        auto zone = control_client->make_session();
+        std::optional<net::DriveSnapshot> taken;
+        for (int i = 0; i < 500; ++i) {
+            control_client->pump();
+            if (!taken) taken = control_client->take_snapshot();
+            if (taken && control_client->session_connected(2)) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        if (!taken || taken->truncated) {
+            log::warn("crew: {} has no usable control snapshot", info->character);
+            return false;
+        }
+        options.snapshot_journal = true; // the state goes back to the headless on release
+        options.session_factory = [pipe = control_client.get()] { return pipe->make_session(); };
+        next = std::make_unique<net::GameConnection>(game_, options);
+        next->adopt_sessions(std::move(world), std::move(zone));
+        next->apply_snapshot(*taken);
+    } else {
+        client = DriveClient::connect(*info, error);
+        if (!client) {
+            log::error("crew: {}", error);
+            return false;
+        }
+        auto snapshot = client->take_snapshot();
+        if (snapshot.truncated) {
+            log::warn("crew: {} has an incomplete zone snapshot", info->character);
+            return false;
+        }
+        options.session_factory = [pipe = client.get()] { return pipe->make_session(); };
+        next = std::make_unique<net::GameConnection>(game_, options);
+        next->start_observe(client->make_session());
+        next->apply_snapshot(snapshot);
+    }
     if (!next->world().player()) {
         log::warn("crew: {} has no player in its snapshot", info->character);
         return false;
@@ -1401,12 +1446,12 @@ bool ClientApp::switch_to_observe(const std::filesystem::path& file, bool intera
     const bool same_assets = !info->game_dir.empty() &&
         std::filesystem::equivalent(game_.base_root(), info->game_dir, path_error);
     const bool reuse_scene = same_assets && can_reuse_observe_scene(*next, info->profile);
-    if (interact) next->set_drive_input([pipe = client.get()](const net::DriveAction& action) {
+    if (interact && client) next->set_drive_input([pipe = client.get()](const net::DriveAction& action) {
         pipe->send_action(action);
     });
     if (conn_) conn_->set_door_particles(nullptr);
 
-    if (!from_observe) {
+    if (!from_crew) {
         // Park A: its connection keeps running, its view and per-character paths are kept for the return.
         save_chat_history(true);
         parked_conn_ = std::move(conn_);
@@ -1421,39 +1466,49 @@ bool ClientApp::switch_to_observe(const std::filesystem::path& file, bool intera
         automation_->set_parked_character(parked_conn_.get(), parked_server_name_);
         if (!reuse_scene) unload_zone();
     } else {
+        // A control lease is handed back before the view on screen goes.
+        if (viewing_control_ && conn_ && control_client_) control_client_->release(conn_->capture_snapshot());
         if (!reuse_scene) unload_zone();
         conn_.reset();
         drive_client_.reset();
+        control_client_.reset();
         game_view_ = {};
         ui_character_dir_.clear();
         layout_for_.clear();
         viewing_observe_ = false;
+        viewing_control_ = false;
     }
     player_ready_ = false;
     screen_ = Screen::Loading;
 
-    // D: the same window, a normal GameConnection over the observe stream.
-    drive_client_ = std::move(client);
+    // The same window, a normal GameConnection over the observe stream or the control lease.
+    if (control) control_client_ = std::move(control_client);
+    else drive_client_ = std::move(client);
     files_profile_ = info->profile;
     char_view_.server_name = info->profile;
     conn_ = std::move(next);
     if (reuse_scene) rebind_observe_scene();
     if (!conn_->character_name().empty())
         use_character_settings(character_files(files_profile(), char_view_.server_name, conn_->character_name()).dir);
-    loading_view_.title = "Observing";
+    loading_view_.title = control ? "Controlling" : "Observing";
     loading_view_.detail = info->character.empty() ? conn_->character_name() : info->character;
     viewing_observe_ = true;
-    interacting_observe_ = interact;
-    log::info("crew: observing {} in this window", conn_->character_name());
+    viewing_control_ = control;
+    interacting_observe_ = !control && interact;
+    if (control) log::info("crew: controlling {} in this window", conn_->character_name());
+    else log::info("crew: observing {} in this window", conn_->character_name());
     return true;
 }
 
 void ClientApp::release_observe() {
-    if (!viewing_observe_) return;
+    if (!viewing_observe_ && !viewing_control_) return;
+    // A control lease goes back first: the headless resumes on this window's exact state.
+    if (viewing_control_ && conn_ && control_client_) control_client_->release(conn_->capture_snapshot());
     const bool reuse_scene = parked_conn_ && can_reuse_observe_scene(*parked_conn_, parked_files_profile_);
     if (!reuse_scene) unload_zone();
     conn_.reset();
     drive_client_.reset();
+    control_client_.reset();
 
     conn_ = std::move(parked_conn_);
     game_view_ = std::move(parked_game_view_);
@@ -1474,6 +1529,7 @@ void ClientApp::release_observe() {
     player_ready_ = false;
     screen_ = Screen::Loading;
     viewing_observe_ = false;
+    viewing_control_ = false;
     interacting_observe_ = false;
     loading_view_.title = "Returning";
     loading_view_.detail = conn_ ? conn_->character_name() : std::string();

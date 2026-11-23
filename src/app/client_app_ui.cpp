@@ -432,7 +432,7 @@ void ClientApp::draw_crew_window() {
         return;
     }
     if (viewing_observe_) {
-        ImGui::Text("%s %s", interacting_observe_ ? "Interacting with" : "Observing",
+        ImGui::Text("%s %s", viewing_control_ ? "Controlling" : interacting_observe_ ? "Interacting with" : "Observing",
                     conn_ ? conn_->character_name().c_str() : "");
         ImGui::SameLine();
         if (ImGui::Button("Release")) release_observe();
@@ -441,7 +441,7 @@ void ClientApp::draw_crew_window() {
     if (crew_entries_.empty()) {
         const std::string where = "No headless characters in " + (platform::data_dir() / "run").string();
         ImGui::TextUnformatted(where.c_str());
-        ImGui::TextUnformatted("Start one with --drive-observe --drive-file <that folder>/drive-<name>.txt");
+        ImGui::TextUnformatted("Start one with --drive-observe or --drive-control and --drive-file <folder>/drive-<name>.txt");
     } else {
         for (std::size_t i = 0; i < crew_entries_.size(); ++i) {
             const auto& entry = crew_entries_[i];
@@ -450,11 +450,15 @@ void ClientApp::draw_crew_window() {
             if (entry.profile.empty()) ImGui::TextUnformatted("(no profile)");
             else ImGui::Text("(%s)", entry.profile.c_str());
             ImGui::SameLine();
-            if (ImGui::Button(("View##" + std::to_string(i)).c_str())) switch_to_observe(crew_entry_paths_[i]);
-            if (entry.interactive) {
-                ImGui::SameLine();
-                if (ImGui::Button(("Interact##" + std::to_string(i)).c_str()))
-                    switch_to_observe(crew_entry_paths_[i], true);
+            if (entry.control) {
+                if (ImGui::Button(("Control##" + std::to_string(i)).c_str())) switch_to_control(crew_entry_paths_[i]);
+            } else {
+                if (ImGui::Button(("View##" + std::to_string(i)).c_str())) switch_to_observe(crew_entry_paths_[i]);
+                if (entry.interactive) {
+                    ImGui::SameLine();
+                    if (ImGui::Button(("Interact##" + std::to_string(i)).c_str()))
+                        switch_to_observe(crew_entry_paths_[i], true);
+                }
             }
         }
     }
