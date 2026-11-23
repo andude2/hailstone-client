@@ -1,13 +1,12 @@
 # Headless crew: review and the road to full control
 
-**Status: review.** This page records what the headless project is today, how the
-graphical client swaps to a headless character's view, why the original
-character loses world state when the view is released, and the architecture that
-makes "assume the whole stream" work. It summarises and extends
-[Driving a headless character from the graphical client](drive-headless.md),
-whose D0/D1/D2 milestones are built and whose D3 (control lease) and D6
-(`CharacterView`) are the work this page argues for. The headless host itself is
-in [the headless client](../headless.md).
+**Status: D3 built, D6 remaining.** This page records what the headless project is today, how the graphical
+client swaps to a headless character's view, why the original character loses world state when the view is
+released, and the architecture that makes "assume the whole stream" work. It summarises and extends
+[Driving a headless character from the graphical client](drive-headless.md), whose D0/D1/D2 milestones and D3
+(control lease) are built: `--drive-control` in the headless host, the production relay (`src/app/drive_control.*`)
+and the graphical client's `/crew` **Control**. D6 (`CharacterView`, so A stays fully engaged) is the remaining
+piece, with its plan below. The headless host itself is in [the headless client](../headless.md).
 
 ## What exists today
 
@@ -119,7 +118,7 @@ broker sockets and script state stay live in the background. **Release is not a
 reload, so nothing drops.** This is the change that actually satisfies "the
 original client stays fully engaged".
 
-### 2. The D3 control lease (make View into Play)
+### 2. The D3 control lease (built: make View into Play)
 
 Keep the transport where it is and give the GUI authority instead of
 read-only:
@@ -158,16 +157,15 @@ the network owner at every stage.
 
 ## Sequencing
 
-1. **D6 `CharacterView` first.** It is the largest change, but it is what fixes
-   the state-loss symptom, and it can land behind the existing View/Interact
-   behaviour (both characters live, A never parked).
-2. **D3 control lease** on top of the same views, so the graphical character
-   can really play L while A sits in its own background view.
+1. **D3 control lease — done.** The headless host freezes and lends its sessions, the graphical client drives a
+   normal `GameConnection` over the lease, and Release hands the state back. It works on the same observe-style
+   park, so A is still unloaded while it drives.
+2. **D6 `CharacterView` — next.** It is the largest change, but it is what fixes the state-loss symptom: both
+   characters live, A never parked and never reloaded. The two phases are below.
 3. **D4 leases/failure matrix**, then **D5 live acceptance** on a test server.
-4. **D7, optional end state:** if A is also run headless, the graphical client
-   becomes a viewer/controller for whichever session it attaches to, and the
-   separate drive client disappears. This is a product decision, not required
-   for the first working version.
+4. **D7, optional end state:** if A is also run headless, the graphical client becomes a viewer/controller for
+   whichever session it attaches to, and the separate drive client disappears. This is a product decision, not
+   required for the first working version.
 
 ## Implementing the `CharacterView` refactor
 

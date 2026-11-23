@@ -1,15 +1,17 @@
 # Driving a headless character from the graphical client
 
-**Status: plan; D0 (transport), D1 (snapshot) and D2's data path passed; the
-same-window swap is built but not run live.** This page works out whether one
-Hailstone client can borrow another character's session long enough to show
-that character's UI in character A's own window (not a second process), and how
-to build it without moving a live session between processes. Tests:
+**Status: D0–D3 built, none run live.** D0 (transport), D1 (snapshot), D2
+(observe and the same-window swap) and D3 (the control lease: the headless
+`--drive-control`, `src/app/drive_control.*`, and the graphical client's
+`/crew` Control) are in. This page works out whether one Hailstone client can
+borrow another character's session long enough to show that character's UI in
+character A's own window (not a second process), and how to build it without
+moving a live session between processes. Tests:
 `tests/mock_drive_spike_test.cpp`, `tests/local_pipe_test.cpp`,
 `tests/mock_drive_pipe_test.cpp`, `tests/drive_snapshot_test.cpp`,
-`tests/drive_observe_test.cpp` and `tests/drive_client_test.cpp`. The
-production pipe hardening, the live swap check and the control lease are still
-ahead.
+`tests/drive_observe_test.cpp`, `tests/drive_client_test.cpp` and
+`tests/drive_control_test.cpp`. The production pipe hardening, the live swap
+check and D6 (`CharacterView`, so A stays engaged) are still ahead.
 
 ## The short answer
 
