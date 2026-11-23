@@ -99,7 +99,7 @@ TEST_CASE("drive control: a snapshot larger than one pipe message crosses the le
     net::DriveSnapshot big;
     big.character = "Gennro";
     const std::vector<std::byte> payload(48 * 1024, std::byte{0x5a});
-    for (int i = 0; i < 200; ++i)
+    for (int i = 0; i < 512; ++i)
         big.packets.push_back(net::AppPacket(static_cast<std::uint16_t>(0x1234), payload));
     relay.set_snapshot(big);
 

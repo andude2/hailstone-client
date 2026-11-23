@@ -21,7 +21,9 @@ namespace hailstone::platform {
 namespace {
 
 using Clock = std::chrono::steady_clock;
-constexpr std::size_t kQueueLimit = kLocalPipeMaxMessage * 2;
+// A state snapshot is sent as one burst of 1 MiB chunks (up to the drive snapshot's 64 MiB): the queue holds it
+// until the game thread drains, rather than failing the pipe at kLocalPipeMaxMessage * 2.
+constexpr std::size_t kQueueLimit = kLocalPipeMaxMessage * 16;
 constexpr std::string_view kHost = "127.0.0.1";
 
 bool hex_char(char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }

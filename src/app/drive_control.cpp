@@ -1,6 +1,7 @@
 #include "app/drive_control.h"
 
 #include "core/byte_io.h"
+#include "core/log.h"
 
 #include <algorithm>
 #include <atomic>
@@ -405,7 +406,10 @@ struct DriveControlClient::Impl : std::enable_shared_from_this<DriveControlClien
 
     void release(net::DriveSnapshot returned) {
         if (!pipe || closed_flag) return;
-        send_snapshot(*pipe, DriveLeaseMessage::Release, net::encode_drive_snapshot(returned));
+        const auto encoded = net::encode_drive_snapshot(returned);
+        if (!send_snapshot(*pipe, DriveLeaseMessage::Release, encoded))
+            log::error("drive control: the release snapshot ({} bytes) could not be sent; the headless cannot resume",
+                       encoded.size());
         pipe->close();
         closed_flag = true;
     }
