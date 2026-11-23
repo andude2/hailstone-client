@@ -812,6 +812,7 @@ int run_headless(HeadlessOptions options) {
                     auto zone_session = control_relay->take_session(2);
                     auto resumed = std::make_unique<net::GameConnection>(game, copts);
                     resumed->adopt_sessions(std::move(world_session), std::move(zone_session));
+                    resumed->adopt_server_rules_from(*conn); // the same server: the plugins must not see a policy change
                     resumed->apply_snapshot(returned);
                     resumed->set_teleport_handler([&teleport_b](const game::TeleportBArgs& a) { teleport_b(a); });
                     conn = std::move(resumed);

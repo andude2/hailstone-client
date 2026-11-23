@@ -115,6 +115,7 @@ struct Automation::Impl {
             class_names_dir = has ? c->server_rules()->dir : fs::path();
         }
         if (serial == policy_serial && has == had_policy) return;
+        log::info("automation: policy change: serial {} -> {}, rules {} -> {}", policy_serial, serial, had_policy, has);
         policy_serial = serial;
         had_policy = has;
         fs::path dir;

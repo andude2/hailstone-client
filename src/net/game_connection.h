@@ -2157,6 +2157,12 @@ public:
     // zone-in has checked the server's files and kept while in the world; the serial changes with it.
     const std::optional<plugin::Rules>& server_rules() const { return server_rules_; }
     std::uint32_t server_rules_serial() const { return server_rules_serial_; }
+    // A control lease hands the same server's rules to the connection that resumes. Without this, the new connection
+    // looks ruleless to Automation::sync_policy, which clears the policy and unloads every compiled plugin.
+    void adopt_server_rules_from(const GameConnection& other) {
+        server_rules_ = other.server_rules_;
+        server_rules_serial_ = other.server_rules_serial_;
+    }
     // Zone packets the abilities code reads (OP_SpawnAppearance, OP_CancelSneakHide, OP_SkillUpdate, OP_Taunt,
     // OP_Begging, OP_PickPocket, OP_Track, OP_FeignDeath), oldest first; OP_SkillUpdate also updates the profile.
     std::optional<AppPacket> poll_ability_packet();
