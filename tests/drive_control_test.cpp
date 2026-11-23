@@ -104,8 +104,9 @@ TEST_CASE("drive control: a snapshot larger than one pipe message crosses the le
     std::string error;
     auto client = app::DriveControlClient::connect(relay.session(), 10000, error);
     REQUIRE_MESSAGE(client != nullptr, error);
-    REQUIRE(pump([] {}, [&] { return relay.viewer_connected(); }, std::chrono::milliseconds(2000)));
+    REQUIRE(pump([] {}, [&] { return relay.viewer_waiting(); }, std::chrono::milliseconds(2000)));
     relay.begin_lease(big);
+    CHECK_FALSE(relay.viewer_waiting());
     std::optional<net::DriveSnapshot> taken;
     for (int i = 0; i < 2000 && !taken; ++i) {
         relay.pump();
@@ -123,17 +124,19 @@ TEST_CASE("drive control: a snapshot larger than one pipe message crosses the le
     CHECK(returned.packets.size() == big.packets.size());
     // The released pipe is closed: it must not count as a viewer, or the headless would lend to it again.
     CHECK_FALSE(relay.viewer_connected());
+    CHECK_FALSE(relay.viewer_waiting()); // a released lease is not a waiting viewer
 
     // A second viewer replaces the closed pipe, so the same character can be driven again.
     std::string error2;
     auto client2 = app::DriveControlClient::connect(relay.session(), 10000, error2);
     REQUIRE_MESSAGE(client2 != nullptr, error2);
-    REQUIRE(pump([] {}, [&] { return relay.viewer_connected(); }, std::chrono::milliseconds(2000)));
+    REQUIRE(pump([] {}, [&] { return relay.viewer_waiting(); }, std::chrono::milliseconds(2000)));
     net::DriveSnapshot again;
     again.character = "Gennro";
     again.packets.push_back(net::AppPacket(static_cast<std::uint16_t>(0x1234),
                                            std::vector<std::byte>(1024, std::byte{0x11})));
     relay.begin_lease(again);
+    CHECK_FALSE(relay.viewer_waiting());
     std::optional<net::DriveSnapshot> second;
     for (int i = 0; i < 500 && !second; ++i) {
         relay.pump();
