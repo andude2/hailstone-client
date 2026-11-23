@@ -124,7 +124,7 @@ std::string cleanup_name(std::string_view name, bool keep_hash) {
     return out;
 }
 
-// GetSpawnType, with corpses first (the game::Spawn version knows only players and NPCs).
+// GetSpawnType (it answers CORPSE for a corpse spawn itself); kept as one place searches ask.
 game::eSpawnType spawn_type(const game::Spawn& s) {
     if (s.is_corpse) return game::eSpawnType::CORPSE;
     return game::Spawn::GetSpawnType(&s);

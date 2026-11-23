@@ -307,16 +307,18 @@ void probe_spawns(void*, const char* args) {
 
         // BodyDesc, CleanName, DisplayName, Name, RaceName, Suffix, TypeDesc: each a u16 length and its bytes.
         hailstone::ByteReader rd(buf + at, size - at);
-        std::string name;
+        std::string name, type;
         for (int s = 0; s < 7; ++s) {
             const auto len = rd.le<std::uint16_t>();
             const auto text = rd.bytes(len);
             if (s == 3) name.assign(reinterpret_cast<const char*>(text.data()), text.size());
+            if (s == 6) type.assign(reinterpret_cast<const char*>(text.data()), text.size());
         }
         at += rd.position();
 
-        WriteChatf("[Probe] spawn %d: level %d, class %d, race %d, hp %d%%, con %d, name %s", rec->id, rec->level,
-            rec->classID, rec->raceID, rec->pctHPs, rec->conColorID, name.c_str());
+        WriteChatf("[Probe] spawn %d: level %d, class %d, race %d, hp %d%%, con %d, name %s, type %s, dead %d",
+            rec->id, rec->level, rec->classID, rec->raceID, rec->pctHPs, rec->conColorID, name.c_str(),
+            type.c_str(), (rec->flags & HS_BULK_SPAWN_DEAD) != 0 ? 1 : 0);
     }
     WriteChatf("[Probe] spawns %u, player %.2f %.2f %.2f, %zu bytes left", header->spawnCount,
         header->playerX, header->playerY, header->playerZ, size - at);

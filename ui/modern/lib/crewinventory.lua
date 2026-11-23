@@ -1,4 +1,4 @@
--- Shared, read-only MQACNet inventory snapshots for Compare and Advanced Inventory.
+-- Shared, read-only ACNet inventory snapshots for Compare and Advanced Inventory.
 local API = hs.UI
 local M = {}
 local cache = {}
@@ -6,7 +6,7 @@ local roster = {}
 local polled = -1
 
 function M.Provider()
-  local p = API.plugins.Get("MQACNet")
+  local p = API.plugins.Get("ACNet")
   return p and p.InventorySupported() and p or nil
 end
 

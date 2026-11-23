@@ -1758,13 +1758,13 @@ TEST_CASE("native plugins: get_spawns_data_bulk, laid out as docs/plugins.md say
     h.approve(plugin::kCapAll);
     REQUIRE(h.plugins->load("HostProbe"));
     // The test world's five spawns (mq_test_world.h), in no set order; the player (1, level 50) at the origin. The
-    // con colours are RoF2's table for a level 50: itself white (10), the level 48 blue (4), the low ones grey (6).
+    // con colours are RoF2's table for a level 50: itself white (10), the level 48 blue (4), the low ones grey (6). Spawn 13 is a corpse: its type and the dead flag must say so, or every bulk consumer reads it as a live NPC.
     h.run("/probespawns");
-    CHECK(h.printed_line("[Probe] spawn 1: level 50, class 2, race 1, hp 100%, con 10, name Tester"));
-    CHECK(h.printed_line("[Probe] spawn 10: level 2, class 1, race 1, hp 80%, con 6, name a_rat01"));
-    CHECK(h.printed_line("[Probe] spawn 11: level 8, class 1, race 1, hp 80%, con 6, name Fippy_Darkpaw000"));
-    CHECK(h.printed_line("[Probe] spawn 12: level 48, class 2, race 1, hp 100%, con 4, name Groupie"));
-    CHECK(h.printed_line("[Probe] spawn 13: level 3, class 1, race 1, hp 80%, con 6, name a_rat02"));
+    CHECK(h.printed_line("[Probe] spawn 1: level 50, class 2, race 1, hp 100%, con 10, name Tester, type PC, dead 0"));
+    CHECK(h.printed_line("[Probe] spawn 10: level 2, class 1, race 1, hp 80%, con 6, name a_rat01, type NPC, dead 0"));
+    CHECK(h.printed_line("[Probe] spawn 11: level 8, class 1, race 1, hp 80%, con 6, name Fippy_Darkpaw000, type NPC, dead 0"));
+    CHECK(h.printed_line("[Probe] spawn 12: level 48, class 2, race 1, hp 100%, con 4, name Groupie, type PC, dead 0"));
+    CHECK(h.printed_line("[Probe] spawn 13: level 3, class 1, race 1, hp 80%, con 6, name a_rat02, type Corpse, dead 1"));
     // Every record's strings framed right: nothing left over.
     CHECK(h.printed_line("[Probe] spawns 5, player 0.00 0.00 0.00, 0 bytes left"));
     // Below 4096 bytes nothing; at 4112 (the header and the 4096 kept free) one record, then it stops.

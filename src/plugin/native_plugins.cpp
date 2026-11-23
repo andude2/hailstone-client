@@ -1427,7 +1427,7 @@ int h_get_spawns_data_bulk(void* h, unsigned char* data, int32_t datamax)
         if ((spawn.player_state & 0x0C) != 0)           flags |= HS_BULK_SPAWN_AGGRESSIVE; // this is checking 0x4 and 0x8 at the same time.
         if (spawn.anon == 1)                            flags |= HS_BULK_SPAWN_ANON;
         if (spawn.buyer)                                flags |= HS_BULK_SPAWN_BUYER;
-        if (spawn.stand_state == STANDSTATE_DEAD)       flags |= HS_BULK_SPAWN_DEAD;
+        if (spawn.stand_state == STANDSTATE_DEAD || spawn.is_corpse) flags |= HS_BULK_SPAWN_DEAD; // a corpse lies (115), never STANDSTATE_DEAD
         if (spawn.stand_state == STANDSTATE_DUCK)       flags |= HS_BULK_SPAWN_DUCKING;
         if (spawn.stand_state == STANDSTATE_FEIGN)      flags |= HS_BULK_SPAWN_FEIGNING;
         if (spawn.gm)                                   flags |= HS_BULK_SPAWN_GM;

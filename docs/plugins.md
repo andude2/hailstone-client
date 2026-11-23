@@ -1151,7 +1151,7 @@ Then seven strings, each a u16 length and that many bytes, no NUL:
 6. the suffix;
 7. the spawn type's description.
 
-  Flags (bit: meaning): 0 AFK, 1 aggressive (player state 0x04 or 0x08), 2 anonymous, 3 buyer, 4 dead, 5 ducking,
+  Flags (bit: meaning): 0 AFK, 1 aggressive (player state 0x04 or 0x08), 2 anonymous, 3 buyer, 4 dead (the stand state is dead, or the spawn is a corpse), 5 ducking,
   6 feigning death, 7 GM, 8 invisible, 9 summoned, 10 levitating, 11 link dead, 12 on a mount, 13 moving (a run speed
   other than 0), 14 named, 15 roleplaying, 16 sitting, 17 sneaking, 18 standing, 19 stunned (player state 0x20),
   20 targetable, 21 trader, 22 underwater. Bits 8, 17 and 22 are never set at present.

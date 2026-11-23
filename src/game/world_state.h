@@ -1333,6 +1333,10 @@ namespace hailstone::game {
 		{
 			if (pSpawn == nullptr)
 				return hailstone::game::eSpawnType::NONE;
+			// A corpse keeps is_npc from its life; without this check it reports as a live NPC (or PC) to every
+			// consumer of the type description, the bulk spawn records among them.
+			if (pSpawn->is_corpse)
+				return hailstone::game::eSpawnType::CORPSE;
 			const char* tName = pSpawn->name.c_str();
 			int Type;
 			if (pSpawn->is_npc) {
