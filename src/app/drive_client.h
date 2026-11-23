@@ -20,6 +20,7 @@ struct DriveObserveFile {
     std::string profile;
     std::string game_dir;
     bool interactive = false;
+    bool control = false; // control=1: a control lease (app::DriveControlClient), not an observe viewer
 };
 
 std::optional<DriveObserveFile> read_drive_observe_file(const std::filesystem::path& path, std::string& error);

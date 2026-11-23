@@ -103,6 +103,7 @@ std::optional<DriveObserveFile> read_drive_observe_file(const std::filesystem::p
         else if (key == "profile") file.profile = value;
         else if (key == "game_dir") file.game_dir = value;
         else if (key == "interactive") file.interactive = value == "1";
+        else if (key == "control") file.control = value == "1";
     }
     if (file.endpoint.empty() || file.token.empty()) {
         error = path.string() + " has no endpoint/token";

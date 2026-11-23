@@ -193,6 +193,21 @@ second. Movement, chat, casting, bank and trade actions, and full character
 control are outside this mode. The standalone `hailstone --drive-file F`
 diagnostic viewer stays read-only.
 
+### Control lease (headless side in)
+
+`--drive-control` (or `control=1` in a crew) serves the same authenticated pipe for a **control lease** instead of
+an observe one: the viewer plays the character rather than watching it. The headless writes a `control=1` drive file
+at the first zone-in; when a viewer connects it sends its snapshot, hands the live sessions to the relay and stops
+updating its own connection and automation — exactly one model acts. The viewer drives a normal `GameConnection`
+over the pipe, so movement, chat, inventory and NPC actions go out for real. On release the viewer sends its whole
+state back, the headless builds a fresh connection on the same sessions, applies it and carries on. An unclean
+viewer exit (a crash, a killed process) stops the headless rather than resuming automation on a state it cannot
+vouch for.
+
+The relay and its mock-server test are in (`src/app/drive_control.*`, `tests/drive_control_test.cpp`). The
+graphical client's `/crew` **Control** button is the next step; until it lands, nothing connects to a `control=1`
+file automatically.
+
 ## Resurrection and item clicks
 
 Sentinel can use `${Me.RezPending}` to find an actionable resurrection

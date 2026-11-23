@@ -170,6 +170,32 @@ TEST_CASE("headless: a crew file parses members and shared keys; a member withou
     CHECK_FALSE(app::parse_crew_file("[crew]\nstagger=5\n").error.empty());
 }
 
+TEST_CASE("headless: --drive-control parses, needs a file, and is exclusive with observe") {
+    auto c = app::parse_headless_args({"--host", "h", "--user", "u", "--password", "p", "--character", "c",
+                                       "--game-dir", "/g", "--drive-control", "--drive-file", "run/drive-L.txt"});
+    CHECK(c.error.empty());
+    CHECK(c.options.drive_control);
+    CHECK_FALSE(c.options.drive_observe);
+    CHECK(c.options.drive_file == "run/drive-L.txt");
+    CHECK_FALSE(app::parse_headless_args({"--host", "h", "--user", "u", "--password", "p", "--character", "c",
+                                          "--game-dir", "/g", "--drive-control"})
+                    .error.empty());
+    CHECK_FALSE(app::parse_headless_args({"--host", "h", "--user", "u", "--password", "p", "--character", "c",
+                                          "--game-dir", "/g", "--drive-observe", "--drive-control",
+                                          "--drive-file", "f"})
+                    .error.empty());
+}
+
+TEST_CASE("headless: a crew's control key parses like observe") {
+    auto crew = app::parse_crew_file(
+        "[crew]\ncontrol=1\n\n[A]\nserver=s\naccount=a\n\n[B]\nserver=s\naccount=b\ncontrol=0\n");
+    CHECK(crew.error.empty());
+    CHECK(crew.control);
+    REQUIRE(crew.members.size() == 2);
+    CHECK(crew.members[0].control == -1); // the shared [crew] value
+    CHECK(crew.members[1].control == 0);
+}
+
 TEST_CASE("headless: an --exec line without its slash is still a command, not a say") {
     // A shell may eat the leading '/' of a quoted argument; --exec names a
     // command line, so the slash is put back rather than said in the zone.

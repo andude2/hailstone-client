@@ -60,6 +60,8 @@ struct HeadlessOptions {
     // its endpoint and token to a new private file for the viewer to read.
     bool drive_observe = false;
     bool drive_interact = false;
+    // --drive-control: freeze this character and lend its live sessions to a control viewer (app::DriveRelay).
+    bool drive_control = false;
     std::string drive_file;
 };
 
@@ -128,6 +130,7 @@ struct CrewMember {
     int stagger = -1;      // seconds to wait before launching this member (< 0: the shared one)
     int interact = -1;     // permit inventory and confirmation input from /crew
     int observe = -1;      // serve this member to /crew (< 0: the shared one)
+    int control = -1;      // lend this member's sessions to /crew (< 0: the shared one)
 };
 struct CrewFile {
     std::string data_dir;  // [crew] data_dir (the shared folder)
@@ -137,6 +140,7 @@ struct CrewFile {
     int stagger = 10;      // seconds between launches, [crew] stagger
     bool interact = false;
     bool observe = false;  // [crew] observe: every member gets --drive-observe and a file in drive_dir
+    bool control = false;  // [crew] control: every member gets --drive-control and a file in drive_dir
     std::string drive_dir; // [crew] drive_dir: where those files go (empty: <data dir>/run)
     std::vector<CrewMember> members;
     std::string error; // empty: parsed

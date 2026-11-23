@@ -14,6 +14,7 @@
 #include "app/automation.h"
 #include "app/actions_ui.h"
 #include "app/ability_bulk.h"
+#include "app/drive_control.h"
 #include "app/drive_observe.h"
 #include "app/lua_ui.h"
 #include "core/config.h"
@@ -106,6 +107,7 @@ HeadlessArgs parse_headless_args(const std::vector<std::string_view>& args) {
         else if (a == "--no-collision") out.options.load_collision = false;
         else if (a == "--drive-observe") out.options.drive_observe = true;
         else if (a == "--drive-interact") out.options.drive_interact = true;
+        else if (a == "--drive-control") out.options.drive_control = true;
         else if (a == "--drive-file") out.options.drive_file = need(a);
         else if (!out.error.empty()) break;
         else out.error = "unknown argument: " + std::string(a);
@@ -113,12 +115,16 @@ HeadlessArgs parse_headless_args(const std::vector<std::string_view>& args) {
     }
     if (out.error.empty() && out.options.drive_observe && !out.options.crew_file.empty())
         out.error = "--drive-observe is for a single character; a crew sets observe=1 in [crew]";
-    if (out.error.empty() && out.options.drive_observe && out.options.drive_file.empty())
-        out.error = "--drive-observe needs --drive-file (the viewer reads its endpoint and token there)";
+    if (out.error.empty() && out.options.drive_control && !out.options.crew_file.empty())
+        out.error = "--drive-control is for a single character; a crew sets control=1 in [crew]";
+    if (out.error.empty() && out.options.drive_observe && out.options.drive_control)
+        out.error = "--drive-observe and --drive-control are exclusive";
+    if (out.error.empty() && (out.options.drive_observe || out.options.drive_control) && out.options.drive_file.empty())
+        out.error = "--drive-observe/--drive-control need --drive-file (the viewer reads its endpoint and token there)";
     if (out.error.empty() && out.options.drive_interact && !out.options.drive_observe)
         out.error = "--drive-interact needs --drive-observe";
-    if (out.error.empty() && !out.options.drive_file.empty() && !out.options.drive_observe)
-        out.error = "--drive-file needs --drive-observe";
+    if (out.error.empty() && !out.options.drive_file.empty() && !out.options.drive_observe && !out.options.drive_control)
+        out.error = "--drive-file needs --drive-observe or --drive-control";
     if (out.error.empty() && out.options.crew_file.empty() && out.options.account.empty()) {
         // A saved-account login (--account) resolves its host, user, password
         // and character from the profile at run time; a crew run likewise.
@@ -142,6 +148,7 @@ CrewFile parse_crew_file(std::string_view text) {
     out.stagger = ini.get_int("crew", "stagger", out.stagger);
     out.interact = ini.get_int("crew", "interact", 0) != 0;
     out.observe = ini.get_int("crew", "observe", out.observe ? 1 : 0) != 0;
+    out.control = ini.get_int("crew", "control", out.control ? 1 : 0) != 0;
     out.drive_dir = ini.get_string("crew", "drive_dir");
     for (const auto& section : ini.sections()) {
         if (section == "crew") continue;
@@ -160,6 +167,7 @@ CrewFile parse_crew_file(std::string_view text) {
         m.stagger = ini.get_int(section, "stagger", -1);
         m.interact = ini.get_int(section, "interact", -1);
         m.observe = ini.get_int(section, "observe", -1);
+        m.control = ini.get_int(section, "control", -1);
         if (m.server.empty() || m.account.empty()) {
             out.error = "crew member [" + section + "] needs server= and account=";
             return out;
@@ -250,10 +258,13 @@ int run_crew(const HeadlessOptions& options) {
     const bool observe_any = crew.observe ||
                              std::any_of(crew.members.begin(), crew.members.end(),
                                          [](const CrewMember& m) { return m.observe > 0; });
+    const bool control_any = crew.control ||
+                             std::any_of(crew.members.begin(), crew.members.end(),
+                                         [](const CrewMember& m) { return m.control > 0; });
     std::filesystem::path drive_dir = crew.drive_dir.empty() ? platform::data_dir() / "run"
                                                              : std::filesystem::path(crew.drive_dir);
     if (drive_dir.is_relative()) drive_dir = platform::data_dir() / drive_dir;
-    if (observe_any) {
+    if (observe_any || control_any) {
         std::error_code ec;
         std::filesystem::create_directories(drive_dir, ec);
         if (ec) log::warn("headless crew: cannot make the drive folder {}: {}", drive_dir.string(), ec.message());
@@ -268,6 +279,7 @@ int run_crew(const HeadlessOptions& options) {
         std::string profile_id, character, world;
         std::string drive_file;
         bool observe = false;
+        bool control = false;
         enum class State { Waiting, Running, Done } state = State::Waiting;
         Clock::time_point at{}; // launch or relaunch time, while Waiting
         int restarts = 0;
@@ -297,7 +309,12 @@ int run_crew(const HeadlessOptions& options) {
         r.character = !m.character.empty() ? m.character : saved.account->character;
         r.world = !m.world.empty() ? m.world : saved.account->world;
         r.observe = m.observe >= 0 ? m.observe != 0 : crew.observe;
-        if (r.observe)
+        r.control = m.control >= 0 ? m.control != 0 : crew.control;
+        if (r.control && r.observe) {
+            log::warn("headless crew: [{}] sets both observe and control; control wins", m.label);
+            r.observe = false;
+        }
+        if (r.observe || r.control)
             r.drive_file = (drive_dir / ("drive-" + safe_file_name(m.label) + ".txt")).string();
         members.push_back(std::move(r));
     }
@@ -331,6 +348,11 @@ int run_crew(const HeadlessOptions& options) {
             args.emplace_back("--drive-observe");
             if (r.crew.interact >= 0 ? r.crew.interact != 0 : crew.interact)
                 args.emplace_back("--drive-interact");
+            args.insert(args.end(), {"--drive-file", r.drive_file});
+        } else if (r.control && !r.drive_file.empty()) {
+            std::error_code ec;
+            std::filesystem::remove(r.drive_file, ec);
+            args.emplace_back("--drive-control");
             args.insert(args.end(), {"--drive-file", r.drive_file});
         }
         std::string error;
@@ -624,13 +646,31 @@ int run_headless(HeadlessOptions options) {
                   observe->session().endpoint);
     }
 
+    // --drive-control: the same pipe, but the viewer lends the sessions and plays the character (D3). One viewer
+    // at a time; the headless stops updating its own connection while the lease is live.
+    std::unique_ptr<DriveRelay> control_relay;
+    if (options.drive_control) {
+        try {
+            control_relay = std::make_unique<DriveRelay>(platform::make_local_pipe_session());
+        } catch (const std::exception& e) {
+            log::error("headless: --drive-control could not start: {}", e.what());
+            return 1;
+        }
+        if (const auto parent = std::filesystem::path(options.drive_file).parent_path(); !parent.empty()) {
+            std::error_code ec;
+            std::filesystem::create_directories(parent, ec);
+        }
+        log::info("headless: drive control at {} (the file is written at the first zone-in)",
+                  control_relay->session().endpoint);
+    }
+
     net::ConnectionOptions copts;
     copts.hooks = &automation.hooks();
     copts.diagnostic_chat_log = options.chat_log;
     copts.plugins = automation.extensions();
-    if (observe) {
+    if (observe || control_relay) {
         copts.snapshot_journal = true;
-        copts.zone_packet_tap = [server = observe.get()](const net::AppPacket& p) {
+        if (observe) copts.zone_packet_tap = [server = observe.get()](const net::AppPacket& p) {
             server->publish_zone_packet(p);
         };
     }
@@ -756,11 +796,54 @@ int run_headless(HeadlessOptions options) {
     conn->set_teleport_handler([&teleport_b](const game::TeleportBArgs& a) { teleport_b(a); });
     Clock::time_point in_zone_at{}, last_status{}, last_observe_state{};
     bool drive_file_written = false, drive_file_failed = false;
+    bool control_lent = false, control_active = false; // --drive-control: the viewer has the sessions
     std::uint64_t last_inventory_revision = ~std::uint64_t{0};
     std::string zone_seen;
     net::ConnectionState last = net::ConnectionState::Idle;
     int result = 1;
     while (!stop_requested) {
+        if (control_relay) {
+            control_relay->pump();
+            if (control_active) {
+                if (control_relay->released()) {
+                    // The viewer handed the exact state back: a fresh connection adopts the same sessions.
+                    net::DriveSnapshot returned = control_relay->take_release();
+                    auto world_session = control_relay->take_session(1);
+                    auto zone_session = control_relay->take_session(2);
+                    auto resumed = std::make_unique<net::GameConnection>(game, copts);
+                    resumed->adopt_sessions(std::move(world_session), std::move(zone_session));
+                    resumed->apply_snapshot(returned);
+                    resumed->set_teleport_handler([&teleport_b](const game::TeleportBArgs& a) { teleport_b(a); });
+                    conn = std::move(resumed);
+                    control_lent = false;
+                    control_active = false;
+                    movement_ready = false;
+                    zone_seen.clear(); // the zone-in lines, collision and movement place again
+                    in_zone_at = Clock::now();
+                    log::info("headless: drive control released; back as {}", conn->character_name());
+                } else if (control_relay->closed()) {
+                    // Held, not resumed: resuming automation on the viewer's state would be a guess. The relay's
+                    // sessions go with it, so the character disconnects rather than acting on stale state.
+                    log::error("headless: the drive viewer left without releasing; stopping");
+                    result = 1;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
+            }
+            if (!control_lent && conn && conn->in_zone() && control_relay->viewer_connected()) {
+                // Lend: the snapshot first, then the live sessions, and stop updating the headless's own model.
+                control_relay->set_snapshot(conn->capture_snapshot());
+                auto [world_session, zone_session] = conn->release_sessions();
+                control_relay->adopt(1, std::move(world_session));
+                control_relay->adopt(2, std::move(zone_session));
+                control_lent = true;
+                control_active = true;
+                log::info("headless: drive control lent to a viewer");
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
+            }
+        }
         const auto now_us = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start).count());
         auto steps = step_clock.advance(now_us);
@@ -825,6 +908,23 @@ int run_headless(HeadlessOptions options) {
                 }
                 if (options.drive_interact) state.ui = conn->capture_drive_ui();
                 observe->publish_state(state);
+            }
+        }
+        if (control_relay && conn->in_zone() && !drive_file_written && !drive_file_failed) {
+            const std::string character_name = !options.character.empty() ? options.character : conn->character_name();
+            const std::string text = "endpoint=" + control_relay->session().endpoint + "\n" +
+                                     "token=" + control_relay->session().token + "\n" +
+                                     "character=" + character_name + "\n" +
+                                     "profile=" + saved_profile_id + "\n" +
+                                     "game_dir=" + options.game_dir + "\n" +
+                                     "control=1\n";
+            if (platform::write_private_file(options.drive_file, text)) {
+                drive_file_written = true;
+                log::info("headless: drive control file {} written", options.drive_file);
+            } else {
+                drive_file_failed = true;
+                log::error("headless: --drive-file {} could not be written (it must not exist yet)",
+                           options.drive_file);
             }
         }
         if (auto z = conn->take_zone_to_load()) {
