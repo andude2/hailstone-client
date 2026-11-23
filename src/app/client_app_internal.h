@@ -823,10 +823,15 @@ private:
     void enter_zone();
     // --drive-file: connect to the headless observe server, install its snapshot, and start in the loading screen.
     bool start_drive();
+    // --drive-file with control=1: hand the lease back before the drive window closes.
+    void release_drive_lease();
     // The same-window swap: park A's connection and view, show L, and put A back on release. Control is the D3
     // lease: L's sessions are lent to this window and its sends go out for real; release hands the state back.
     bool switch_to_observe(const std::filesystem::path& file, bool interact = false);
     bool switch_to_control(const std::filesystem::path& file);
+    // --drive-file in a window of its own: this window's character keeps playing, and the drive window drives the
+    // headless character's control lease.
+    void spawn_control_window(std::size_t entry);
     bool switch_to_crew(const std::filesystem::path& file, bool interact, bool control);
     void release_observe();
     void pump_parked_connection();

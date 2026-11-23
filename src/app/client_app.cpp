@@ -85,7 +85,10 @@ int ClientApp::run() {
             log::info("window close request: a zone change ended its camp; camping again in this zone");
             window_close_request();
         }
-        if (quit_) break;
+        if (quit_) {
+            release_drive_lease();
+            break;
+        }
         auto now = Clock::now();
         float dt = std::min(std::chrono::duration<float>(now - last).count(), 0.1f);
         last = now;
@@ -1572,27 +1575,61 @@ bool ClientApp::start_drive() {
         log::error("--drive-file: {}", error);
         return false;
     }
-    auto client = DriveClient::connect(*file, error);
-    if (!client) {
-        log::error("--drive-file: {}", error);
-        return false;
-    }
-    drive_client_ = std::move(client);
-    files_profile_ = file->profile;
-    char_view_.server_name = file->profile;
     net::ConnectionOptions options;
     options.profile_id = file->profile;
     options.diagnostic_chat_log = false;
-    options.session_factory = [client = drive_client_.get()] { return client->make_session(); };
-    conn_ = std::make_unique<net::GameConnection>(game_, std::move(options));
-    conn_->start_observe(drive_client_->make_session());
-    conn_->apply_snapshot(drive_client_->take_snapshot());
+    if (file->control) {
+        // A control lease in its own window: this window is the viewer, and the character's own window (if any) is
+        // untouched. Release hands the state back to the headless.
+        control_client_ = DriveControlClient::connect({file->endpoint, file->token}, 10000, error);
+        if (!control_client_) {
+            log::error("--drive-file: {}", error);
+            return false;
+        }
+        auto world = control_client_->make_session();
+        auto zone = control_client_->make_session();
+        std::optional<net::DriveSnapshot> taken;
+        for (int i = 0; i < 500; ++i) {
+            control_client_->pump();
+            if (!taken) taken = control_client_->take_snapshot();
+            if (taken && control_client_->session_connected(2)) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        if (!taken || taken->truncated || !control_client_->session_connected(2)) {
+            log::error("--drive-file: the control lease lent no usable zone");
+            return false;
+        }
+        options.snapshot_journal = true;
+        options.session_factory = [pipe = control_client_.get()] { return pipe->make_session(); };
+        conn_ = std::make_unique<net::GameConnection>(game_, options);
+        conn_->adopt_sessions(std::move(world), std::move(zone));
+        conn_->apply_snapshot(*taken);
+        viewing_control_ = true;
+    } else {
+        drive_client_ = DriveClient::connect(*file, error);
+        if (!drive_client_) {
+            log::error("--drive-file: {}", error);
+            return false;
+        }
+        options.session_factory = [client = drive_client_.get()] { return client->make_session(); };
+        conn_ = std::make_unique<net::GameConnection>(game_, options);
+        conn_->start_observe(drive_client_->make_session());
+        conn_->apply_snapshot(drive_client_->take_snapshot());
+    }
+    files_profile_ = file->profile;
+    char_view_.server_name = file->profile;
     if (!conn_->character_name().empty())
         use_character_settings(character_files(files_profile(), char_view_.server_name, conn_->character_name()).dir);
     screen_ = Screen::Loading;
-    loading_view_.title = "Observing";
+    loading_view_.title = file->control ? "Controlling" : "Observing";
     loading_view_.detail = file->character;
     return true;
+}
+
+void ClientApp::release_drive_lease() {
+    if (!viewing_control_ || !conn_ || !control_client_) return;
+    control_client_->release(conn_->capture_snapshot());
+    viewing_control_ = false;
 }
 
 } // namespace client_internal

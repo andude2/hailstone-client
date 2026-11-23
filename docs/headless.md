@@ -205,9 +205,13 @@ viewer exit (a crash, a killed process) stops the headless rather than resuming 
 vouch for.
 
 The relay and its mock-server test are in (`src/app/drive_control.*`, `tests/drive_control_test.cpp`). The
-graphical client's `/crew` window offers **Control** for a `control=1` file; **Release** sends the state back. The
-graphical character is parked while it drives, as with View: its scene is unloaded until the `CharacterView`
-refactor, so its own world state does not stay live yet.
+graphical client's `/crew` window offers two ways to drive a `control=1` file:
+
+- **Control** shows the lease in this window. **Release** (or switching away) sends the state back. This window's
+  character is parked, as with View: its scene is unloaded until the `CharacterView` refactor.
+- **New window** starts `hailstone --drive-file <that file>` as a window of its own (through the box set's
+  `ChildProcesses`). This window's character is untouched and keeps playing; the drive window is a normal
+  `ClientApp` on the lease and hands it back on `/quit`, a dropped link or close, so the headless resumes.
 
 ## Resurrection and item clicks
 

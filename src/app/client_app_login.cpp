@@ -1094,6 +1094,11 @@ void ClientApp::update_connection() {
     if (!connection_frontend(*conn_, pending_ui_pack_,
         [this](const std::string& skin) { use_ui_pack(skin, std::exchange(ui_reload_pending_, false)); },
         [this](net::GameConnection::QuitRequest request) {
+            if (drive_mode_ && control_client_) {
+                release_drive_lease();
+                quit_ = true;
+                return;
+            }
             if (viewing_observe_) {
                 release_observe();
                 return;
@@ -1103,6 +1108,11 @@ void ClientApp::update_connection() {
             quit_ = true;
         },
         [this] {
+            if (drive_mode_ && control_client_) {
+                release_drive_lease();
+                quit_ = true;
+                return;
+            }
             if (viewing_observe_) {
                 release_observe();
                 return;

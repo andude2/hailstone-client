@@ -423,6 +423,25 @@ void ClientApp::draw_ui(float fps) {
     draw_screen_picture_behind();
 }
 
+void ClientApp::spawn_control_window(std::size_t entry) {
+    if (entry >= crew_entries_.size() || entry >= crew_entry_paths_.size()) return;
+    const DriveObserveFile& file = crew_entries_[entry];
+#if defined(_WIN32)
+    const std::filesystem::path exe = platform::install_dir() / "hailstone.exe";
+#else
+    const std::filesystem::path exe = platform::install_dir() / "hailstone";
+#endif
+    std::vector<std::string> args{exe.string(), "--drive-file", crew_entry_paths_[entry].string()};
+    const std::string game_dir = file.game_dir.empty() ? opts_.game_dir : file.game_dir;
+    if (!game_dir.empty()) args.insert(args.end(), {"--game-dir", game_dir});
+    if (!opts_.classic_dir.empty()) args.insert(args.end(), {"--classic-dir", opts_.classic_dir});
+    std::string error;
+    if (box_clients_.start(args, error))
+        log::info("crew: started a control window for {}", file.character);
+    else
+        log::warn("crew: could not start a control window for {}: {}", file.character, error);
+}
+
 void ClientApp::draw_crew_window() {
     if (!crew_window_open_) return;
     if (Clock::now() - crew_entries_at_ > std::chrono::seconds(2)) refresh_crew_entries();
@@ -452,6 +471,10 @@ void ClientApp::draw_crew_window() {
             ImGui::SameLine();
             if (entry.control) {
                 if (ImGui::Button(("Control##" + std::to_string(i)).c_str())) switch_to_control(crew_entry_paths_[i]);
+                ImGui::SameLine();
+                if (ImGui::Button(("New window##" + std::to_string(i)).c_str())) spawn_control_window(i);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Control it in its own window; this window's character keeps playing");
             } else {
                 if (ImGui::Button(("View##" + std::to_string(i)).c_str())) switch_to_observe(crew_entry_paths_[i]);
                 if (entry.interactive) {
