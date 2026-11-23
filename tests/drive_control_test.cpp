@@ -93,6 +93,37 @@ TEST_CASE("drive control: a live zone session is lent to another connection and 
     REQUIRE(pump(resumed_step, [&] { return MockEqServer::count(server.zone_log, Op::ChannelMessage) > messages2; }));
 }
 
+TEST_CASE("drive control: a snapshot larger than one pipe message crosses the lease") {
+    // A long session's journal is bigger than the pipe's 8 MiB message cap; the snapshot must cross in chunks.
+    app::DriveRelay relay(platform::make_local_pipe_session());
+    net::DriveSnapshot big;
+    big.character = "Gennro";
+    const std::vector<std::byte> payload(48 * 1024, std::byte{0x5a});
+    for (int i = 0; i < 200; ++i)
+        big.packets.push_back(net::AppPacket(static_cast<std::uint16_t>(0x1234), payload));
+    relay.set_snapshot(big);
+
+    std::string error;
+    auto client = app::DriveControlClient::connect(relay.session(), 10000, error);
+    REQUIRE_MESSAGE(client != nullptr, error);
+    REQUIRE(pump([] {}, [&] { return relay.viewer_connected(); }, std::chrono::milliseconds(2000)));
+    std::optional<net::DriveSnapshot> taken;
+    for (int i = 0; i < 2000 && !taken; ++i) {
+        relay.pump();
+        client->pump();
+        taken = client->take_snapshot();
+        if (!taken) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(taken);
+    CHECK(taken->packets.size() == big.packets.size());
+    CHECK(taken->packets.front().data.size() == payload.size());
+
+    client->release(big);
+    REQUIRE(pump([&] { relay.pump(); }, [&] { return relay.released(); }, std::chrono::seconds(10)));
+    const net::DriveSnapshot returned = relay.take_release();
+    CHECK(returned.packets.size() == big.packets.size());
+}
+
 TEST_CASE("drive control: extended targets survive the lease and the hand-back") {
     // The reported symptom was extended targets dropping when the graphical character returned; they are part of
     // the zone stream, so the snapshot journal must carry them through both hand-offs.

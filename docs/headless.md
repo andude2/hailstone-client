@@ -204,6 +204,10 @@ state back, the headless builds a fresh connection on the same sessions, applies
 viewer exit (a crash, a killed process) stops the headless rather than resuming automation on a state it cannot
 vouch for.
 
+State snapshots cross the pipe in 1 MiB chunks (`send_snapshot`/`SnapshotReader` in `src/app/drive_control.cpp`): one
+pipe message is capped at 8 MiB, and a long session's journal — or the viewer's return — is larger. A single
+oversized message used to fail the release and end the headless run.
+
 The relay and its mock-server test are in (`src/app/drive_control.*`, `tests/drive_control_test.cpp`). The
 graphical client's `/crew` window offers two ways to drive a `control=1` file:
 

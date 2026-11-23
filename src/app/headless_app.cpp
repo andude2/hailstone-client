@@ -824,8 +824,9 @@ int run_headless(HeadlessOptions options) {
                 } else if (control_relay->closed()) {
                     // Held, not resumed: resuming automation on the viewer's state would be a guess. The relay's
                     // sessions go with it, so the character disconnects rather than acting on stale state.
-                    log::error("headless: the drive viewer left without releasing; stopping");
-                    result = 1;
+                    // A crew supervisor relaunches a link death; a standalone run must be restarted.
+                    log::error("headless: the drive viewer left without releasing; stopping (a crew relaunches it)");
+                    result = 3;
                     break;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));

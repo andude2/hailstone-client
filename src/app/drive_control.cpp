@@ -2,6 +2,7 @@
 
 #include "core/byte_io.h"
 
+#include <algorithm>
 #include <atomic>
 #include <deque>
 #include <mutex>
@@ -55,6 +56,52 @@ bool send_kind(platform::LocalPipeConnection& pipe, DriveLeaseMessage kind,
     return pipe.send_message(std::span<const std::byte>(bytes.data(), bytes.size()), 5000);
 }
 
+// A state snapshot crosses the pipe in chunks: one message is capped at kLocalPipeMaxMessage (8 MiB), and a long
+// session's journal, or a viewer's return, is larger than that. Each chunk is {u32 whole size, u32 offset, bytes}.
+constexpr std::size_t kSnapshotChunk = std::size_t{1} << 20;
+
+bool send_snapshot(platform::LocalPipeConnection& pipe, DriveLeaseMessage kind,
+                   const std::vector<std::byte>& encoded) {
+    if (encoded.size() > net::kDriveSnapshotMaxBytes) return false;
+    if (encoded.empty()) return true;
+    const auto whole = static_cast<std::uint32_t>(encoded.size());
+    for (std::size_t offset = 0; offset < encoded.size(); offset += kSnapshotChunk) {
+        const std::size_t size = std::min(kSnapshotChunk, encoded.size() - offset);
+        ByteWriter w;
+        w.le(whole);
+        w.le(static_cast<std::uint32_t>(offset));
+        w.bytes(std::span<const std::byte>(encoded.data() + offset, size));
+        if (!send_kind(pipe, kind, w.take())) return false;
+    }
+    return true;
+}
+
+// Reassembles a chunked snapshot; a size or offset that does not continue the same transfer is refused.
+struct SnapshotReader {
+    std::vector<std::byte> bytes;
+    std::uint32_t whole = 0;
+    bool active = false;
+
+    bool feed(std::uint32_t total, std::uint32_t offset, std::span<const std::byte> data) {
+        if (total > net::kDriveSnapshotMaxBytes) return false;
+        if (!active) {
+            active = true;
+            whole = total;
+            bytes.clear();
+            bytes.reserve(whole);
+        }
+        if (total != whole || offset != bytes.size()) return false;
+        bytes.insert(bytes.end(), data.begin(), data.end());
+        return true;
+    }
+    bool complete() const { return active && bytes.size() == whole; }
+    void reset() {
+        bytes.clear();
+        whole = 0;
+        active = false;
+    }
+};
+
 std::vector<std::byte> encode_state(std::uint64_t id, net::SessionState state, const std::string& error) {
     ByteWriter w;
     w.le(id);
@@ -83,6 +130,7 @@ struct DriveRelay::Impl {
     bool snapshot_sent = false;
     bool released_flag = false;
     std::optional<net::DriveSnapshot> release;
+    SnapshotReader release_in;
     net::SessionOptions options;
     std::unordered_map<std::uint64_t, Link> links;
 
@@ -122,9 +170,19 @@ struct DriveRelay::Impl {
         const auto kind = static_cast<DriveLeaseMessage>(r.le<std::uint8_t>());
         if (kind == DriveLeaseMessage::Bye) return false;
         if (kind == DriveLeaseMessage::Release) {
-            if (auto returned = net::decode_drive_snapshot(message.subspan(1))) {
-                release = std::move(*returned);
-                released_flag = true;
+            try {
+                ByteReader body(message.subspan(1));
+                const auto total = body.le<std::uint32_t>();
+                const auto offset = body.le<std::uint32_t>();
+                if (!release_in.feed(total, offset, message.subspan(1 + 8))) return false;
+                if (!release_in.complete()) return true; // more chunks
+                if (auto returned = net::decode_drive_snapshot(release_in.bytes)) {
+                    release = std::move(*returned);
+                    released_flag = true;
+                }
+                release_in.reset();
+            } catch (const std::exception&) {
+                return false;
             }
             return false; // the lease ends: the headless takes the sessions back
         }
@@ -160,12 +218,13 @@ struct DriveRelay::Impl {
         auto p = current_pipe();
         if (!p) return;
         if (!snapshot_sent && snapshot) {
-            if (!send_kind(*p, DriveLeaseMessage::Snapshot, net::encode_drive_snapshot(*snapshot))) return;
+            if (!send_snapshot(*p, DriveLeaseMessage::Snapshot, net::encode_drive_snapshot(*snapshot))) return;
             snapshot_sent = true;
         }
         while (auto message = p->receive_message(0)) {
             if (!handle(*p, std::span<const std::byte>(message->data(), message->size()))) break;
         }
+        if (released_flag) return; // the headless takes the sessions back now
         if (p->closed()) return;
         for (auto& [id, link] : links) {
             if (!link.real || released_flag) continue;
@@ -240,6 +299,7 @@ struct DriveControlClient::Impl : std::enable_shared_from_this<DriveControlClien
 
     std::shared_ptr<platform::LocalPipeConnection> pipe;
     std::optional<net::DriveSnapshot> snapshot;
+    SnapshotReader snapshot_in;
     std::unordered_map<std::uint64_t, Link> links;
     std::uint64_t next_id = 1;
     bool closed_flag = false;
@@ -262,7 +322,23 @@ struct DriveControlClient::Impl : std::enable_shared_from_this<DriveControlClien
                 break;
             }
             if (kind == DriveLeaseMessage::Snapshot) {
-                if (auto value = net::decode_drive_snapshot(bytes.subspan(1))) snapshot = std::move(*value);
+                try {
+                    ByteReader body(bytes.subspan(1));
+                    const auto total = body.le<std::uint32_t>();
+                    const auto offset = body.le<std::uint32_t>();
+                    if (!snapshot_in.feed(total, offset, bytes.subspan(1 + 8))) {
+                        closed_flag = true;
+                        break;
+                    }
+                    if (snapshot_in.complete()) {
+                        if (auto value = net::decode_drive_snapshot(snapshot_in.bytes))
+                            snapshot = std::move(*value);
+                        snapshot_in.reset();
+                    }
+                } catch (const std::exception&) {
+                    closed_flag = true;
+                    break;
+                }
                 continue;
             }
             try {
@@ -329,7 +405,7 @@ struct DriveControlClient::Impl : std::enable_shared_from_this<DriveControlClien
 
     void release(net::DriveSnapshot returned) {
         if (!pipe || closed_flag) return;
-        send_kind(*pipe, DriveLeaseMessage::Release, net::encode_drive_snapshot(returned));
+        send_snapshot(*pipe, DriveLeaseMessage::Release, net::encode_drive_snapshot(returned));
         pipe->close();
         closed_flag = true;
     }
