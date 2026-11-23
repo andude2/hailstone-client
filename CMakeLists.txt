@@ -1560,6 +1560,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/drive_snapshot_test.cpp
     tests/drive_observe_test.cpp
     tests/drive_client_test.cpp
+    tests/drive_control_test.cpp
     tests/local_pipe_test.cpp
     tests/item_use_test.cpp
     tests/game_connection_cast_test.cpp

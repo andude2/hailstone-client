@@ -260,6 +260,13 @@ void GameConnection::apply_snapshot(const DriveSnapshot& snapshot) {
     applying_snapshot_ = false;
     state_ = ConnectionState::InZone;
     zone_ready_ = true;
+    // A viewer that later hands the session back must return the whole stream, not only what it saw while driving.
+    if (options_.snapshot_journal) {
+        snapshot_journal_ = snapshot.packets;
+        snapshot_bytes_ = 0;
+        for (const auto& packet : snapshot.packets) snapshot_bytes_ += packet.data.size() + 4;
+        snapshot_truncated_ = snapshot.truncated;
+    }
     set_target(snapshot.target);
     set_player_motion(snapshot.position, snapshot.heading, snapshot.velocity, snapshot.moving);
     set_player_drawn(snapshot.position, snapshot.heading);
@@ -270,6 +277,27 @@ void GameConnection::start_observe(std::unique_ptr<Session> zone_session) {
     state_ = ConnectionState::InZone;
     zone_ready_ = true;
     status_ = "Observing";
+}
+
+std::pair<std::unique_ptr<Session>, std::unique_ptr<Session>> GameConnection::release_sessions() {
+    world_drop_pending_ = false;
+    zoning_ = false;
+    return {std::move(world_session_), std::move(zone_session_)};
+}
+
+void GameConnection::adopt_sessions(std::unique_ptr<Session> world_session, std::unique_ptr<Session> zone_session) {
+    world_session_ = std::move(world_session);
+    zone_session_ = std::move(zone_session);
+    // The sessions were authenticated by the connection that lent them: no login goes out, and the zone is entered
+    // already (the snapshot that follows carries the zone stream the server sent there).
+    world_login_sent_ = true;
+    world_drop_pending_ = false;
+    zoning_ = false;
+    if (zone_session_) {
+        state_ = ConnectionState::InZone;
+        zone_ready_ = true;
+        status_ = "Driving";
+    }
 }
 
 void GameConnection::apply_local_state(const DriveSnapshot& local) {

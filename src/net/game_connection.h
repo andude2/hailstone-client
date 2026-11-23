@@ -515,6 +515,12 @@ public:
     // local state that the server does not echo. Nothing this connection sends leaves it.
     void start_observe(std::unique_ptr<Session> zone_session);
     void apply_local_state(const DriveSnapshot& local);
+    // D3 (docs/research/drive-headless.md): a control lease. release_sessions leaves this connection without its
+    // sessions (update() then does nothing) and hands them to the caller. adopt_sessions installs sessions that
+    // another connection already authenticated, so this connection starts InZone and sends no login of its own.
+    // Capture a snapshot before the release and apply it after the adoption.
+    std::pair<std::unique_ptr<Session>, std::unique_ptr<Session>> release_sessions();
+    void adopt_sessions(std::unique_ptr<Session> world_session, std::unique_ptr<Session> zone_session);
     // The OP_Weather messages since the last call (game::Weather::handle_message takes them).
     std::vector<Weather> take_weather() { return std::exchange(weather_messages_, {}); }
     // The zone the server put us in, once per zone-in: load its geometry. Not while the server's files come.
