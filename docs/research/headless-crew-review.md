@@ -169,6 +169,30 @@ the network owner at every stage.
    separate drive client disappears. This is a product decision, not required
    for the first working version.
 
+## Implementing the `CharacterView` refactor
+
+D6 is the remaining work, and it is a per-character view split done in two safe phases.
+
+**Phase 1, a scene bundle (no behaviour change).** `unload_zone()` (`src/app/client_app_zone.cpp`) destroys the
+zone's scene: `zone_renderer_`, `world_geometry_renderer_`, `flora_renderer_`, `zone_particles_`,
+`switch_particles_`, `sky_renderer_`, `actor_renderer_` (with `actor_kept_`), `actor_library_`, `collision_`,
+`world_visual_collision_`, `animated_objects_`, `zone_`, the fire lists, `zone_ladders_`, `zone_line_`'s state,
+`missiles_`, the preview slots and `ui_host_.zone_exits`/`char_library`. It also tells `world_objects_`, `nav_`,
+`audio_` and the weather that the zone is gone; those are shared and stay. Phase 1 adds a `ParkedScene` holding the
+per-zone bundle, moves it aside on a crew switch instead of destroying it, and moves it back on release, re-running
+only the non-loading part of `load_zone` (no archive reads, no re-fired zone hooks). This removes the reload and the
+state churn; it does not yet let both characters render at once.
+
+**Phase 2, `CharacterView`.** Move the per-character members into a `CharacterView`: `conn_`, `game_view_`,
+`stats_ui_`, `item_ui_`, `spell_ui_`, the group/social/actions/progress/market panels, chat, the UI directory and
+layout, and the phase-1 scene bundle. `ClientApp` keeps the shell: window, `VkContext`, workers, audio, config,
+`GameDir`, `ImGuiLayer`. `switch_to_crew` becomes `active_view = &view`; A's view keeps updating (and its plugins
+keep their world bindings) while L's is shown, so Release is a pointer swap, not a reload.
+
+What to check: compile and the mock-server `GameConnection` tests; then a live display run — View/Control L, move,
+open windows, switch to another member, Release, and check A's extended targets, plugins and camera are exactly as
+they were. Every scene resource must be destroyed only with its own view, and `vk_.wait_idle()` must gate a move.
+
 ## Review notes
 
 - The `headless` branch tracks build outputs that do not belong in the tree:

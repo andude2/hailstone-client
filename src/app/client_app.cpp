@@ -1413,8 +1413,8 @@ bool ClientApp::switch_to_crew(const std::filesystem::path& file, bool interact,
             if (taken && control_client->session_connected(2)) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
-        if (!taken || taken->truncated) {
-            log::warn("crew: {} has no usable control snapshot", info->character);
+        if (!taken || taken->truncated || !control_client->session_connected(2)) {
+            log::warn("crew: {} did not lend a connected zone", info->character);
             return false;
         }
         options.snapshot_journal = true; // the state goes back to the headless on release
