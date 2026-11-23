@@ -16,3 +16,8 @@ __pycache__/
 /.docker/
 # luac -p writes this in the folder it runs in
 luac.out
+# Windows build outputs that must not be committed: binaries at the checkout root and the compiled shaders
+# a build writes beside their sources (they belong in build/hailstone/shaders/).
+/hailstone_headless.exe
+/zlib1.dll
+/shaders/*.spv
