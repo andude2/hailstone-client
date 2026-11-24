@@ -66,6 +66,9 @@ struct Automation::Impl {
 
     net::GameConnection* parked = nullptr;
     std::string parked_server_name;
+    // While a crew character is shown in place of this window's own, its compiled plugins keep drawing: Sentinel's
+    // peer table must stay available (its self row queues /crew release).
+    bool draw_parked_plugins = false;
 
     net::GameConnection* conn() const {
         return parked ? parked : (env.connection ? env.connection() : nullptr);
@@ -349,6 +352,7 @@ void Automation::answer_plugin_consent(std::optional<bool> allow) {
 void Automation::set_parked_character(net::GameConnection* connection, std::string server_name) {
     impl_->parked = connection;
     impl_->parked_server_name = std::move(server_name);
+    impl_->draw_parked_plugins = connection != nullptr;
 }
 
 void Automation::frame() {
@@ -371,6 +375,10 @@ void Automation::imgui(bool dev) {
         m.scripts->imgui();
         m.plugins->imgui();
         m.hooks.imgui();
+    } else if (m.draw_parked_plugins) {
+        // The parked character's compiled plugin windows (Sentinel's peer table among them) stay on screen over the
+        // viewed character; their host connection is the parked one, so their data stays the parked character's.
+        m.plugins->imgui();
     }
     if (!ui::lua::replaces("PluginConsent")) m.consent_window();
     if (dev && !m.parked) m.dev_window();
