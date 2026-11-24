@@ -1121,10 +1121,19 @@ void GameConnection::loot(std::uint32_t corpse_id) {
     // CEverQuest::LootCorpse @0x536720 (__do_loot, a right click on a corpse): a corpse (type above 1), not while
     // dead, an item request is pending or another corpse is open; beyond its AvatarHeight * 1.6 + 14 (PlayerDistance
     // with z scale 1.2) "You are too far away to loot that corpse." (colour 0xd); else OP_LootRequest.
-    if (state_ != ConnectionState::InZone || pstatus_.dead || loot_) return;
+    if (state_ != ConnectionState::InZone || pstatus_.dead || loot_) {
+        log::info("loot: corpse {}: not now (state {}, dead {}, already looting {})", corpse_id,
+                  static_cast<int>(state_), pstatus_.dead, loot_.has_value());
+        return;
+    }
     auto it = world_.spawns.find(corpse_id);
-    if (it == world_.spawns.end() || !it->second.is_corpse) return;
+    if (it == world_.spawns.end() || !it->second.is_corpse) {
+        log::info("loot: corpse {} is not a corpse in this zone (found {}, corpse {})", corpse_id,
+                  it != world_.spawns.end(), it != world_.spawns.end() && it->second.is_corpse);
+        return;
+    }
     if (!corpse_in_reach(corpse_id)) {
+        log::info("loot: corpse {} ({}) is out of reach", corpse_id, game::display_name(it->second.name));
         if (world_.player()) system(12390, {}, 0xd); // a missing player is silent, as the original
         return;
     }
