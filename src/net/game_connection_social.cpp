@@ -154,6 +154,9 @@ void GameConnection::send_command(const std::string& typed) {
     std::string line = typed;
     // Plugin commands and line filters first (plugin/hooks.h): they can take any line, the client's commands too.
     if (options_.hooks && options_.hooks->command(line)) return;
+    // /crew is the graphical client's command (the crew window and the chat relay's /crew relay); a headless
+    // connection has no such command, so a relay line meant for the GUI is not an unknown command here.
+    if (line.rfind("/crew", 0) == 0) return;
     if (!zone_session_ || line.empty()) return;
     // InterpretCmd @0x51fce0: with the interface locked (/safelock) only /safelock gets through.
     if (interface_locked() && !game::locked_line_allowed(line, fmt_eq(strings_, 14193))) return system(game::kStrInterfaceLocked);
