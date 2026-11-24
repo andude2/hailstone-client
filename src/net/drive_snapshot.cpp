@@ -11,7 +11,7 @@ namespace {
 
 constexpr std::uint32_t kMagic = 0x31534448; // HDS1
 constexpr std::uint16_t kVersion = 1;
-constexpr std::uint32_t kMaxPackets = 100000;
+constexpr std::size_t kMaxPackets = kDriveSnapshotMaxPackets;
 
 void put_packet(ByteWriter& w, const AppPacket& packet) {
     w.le(packet.opcode);
@@ -45,13 +45,15 @@ std::string read_string(ByteReader& r) {
 } // namespace
 
 std::vector<std::byte> encode_drive_snapshot(const DriveSnapshot& snapshot) {
-    if (snapshot.packets.size() > kMaxPackets) throw std::invalid_argument("drive snapshot has too many packets");
+    // Clamp rather than throw: the recording cap sets `truncated`, and an exception here used to terminate the
+    // headless through the relay's uncaught path.
+    const std::size_t count = std::min<std::size_t>(snapshot.packets.size(), kMaxPackets);
     ByteWriter w;
     w.le(kMagic);
     w.le(kVersion);
     put_string(w, snapshot.character);
-    w.le(static_cast<std::uint32_t>(snapshot.packets.size()));
-    for (const auto& packet : snapshot.packets) put_packet(w, packet);
+    w.le(static_cast<std::uint32_t>(count));
+    for (std::size_t i = 0; i < count; ++i) put_packet(w, snapshot.packets[i]);
     put_packet(w, snapshot.inventory_packet);
     w.f32(snapshot.position.x);
     w.f32(snapshot.position.y);

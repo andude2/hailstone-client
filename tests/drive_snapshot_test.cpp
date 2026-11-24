@@ -14,6 +14,24 @@ using namespace hailstone;
 using namespace hailstone::net;
 using namespace hailstone::test;
 
+TEST_CASE("drive snapshot: a journal over the packet bound is clamped, not thrown") {
+    // A long session's zone stream can pass kDriveSnapshotMaxPackets; the encode must clamp (and the recording caps
+    // it as truncated), because an exception here used to terminate the headless through the relay.
+    DriveSnapshot snapshot;
+    snapshot.character = "Gennro";
+    const std::vector<std::byte> data(8, std::byte{0x11});
+    snapshot.packets.reserve(kDriveSnapshotMaxPackets + 1);
+    for (std::size_t i = 0; i <= kDriveSnapshotMaxPackets; ++i)
+        snapshot.packets.push_back(net::AppPacket(static_cast<std::uint16_t>(0x1000), data));
+    std::vector<std::byte> encoded;
+    CHECK_NOTHROW(encoded = encode_drive_snapshot(snapshot));
+    REQUIRE_FALSE(encoded.empty());
+    const auto decoded = decode_drive_snapshot(encoded);
+    REQUIRE(decoded);
+    CHECK(decoded->packets.size() == kDriveSnapshotMaxPackets);
+    CHECK(decoded->packets.size() < snapshot.packets.size());
+}
+
 TEST_CASE("drive snapshot: applying a snapshot does not re-raise the game state or every spawn") {
     // The connection is new, but its plugins already knew the character was in game: a lease's resume must not look
     // like a fresh login (OnGameState(InGame) plus OnAddSpawn for every spawn), which resets them.

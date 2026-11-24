@@ -1443,7 +1443,8 @@ std::optional<TimeOfDay> GameConnection::current_time_of_day() const {
 void GameConnection::handle_zone(const AppPacket& p) {
     if (options_.snapshot_journal && !applying_snapshot_ && !snapshot_truncated_) {
         const std::size_t bytes = p.data.size() + 4; // the opcode and a length, near enough for the bound
-        if (snapshot_bytes_ + bytes > kDriveSnapshotMaxBytes) snapshot_truncated_ = true;
+        if (snapshot_journal_.size() >= kDriveSnapshotMaxPackets || snapshot_bytes_ + bytes > kDriveSnapshotMaxBytes)
+            snapshot_truncated_ = true;
         else {
             snapshot_journal_.push_back(p);
             snapshot_bytes_ += bytes;

@@ -388,12 +388,12 @@ int run_crew(const HeadlessOptions& options) {
                         std::error_code ec;
                         std::filesystem::remove(r.drive_file, ec); // the endpoint is gone with the child
                     }
-                    if (e.exit_code == 3) {
+                    if (e.exit_code == 3 || e.exit_code < 0) { // 3: link died; negative: crashed (0xC0000409, ...)
                         r.state = Member::State::Waiting;
                         r.at = now + std::chrono::seconds(30);
                         ++r.restarts;
-                        log::warn("headless crew: [{}] link died; relaunching in 30 s (restart {})", e.name,
-                                  r.restarts);
+                        log::warn("headless crew: [{}] {}; relaunching in 30 s (restart {})", e.name,
+                                  e.exit_code == 3 ? "link died" : "crashed", r.restarts);
                     } else {
                         r.state = Member::State::Done;
                         log::info("headless crew: [{}] ended (exit {})", e.name, e.exit_code);

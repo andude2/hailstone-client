@@ -224,6 +224,7 @@ struct DriveRelay::Impl {
     void pump() {
         auto p = current_pipe();
         if (!p) return;
+        try {
         if (!snapshot_sent && snapshot) {
             if (!send_snapshot(*p, DriveLeaseMessage::Snapshot, net::encode_drive_snapshot(*snapshot))) return;
             snapshot_sent = true;
@@ -249,6 +250,12 @@ struct DriveRelay::Impl {
                 link.error = error;
                 send_kind(*p, DriveLeaseMessage::State, encode_state(id, state, error));
             }
+        }
+        } catch (const std::exception& e) {
+            // Never terminate over a lease: close the pipe so the headless takes its unclean path (exit 3) and a
+            // crew relaunches it.
+            log::error("drive relay: {}", e.what());
+            p->close();
         }
     }
 };

@@ -63,6 +63,9 @@ struct DriveSnapshot {
 // The journal's bound: a zone-in burst is a few MiB; a long session's journal can grow, and a truncated snapshot
 // says so rather than pretending to be complete.
 inline constexpr std::size_t kDriveSnapshotMaxBytes = std::size_t{64} << 20;
+// The journal's packet count bound too: a long session's zone stream can pass this before its byte bound, and a
+// snapshot over it is refused (truncated) rather than throwing during the encode.
+inline constexpr std::size_t kDriveSnapshotMaxPackets = 1000000;
 
 std::vector<std::byte> encode_drive_snapshot(const DriveSnapshot& snapshot);
 std::optional<DriveSnapshot> decode_drive_snapshot(std::span<const std::byte> bytes);
