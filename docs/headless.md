@@ -167,7 +167,10 @@ keeps playing, and the token admits one viewer at a time.
 
 In A's window, type `/crew`. The Crew window lists the `drive-*.txt` files in
 `<data dir>/run` with their character names; **View** switches the window to
-that character. A is parked with its connection alive in the background.
+that character. The buttons are commands too: `/crew <name>` takes that
+character (**Control**, or **View** when it serves no control lease) and
+`/crew release` hands the window back, which is what Sentinel's peer table
+queues when a name there is clicked (its own row releases). A is parked with its connection alive in the background.
 The window loads L's snapshot and UI layout. **View** on another member swaps
 the observed character while A stays parked. **Release** restores A. A switch
 within the same server profile, zone, and instance can keep the loaded scene
@@ -205,8 +208,13 @@ viewer exit (a crash, a killed process) stops the headless rather than resuming 
 vouch for.
 
 State snapshots cross the pipe in 1 MiB chunks (`send_snapshot`/`SnapshotReader` in `src/app/drive_control.cpp`): one
-pipe message is capped at 8 MiB, and a long session's journal — or the viewer's return — is larger. A single
-oversized message used to fail the release and end the headless run.
+pipe message is capped at 8 MiB, and the viewer's return or a zone-in burst can be larger. A single oversized message
+used to fail the release and end the headless run.
+
+The snapshot is a **state**, not the whole session. The journal is reset at each zone connection, repeated updates
+collapse to the latest per entity/slot (position and HP per spawn, appearance per spawn and type, buffs per entity and
+slot, the connection-wide profile/inventory/weather/target values), and chat and pure visual packets are not replayed.
+A character logged in for hours in one zone therefore attaches with a bounded snapshot.
 
 The relay and its mock-server test are in (`src/app/drive_control.*`, `tests/drive_control_test.cpp`). The
 graphical client's `/crew` window offers two ways to drive a `control=1` file:

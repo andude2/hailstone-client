@@ -225,13 +225,28 @@ does not silently resume into a stale inventory. The safe outcomes are to stay
 paused, to refuse the detach, or to camp L with a clear message. The first
 version should choose "stay paused and say what is missing".
 
-A first implementation can use a **fresh zone-in burst** as the snapshot: the
-packets a server sends when a character enters a zone already contain most of
-P0. Several builders exist for tests and the mock server
-(`encode_char_inventory`, `encode_spawn_doors`, and the mock server's zone-in
-builders). They should be moved to a production `net/` helper and tested
-against the decoders. This is the same idea as a snapshot, expressed in the
-packets the client already understands.
+The snapshot is a **state**, not the session's history. `GameConnection` journals
+the current zone's stream and `compact_journal_packets` (`net/drive_snapshot.cpp`)
+folds it to what a fresh connection needs:
+
+- **Kept in full:** zone and entity construction (`OP_NewZone`, `OP_ZoneEntry`,
+  `OP_NewSpawn`, `OP_RemoveSpawn`, doors, objects, ground, group/raid/task
+  changes) and anything not in the update list below.
+- **Kept once, the latest per entity/slot:** `OP_ClientUpdate` and
+  `OP_NPCMoveUpdate` per spawn, `OP_HPUpdate` per spawn, `OP_SpawnAppearance` per
+  spawn and appearance type, `OP_Buff` per entity and slot, `OP_Death` per
+  spawn, `OP_BuffCreate`/`OP_TargetBuffs`/`OP_PetBuffWindow` per entity, and
+  the connection-wide values (profile, inventory, mana, stamina, weather, time,
+  xp, level appearance, target, extended targets).
+- **Not replayed:** chat and pure visual packets (`OP_SpecialMesg`,
+  `OP_ChannelMessage`, `OP_Action`, `OP_Damage`, `OP_Animation`, missiles).
+
+The journal is reset when a zone connection is created and compacted every
+8 MiB, so a character logged in for hours in one zone has a snapshot bounded by
+the zone's entities, not by its session length: the behavior and tests behind
+`capture_snapshot`/`apply_snapshot` are unchanged because the client already
+decodes every packet the snapshot carries. The local half (position, target,
+possessions) is still captured directly and applied after the replay.
 
 ### The client-authoritative state problem
 

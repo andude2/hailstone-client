@@ -66,6 +66,13 @@ inline constexpr std::size_t kDriveSnapshotMaxBytes = std::size_t{64} << 20;
 // The journal's packet count bound too: a long session's zone stream can pass this before its byte bound, and a
 // snapshot over it is refused (truncated) rather than throwing during the encode.
 inline constexpr std::size_t kDriveSnapshotMaxPackets = 1000000;
+// The journal is compacted (latest state packet per entity/slot, pure log packets dropped) once it passes this,
+// so a snapshot is bounded by the zone's entities, not by how many hours the character has been logged in.
+inline constexpr std::size_t kDriveSnapshotCompactBytes = std::size_t{8} << 20;
+
+// Keep the current state, not the whole history: all zone/entity construction packets, the latest update per
+// entity/slot for the state-bearing updates, and no chat/combat/visual packets.
+std::vector<AppPacket> compact_journal_packets(std::vector<AppPacket> packets);
 
 std::vector<std::byte> encode_drive_snapshot(const DriveSnapshot& snapshot);
 std::optional<DriveSnapshot> decode_drive_snapshot(std::span<const std::byte> bytes);

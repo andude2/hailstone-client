@@ -7,7 +7,10 @@
 #include <string>
 
 #include "mock_server/harness.h"
+#include "net/drive_snapshot.h"
 #include "net/game_connection.h"
+#include "net/opcodes.h"
+#include "net/zone_packets.h"
 #include "plugin/hooks.h"
 
 using namespace hailstone;
@@ -30,6 +33,38 @@ TEST_CASE("drive snapshot: a journal over the packet bound is clamped, not throw
     REQUIRE(decoded);
     CHECK(decoded->packets.size() == kDriveSnapshotMaxPackets);
     CHECK(decoded->packets.size() < snapshot.packets.size());
+}
+
+TEST_CASE("drive snapshot: the journal keeps the latest state, not the whole history") {
+    // An hours-long session is mostly repeated updates: the snapshot must be bounded by entities, not by time.
+    // Each spawn's HP and position collapse to their latest packet; a pure log packet is not state.
+    std::vector<AppPacket> packets;
+    const std::vector<std::byte> log(4, std::byte{0x01});
+    for (int i = 0; i < 200; ++i) {
+        HpUpdate hp;
+        hp.spawn_id = 100;
+        hp.cur_hp = static_cast<std::uint32_t>(1000 + i);
+        hp.max_hp = 2000;
+        packets.push_back(encode(hp));
+        SpawnPositionUpdate u;
+        u.spawn_id = 100;
+        u.motion.x = static_cast<float>(i);
+        packets.push_back(encode(u));
+        packets.push_back(AppPacket(to_wire(Op::ChannelMessage), log));
+    }
+    const auto kept = compact_journal_packets(std::move(packets));
+    CHECK(kept.size() == 2); // the latest HP and the latest position only
+    std::optional<HpUpdate> hp;
+    std::optional<SpawnPositionUpdate> position;
+    for (const auto& packet : kept) {
+        CHECK(packet.opcode != to_wire(Op::ChannelMessage));
+        if (packet.opcode == to_wire(Op::HPUpdate)) hp = decode_hp_update(packet);
+        if (packet.opcode == to_wire(Op::ClientUpdate)) position = decode_spawn_position_update(packet);
+    }
+    REQUIRE(hp);
+    CHECK(hp->cur_hp == 1199);
+    REQUIRE(position);
+    CHECK(position->motion.x == 199.0f);
 }
 
 TEST_CASE("drive snapshot: applying a snapshot does not re-raise the game state or every spawn") {

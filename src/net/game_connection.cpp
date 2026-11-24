@@ -238,8 +238,11 @@ DriveSnapshot GameConnection::capture_local_state() const {
 
 DriveSnapshot GameConnection::capture_snapshot() const {
     DriveSnapshot snapshot = capture_local_state();
-    snapshot.packets = snapshot_journal_;
-    snapshot.truncated = snapshot_truncated_;
+    snapshot.packets = compact_journal_packets(snapshot_journal_);
+    std::size_t bytes = 0;
+    for (const auto& packet : snapshot.packets) bytes += packet.data.size() + 4;
+    snapshot.truncated =
+        snapshot_truncated_ || snapshot.packets.size() > kDriveSnapshotMaxPackets || bytes > kDriveSnapshotMaxBytes;
     return snapshot;
 }
 
@@ -450,6 +453,10 @@ void GameConnection::update() {
             world_drop_pending_ = false;
             zone_session_ = create_session();
             zone_session_->connect(zone_host_, zone_port_);
+            // The journal is the current zone's stream: the previous zone's packets would only age it.
+            snapshot_journal_.clear();
+            snapshot_bytes_ = 0;
+            snapshot_truncated_ = false;
         } else if (Clock::now() >= world_drop_deadline_) {
             world_drop_pending_ = false;
             fail("World did not drop the connection");
@@ -1442,12 +1449,16 @@ std::optional<TimeOfDay> GameConnection::current_time_of_day() const {
 
 void GameConnection::handle_zone(const AppPacket& p) {
     if (options_.snapshot_journal && !applying_snapshot_ && !snapshot_truncated_) {
-        const std::size_t bytes = p.data.size() + 4; // the opcode and a length, near enough for the bound
-        if (snapshot_journal_.size() >= kDriveSnapshotMaxPackets || snapshot_bytes_ + bytes > kDriveSnapshotMaxBytes)
-            snapshot_truncated_ = true;
-        else {
-            snapshot_journal_.push_back(p);
-            snapshot_bytes_ += bytes;
+        snapshot_journal_.push_back(p);
+        snapshot_bytes_ += p.data.size() + 4; // the opcode and a length, near enough for the bound
+        if (snapshot_bytes_ > kDriveSnapshotCompactBytes) {
+            // A snapshot is the state, not the history: collapse repeated updates per entity/slot and drop log and
+            // visual packets, so a character logged in for hours keeps a small journal.
+            snapshot_journal_ = compact_journal_packets(std::move(snapshot_journal_));
+            snapshot_bytes_ = 0;
+            for (const auto& kept : snapshot_journal_) snapshot_bytes_ += kept.data.size() + 4;
+            if (snapshot_journal_.size() > kDriveSnapshotMaxPackets || snapshot_bytes_ > kDriveSnapshotMaxBytes)
+                snapshot_truncated_ = true;
         }
     }
     if (options_.zone_packet_tap) options_.zone_packet_tap(p);
