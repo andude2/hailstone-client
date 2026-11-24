@@ -695,6 +695,8 @@ int run_headless(HeadlessOptions options) {
     const auto start = Clock::now();
     bool entered = false, first_zone = true, consent_logged = false;
     bool movement_ready = false; // the movement body placed at a zone-in
+    bool resuming = false;       // the viewer just released; the same zone's collision and nav goal stay
+    std::string loaded_zone;     // the zone whose collision is loaded
     bool nav_was_active = false; // for the walk's speed line, once per walk
     glm::vec3 feet{0.0f};
     float yaw = 0.0f, pitch = 0.0f, floor_offset = 6.0f;
@@ -818,9 +820,12 @@ int run_headless(HeadlessOptions options) {
                     conn = std::move(resumed);
                     control_lent = false;
                     control_active = false;
-                    movement_ready = false;
-                    zone_seen.clear(); // the zone-in lines, collision and movement place again
-                    first_zone = true; // and the --exec lines run again, re-arming a plugin that stopped
+                    movement_ready = false; // the movement body places again from the returned position
+                    // The zone, its collision and the navigation goal survive the lease: the headless never left
+                    // them. Re-running the zone-in commands would reload the collision and clear a plugin's
+                    // navigation goal (and /mono load would restart Sentinel), so a resumed same-zone character
+                    // would stand still. A real zone change under the viewer still reloads below.
+                    resuming = true;
                     in_zone_at = Clock::now();
                     log::info("headless: drive control released; back as {}", conn->character_name());
                 } else if (control_relay->closed()) {
@@ -932,27 +937,34 @@ int run_headless(HeadlessOptions options) {
             }
         }
         if (auto z = conn->take_zone_to_load()) {
-            navigator.zone_unloaded();
-            movement_ready = false;
-            zone.reset();
-            collision.reset();
-            if (options.load_collision) {
-                try {
-                    zone = assets::load_zone(game, *z);
-                    collision = game::CollisionMesh::build(*zone);
-                    conn->reground();
-                    navigator.zone_loaded(*collision, &zone->regions,
-                                          platform::cache_dir() / "navmesh" /
-                                              (server_label.empty() ? std::string("default")
-                                                                    : profile_id_for_world(server_label)) /
-                                              nav::ZoneNav::cache_name(*z));
-                    log::info("headless: collision for {} loaded (no scene)", *z);
-                } catch (const std::exception& e) {
-                    log::warn("headless: zone {} collision unavailable: {}; continuing without it", *z, e.what());
-                    zone.reset();
-                    collision.reset();
+            const bool same_zone = resuming && !loaded_zone.empty() && *z == loaded_zone;
+            resuming = false;
+            if (!same_zone) {
+                navigator.zone_unloaded();
+                movement_ready = false;
+                zone.reset();
+                collision.reset();
+                if (options.load_collision) {
+                    try {
+                        zone = assets::load_zone(game, *z);
+                        collision = game::CollisionMesh::build(*zone);
+                        conn->reground();
+                        navigator.zone_loaded(*collision, &zone->regions,
+                                              platform::cache_dir() / "navmesh" /
+                                                  (server_label.empty() ? std::string("default")
+                                                                        : profile_id_for_world(server_label)) /
+                                                  nav::ZoneNav::cache_name(*z));
+                        log::info("headless: collision for {} loaded (no scene)", *z);
+                    } catch (const std::exception& e) {
+                        log::warn("headless: zone {} collision unavailable: {}; continuing without it", *z, e.what());
+                        zone.reset();
+                        collision.reset();
+                    }
                 }
+                loaded_zone = *z;
             }
+        } else {
+            resuming = false;
         }
         ability_host.conn = conn.get();
         ability_host.in_game = conn->state() == net::ConnectionState::InZone;
