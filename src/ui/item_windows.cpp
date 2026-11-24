@@ -489,8 +489,11 @@ ItemWindowsActions item_windows(ItemWindowsState& state, const ItemWindowsInput&
         ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f - em * 10.0f, vp->WorkPos.y + em * 8.0f),
                                 ImGuiCond_FirstUseEver);
         bool open = true;
+        // While a text field has the keyboard (typing in chat), a corpse a plugin or the server opens must not
+        // take the focus and eat the keystrokes.
+        const ImGuiWindowFlags no_focus = ImGui::GetIO().WantTextInput ? ImGuiWindowFlags_NoFocusOnAppearing : 0;
         if (ImGui::Begin(std::format("Loot: {}###hailstone_loot", in.corpse_name).c_str(), &open,
-                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize)) {
+                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize | no_focus)) {
             if (in.loot->empty()) ImGui::TextColored(kDim, "The corpse is empty.");
             int n = 0;
             for (const auto& [cs, item] : *in.loot) {

@@ -792,6 +792,10 @@ function hud.Dialog(screen, title, opts, body)
   ui.PushStyleVar(ui.StyleVar.Alpha, alpha)
   local flags = ui.WindowFlags.NoSavedSettings | ui.WindowFlags.NoResize
       | ui.WindowFlags.NoScrollbar | ui.WindowFlags.NoScrollWithMouse
+  -- while a text field has the keyboard (typing in a chat window), an appearing dialog must not take the focus:
+  -- windows a plugin or the server opens (SmartLoot's corpse cycle) would eat the keystrokes otherwise.
+  -- opts.noFocus: never take the focus on appearing (a mouse-driven window a plugin opens: the loot window)
+  if io.typing or opts.noFocus then flags = flags | ui.WindowFlags.NoFocusOnAppearing end
   if not opts.resizable then flags = flags | ui.WindowFlags.AlwaysAutoResize end
   -- the roll-up: ImGui's collapse button beside the close box, the state kept in the setting (applied every frame,
   -- so a click or a double click on the title bar, which ImGui applies after it, still toggles it)

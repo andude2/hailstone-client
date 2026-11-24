@@ -23,6 +23,7 @@ local OPTS = {
   size = function() return 330, 230 end,
   resizable = { 220, 150 },
   place = function(W_, H, w, h, s, x, y) return x, y end,
+  noFocus = true, -- a corpse opens on its own (SmartLoot's cycle): never take the keyboard from a chat input
 }
 local function body(x, y, w, h, s)
   local corpse = W.Text(WINDOW, "LW_CorpseName")
