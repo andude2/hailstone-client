@@ -1391,7 +1391,7 @@ void ClientApp::crew_command(std::string_view args) {
     // "/crew relay <text>" appends a relayed line (a tell or channel message another headless character received)
     // to this window's current character's chat. The relay plugin sends it; the text is already formatted.
     if (const auto space = name.find(' '); space != std::string::npos && same(name.substr(0, space), "relay")) {
-        if (conn_ && space + 1 < name.size()) conn_->ui_message(name.substr(space + 1));
+        if (conn_ && space + 1 < name.size()) conn_->ui_tell_message(name.substr(space + 1));
         return;
     }
     if (same(name, "release")) {

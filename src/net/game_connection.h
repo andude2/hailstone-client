@@ -541,6 +541,11 @@ public:
     void ui_message(std::string text, std::uint32_t rgb = 0, std::uint32_t color = 0) {
         chat(ChatEvent::Kind::System, std::move(text), rgb, color);
     }
+    // A relayed tell: the Tells filter/window rather than System Messages. No peer is set: the relayed line is
+    // another character's history, so a reply must not be addressed as this character.
+    void ui_tell_message(std::string text, std::uint32_t rgb = 0, std::uint32_t color = 0) {
+        chat(ChatEvent::Kind::Tell, std::move(text), rgb, color);
+    }
     // The sound events since the last call (doors included).
     std::vector<SpellEffectCue> take_spell_effect_cues() { return std::exchange(effect_cues_, {}); }
     // The effect packets since the last call, in order (app/spell_particles.h plays them).
