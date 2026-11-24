@@ -450,11 +450,18 @@ void ClientApp::draw_crew_window() {
         ImGui::End();
         return;
     }
-    if (viewing_observe_) {
+    if (viewing_observe_ || viewing_control_) {
         ImGui::Text("%s %s", viewing_control_ ? "Controlling" : interacting_observe_ ? "Interacting with" : "Observing",
                     conn_ ? conn_->character_name().c_str() : "");
         ImGui::SameLine();
-        if (ImGui::Button("Release")) release_observe();
+        if (ImGui::Button("Release")) {
+            if (viewing_control_ && drive_mode_) {
+                release_drive_lease();
+                quit_ = true;
+            } else {
+                release_observe();
+            }
+        }
         ImGui::Separator();
     }
     if (crew_entries_.empty()) {

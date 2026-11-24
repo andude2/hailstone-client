@@ -1372,6 +1372,44 @@ bool ClientApp::switch_to_observe(const std::filesystem::path& file, bool intera
     return switch_to_crew(file, interact, false);
 }
 
+void ClientApp::crew_command(std::string_view args) {
+    const std::size_t begin = args.find_first_not_of(" \t");
+    const std::string name = begin == std::string_view::npos
+                                 ? std::string()
+                                 : std::string(args.substr(begin, args.find_last_not_of(" \t") - begin + 1));
+    if (name.empty()) {
+        crew_window_open_ = !crew_window_open_;
+        return;
+    }
+    auto same = [](std::string_view a, std::string_view b) {
+        return a.size() == b.size() &&
+               std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+                   return std::tolower(static_cast<unsigned char>(x)) ==
+                          std::tolower(static_cast<unsigned char>(y));
+               });
+    };
+    if (same(name, "release")) {
+        if (viewing_control_ && drive_mode_) {
+            // The separate control window has no parked character: hand the lease back and close this viewer.
+            release_drive_lease();
+            quit_ = true;
+        } else if (viewing_observe_ || viewing_control_) {
+            release_observe();
+        } else {
+            log::info("crew: not viewing a crew character; nothing to release");
+        }
+        return;
+    }
+    refresh_crew_entries();
+    for (std::size_t i = 0; i < crew_entries_.size(); ++i) {
+        if (!same(crew_entries_[i].character, name)) continue;
+        if (crew_entries_[i].control) switch_to_control(crew_entry_paths_[i]);
+        else switch_to_observe(crew_entry_paths_[i]);
+        return;
+    }
+    log::warn("crew: no headless character named {}", name);
+}
+
 bool ClientApp::switch_to_control(const std::filesystem::path& file) { return switch_to_crew(file, false, true); }
 
 bool ClientApp::switch_to_crew(const std::filesystem::path& file, bool interact, bool control) {

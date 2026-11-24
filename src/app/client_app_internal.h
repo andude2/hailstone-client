@@ -529,8 +529,10 @@ public:
         perf_ui_.set_log_hitches(config_.get_bool("ui.perf_log_hitches", false));
         automation_->hooks().add_command(plugin::Hooks::kClient, "/perf", [this](std::string_view) { perf_ui_.toggle(); });
         // /crew: the headless characters this window can observe, and the switch back (docs/headless.md).
-        automation_->hooks().add_command(plugin::Hooks::kClient, "/crew", [this](std::string_view) {
-            crew_window_open_ = !crew_window_open_;
+        // /crew <name> takes that character (Control, or View when it serves no lease); /crew release
+        // hands the view back to this window's own character. Sentinel's peer table queues both.
+        automation_->hooks().add_command(plugin::Hooks::kClient, "/crew", [this](std::string_view args) {
+            crew_command(args);
         });
         automation_->hooks().add_command(plugin::Hooks::kClient, "/screenshot", [this](std::string_view) { take_screenshot(); });
         // /debug_animinfo: the target's (or your own) model, the clips its bone groups play and the bones left at rest
@@ -833,6 +835,9 @@ private:
     // headless character's control lease.
     void spawn_control_window(std::size_t entry);
     bool switch_to_crew(const std::filesystem::path& file, bool interact, bool control);
+    // /crew with no argument toggles the Crew window; "/crew release" and "/crew <name>" are the
+    // window's Release and Control/View buttons as commands (Sentinel's peer table queues them).
+    void crew_command(std::string_view args);
     void release_observe();
     void pump_parked_connection();
     void draw_crew_window();
