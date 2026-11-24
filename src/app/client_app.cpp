@@ -1348,6 +1348,21 @@ void ClientApp::update_guide() {
 void ClientApp::pump_parked_connection() {
     if (!parked_conn_) return;
     parked_conn_->update();
+    // Extended targets are the parked character's too: a change here says whether the server cleared them while
+    // another character was shown or the return path does.
+    {
+        static const net::GameConnection* last = nullptr;
+        static std::size_t last_filled = 0, last_size = 0;
+        const auto& slots = parked_conn_->xtargets().slots;
+        const auto filled = static_cast<std::size_t>(std::count_if(
+            slots.begin(), slots.end(), [](const game::XTargetSlot& s) { return s.spawn_id != 0; }));
+        if (last != parked_conn_.get() || filled != last_filled || slots.size() != last_size) {
+            last = parked_conn_.get();
+            last_filled = filled;
+            last_size = slots.size();
+            log::info("crew: parked {} xtargets {}/{}", parked_conn_->character_name(), filled, slots.size());
+        }
+    }
     parked_stats_->draw(*parked_conn_); // Closed window: update the parked player's ability and spell data.
     parked_ability_host_.in_game = parked_conn_->in_zone();
     parked_ability_host_.character = parked_stats_->character();
