@@ -293,13 +293,22 @@ void GameConnection::auto_target_tick() {
 void GameConnection::xtarget_request(int slot, std::uint32_t type, const std::string& name) {
     if (!game::xtarget_set_slot(xtargets_, slot, type, name)) return;
     const auto& s = xtargets_.slots[static_cast<std::size_t>(slot)];
+    log::info("xtargets: request slot {} type {} '{}'", slot, s.type, s.name);
     send_zone_packet(encode_xtarget_request(static_cast<std::uint32_t>(slot), s.type, s.name));
 }
 
 void GameConnection::set_xtarget_auto_haters(bool on) {
     if (on == xtargets_.auto_haters) return;
     xtargets_.auto_haters = on;
+    log::info("xtargets: auto add haters {}", on);
     send_zone_packet(AppPacket(to_wire(Op::XTargetAutoAddHaters), {static_cast<std::byte>(on ? 1 : 0)}));
+}
+
+void GameConnection::refresh_xtarget_auto_haters() {
+    // A lease's return re-asserts the flag: the server keeps auto adding haters for this session.
+    send_zone_packet(AppPacket(to_wire(Op::XTargetAutoAddHaters),
+                               {static_cast<std::byte>(xtargets_.auto_haters ? 1 : 0)}));
+    log::info("xtargets: auto add haters re-sent ({})", xtargets_.auto_haters);
 }
 
 void GameConnection::select_xtarget(int slot) {
@@ -626,6 +635,13 @@ void GameConnection::handle_group(Op op, const AppPacket& p) {
             s.spawn_id = e.spawn_id;
             s.name = std::move(e.name);
             if (e.status == 0 && s.type == 3) s.type = 1;
+        }
+        {
+            std::size_t filled = 0;
+            for (const auto& s : xtargets_.slots)
+                if (s.spawn_id != 0) ++filled;
+            log::info("xtargets: response max {} entries {} -> {}/{}", x->max, x->entries.size(), filled,
+                      xtargets_.slots.size());
         }
         break;
     }

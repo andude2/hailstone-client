@@ -651,6 +651,8 @@ public:
     void xtarget_request(int slot, std::uint32_t type, const std::string& name);
     // Send_OP_XTargetAutoAddHaters @0x548850: the list's auto add flag, sent when it changes.
     void set_xtarget_auto_haters(bool on);
+    // Sends the current flag even when it did not change (a control lease's return re-asserts it).
+    void refresh_xtarget_auto_haters();
     // 0x548960: the slot the window's menu acts on (kept only when in range).
     void select_xtarget(int slot);
     // ExtendedTargetList_TargetNextSlot @0x5488f0 (CYCLE_XTARGET): from the last cycled slot, the next one holding
