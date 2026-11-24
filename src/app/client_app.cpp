@@ -1535,7 +1535,6 @@ void ClientApp::release_observe() {
     files_profile_ = std::move(parked_files_profile_);
     char_view_.server_name = std::move(parked_server_name_);
     automation_->set_parked_character(nullptr);
-    if (conn_) conn_->refresh_xtarget_auto_haters();
     if (conn_) {
         const auto& slots = conn_->xtargets().slots;
         const auto filled = static_cast<std::size_t>(std::count_if(

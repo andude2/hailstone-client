@@ -730,9 +730,19 @@ public:
             sets_.load([&](const std::string& key) { return host.actions->char_ini_string("ExternalTargetRoles", key); });
         }
         if (list.zone != zone_) {
-            zone_ = list.zone;
-            roles_restored_ = false;
-            c.set_xtarget_auto_haters(auto_haters_);
+            if (zone_ == 0 && list.auto_haters) {
+                // A window reloaded during a session (a crew view returning): the session already has auto-haters
+                // on. Adopt it and store it rather than sending the saved setting, which can be a stale false and
+                // would turn the server's hater list off.
+                zone_ = list.zone;
+                roles_restored_ = false;
+                auto_haters_ = true;
+                store(host);
+            } else {
+                zone_ = list.zone;
+                roles_restored_ = false;
+                c.set_xtarget_auto_haters(auto_haters_);
+            }
         }
         if (!roles_restored_ && !list.slots.empty() && host.actions && !host.actions->char_ini_path().empty()) {
             // CExtendedTargetWnd_LoadCurrentRoles: the saved roles onto the list.

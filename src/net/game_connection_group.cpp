@@ -304,13 +304,6 @@ void GameConnection::set_xtarget_auto_haters(bool on) {
     send_zone_packet(AppPacket(to_wire(Op::XTargetAutoAddHaters), {static_cast<std::byte>(on ? 1 : 0)}));
 }
 
-void GameConnection::refresh_xtarget_auto_haters() {
-    // A lease's return re-asserts the flag: the server keeps auto adding haters for this session.
-    send_zone_packet(AppPacket(to_wire(Op::XTargetAutoAddHaters),
-                               {static_cast<std::byte>(xtargets_.auto_haters ? 1 : 0)}));
-    log::info("xtargets: auto add haters re-sent ({})", xtargets_.auto_haters);
-}
-
 void GameConnection::select_xtarget(int slot) {
     if (slot >= 0 && slot < static_cast<int>(xtargets_.slots.size())) xtargets_.selected = slot;
 }
