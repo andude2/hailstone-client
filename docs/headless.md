@@ -216,6 +216,13 @@ collapse to the latest per entity/slot (position and HP per spawn, appearance pe
 slot, the connection-wide profile/inventory/weather/target values), and chat and pure visual packets are not replayed.
 A character logged in for hours in one zone therefore attaches with a bounded snapshot.
 
+The UCS (chat-server) connection is not one of the leased world/zone sessions. While a viewer drives, the headless
+keeps pumping it (`pump_chat_server`), so channel chat, tells and mail still arrive, and on release it is moved to the
+successor connection (`transfer_chat_server`) rather than logged out and back in. Outgoing `/1`../`/10` and `/join`
+from the viewer go through the lent zone (`OP_ChannelMessage` channel 20), so the viewer needs no UCS session. A relay
+add-on can forward other characters' chat into the window with `/crew relay <text>`, which appends a system line to
+the current character's chat.
+
 The relay and its mock-server test are in (`src/app/drive_control.*`, `tests/drive_control_test.cpp`). The
 graphical client's `/crew` window offers two ways to drive a `control=1` file:
 

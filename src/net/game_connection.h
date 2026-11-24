@@ -2638,6 +2638,12 @@ public:
     // is set the chat commands and socials send nothing.
     bool chat_blocked() const { return chat_blocked_; }
     bool chat_server_connected() const;
+    // Pumps the UCS connection alone, for a lent connection whose zone/world sessions are in the relay: channels,
+    // mail and friends keep arriving while a control viewer drives the character.
+    void pump_chat_server();
+    // Moves the UCS connection (and the info it needs to stay on the same server/name) from a connection being
+    // replaced to its successor, so a lease's release does not log L's chat server out and back in.
+    static void transfer_chat_server(GameConnection& from, GameConnection& to);
     // ---- client option commands (net/game_connection_options.cpp; game/option_commands.h) ----
     // /quit and /exit (Cmd_quit @0x4e63a0, Cmd_exit @0x4e64c0): the client closes the connection and quits; the app
     // takes the request once.

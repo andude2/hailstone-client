@@ -816,6 +816,8 @@ int run_headless(HeadlessOptions options) {
                     resumed->adopt_sessions(std::move(world_session), std::move(zone_session));
                     resumed->adopt_server_rules_from(*conn); // the same server: the plugins must not see a policy change
                     resumed->apply_snapshot(returned);
+                    // L's chat server stayed in this process: carry it over instead of logging out and back in.
+                    net::GameConnection::transfer_chat_server(*conn, *resumed);
                     resumed->set_teleport_handler([&teleport_b](const game::TeleportBArgs& a) { teleport_b(a); });
                     conn = std::move(resumed);
                     control_lent = false;
@@ -835,6 +837,10 @@ int run_headless(HeadlessOptions options) {
                     log::error("headless: the drive viewer left without releasing; stopping (a crew relaunches it)");
                     result = 3;
                     break;
+                } else if (conn) {
+                    // The zone and world sessions are in the relay, but L's UCS connection is neither: keep it
+                    // pumped so channel chat and tells keep arriving for the viewer's relay.
+                    conn->pump_chat_server();
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;

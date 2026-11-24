@@ -1388,6 +1388,12 @@ void ClientApp::crew_command(std::string_view args) {
                           std::tolower(static_cast<unsigned char>(y));
                });
     };
+    // "/crew relay <text>" appends a relayed line (a tell or channel message another headless character received)
+    // to this window's current character's chat. The relay plugin sends it; the text is already formatted.
+    if (const auto space = name.find(' '); space != std::string::npos && same(name.substr(0, space), "relay")) {
+        if (conn_ && space + 1 < name.size()) conn_->ui_message(name.substr(space + 1));
+        return;
+    }
     if (same(name, "release")) {
         if (viewing_control_ && drive_mode_) {
             // The separate control window has no parked character: hand the lease back and close this viewer.

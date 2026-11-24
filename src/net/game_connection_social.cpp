@@ -2061,6 +2061,14 @@ void GameConnection::ignore_command(const std::string& args) {
     if (!chat_server_->send_command("ignoreplayer " + who)) system(4529);
 }
 
+void GameConnection::pump_chat_server() { update_chat_server(); }
+
+void GameConnection::transfer_chat_server(GameConnection& from, GameConnection& to) {
+    to.chat_server_ = std::move(from.chat_server_);
+    to.chat_server_info_ = std::move(from.chat_server_info_);
+    to.chat_server_target_ = std::move(from.chat_server_target_);
+}
+
 void GameConnection::update_chat_server() {
     if (chat_server_info_ && state_ == ConnectionState::InZone) {
         // CEverQuest::ChatServerConnect @0x5135b0 keeps a connection to the same server and name.
