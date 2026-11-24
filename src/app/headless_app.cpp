@@ -981,9 +981,13 @@ int run_headless(HeadlessOptions options) {
             ++frames;
             if (const auto now = Clock::now(); now - last_heartbeat > std::chrono::seconds(10)) {
                 last_heartbeat = now;
-                log::info("headless: frame {}: {}, player {}, zone {}, plugins {}, pulses {}", frames,
+                const auto& xt = conn->xtargets().slots;
+                const auto filled = static_cast<std::size_t>(std::count_if(
+                    xt.begin(), xt.end(), [](const game::XTargetSlot& s) { return s.spawn_id != 0; }));
+                log::info("headless: frame {}: {}, player {}, zone {}, plugins {}, pulses {}, xtargets {}/{}", frames,
                           net::to_string(conn->state()), conn->world().player() ? "yes" : "no",
-                          conn->world().zone_short_name, automation.loaded_plugin_count(), automation.pulse_count());
+                          conn->world().zone_short_name, automation.loaded_plugin_count(), automation.pulse_count(),
+                          filled, xt.size());
             }
         }
         if (automation.plugin_consent() && !consent_logged) {

@@ -45,8 +45,8 @@ TEST_CASE("drive snapshot: applying a snapshot does not re-raise the game state 
     net::GameConnection restored(game, options);
     restored.apply_snapshot(snapshot);
     restored.update();
-    CHECK(game_states == 0);
-    CHECK(spawns == 0);
+    CHECK(game_states == 0); // no fake login
+    CHECK(spawns > 0);       // the spawn refresh the plugins read
 }
 
 TEST_CASE("drive snapshot: a zone journal replays into a fresh connection") {
