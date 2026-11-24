@@ -1520,6 +1520,12 @@ void ClientApp::release_observe() {
     files_profile_ = std::move(parked_files_profile_);
     char_view_.server_name = std::move(parked_server_name_);
     automation_->set_parked_character(nullptr);
+    if (conn_) {
+        const auto& slots = conn_->xtargets().slots;
+        const auto filled = static_cast<std::size_t>(std::count_if(
+            slots.begin(), slots.end(), [](const game::XTargetSlot& s) { return s.spawn_id != 0; }));
+        log::info("crew: back to {} (xtargets {}/{})", conn_->character_name(), filled, slots.size());
+    }
     ui_host_.conn = conn_.get();
     ui_host_.in_game = conn_ && conn_->in_zone();
     if (parked_stats_) {
