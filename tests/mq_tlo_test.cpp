@@ -3,6 +3,7 @@
 
 #include <ctime>
 
+#include "core/build_info.h"
 #include "manual_clock.h"
 #include "mq/parse.h"
 #include "mq/spawn_search.h"
@@ -117,6 +118,8 @@ TEST_CASE("TLO: spells, gems and buffs") {
     CHECK(f.p("${Me.Buff[2]}") == "NULL");           // the song is not a buff
     CHECK(f.p("${Me.Song[1]}") == "Selo's Accelerando");
     CHECK(f.p("${Me.CountBuffs} ${Me.CountSongs}") == "1 1");
+    // The buff and song windows' slots (RoF2's 42 and 20), and the buff slots one long buff leaves.
+    CHECK(f.p("${Me.MaxBuffSlots} ${Me.MaxSongSlots} ${Me.FreeBuffSlots}") == "42 20 41");
     // 10 ticks = 60 s, counted from when it arrived.
     auto secs = std::stoi(f.p("${Me.Buff[1].Duration.TotalSeconds}"));
     CHECK(secs >= 59);
@@ -531,6 +534,26 @@ TEST_CASE("TLO: Group, items, Zone and the rest") {
     CHECK(f.p("${Cursor}") == "NULL");
     CHECK(f.p("${Window[InventoryWindow].Open} ${Window[BankWnd].Open}") == "TRUE FALSE");
     CHECK(f.p("${EverQuest.GameState} ${EverQuest.Server}") == "INGAME TestServer");
+    // MacroQuest.Path[config] is the scripts' settings folder; MQ's other names stay NULL until settled.
+    CHECK(f.p("${MacroQuest.Path[config]}") == "NULL"); // no folder given
+    f.ctx.config_path = "/data/scripts/config";
+    CHECK(f.p("${MacroQuest.Path[config]} ${MacroQuest.Path[CONFIG]}") == "/data/scripts/config /data/scripts/config");
+    CHECK(f.p("${MacroQuest.Path[macros]} ${MacroQuest.Path}") == "NULL NULL");
+    // Hailstone.Path is the same member under the client's name (TLO names take any case).
+    CHECK(f.p("${Hailstone.Path[config]} ${HailStone.Path[Config]}") == "/data/scripts/config /data/scripts/config");
+    CHECK(f.p("${Hailstone.Path[macros]} ${Hailstone.Path}") == "NULL NULL");
+    // Their other members are EverQuest's, as in MQ: the server's name, the game state.
+    CHECK(f.p("${MacroQuest.Server} ${Hailstone.Server}") == "TestServer TestServer");
+    CHECK(f.p("${MacroQuest.Server.Equal[testserver]} ${MacroQuest.GameState}") == "TRUE INGAME");
+    // Build is MQ's build target (4, Emu), a number E3 casts; BuildDate the build's yyyymmdd, Version Hailstone's.
+    CHECK(f.p("${MacroQuest.Build} ${Hailstone.Build}") == "4 4");
+    const std::string date = std::to_string(build_date());
+    CHECK(date.size() == 8);
+    CHECK(build_date() >= 20260101);
+    CHECK(f.p("${MacroQuest.BuildDate}") == date);
+    CHECK(f.p("${Hailstone.BuildDate}") == date);
+    CHECK(f.p("${MacroQuest.Version}") == release_version());
+    CHECK(f.p("${Hailstone.Version}") == release_version());
     CHECK(f.p("${Int[7.9]} ${Float[2].Deci} ${Bool[0]} ${Bool[yes]}") == "7 2.0 FALSE TRUE");
     // No whole number for NaN, an infinity or one past int64 (the cast would be undefined); in range is cut as before.
     CHECK(f.p("${Int[nan]} ${Int[inf]} ${Int[-inf]} ${Int[1e300]} ${Int[-1e300]}") == "NULL NULL NULL NULL NULL");
@@ -818,4 +841,56 @@ TEST_CASE("spawn search: random text parses and searches without fault") {
         auto q = mq::parse_spawn_search(text, &f.world.conn->guild());
         CHECK_NOTHROW(mq::search_spawns(q, f.world.conn->world(), mq::sources_of(*f.world.conn)));
     }
+}
+
+TEST_CASE("TLO: Me.Bandolier[name|#] and .Active, .Index, .Name, .Item[n]") {
+    Fixture f;
+    using A = net::GameConnectionTestAccess;
+    auto& sets = A::bandolier(*f.world.conn);
+    sets.assign(game::kBandolierSets, {});
+    auto belt = [](std::uint32_t id, const char* name) {
+        game::BeltItem b;
+        b.id = id;
+        b.icon = id + 1;
+        b.name = name;
+        return b;
+    };
+    sets[0].name = "Melee";
+    sets[0].items = {belt(5101, "Cudgel"), belt(5102, "Buckler"), belt(0, ""), belt(0, "")};
+    sets[2].name = "Bow";
+    sets[2].items = {belt(0, ""), belt(0, ""), belt(5103, "Longbow"), belt(5104, "Arrow")};
+    auto wear = [&](std::int16_t slot, std::uint32_t id) {
+        net::Item it;
+        it.id = id;
+        it.name = "worn";
+        A::inventory(*f.world.conn).put(net::ItemSlot::possessions(slot), it);
+    };
+
+    // By name (any case) or number; a name no set has is NULL.
+    CHECK(f.p("${Me.Bandolier[melee]} ${Me.Bandolier[MELEE].Index} ${Me.Bandolier[Bow].Index}") == "Melee 1 3");
+    CHECK(f.p("${Me.Bandolier[1].Name} ${Me.Bandolier[3].Name}") == "Melee Bow");
+    CHECK(f.p("${Me.Bandolier[Caster]}") == "NULL");
+    CHECK(f.p("${Me.Bandolier[Caster].Active}") == "NULL");
+    // A set without a name answers NULL; numbers are clamped to 1..20.
+    CHECK(f.p("${Me.Bandolier[2].Active} ${Me.Bandolier[2].Name}") == "NULL NULL");
+    CHECK(f.p("${Me.Bandolier[0].Name} ${Me.Bandolier[99].Name}") == "Melee NULL");
+
+    // Active: each of the four slots holds the set's item, an empty one an empty slot.
+    CHECK(f.p("${Me.Bandolier[Melee].Active} ${Me.Bandolier[Bow].Active}") == "FALSE FALSE");
+    wear(net::kSlotPrimary, 5101);
+    CHECK(f.p("${Me.Bandolier[Melee].Active}") == "FALSE"); // the Buckler is not on
+    wear(net::kSlotSecondary, 5102);
+    CHECK(f.p("${Me.Bandolier[Melee].Active} ${Me.Bandolier[Bow].Active}") == "TRUE FALSE");
+    wear(net::kSlotAmmo, 5104); // an item in a slot the set leaves empty
+    CHECK(f.p("${Me.Bandolier[Melee].Active}") == "FALSE");
+    (void)A::inventory(*f.world.conn).take(net::ItemSlot::possessions(net::kSlotPrimary));
+    (void)A::inventory(*f.world.conn).take(net::ItemSlot::possessions(net::kSlotSecondary));
+    wear(net::kSlotRange, 5103);
+    CHECK(f.p("${Me.Bandolier[Melee].Active} ${Me.Bandolier[Bow].Active}") == "FALSE TRUE");
+
+    // Item[n]: the set's items (1 primary .. 4 ammo, clamped).
+    CHECK(f.p("${Me.Bandolier[Melee].Item[1]} ${Me.Bandolier[Melee].Item[2].ID}") == "Cudgel 5102");
+    CHECK(f.p("${Me.Bandolier[Bow].Item[4].Name} ${Me.Bandolier[Bow].Item[4].IconID}") == "Arrow 5105");
+    CHECK(f.p("${Me.Bandolier[Bow].Item[9].Name} ${Me.Bandolier[Bow].Item[0].ID}") == "Arrow 0");
+    CHECK(f.p("${Me.Bandolier[Bow].Item}") == "NULL");
 }

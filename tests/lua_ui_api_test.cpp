@@ -861,7 +861,8 @@ end)
 
 // The modern pack's STML links (ui/modern/lib/stml.lua): an href's target, also when its quote is never closed (the
 // storyline pages some servers ship: <a href="file:///storyline/Epic/BardEpic.txt>Bard</a>), a WndNotify link's
-// message and data, an <a> with neither only coloured, and a "<" that opens no tag kept as text.
+// message and data, an <a> with neither only coloured, and a "<" that opens no tag kept as text. Also the <c> colours
+// stml.Lines carries from line to line, no more than 32 of them.
 TEST_CASE("Lua UI: STML href links, an unclosed quote ending at the tag's end") {
     hailstone::test::ScratchDir scratch("lua_ui_api_stml_href_test");
     const fs::path dir = scratch.path() / "pack";
@@ -893,6 +894,15 @@ local function plain(line)
   return table.concat(t)
 end
 out.lt = plain("a < b") .. "|" .. plain('<c "#ff0000">x &amp; <3') .. "|" .. plain("one <b>two</b> three")
+-- a colour open at a line's end carries on; past 32 unclosed tags only the innermost 32 carry
+local W = { 1, 1, 1, 1 }
+local function hex(c) return string.format("%02x%02x%02x", math.floor(c[1] * 255 + 0.5), math.floor(c[2] * 255 + 0.5), math.floor(c[3] * 255 + 0.5)) end
+local lines = stml.Lines('<c "#ff0000">a\nb</c>c', W)
+local deep = {}
+for i = 1, 40 do deep[i] = string.format('<c "#%02x0000">', i) end
+local capped = stml.Lines(table.concat(deep) .. "x\ny" .. ("</c>"):rep(32) .. "z", W)
+out.carry = hex(lines[2][1][2]) .. "," .. tostring(lines[2][2][2] == W) .. "|" .. hex(capped[2][1][2]) .. "," ..
+  tostring(capped[2][#capped[2]][2] == W)
 )lua";
     ImGuiContext* ctx = ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
@@ -921,6 +931,7 @@ out.lt = plain("a < b") .. "|" .. plain('<c "#ff0000">x &amp; <3') .. "|" .. pla
         CHECK(get("notify") == "item=27,x");
         CHECK(get("plain") == "here=plain");
         CHECK(get("lt") == "a < b|x & <3|one two three"); // a "<" that opens no tag is text
+        CHECK(get("carry") == "ff0000,true|280000,true");
     }
     ImGui::DestroyContext(ctx);
 }

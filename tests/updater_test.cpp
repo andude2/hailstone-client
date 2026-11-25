@@ -19,6 +19,7 @@
 #include "core/version.h"
 #include "core/zip_write.h"
 #include "platform/durable_file.h"
+#include "platform/shared_file.h"
 #include "scratch_dir.h"
 
 using namespace hailstone;
@@ -492,6 +493,29 @@ UpdatePackage stage_one(const fs::path& inst, const std::string& component, cons
     return p;
 }
 } // namespace
+
+TEST_CASE("update install: nothing is installed or rolled back while another process holds the install lock") {
+    test::ScratchDir dir("updater_install_lock");
+    const fs::path inst = dir.path();
+    put(inst / "hailstone", "old");
+    stage_one(inst, "core", zip_of({{"hailstone", "new"}}));
+    {
+        auto other = platform::ScopedFileLock::try_acquire(inst / "update/install.lock",
+                                                           platform::FileLockMode::Exclusive,
+                                                           platform::LockFolder::Ordinary);
+        REQUIRE(other);
+        CHECK_FALSE(install_staged_update(inst, "0.1.0").ok);
+        CHECK(get(inst / "hailstone") == "old");
+        CHECK(fs::exists(inst / "update/download/p.zip")); // the other process's staging is untouched
+        // A start does not roll back what the other process is in the middle of installing.
+        REQUIRE(write_file_atomic(inst / "update/state.txt", "installing 0.2.0 0.1.0\n"));
+        CHECK(update_at_start(inst, "0.2.0").message.empty());
+        CHECK(fs::exists(inst / "update/state.txt"));
+    }
+    fs::remove(inst / "update/state.txt");
+    CHECK(install_staged_update(inst, "0.1.0").ok); // the lock went with its owner
+    CHECK(get(inst / "hailstone") == "new");
+}
 
 TEST_CASE("update install: each move is in the journal, written before it") {
     test::ScratchDir dir("updater_journal");

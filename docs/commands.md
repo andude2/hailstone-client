@@ -239,6 +239,9 @@ These are not in the original client.
 | `/foreground` | Raise this client’s window and request keyboard focus. On Windows, a maximized window keeps its size. |
 | `/destroycursor <id>` | Destroy the item on your cursor without asking, only if its item id is `<id>`; never coin or a bag. For plugins (docs/plugins.md). |
 | `/stowcursor <id>` | Put the item on your cursor into your packs (never a worn slot), only if its item id is `<id>`. For plugins (docs/plugins.md). |
+| `/exchange "<item name\|id>" <slot>` | Put an item from your packs in a worn slot; what the slot held goes where the item was, or into your packs if it does not fit there (MQ2Exchange's command, which E3 uses). The name is exact, any case; the slots are MacroQuest's names (`/exchange help list`). |
+| `/unequip <slot>` | Take the item off a worn slot into the first free general slot or bag slot. |
+| `/exchange help`, `/exchange help list` (or `/exchange list`) | The commands, and the slot names and numbers. |
 | `/web [address]` | The in-game browser (docs/browser.md); with an address, it opens on a new tab. |
 | `/camera [iso \| first \| behind \| toggle]` | Switch to the isometric camera or back (docs/isometric.md); `/camera` alone shows the settings, `/camera pitch\|fov\|distance\|reveal <value>` and `/camera wasd camera\|classic` change them. |
 | `/luasocial [1..120 \| new]` | The Lua social editor. |
@@ -264,13 +267,15 @@ one, the server's add-on rules decide whether it may.
 | `/lua run <script> [args...]`, `/lua stop [script]`, `/lua pause [script]`, `/lua list` | Lua scripts. |
 | `/plugin list`, `/plugin <name> [load\|unload]` | Compiled plugins. |
 | `/nav ...` | Walk along the navigation mesh: `/nav target`, `/nav id <#>`, `/nav loc <y> <x> <z>`, `/nav door <name> [click]`, `/nav stop`, `/nav status`, `/nav option ...`, `/nav help`. |
-| `/moveto loc <y> <x> [z] \| id [#] \| mdist <n> \| off` | Walk in a straight line, without the mesh. |
-| `/stick [<distance>] [behind] [id <#>]`, `/stick off` | Stay with the target or a spawn. |
+| `/afollow [on] [<distance>] [door\|nodoor] [spawn <id>]`, `/afollow off \| pause \| unpause \| help` | Follow the target (or a spawn) along the way it walks, holding within the distance (10 at first); your movement keys stop it (docs/navigation.md). |
+| `/moveto loc <y> <x> [z] \| id [#] \| dist <n> \| off` | Walk in a straight line, without the mesh; it stops within 10 unless `dist` (or `mdist`, also inline after `loc` or `id`) set another distance. |
+| `/stick [<distance>] [behind] [id <#>]`, `/stick off`, `/stick pause`, `/stick unpause` | Stay with the target or a spawn. MQ2MoveUtils' `hold`, `snaproll`, `uw`, `delaystrafe`, `moveback` and `imsafe` are taken too (docs/navigation.md). |
 | `/target ...`, `/face ...` | Target or face by MacroQuest's spawn search (`/target` is above). |
 | `/keypress <command> [hold\|release]` | Press a key command by name. |
 | `/echo <text>` | Print a line to chat. |
 | `/docommand <line>`, `/noparse <line>` | Run a line; run it without expanding `${...}`. |
 | `/squelch <line>` | Run a line without the chat lines it prints. |
+| `/timed <deciseconds> <line>` | Run a line that many tenths of a second later (MacroQuest's). Its `${...}` are read when it runs; a script's line keeps the script's permissions. At most 1000 wait at once. |
 
 In a social's lines, `/pause` waits and `/timer` sets the button's cooldown (docs/dev-ui.md).
 

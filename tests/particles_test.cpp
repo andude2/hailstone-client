@@ -222,7 +222,7 @@ TEST_CASE("SpellEffect_SpawnStageEmitters: slots, levels, locations and settings
     auto out = game::spawn_stage_emitters(fx, 0, 1234, &caster, &target, {0, 0, 0}, 3000, s);
     REQUIRE(out.size() == 2);
     CHECK(out[0].emitter == 10);
-    CHECK(out[0].key == ((7u << 16) | 1234u));
+    CHECK(out[0].key == game::EmitterKey::spell(7, 1234));
     CHECK(out[0].duration_ms == 3000);
     CHECK(out[0].density == 0.5f);
     CHECK(out[0].position == glm::vec3(1, 2, 3));
@@ -234,6 +234,11 @@ TEST_CASE("SpellEffect_SpawnStageEmitters: slots, levels, locations and settings
     // The flag forces density and opacity to 1.0.
     auto full = game::spawn_stage_emitters(fx, 0, 1234, &caster, &target, {0, 0, 0}, 0, s, true);
     CHECK(full[0].density == 1.0f);
+    const auto high = game::spawn_stage_emitters(fx, 0, 66770, &caster, &target, {0, 0, 0}, 3000, s);
+    REQUIRE(high.size() == 2);
+    CHECK(high[0].key == game::EmitterKey::spell(7, 66770));
+    CHECK(high[0].key != out[0].key);
+    CHECK(game::EmitterKey::spell(0, 66770) != game::EmitterKey(66770));
 }
 
 TEST_CASE("Spell particle sources: self, other players and NPCs") {
@@ -334,9 +339,8 @@ TEST_CASE("Model points: the WLD table and the point matrix") {
 }
 
 TEST_CASE("NMS model points: dkm.pts" * doctest::skip(!hailstone::test::game_dir())) {
-    const auto& game = *hailstone::test::game_dir();
-    auto archive = game.find("dkm.eqg");
-    REQUIRE(archive);
+    auto archive = hailstone::test::game_file("dkm.eqg");
+    if (!archive) return;
     auto pfs = assets::PfsArchive::open(*archive);
     auto data = pfs.read("dkm.pts");
     REQUIRE(data);
@@ -353,10 +357,13 @@ TEST_CASE("NMS model points: dkm.pts" * doctest::skip(!hailstone::test::game_dir
 
 TEST_CASE("NMS spell particle files parse" * doctest::skip(!hailstone::test::game_dir())) {
     const auto& game = *hailstone::test::game_dir();
+    if (!hailstone::test::game_file("spellsnew.edd") || !hailstone::test::game_file("spellsnew.eff")) return;
     auto edd = game.read("spellsnew.edd");
     REQUIRE(edd);
     auto defs = assets::parse_edd(*edd);
-    CHECK(defs.size() == 2577); // record 0 is the file's own "None" sentinel
+    REQUIRE_FALSE(defs.empty());
+    // The record count is the reference folder's; a live install's file has more.
+    if (hailstone::test::reference_folder()) CHECK(defs.size() == 2577); // record 0 is the file's own "None" sentinel
     CHECK(defs[0].name == "None");
     auto eff = game.read("spellsnew.eff");
     REQUIRE(eff);
@@ -431,8 +438,8 @@ TEST_CASE("Actor emitters: PRT versions widen as the EQGM loader widens them") {
 
 TEST_CASE("NMS actor emitters: a fire elemental and a glowing sword" * doctest::skip(!hailstone::test::game_dir())) {
     const auto& game = *hailstone::test::game_dir();
-    auto archive = game.find("arxmentisweapons.eqg");
-    REQUIRE(archive);
+    auto archive = hailstone::test::game_file("arxmentisweapons.eqg");
+    if (!archive) return;
     auto pfs = assets::PfsArchive::open(*archive);
     auto prt = pfs.read("it12753.prt");
     auto pts = pfs.read("it12753.pts");
@@ -452,7 +459,9 @@ TEST_CASE("NMS actor emitters: a fire elemental and a glowing sword" * doctest::
     // is checked.
     auto defs = assets::parse_edd(*edd);
     CHECK_FALSE(defs.empty());
-    CHECK(e[0].emitter >= defs.size());
+    // A live install's file is new enough to hold the emitter.
+    if (hailstone::test::pinned_values("the emitter past the end of ActorEmittersNew.edd"))
+        CHECK(e[0].emitter >= defs.size());
 }
 
 TEST_CASE("particle billboard modes: facing and turning clockwise, streaking along the axis, flat on the ground") {

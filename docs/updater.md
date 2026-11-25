@@ -185,6 +185,11 @@ never write the same `.part` file, and a window that quits first never installs 
 
 ### Start and rollback
 
+One process at a time installs or rolls back in a folder: `install_staged_update` and `update_at_start` take an
+exclusive lock on `update/install.lock` (`platform::ScopedFileLock`, released when the process ends). A process that
+cannot get it leaves the work to the one that holds it: an install reports an error and `update_at_start` does
+nothing, so one process never undoes another's half-done install through the shared `journal.txt`.
+
 `update_at_start`, the first thing `main` does:
 
 - **`installing`** (the client died mid-install): the journal is undone and the old version is back. If this binary

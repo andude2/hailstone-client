@@ -231,6 +231,8 @@ TEST_CASE("command_caps: EQ commands by their handler, abbreviations too; text i
     CHECK(command_caps("/STOWCURSOR 123") == kCapActions);
     CHECK(command_caps("/destroy") == kCapActions);
     CHECK(command_caps("/Destroy") == kCapActions);
+    CHECK(command_caps("/exchange \"Mirrored Mask\" face") == kCapActions);
+    CHECK(command_caps("/unequip ammo") == kCapActions);
     CHECK(command_caps("/stowcursorx 123") == kCapCommands);
     CHECK(command_caps("/destro") == kCapCommands); // no prefix match: the client runs it as no command
     CHECK(command_caps("/finditem sword") == kCapCommands); // a window, not an item move

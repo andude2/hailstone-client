@@ -705,8 +705,14 @@ TEST_CASE("Crescent Reach loads as an EQG zone with water regions" * doctest::sk
     CHECK_FALSE(is_eqg_zone(game, "qeynos2"));
     auto z = load_zone(game, "crescent");
     REQUIRE(z.terrain.size() == 1);
-    CHECK(z.terrain[0].indices.size() / 3 == 67484);
-    CHECK(z.placements.size() == 2341);
+    CHECK_FALSE(z.terrain[0].indices.empty());
+    CHECK(z.terrain[0].indices.size() % 3 == 0);
+    CHECK_FALSE(z.placements.empty());
+    // A live install's crescent.eqg has another terrain and object list; the counts are the reference folder's.
+    if (hailstone::test::reference_folder()) {
+        CHECK(z.terrain[0].indices.size() / 3 == 67484);
+        CHECK(z.placements.size() == 2341);
+    }
     CHECK(z.regions.region_count() == 58);
     // AWT_river30 (index 31): narrow in X, long in Y (OpenEQ's orientation fixture).
     glm::vec3 river(-1091.171875f, -2348.66162109375f, -204.40826416015625f);

@@ -314,7 +314,10 @@ Each entry names the window and what is particular to it; the `hs.*` calls behin
   - Turn on **Allow window resizing** to drag the left edge and change the width. A horizontal tray wraps to fit. For vertical icons without names, drag the bottom edge to change how many icons fit in each column. The grip shows on hover. Turning resizing off keeps the size. **Reset size** restores automatic sizing. **Icons per row** also returns horizontal trays to fitting their contents.
   - The `hud.*` settings are saved per tray and character (`lib/bufftray.lua`).
 
-- **CastSpellWnd**: gem tiles in a row or column, refresh shading, the spell book.
+- **CastSpellWnd** (Modern Spell Gems): gem tiles with refresh shading and a spell book button after the last gem. The default is a single row with the window background and the original icon size. The **Vertical** setting fills down first.
+  - Alt-right-click the bar for **Show spell names**, **Show window background**, **Show resize bar**, and **Icon size**. Spell names appear beside their gems. Hover a gem for its full name.
+  - With **Show resize bar** on, drag the right edge, bottom edge, or bottom-right corner to wrap the tiles into rows and columns. Hiding the grip keeps the chosen wrap. **Reset size** clears the wrap and restores the default icon size and frame scale.
+  - The options are saved per character with the Modern layout. Gem clicks and drags keep their usual actions in every layout.
 
 - **HotButtonWnd**..10, **CastingWindow**, **EQMainWnd**; **CompassWindow** (a heading band).
 
@@ -346,7 +349,7 @@ Each entry names the window and what is particular to it; the `hs.*` calls behin
 
 - **ExtendedTargetWnd** (`lib/xtarget.lua`, which takes a plugin's part on each row, docs/plugins.md): filled / available slots, a row for every server slot (empty ones faint) with its role unless an auto hater, six rows tall until resized. Right-click adds Hailstone's Auto expand (`hud.expand.ExtendedTargetWnd`), which grows the frame down to the last filled slot.
 
-- **PetInfoWindow**: buff right click offers Spell Info and Add to Blocked Pet Spells.
+- **PetInfoWindow**: right-click a buff for Spell Info or Add to Blocked Pet Spells. Removable beneficial buffs also offer **Remove**. The icon clears when the server updates the pet's buffs.
 
 - **SpellBookWnd** (`spellbook.lua`, over `hs.SpellBook`): search, sort, filters, categories, list or grid, spell display text.
   - Spell sets: load, edit, delete, New set or From gems. The twelve-slot editor takes drags, double-clicks or the spell's menu and saves without memorizing; a spell dropped on a set's card joins that set.
@@ -632,6 +635,7 @@ Labels and gauges by EQType (`hs.Label`, `hs.Gauge`): the combat timer (label 13
 - A second argument `true` to `hs.Label` (1, 28) or `hs.Gauge` (1, 6, 27) adds the name plate's invisibility marks to the name: Hailstone's, the original's captions are plain.
 - `hs.Gauge` and `hs.ChildGauge` return a special value's fill tint as CGaugeWnd::Draw gives it (`gauge_fill`: -2 full in dark red, -110..-10 purple, -2000..-1000 pink); the group frames use it for a member out of zone.
 - `hs.BuffSlot`'s fifth answer is the fade under 19 s (`game::buff_fade`, CBuffWindow::OnProcessFrame).
+- Pass true as `hs.BuffSlot`'s fourth argument to append the pet entity ID and server slot for a removable pet buff. Other buffs append two nils. `hs.WindowButton("PetInfoWindow", child, 3)` requests removal for the current buff at that child.
 - The modern player frame shows the combat state (PW_CombatStateAnim by `hs.ChildArt`) as a pip on the level badge and the combat timer as a ring.
 
 #### `lua_ui_hud.cpp`

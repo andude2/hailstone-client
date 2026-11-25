@@ -621,7 +621,7 @@ private:
             return false;
         };
         ctx.deity_name = [&c](std::uint32_t deity) { return deity_desc(c, deity); };
-        ctx.spell = [&c](std::int32_t id) { return c.spell_table().get(static_cast<std::uint32_t>(id)); };
+        ctx.spells = &c.spell_table();
         ctx.db_string = [&c](std::uint32_t id, std::uint32_t type) { return c.strings().db_string(id, type); };
         cached_ = game::build_item_display(*it, ctx);
         cached_id_ = it->id;

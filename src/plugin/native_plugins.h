@@ -81,6 +81,7 @@ struct NativeEnv {
     std::vector<std::filesystem::path> dirs; // where plugins are looked for, and one level down (plugins/<name>/)
     std::filesystem::path cache_dir;         // the approved copies
     std::filesystem::path config_dir;        // each plugin's own directory is config_dir / name
+    std::filesystem::path scripts_config_dir; // the scripts' settings folder (get_scripts_config_dir); empty: none
     // The per-server and per-character folders (server_config_dir, character_config_dir) are under the connection's:
     // the server's rules' folder (servers/<profile>/) and its character's files.
 };

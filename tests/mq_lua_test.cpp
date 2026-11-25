@@ -59,6 +59,7 @@ struct Host {
             keys.emplace_back(command, mode);
             return true;
         };
+        ce.now_ms = [this] { return clock; };
         commands = std::make_unique<mq::Commands>(ce);
         mq::ScriptEnv se;
         se.hooks = &hooks;
@@ -1128,6 +1129,74 @@ mq.cmd('/docommand /hpbind')
     CHECK(std::find(h.sent.begin(), h.sent.end(), "/tell Groupie bind 75") != h.sent.end());
     CHECK(std::find(h.sent.begin(), h.sent.end(), "/tell Groupie x${Me.PctHPs}") != h.sent.end());
     CHECK(std::find(h.sent.begin(), h.sent.end(), "/tell Groupie x75") == h.sent.end());
+}
+
+TEST_CASE("MQ commands: /timed runs its line that many tenths of a second later, expanded then, as its sender") {
+    Host h;
+    auto tick = [&](std::int64_t ms) {
+        h.clock += ms;
+        h.hooks.pulse();
+    };
+    // 3 tenths: not before 300 ms.
+    h.run("/timed 3 /who");
+    CHECK(h.sent.empty());
+    tick(299);
+    CHECK(h.sent.empty());
+    tick(1);
+    CHECK(h.sent == std::vector<std::string>{"/who"});
+    tick(1000);
+    CHECK(h.sent.size() == 1u); // once
+    // Due ones in the order they fall due; the same time in the order sent. 0 (or no number) is the next pulse.
+    h.sent.clear();
+    h.run("/timed 2 /who second");
+    h.run("/timed 1 /who first");
+    h.run("/timed 2 /who third");
+    h.run("/timed x /who now");
+    tick(0);
+    CHECK(h.sent == std::vector<std::string>{"/who now"});
+    tick(250);
+    CHECK(h.sent == std::vector<std::string>{"/who now", "/who first", "/who second", "/who third"});
+    // ${...} is read when the line runs, not when it is sent.
+    h.sent.clear();
+    auto& ps = net::GameConnectionTestAccess::status(*h.world.conn);
+    h.run("/timed 1 /tell Groupie ${Me.PctHPs}");
+    ps.hp = 500;
+    tick(100);
+    CHECK(h.sent == std::vector<std::string>{"/tell Groupie 50"});
+    // Nested: a /timed line may queue another.
+    h.sent.clear();
+    h.run("/timed 1 /timed 1 /who later");
+    tick(100);
+    CHECK(h.sent.empty());
+    tick(100);
+    CHECK(h.sent == std::vector<std::string>{"/who later"});
+    // No command, no arguments.
+    h.run("/timed 5");
+    h.run("/timed");
+    CHECK(h.printed.back() == "Usage: /timed <deciseconds> <command>");
+    tick(1000);
+    CHECK(h.sent.size() == 1u);
+    // A script's line runs with the script's permissions, not the player's, however late it runs.
+    h.sent.clear();
+    {
+        plugin::CallerScope scope(plugin::kCapRead | plugin::kCapCommands, "probe");
+        h.run("/timed 1 /sit");
+        h.run("/timed 1 /who allowed");
+    }
+    tick(100);
+    CHECK(h.sent == std::vector<std::string>{"/who allowed"});
+    bool refused = false;
+    for (const auto& l : h.printed)
+        refused |= l.find("probe") != std::string::npos && l.find("/sit needs the server's 'move' permission") !=
+                                                                std::string::npos;
+    CHECK(refused);
+    // At most kMaxTimedCommands waiting at once.
+    for (std::size_t i = 0; i < mq::kMaxTimedCommands; ++i) h.run("/timed 10 /who");
+    h.run("/timed 10 /who one too many");
+    CHECK(h.printed.back().find("/timed holds at most") != std::string::npos);
+    h.sent.clear();
+    tick(1000);
+    CHECK(h.sent.size() == mq::kMaxTimedCommands);
 }
 
 // ---------------------------------------------------------------- Lua socials

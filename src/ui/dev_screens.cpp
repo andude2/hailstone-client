@@ -21,6 +21,7 @@
 #include "game/eq_names.h"
 #include "game/zone_names.h"
 #include "game/gamepad_bindings.h"
+#include "game/mq_colors.h"
 
 namespace hailstone::ui {
 
@@ -2159,8 +2160,12 @@ std::optional<std::string> chat_window(ChatView& view, bool* open) {
     ImGui::PushTextWrapPos(0.0f);
     for (const ChatLine& l : view.lines) {
         ImGui::PushStyleColor(ImGuiCol_Text, l.rgb ? rgb_color(l.rgb) : channel_color(l.channel));
-        if (l.text.find('\x12') == std::string::npos) ImGui::TextUnformatted(l.text.c_str());
-        else chat_line_with_links(l.text, view);
+        // The dev screen's chat draws each line in one colour: a plugin's colour codes are taken out (game/mq_colors.h).
+        const bool coded = l.text.find(game::kMqColorCode) != std::string::npos;
+        const std::string plain = coded ? game::strip_mq_colors(l.text) : std::string();
+        const std::string& text = coded ? plain : l.text;
+        if (text.find('\x12') == std::string::npos) ImGui::TextUnformatted(text.c_str());
+        else chat_line_with_links(text, view);
         ImGui::PopStyleColor();
     }
     ImGui::PopTextWrapPos();

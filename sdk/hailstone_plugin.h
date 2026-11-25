@@ -27,11 +27,11 @@
  * Compatibility: the tables only grow at their end and carry their size. A plugin built for an older ABI loads in a
  * newer client; one built for a newer ABI does not load in an older client.
  *
- * This SDK's ABI 4 is upstream's: the UI contribution pair and the later get_spells_by_name/acquire/release calls,
- * in the order upstream added them. ABI 5 appends this branch's own loot and inventory calls (get_loot_data_bulk
- * through inventory_rows) after them, so nothing upstream placed has moved. A plugin that reports ABI 3 is handed the
- * same append-only table, so its released positions still hold; test HAILSTONE_HOST_HAS before any call past the
- * prefix you were built for.
+ * This SDK's ABI 4 is upstream's: the UI contribution pair and the later ABI 4 calls through get_scripts_config_dir,
+ * in the order upstream added them. ABI 5 appends this branch's own loot, inventory and task calls
+ * (get_loot_data_bulk through task_rows) after them, so nothing upstream placed has moved. A plugin that reports ABI 3
+ * is handed the same append-only table, so its released positions still hold; test HAILSTONE_HOST_HAS before any call
+ * past the prefix you were built for.
  *
  * Plain C, no C++ types across the boundary: build with any compiler. Every string the client passes is valid only
  * during the call; strings the plugin returns are copied by the client before the call returns.
@@ -99,6 +99,11 @@ extern "C" {
 #define GAMESTATE_INGAME 5
 #define GAMESTATE_LOGGINGIN 253
 #define GAMESTATE_UNLOADING 255
+
+/* command_exists' answers */
+#define HAILSTONE_COMMAND_NONE 0
+#define HAILSTONE_COMMAND_ADDED 1 /* AddCommand: a plugin's, a script's or the client's own (/echo, /plugin ...) */
+#define HAILSTONE_COMMAND_GAME 2  /* the game's own slash command */
 
 /* A TLO value the plugin gives back. */
 enum {
@@ -186,7 +191,7 @@ typedef struct HS_Bulk_BuffData {
     int32_t hitcount;
     int32_t spelltype;
     int32_t counterType;
-    int32_t counterTotal;
+    int32_t counterTotal; /* that counter effect's counters left once known, else the spell's base (docs/plugins.md) */
     uint8_t slotType; /* HAILSTONE_BUFF_SLOT_BUFF / _SONG / _DISC*/
 } HS_BulkBuffData;
 /* get_buff_name_data_bulk: HS_Bulk_BuffData with the caster's name in place of its spawn id. One record per buff slot,
@@ -199,7 +204,7 @@ typedef struct HS_Bulk_BuffNameFixedRecord {
     int32_t hitcount;
     int32_t spelltype;
     int32_t counterType;
-    int32_t counterTotal;
+    int32_t counterTotal; /* as get_buff_data_bulk's: the counters left once known, else the spell's base */
     uint8_t slotType; /* HAILSTONE_BUFF_SLOT_BUFF / _SONG / _DISC*/
 } HS_Bulk_BuffNameFixedRecord;
 typedef struct HS_Bulk_PetBuffData {
@@ -861,6 +866,9 @@ typedef struct HailstoneHooks {
     const char* (*zone_display_name)(uint32_t zone_id, uint32_t instance_id);
     /* UI + EXTEND. Nonzero supplies a validated map policy; zero abstains. */
     int (*map_policy)(HailstoneMapPolicy* out);
+    /* EXTEND. Requests an inclusive spell ID limit above the stock RoF2 range; 0 abstains. The host validates
+     * the spell file before selecting a limit for the next zone stream. Added later in ABI 4. */
+    uint32_t (*spell_id_limit)(void);
 } HailstoneHooks;
 
 
@@ -941,7 +949,11 @@ typedef struct PluginHostApi {
     const char* (*name)(void* host);           /* the plugin's name */
     void (*log)(void* host, int level, const char* text); /* the client's log: 0 debug .. 3 error */
 
-    /* MQ's WriteChatColor: a line in the chat window (color 0xRRGGBB, 0 the default). */
+    /* MQ's WriteChatColor: a line in the chat window (color 0xRRGGBB, 0 the default). MacroQuest's colour codes in the
+     * text (BEL and a letter, "\ag" ... "\ax", "\a#rrggbb") colour its parts (docs/plugins.md "Colour codes"). Unlike
+     * the other host functions it works from any of the plugin's threads: from one the client does not answer on (not
+     * its own thread, not a lent one) the line waits for the next pulse, as MacroQuest's WriteChatColor posts it to its
+     * main thread; lines from there keep their order. */
     void (*write_chat)(void* host, const char* text, uint32_t color);
     /* MQ's DoCommand: a command line, as typed (${...} parsed), held to the plugin's capabilities. */
     void (*do_command)(void* host, const char* line);
@@ -1028,7 +1040,8 @@ typedef struct PluginHostApi {
 
     /* ---- ABI 2: more of the client ---- */
     /* A chat line in one of the game's chat colours (the colour numbers the game's own messages use: 15 yellow,
-     * 2 green, 6 grey ...; 0 the default), where write_chat takes an RGB value. */
+     * 2 green, 6 grey ...; 0 the default), where write_chat takes an RGB value. From another thread it waits for the
+     * next pulse, as write_chat does. */
     void (*write_chat_color)(void* host, const char* text, uint32_t color);
     /* The plugin's folders for the saved server (servers/<profile>/plugin-config/<name>/) and for the character
      * (servers/<profile>/characters/<world>/<character>/plugin-config/<name>/), created on demand: as config_dir,
@@ -1242,8 +1255,39 @@ typedef struct PluginHostApi {
      * reads still need theirs). Added later in ABI 3: test HAILSTONE_HOST_HAS(host, acquire_bulk_buffer) first. */
     unsigned char* (*acquire_bulk_buffer)(void* host, int32_t* size);
     void (*release_bulk_buffer)(void* host);
+    /* READ. The limit selected for ZoneEntry and whether the currently loaded file supports that extension.
+     * Without a compatible request at ZoneEntry, the limit is 45000 and readiness is 0. With no connection or
+     * permission both calls return 0. Before advertising on the wire, check both results. Added later in ABI 4:
+     * check HAILSTONE_HOST_HAS for both fields. */
+    uint32_t (*spell_id_limit)(void* host);
+    int (*spell_data_ready)(void* host);
+    /* Whether a typed "/name" would run a command, looked up as the line would be: HAILSTONE_COMMAND_ADDED when a
+     * plugin, a script or the client itself added it (AddCommand; these come first), else HAILSTONE_COMMAND_GAME when
+     * it is one of the game's own (whose table takes any prefix of its names, and its GM commands only for a GM),
+     * else HAILSTONE_COMMAND_NONE. The leading '/' is optional; a name with a space is none. Needs no capability; 0
+     * off the main thread. Added later in ABI 3: test HAILSTONE_HOST_HAS(host, command_exists) first. */
+    int (*command_exists)(void* host, const char* name);
+    /* Lends the client's thread to the plugin's own threads, for a plugin whose callback waits while a thread of its
+     * own does the work: a script runtime whose script thread runs while OnPulse blocks, as MQ2Mono's C# scripts do.
+     * lend 1, from inside one of the plugin's callbacks on the client's thread: until lend 0, or until that callback
+     * returns, host functions called from any of the plugin's threads work as on the client's thread, with the
+     * plugin's capabilities. Every host call then runs one at a time, the client's thread's own included, so a thread
+     * may call while the callback waits for it; the callback must only wait, not run the client meanwhile (it can't:
+     * nothing of the client runs until it returns). lend 0 returns once a host call another thread is making has
+     * returned. While it lends, a host call the client's thread makes holds that lock until it returns, callbacks it
+     * runs included: such a callback must not wait for the plugin's threads (their calls wait for the lock). lend 1
+     * returns 1 when it started lending, 2 when the plugin already lends (a nested callback: leave the lend 0 to
+     * whoever started it), 0 on a lent thread, outside a callback, inside another plugin's lending callback, or inside
+     * a host call the client's thread makes while this plugin lends (do not wait there). lend 0 returns 1. Needs no
+     * capability. Added later in ABI 4: test HAILSTONE_HOST_HAS(host, lend_thread) first. */
+    int (*lend_thread)(void* host, int lend);
+    /* The folder the scripts' settings go in, <Hailstone folder>/scripts/config/ (MacroQuest.Path[config]; Lua's
+     * mq.configDir), shared by every plugin and script, for every server. Created on demand and written to `out` as
+     * config_dir writes it (the full length returned; cut to fit), 0 when the client has none. Needs no capability.
+     * Added later in ABI 4: test HAILSTONE_HOST_HAS(host, get_scripts_config_dir) first. */
+    int (*get_scripts_config_dir)(void* host, char* out, size_t out_size);
     /* ---- ABI 5: this branch's own calls, appended after upstream's ABI 4 table (set_ui_contribution through
-     * release_bulk_buffer above). Nothing there moved; test HAILSTONE_HOST_HAS before using any of these. ---- */
+     * get_scripts_config_dir above). Nothing there moved; test HAILSTONE_HOST_HAS before using any of these. ---- */
     /* READ. The open loot session (a corpse's items and coin) as records, as get_raid_data_bulk lays its list
      * out. Added in ABI 5: test HAILSTONE_HOST_HAS(host, get_loot_data_bulk) first. */
     int32_t (*get_loot_data_bulk)(void* host, unsigned char* out, int32_t out_size);

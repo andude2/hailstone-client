@@ -19,7 +19,9 @@ TEST_CASE("PfsArchive rejects data that is not PFS") {
 }
 
 TEST_CASE("PfsArchive reads a classic zone archive" * doctest::skip(!hailstone::test::game_dir())) {
-    auto archive = PfsArchive::open(hailstone::test::game_dir()->find("qeynos2.s3d").value());
+    const auto path = hailstone::test::game_file("qeynos2.s3d");
+    if (!path) return;
+    auto archive = PfsArchive::open(*path);
     CHECK(archive.contains("qeynos2.wld"));
     CHECK(archive.contains("QEYNOS2.WLD"));
     CHECK(archive.contains("objects.wld"));
@@ -33,16 +35,20 @@ TEST_CASE("PfsArchive reads a classic zone archive" * doctest::skip(!hailstone::
 
 TEST_CASE("pfs_name_crc names every file of a classic archive" * doctest::skip(!hailstone::test::game_dir())) {
     // qeynos2.s3d has 152 directory entries: 151 files plus the name table.
-    auto archive = PfsArchive::open(hailstone::test::game_dir()->find("qeynos2.s3d").value());
+    const auto path = hailstone::test::game_file("qeynos2.s3d");
+    if (!path) return;
+    auto archive = PfsArchive::open(*path);
     CHECK(archive.names().size() == 151);
 }
 
 TEST_CASE("PfsArchive handles archives with stale names and a 0xffffffff name table" *
           doctest::skip(!hailstone::test::game_dir())) {
     auto gd = hailstone::test::game_dir();
-    auto velketor = PfsArchive::open(gd->find("velketor_chr.s3d").value());
-    CHECK_FALSE(velketor.contains("kael_chr.wld"));
-    CHECK(velketor.contains("velketor_chr.wld"));
+    if (const auto path = hailstone::test::game_file("velketor_chr.s3d")) {
+        auto velketor = PfsArchive::open(*path);
+        CHECK_FALSE(velketor.contains("kael_chr.wld"));
+        CHECK(velketor.contains("velketor_chr.wld"));
+    }
     if (const auto special = gd->find("gequip_nms.s3d")) {
         auto gequip = PfsArchive::open(*special);
         CHECK(gequip.contains("bat04.dds"));

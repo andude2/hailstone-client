@@ -9,6 +9,7 @@
 #include <cstring>
 #include <format>
 #include <fstream>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -38,6 +39,7 @@
 #include "game/task_window.h"
 #include "game/merchant.h"
 #include "game/server_ext_chain.h"
+#include "game/slash_commands.h"
 #include "game/spa_ids.h"
 #include "game/spell_effect_text.h"
 #include "game/spells.h"
@@ -291,6 +293,16 @@ struct Loaded {
     bool read_denied = false;   // ... HAILSTONE_CAP_READ (the readers)
     bool web_denied = false;    // ... HAILSTONE_CAP_WEB (web_*)
     std::atomic<bool> thread_warned{false}; // said once that it called the host from another thread
+    // write_chat / write_chat_color from one of its own threads (not a lent one): shown at the next pulse, in order,
+    // as MacroQuest's WriteChatColor posts a line from another thread to its main thread. Any of its threads may add.
+    struct QueuedChat {
+        std::string text;
+        std::uint32_t color = 0;
+        bool chat_color = false; // write_chat_color's
+    };
+    std::mutex chat_mutex;
+    std::vector<QueuedChat> queued_chat;
+    bool chat_queue_full = false; // said once that lines were dropped
     std::vector<std::string> threw_at;       // the callbacks that let an exception out (said once each)
 
     // next_spawn's walk: the zone's spawn ids in order, made again at a walk's start (after_id 0) and whenever the
@@ -308,6 +320,9 @@ struct Loaded {
     // deeper (nested) callback leaves it held, and it goes back when the callback it was acquired in returns (Busy).
     std::unique_ptr<unsigned char[]> bulk_buffer;
     int bulk_held_at = 0;
+    // The callback depth (busy) it lent the client's thread at (lend_thread), 0 while it lends nothing: the lending
+    // ends with lend_thread(0) or when that callback returns (Busy).
+    int lend_held_at = 0;
     bool unload_pending = false; // unload asked for while busy: done at the next pulse
     bool host_threw_warned = false; // (host_threw)
     bool map_policy_running = false; // get_map_policy cannot recursively invoke its caller's policy hook
@@ -340,12 +355,40 @@ struct Loaded {
     }
 };
 
+// lend_thread: the plugin lending the client's thread to its own threads, null while none does. One at a time: a
+// plugin lends from inside its callback, so the client's thread is in that plugin until it ends. While one lends,
+// every host call takes g_lend_mutex (the client's thread's own too), so they run one at a time on whatever thread.
+// Recursive: a host call from a lent thread may call into a plugin that calls the host again on that thread.
+namespace {
+std::recursive_mutex g_lend_mutex;
+std::atomic<Loaded*> g_lender{nullptr};
+// How many host calls the client's own thread is making while holding g_lend_mutex (HostThread), nested ones counted;
+// read and written on that thread alone. Inside such a call a lent thread cannot get the lock until it returns, so a
+// callback it dispatches must not wait for one (h_lend_thread refuses there).
+int g_main_locked_calls = 0;
+
+// Ends l's lending, once the host call a lent thread may be making has returned (the lock).
+void end_lending(Loaded& l) {
+    if (g_lender.load() != &l) return;
+    std::lock_guard<std::recursive_mutex> lock(g_lend_mutex);
+    g_lender.store(nullptr);
+    l.lend_held_at = 0;
+}
+} // namespace
+
 // Inside a plugin's code: its capabilities, and it stays loaded until this ends.
 struct Busy {
     explicit Busy(Loaded& l) : l_(l), scope_(l.caps, l.name) { ++l_.busy; }
     ~Busy() {
+        // While a plugin lends, a lent thread's host call may run this plugin's callbacks (their Busy) under
+        // g_lend_mutex at the same time: the counts change under it too. (A callback's return here may come while a
+        // lent call is in flight, when the lending ends with that callback.)
+        std::unique_lock<std::recursive_mutex> lock;
+        if (g_lender.load()) lock = std::unique_lock<std::recursive_mutex>(g_lend_mutex);
         // The callback its bulk buffer was acquired in has returned: the pointer is no longer the plugin's to use.
         if (--l_.busy < l_.bulk_held_at) l_.bulk_held_at = 0;
+        // ... and the one it lent the client's thread in: its threads can no longer act for it.
+        if (l_.lend_held_at && l_.busy < l_.lend_held_at) end_lending(l_);
     }
     Busy(const Busy&) = delete;
     Busy& operator=(const Busy&) = delete;
@@ -403,6 +446,11 @@ public:
     const char* name() const override { return l_ ? l_->name.c_str() : "unloaded plugin"; }
     std::uint64_t lifecycle_revision(const net::GameConnection&) const override {
         return l_ ? l_->lifecycle_generation : 0;
+    }
+    std::uint32_t spell_id_limit(const net::GameConnection&) const override {
+        if (!active() || l_->unload_pending || !l_->can(kCapExtend) || !h().spell_id_limit) return 0;
+        const auto requested = run(h().spell_id_limit);
+        return active() && !l_->unload_pending && l_->can(kCapExtend) ? requested : 0;
     }
 
     std::optional<game::FollowProfile> follow_profile(const net::GameConnection&) const override {
@@ -1270,6 +1318,44 @@ int h_remove_ui_contribution(void* h, const char* id) {
     return l.host->env.ui && l.can(kCapUi | kCapExtend) && l.host->env.ui->remove_contribution_from_sdk(l.name, id);
 }
 
+// The order a typed line takes (Hooks::command before the game's table, as GameConnection's
+// parse_command_line), so the answer is what the line would run.
+int h_command_exists(void* h, const char* name) {
+    Loaded& l = Loaded::of(h);
+    if (!name) return HAILSTONE_COMMAND_NONE;
+    std::string n(name);
+    if (!n.empty() && n.front() != '/') n.insert(n.begin(), '/');
+    // "/" alone would be a prefix of every game command; a word with a space is never looked up as one.
+    if (n.size() < 2 || n.find_first_of(" \t") != std::string::npos) return HAILSTONE_COMMAND_NONE;
+    if (l.host->env.hooks->has_command(n)) return HAILSTONE_COMMAND_ADDED;
+    const net::GameConnection* c = connection_of(l);
+    if (game::find_slash_command(n, c && c->player_is_gm(), c ? &c->strings() : nullptr)) return HAILSTONE_COMMAND_GAME;
+    return HAILSTONE_COMMAND_NONE;
+}
+
+// lend_thread (sdk/hailstone_plugin.h): from inside one of l's callbacks on the client's own thread, lends that
+// thread to l's other threads until lend_thread(0) or until the callback returns (Busy). Refused on a lent thread
+// (only the client's own thread lends itself), outside a callback, and while another plugin lends it (this callback
+// runs inside that plugin's). 2 when l already lends it: the caller did not start it, so must not end it. Refused
+// too inside a host call the client's thread makes while l lends (a callback that call dispatched): that call holds
+// the lock until it returns, so the lent threads cannot call the host meanwhile and a callback waiting for them would
+// never return. This call itself is one such (main_only's HostThread), hence more than one.
+int h_lend_thread(void* h, int lend) {
+    Loaded& l = Loaded::of(h);
+    if (on_lent_thread()) return 0;
+    if (!lend) {
+        end_lending(l);
+        return 1;
+    }
+    if (l.busy == 0) return 0;
+    Loaded* const lender = g_lender.load();
+    if (lender == &l) return g_main_locked_calls > 1 ? 0 : 2;
+    if (lender) return 0;
+    l.lend_held_at = l.busy;
+    g_lender.store(&l);
+    return 1;
+}
+
 // The plugin's folder: plugins/<name>/ when its binary is there, else plugins/<name>/ beside the binary.
 fs::path plugin_folder(const fs::path& file, const std::string& name) {
     fs::path dir = file.parent_path();
@@ -1285,6 +1371,16 @@ const net::GameConnection* readable(Loaded& l, const char* what) {
         return nullptr;
     }
     return connection_of(l);
+}
+
+std::uint32_t h_spell_id_limit(void* h) {
+    const auto* c = readable(Loaded::of(h), "spell_id_limit");
+    return c ? c->spell_id_limit() : 0;
+}
+
+int h_spell_data_ready(void* h) {
+    const auto* c = readable(Loaded::of(h), "spell_data_ready");
+    return c && c->spell_data_ready() ? 1 : 0;
 }
 
 int h_get_player(void* h, HailstonePlayer* out) {
@@ -2011,7 +2107,11 @@ int h_get_buff_data_bulk(void* h, unsigned char* data, int32_t datamax)
                     default:                           match = false;       break;
                     }
                     if (match) { // the first counter effect only
-                        rec->counterTotal = spell->base[i];
+                        // The counters left (the effect's slot data, as MQ2Mono's SlotData and the buff window's
+                        // counter overlay), once the client knows them; until then (a zone-in list or the profile
+                        // fills no slot data) the counters the spell starts with.
+                        rec->counterTotal = buff.counters_known && i < buff.slot_data.size() ? buff.slot_data[i]
+                                                                                              : spell->base[i];
                         break;
                     }
                 }
@@ -2104,7 +2204,11 @@ int32_t h_get_buff_name_data_bulk(void* h, unsigned char* data, int32_t datamax)
                     default:                           match = false;       break;
                     }
                     if (match) { // the first counter effect only
-                        rec->counterTotal = spell->base[i];
+                        // The counters left (the effect's slot data, as MQ2Mono's SlotData and the buff window's
+                        // counter overlay), once the client knows them; until then (a zone-in list or the profile
+                        // fills no slot data) the counters the spell starts with.
+                        rec->counterTotal = buff.counters_known && i < buff.slot_data.size() ? buff.slot_data[i]
+                                                                                              : spell->base[i];
                         break;
                     }
                 }
@@ -2887,6 +2991,12 @@ void h_write_chat_color(void* h, const char* text, std::uint32_t color) {
     else if (l.host->env.print) l.host->env.print(text, 0);
 }
 
+int h_get_scripts_config_dir(void* h, char* out, std::size_t out_size) {
+    const Loaded& l = Loaded::of(h);
+    if (l.host->env.scripts_config_dir.empty()) return 0;
+    return dir_out(l.host->env.scripts_config_dir, out, out_size);
+}
+
 int h_server_config_dir(void* h, char* out, std::size_t out_size) {
     Loaded& l = Loaded::of(h);
     const Policy* policy = l.host->env.policy;
@@ -3271,11 +3381,48 @@ void host_threw(void* h) noexcept {
         }
     }
 }
+// Whether a host call may run on this thread, held for the call: the client's thread, or (lend_thread) a thread of
+// the plugin that lends it the client's thread, which then acts as the client's for the call. While a plugin lends,
+// every host call takes g_lend_mutex, so they run one at a time whichever thread makes them.
+class HostThread {
+public:
+    explicit HostThread(void* h) {
+        if (on_main_thread()) {
+            if (g_lender.load()) {
+                lock_ = std::unique_lock<std::recursive_mutex>(g_lend_mutex);
+                counted_ = !on_lent_thread(); // the client's own thread (a lent one acts as it, but is not it)
+                if (counted_) ++g_main_locked_calls;
+            }
+            ok_ = true;
+            return;
+        }
+        Loaded* l = h ? &Loaded::of(h) : nullptr;
+        if (!l || g_lender.load() != l) return;
+        lock_ = std::unique_lock<std::recursive_mutex>(g_lend_mutex);
+        if (g_lender.load() != l) return; // the lending ended while this waited
+        lent_.emplace();
+        ok_ = true;
+    }
+    ~HostThread() {
+        if (counted_) --g_main_locked_calls;
+    }
+    HostThread(const HostThread&) = delete;
+    HostThread& operator=(const HostThread&) = delete;
+    bool ok() const { return ok_; }
+
+private:
+    std::unique_lock<std::recursive_mutex> lock_; // destroyed after lent_: the thread stops acting first
+    std::optional<ThreadLent> lent_;
+    bool ok_ = false;
+    bool counted_ = false; // in g_main_locked_calls
+};
+
 template <auto F> struct MainOnly;
 template <typename R, typename... A, R (*F)(void*, A...)> struct MainOnly<F> {
     static R call(void* h, A... a) {
         try {
-            if (!on_main_thread()) {
+            HostThread thread(h);
+            if (!thread.ok()) {
                 off_thread(h);
                 if constexpr (std::is_void_v<R>) return;
                 else return R{};
@@ -3291,12 +3438,63 @@ template <typename R, typename... A, R (*F)(void*, A...)> struct MainOnly<F> {
     }
 };
 template <auto F> constexpr auto main_only = &MainOnly<F>::call;
+
+// write_chat and write_chat_color: on the client's thread (or a lent one) at once; from another of the plugin's
+// threads queued for the next pulse (show_queued_chat), as MacroQuest's WriteChatColor does, where every other host
+// function is refused there. At most kQueuedChatLines wait; past them a line is dropped and the log says so once.
+constexpr std::size_t kQueuedChatLines = 1000;
+void queue_chat(void* h, const char* text, std::uint32_t color, bool chat_color) {
+    if (!h || !text) return;
+    Loaded& l = Loaded::of(h);
+    std::lock_guard<std::mutex> lock(l.chat_mutex);
+    if (l.queued_chat.size() >= kQueuedChatLines) {
+        if (!l.chat_queue_full) {
+            l.chat_queue_full = true;
+            log::warn("plugin {}: more than {} chat lines from its own threads before a pulse; the rest dropped",
+                      l.name, kQueuedChatLines);
+        }
+        return;
+    }
+    l.queued_chat.push_back({text, color, chat_color});
+}
+template <bool ChatColor> void write_chat_entry(void* h, const char* text, std::uint32_t color) {
+    try {
+        {
+            HostThread thread(h);
+            if (thread.ok()) {
+                if constexpr (ChatColor) h_write_chat_color(h, text, color);
+                else h_write_chat(h, text, color);
+                return;
+            }
+        }
+        queue_chat(h, text, color, ChatColor);
+    } catch (...) {
+        host_threw(h);
+    }
+}
+// The lines queue_chat held, on the client's thread at a pulse.
+void show_queued_chat(Loaded& l) {
+    std::vector<Loaded::QueuedChat> lines;
+    {
+        std::lock_guard<std::mutex> lock(l.chat_mutex);
+        lines.swap(l.queued_chat);
+        l.chat_queue_full = false;
+    }
+    // As the plugin's own line, as it would be from one of its callbacks: GameConnection::chat keeps MacroQuest's
+    // colour codes only in a plugin's or script's line, and this runs from the client's pulse, outside any.
+    CallerScope scope(l.caps, l.name);
+    for (const auto& c : lines) {
+        if (c.chat_color) h_write_chat_color(&l, c.text.c_str(), c.color);
+        else h_write_chat(&l, c.text.c_str(), c.color);
+    }
+}
 // The same, for a host function whose 0 means something: off the client's thread it returns `off` instead.
 template <auto F, auto Off> struct MainOnlyOr;
 template <typename R, typename... A, R (*F)(void*, A...), auto Off> struct MainOnlyOr<F, Off> {
     static R call(void* h, A... a) {
         try {
-            if (!on_main_thread()) {
+            HostThread thread(h);
+            if (!thread.ok()) {
                 off_thread(h);
                 return static_cast<R>(Off);
             }
@@ -3366,8 +3564,9 @@ NativePlugins::NativePlugins(NativeEnv env) : impl_(std::make_unique<Impl>()) {
     Impl* m = impl_.get();
     m->owner = m->env.hooks->new_owner("plugins");
     m->env.hooks->add_command(m->owner, "/plugin", [m](std::string_view args) { m->command(args); }, kCapCommands);
-    // Unloads a plugin asked for from its own code.
+    // Shows the chat lines plugins wrote from their own threads, and unloads a plugin asked for from its own code.
     m->env.hooks->on_pulse(m->owner, [m] {
+        for (const auto& l : m->loaded) show_queued_chat(*l);
         std::vector<std::string> pending;
         for (const auto& l : m->loaded)
             if (l->unload_pending && !l->busy) pending.push_back(l->name);
@@ -3667,7 +3866,7 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
     p.table.caps = main_only<h_caps>;
     p.table.name = main_only<h_name>;
     p.table.log = main_only<h_log>;
-    p.table.write_chat = main_only<h_write_chat>;
+    p.table.write_chat = write_chat_entry<false>;
     p.table.do_command = main_only<h_do_command>;
     p.table.add_command = main_only<h_add_command>;
     p.table.remove_command = main_only<h_remove_command>;
@@ -3705,7 +3904,7 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
     p.table.out_end = main_only<h_out_end>;
     p.table.add_option = main_only<h_add_option>;
     p.table.add_menu = main_only<h_add_menu>;
-    p.table.write_chat_color = main_only<h_write_chat_color>;
+    p.table.write_chat_color = write_chat_entry<true>;
     p.table.server_config_dir = main_only<h_server_config_dir>;
     p.table.character_config_dir = main_only<h_character_config_dir>;
     p.table.zone_name = main_only<h_zone_name>;
@@ -3783,6 +3982,11 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
     p.table.get_spells_by_name_data_bulk = main_only<h_get_spells_by_name_data_bulk>;
     p.table.acquire_bulk_buffer = acquire_bulk_buffer_entry;
     p.table.release_bulk_buffer = main_only<h_release_bulk_buffer>;
+    p.table.spell_id_limit = main_only<h_spell_id_limit>;
+    p.table.spell_data_ready = main_only<h_spell_data_ready>;
+    p.table.command_exists = main_only<h_command_exists>;
+    p.table.lend_thread = main_only<h_lend_thread>;
+    p.table.get_scripts_config_dir = main_only<h_get_scripts_config_dir>;
     // ABI 5: this branch's own calls, appended after upstream's table so its layout never moves.
     p.table.get_loot_data_bulk = main_only<h_get_loot_data_bulk>;
     p.table.loot_corpse = main_only<h_loot_corpse>;

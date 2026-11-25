@@ -37,6 +37,7 @@
 #include "game/combat.h"
 #include "game/eq_names.h"
 #include "game/item_links.h"
+#include "game/mq_colors.h"
 #include "game/spells.h"
 #include "net/game_connection.h"
 #include "plugin/lua_keep.h"
@@ -328,22 +329,40 @@ std::string timestamp_stml(std::int64_t time, TimestampFormat format) {
     return std::format("<c \"#8a8a8a\">[{:02d}:{:02d}:{:02d}] </c>", m.hour, m.min, time % 60);
 }
 
+// The text between a line's links: its MacroQuest colour codes (a plugin's or script's line: game/mq_colors.h) as
+// <c "#rrggbb"> and </c>, as MacroQuest's MQToSTML gives them, the rest escaped (with the name link).
+void add_colored(std::string& out, std::string_view text, std::string& name, game::MqColorState& colors) {
+    if (text.find(game::kMqColorCode) == std::string_view::npos) {
+        out += escape_linking(text, name);
+        return;
+    }
+    for (const game::MqColorPiece& p : game::parse_mq_colors(text, colors)) {
+        switch (p.kind) {
+        case game::MqColorPiece::Kind::Text: out += escape_linking(p.text, name); break;
+        case game::MqColorPiece::Kind::Open: out += std::format("<c \"#{:06x}\">", p.rgb); break;
+        case game::MqColorPiece::Kind::Close: out += "</c>"; break;
+        }
+    }
+}
+
 // One line as STML: its colour, item links as <a WndNotify="27,data"> (the tag between the two \x12, encoded by
-// game::stml_link_data), and with `names`, a link on its player's name.
+// game::stml_link_data), and with `names`, a link on its player's name. A colour code's colour lasts across the
+// links, which keep their own link colour; any still open close at the end of the line.
 std::string line_stml(const ui::ChatLine& l, bool names, TimestampFormat stamps) {
     std::uint32_t rgb = l.rgb ? l.rgb : l.color ? chat_index_rgb(static_cast<int>(l.color)) : channel_rgb(l.channel);
     std::string out = timestamp_stml(l.time, stamps) + std::format("<c \"#{:06x}\">", rgb & 0xffffff);
     std::string name = names ? link_name(l) : std::string();
+    game::MqColorState colors(rgb & 0xffffff);
     std::string_view text = l.text;
     std::size_t at = 0;
     while (at < text.size()) {
         std::size_t a = text.find('\x12', at);
         std::size_t b = a == std::string::npos ? std::string::npos : text.find('\x12', a + 1);
         if (b == std::string::npos) {
-            out += escape_linking(text.substr(at), name);
+            add_colored(out, text.substr(at), name, colors);
             break;
         }
-        out += escape_linking(text.substr(at, a - at), name);
+        add_colored(out, text.substr(at, a - at), name, colors);
         std::string tag = l.text.substr(a + 1, b - a - 1);
         if (!tag.empty() && tag.front() == '3') {
             const auto achievement = game::parse_achievement_chat_link(tag);
@@ -367,6 +386,7 @@ std::string line_stml(const ui::ChatLine& l, bool names, TimestampFormat stamps)
         out += std::format("<a WndNotify=\"27,{}\">{}</a>", game::stml_link_data(tag), escape(shown));
         at = b + 1;
     }
+    for (std::size_t i = game::finish_mq_colors(colors).size(); i > 0; --i) out += "</c>";
     return out + "</c>";
 }
 
@@ -2770,7 +2790,7 @@ std::string chat_visible_text() {
         std::vector<std::string> lines;
         for (std::size_t k = 0; k < v.lines.size(); ++k)
             if (line_seq(v, k) > wnd(w).cleared && window_of_line(v.lines[k]) == w)
-                lines.push_back(game::strip_links(v.lines[k].text));
+                lines.push_back(game::strip_mq_colors(game::strip_links(v.lines[k].text)));
         std::size_t from = lines.size() > 20 ? lines.size() - 20 : 0;
         for (std::size_t i = from; i < lines.size(); ++i) out += lines[i] + "\n";
         out += "\n===================================\n";

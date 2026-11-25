@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <iterator>
 #include <random>
+#include <utility>
 
 #include "core/ascii_case.h"
 #include "core/game_dir.h"
@@ -30,6 +31,7 @@
 #include "game/sound_rules.h"
 #include "game/spawn_heights.h"
 #include "game/coords.h"
+#include "game/mq_colors.h"
 #include "game/zone_names.h"
 #include "game/mechanics/tables.h"
 #include "game/mechanics/vehicle.h"
@@ -135,6 +137,8 @@ void GameConnection::reload_game_files() {
     auto table = std::make_shared<game::SpellTable>();
     if (!table->load(game_)) log::warn("spells_us.txt not found; spell names and rules are unavailable");
     spell_table_ = std::move(table);
+    if (spell_id_limit_ > game::kRof2StockMaxSpellId && !spell_data_ready())
+        log::warn("Reloaded spells_us.txt does not support the current zone's spell ID limit {}", spell_id_limit_);
     // SetHeights' data: racedata.txt's default heights and moddat.ini's ROffsets (game/spawn_heights.h).
     auto text = [&](std::string_view file) {
         auto bytes = game_.read(file);
@@ -154,6 +158,21 @@ void GameConnection::reload_game_files() {
 
 GameConnection::~GameConnection() { disconnect(); }
 
+void GameConnection::select_zone_spell_limit() {
+    spell_id_limit_ = game::kRof2StockMaxSpellId;
+    const auto requested = server_ext().spell_id_limit(*this);
+    if (!requested) return;
+    if (requested <= game::kRof2StockMaxSpellId || !std::in_range<std::int32_t>(requested)) {
+        log::warn("Unsupported server extension spell ID limit {}", requested);
+        return;
+    }
+    if (!spell_table_->compatible_with_wire_limit(requested)) {
+        log::warn("spells_us.txt cannot support the requested server extension spell ID limit {}", requested);
+        return;
+    }
+    spell_id_limit_ = requested;
+}
+
 void GameConnection::fail(std::string message) {
     close_evolving_transfer();
     reset_fellowship();
@@ -163,6 +182,7 @@ void GameConnection::fail(std::string message) {
     capture_bank();
     error_ = std::move(message);
     state_ = ConnectionState::Disconnected;
+    spell_id_limit_ = game::kRof2StockMaxSpellId;
     respawn_.reset();
     clear_hover_rez();
     respawn_spawn_pending_ = false;
@@ -179,6 +199,14 @@ void GameConnection::fail(std::string message) {
 
 void GameConnection::chat(ChatEvent::Kind kind, std::string text, std::uint32_t rgb, std::uint32_t color,
                           std::string peer, std::optional<std::string> display_text) {
+    // MacroQuest's colour codes (game/mq_colors.h) are for the plugins' and scripts' own lines: from anyone else (a
+    // server's message, a player's tell) a BEL is taken out, so their text cannot colour the chat. A hook below may
+    // still put codes into a line it rewrites, as the plugin's own.
+    if (plugin::caller_name().empty()) {
+        auto drop = [](std::string& t) { std::erase(t, game::kMqColorCode); };
+        drop(text);
+        if (display_text) drop(*display_text);
+    }
     if (options_.hooks) { // OnIncomingChat, OnFilterChat (a server's client may drop lines in dsp_chat)
         // A deliberate difference from MQ, whose hook hangs off dsp_chat and sees a hit line as displayed: hooks get
         // the full sentence whatever the hit mode (docs/plugins.md), so a parser matches one form.
@@ -192,8 +220,14 @@ void GameConnection::chat(ChatEvent::Kind kind, std::string text, std::uint32_t 
         rgb = line.color;
     }
     // Hit modes change presentation only: logs and incoming-chat parsers retain the complete sentence.
-    if (options_.diagnostic_chat_log) log::info("chat: {}", text);
-    if (chat_logging()) write_chat_log(text); // dsp_chat's OutputTextToLog (Log on)
+    if (text.find(game::kMqColorCode) == std::string::npos) {
+        if (options_.diagnostic_chat_log) log::info("chat: {}", text);
+        if (chat_logging()) write_chat_log(text); // dsp_chat's OutputTextToLog (Log on)
+    } else {
+        const std::string plain = game::strip_mq_colors(text); // the logs are plain text
+        if (options_.diagnostic_chat_log) log::info("chat: {}", plain);
+        if (chat_logging()) write_chat_log(plain);
+    }
     chat_.push_back({kind, display_text ? std::move(*display_text) : std::move(text), rgb, color, std::move(peer)});
     if (chat_.size() > 500) chat_.pop_front();
 }
@@ -209,6 +243,7 @@ void GameConnection::start(const WorldTicket& ticket) {
     reset_tribute_donations();
     reset_tribute_bonuses();
     reset_guild_permissions(kTributeNone);
+    spell_id_limit_ = game::kRof2StockMaxSpellId;
     ticket_ = ticket;
     camped_out_.reset();
     link_death_.reset();
@@ -729,6 +764,8 @@ void GameConnection::update() {
     if (zone_session_) {
         zone_session_->update();
         if (zone_session_->state() == SessionState::Connected && state_ == ConnectionState::ZoneConnecting) {
+            // World identity is known now. Publish readiness before the outgoing packet hook runs.
+            select_zone_spell_limit();
             ZoneEntryRequest entry;
             entry.name = character_;
             // GetZoneInfoFromNetwork @0x539480: the spell files' checksums (ClientSpellManager +0x2bf40/+0x2bf44).
@@ -1129,6 +1166,7 @@ void GameConnection::handle_world(const AppPacket& p) {
         quest_npcs_asked_ = false;
         world_.player_id = 0;
         world_.controlled_id = 0;
+        if (world_.eye_id) speed_run_ = 0.0f;
         world_.eye_id = world_.view_id = 0;
         eye_motion_dirty_ = false;
         last_eye_position_send_ = {};
@@ -2945,7 +2983,9 @@ void GameConnection::send_position(bool force, glm::vec3 position, bool reliable
     // PackPlayerPositionUpdate @0x4dd360: the animation field is SpeedRun (+0x7c, clamped to -12.8..12.7) x 40,
     // truncated (__ftol2_sse); other clients unpack it x 0.025 as the spawn's SpeedRun (its walk / run animation).
     // A ridden mount's (the controlled spawn's) goes out under the rider's id (DoMainLoop @0x53e28b).
-    float speed_run = std::clamp(speed_run_, -12.8f, 12.7f);
+    // While the Eye has the controls, SpeedRun belongs to its frame. The passive player has no run speed.
+    // Sending the Eye's speed under the player's ID makes observers extrapolate movement for the caster.
+    const float speed_run = std::clamp(world_.eye_id ? 0.0f : speed_run_, -12.8f, 12.7f);
     u.motion.animation = static_cast<std::int32_t>(speed_run * 40.0f);
     send_zone(encode(u), reliable);
     last_position_send_ = now;
@@ -2975,6 +3015,8 @@ void GameConnection::release_eye_control(bool remove_effect) {
             spells_.buffs[static_cast<std::size_t>(slot)] = {};
         }
     if (!game::release_eye_control(world_)) return;
+    // A position report can run before the next movement frame supplies the restored body's SpeedRun.
+    speed_run_ = 0.0f;
     eye_motion_dirty_ = false;
     last_eye_position_send_ = {};
     ByteWriter ack;
@@ -3017,6 +3059,7 @@ void GameConnection::send_eye_position(bool force) {
 void GameConnection::leave_zone_dropped() {
     reset_achievements();
     reset_rewards();
+    spell_id_limit_ = game::kRof2StockMaxSpellId;
     // The zone has dropped the link (or was closed after the wait).
     ZoneExit exit = std::exchange(zone_exit_, ZoneExit::None);
     if (exit == ZoneExit::Zoning) {
@@ -3102,6 +3145,7 @@ void GameConnection::disconnect() {
     zone_session_.reset();
     world_session_.reset();
     discard_questions(); // nothing is left to answer them to
+    spell_id_limit_ = game::kRof2StockMaxSpellId;
     if (state_ != ConnectionState::Disconnected) state_ = ConnectionState::Disconnected;
 }
 

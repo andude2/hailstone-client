@@ -490,12 +490,12 @@ void ClientApp::update_player(float dt) {
     for (const auto& e : key_events_)
         if (game::mechanics::is_movement_command(e.command)) movement_command(e.command, e.down, accept);
     mk.move_down = actions_ui_->keymap().held(game::KeyCommand::CMD_MOVE_DOWN);
-    // CastSpell's line of sight test (PlayerBase::CanSee) against the zone's collision.
+    // Spell sight lines test the current scene, including doors and moving objects.
     // Each new connection is given its hooks once. (Not a test on the connection's address: a new connection can be
     // allocated where the freed one was, after /camp or a return to character select.)
     if (!conn_->has_line_of_sight()) {
         conn_->set_line_of_sight([this](const glm::vec3& a, const glm::vec3& b) {
-            return !collision_ || collision_->line_of_sight(a, b);
+            return world_line_of_sight(a, b);
         });
         // OP_RequestClientZoneChange: DoTeleportB on the player (a #goto in this zone moves without zoning).
         // Capture the owning connection so a parked character's summon never moves the active crew view's body.

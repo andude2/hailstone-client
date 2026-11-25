@@ -4386,6 +4386,89 @@ return "ok"
     CHECK(run_gamepad_lib_script(kScript, "ui_pack_gamepad_settle_test") == "ok");
 }
 
+// One highlight (lib/theme.lua T.button, T.slot): with a pad given, its focus alone says which item is focused; the
+// mouse resting over an item the pad's focus is not on does not light it as well. Without a pad, the mouse does. And
+// the pack's mouse checks over a rectangle (T.mouseOver) need the window itself hovered: not a popup above it.
+TEST_CASE("UI packs (gamepad): a pad's focus is the only highlight, and the mouse needs its window") {
+    constexpr const char* kScript = R"lua(
+local T = dofile("lib/theme.lua")
+local function check(ok, what) if not ok then error(what, 2) end end
+ui.Begin("gamepad highlight test")
+local hovered, padFocus = ui.IsItemHovered, false
+ui.IsItemHovered = function() return true end
+local fake = { focused = function() return padFocus end, yActivated = function() return false end,
+  navVisible = function() return false end }
+local _, focused = T.button("##b1", "One", 100, 40, nil, fake)
+check(focused == false, "button: the mouse lit an item the pad is not on")
+_, focused = T.slot("##s1", nil, 40, nil, fake)
+check(focused == false, "slot: the mouse lit an item the pad is not on")
+padFocus = true
+_, focused = T.button("##b2", "Two", 100, 40, nil, fake)
+check(focused == true, "button: the pad's focus not shown")
+_, focused = T.button("##b3", "Three", 100, 40)
+check(focused == true, "button without a pad: the mouse not shown")
+_, focused = T.slot("##s2", nil, 40)
+check(focused == true, "slot without a pad: the mouse not shown")
+ui.IsItemHovered = hovered
+local overRect, overWindow = ui.IsMouseHoveringRect, ui.IsWindowHovered
+local flags
+ui.IsMouseHoveringRect = function() return true end
+ui.IsWindowHovered = function(f) flags = f; return false end
+check(not T.mouseOver(0, 0, 10, 10), "over a window above")
+check(flags & ui.HoveredFlags.ChildWindows ~= 0 and flags & ui.HoveredFlags.AllowWhenBlockedByActiveItem ~= 0, "flags")
+ui.IsWindowHovered = function() return true end
+check(T.mouseOver(0, 0, 10, 10), "over its own window")
+ui.IsMouseHoveringRect, ui.IsWindowHovered = overRect, overWindow
+ui.End()
+return "ok"
+)lua";
+    CHECK(run_gamepad_lib_script(kScript, "ui_pack_gamepad_highlight_test") == "ok");
+}
+
+// lib/markets.lua M.rows: a row that reads as nothing (gone since the count was read) is left out, so every later row
+// is still there for ipairs and a sort, whether the whole list is read or a few rows a frame; filled again, it is back.
+TEST_CASE("UI packs (gamepad): a market list's missing row leaves no hole") {
+    constexpr const char* kScript = R"lua(
+local M = dofile("lib/markets.lua")
+local function check(ok, what) if not ok then error(what, 2) end end
+local windows = hs.UI.windows
+local info, row = windows.ListInfo, windows.ListRow
+local LIST = {}
+for i = 1, 30 do LIST[i] = "r" .. i end
+local gone = { [3] = true }
+windows.ListInfo = function() return #LIST, 1, 4 end
+windows.ListRow = function(_, _, r)
+  if gone[r + 1] then return nil end
+  return { LIST[r + 1] }
+end
+local function names(rows)
+  local out = {}
+  for _, r in ipairs(rows) do out[#out + 1] = r.texts[1] end
+  return out
+end
+-- read whole: 29 rows, the one after the hole kept
+local rows, selected = M.rows("MarketTestWnd", "L")
+local got = names(rows)
+check(#got == 29 and #rows == 29 and got[3] == "r4" and got[29] == "r30", "whole: " .. table.concat(got, ","))
+check(selected == 4, "selected")
+-- filled again: read back in a few rows a frame (30 rows: 13 a call)
+gone[3] = nil
+for _ = 1, 3 do rows = M.rows("MarketTestWnd", "L") end
+got = names(rows)
+check(#got == 30 and got[3] == "r3", "filled: " .. table.concat(got, ","))
+-- gone in the middle while read a few rows a frame
+gone[10] = true
+for _ = 1, 3 do rows = M.rows("MarketTestWnd", "L") end
+got = names(rows)
+check(#got == 29 and #rows == 29 and got[10] == "r11" and got[29] == "r30", "a few a frame: " .. table.concat(got, ","))
+local copy = table.move(rows, 1, #rows, 1, {})
+table.sort(copy, function(a, b) return a.index > b.index end) -- (a hole would hand the sort a nil)
+windows.ListInfo, windows.ListRow = info, row
+return "ok"
+)lua";
+    CHECK(run_gamepad_lib_script(kScript, "ui_pack_gamepad_market_rows_test") == "ok");
+}
+
 // The gamepad STML parser (lib/stml.lua): a "<" that opens no tag is text, shown with what follows it, in the colour
 // it is in; a closed tag is still dropped.
 TEST_CASE("UI packs (gamepad): STML keeps the text after an unmatched <") {
@@ -5954,7 +6037,8 @@ TEST_CASE("UI packs (modern): a resized bag window lays its slots out to its wid
 }
 
 // The buff menu (ui/modern/lib/buffmenu.lua): a right click on a target's or the pet's buff opens that buff's menu,
-// and its rows act on the buff that was clicked: Spell Info on the target's, Add to Blocked Pet Spells on the pet's.
+// and its rows act on the buff that was clicked: Spell Info on the target's, Add to Blocked Pet Spells on the pet's,
+// and Remove on a removable pet buff still on the same pet and in the same slot.
 // The frame's own menu stays shut (the buff took the click); Alt with a right click still opens it.
 TEST_CASE("UI packs (modern): a right click on a target's or the pet's buff opens the buff menu") {
     test::ScratchDir scratch("ui_pack_buff_menu_test");
@@ -5980,13 +6064,20 @@ TEST_CASE("UI packs (modern): a right click on a target's or the pet's buff open
         run(R"lua(
 targetShown, petShown = true, true
 targetIcon, petIcon = nil, nil
-menuLabels, menuPick, shownSpell, blocked = {}, nil, nil, {}
-local buffSlot, label, shown, gauge, menuItem, showSpell, setText, clickChild =
-  hs.BuffSlot, hs.Label, hs.WindowShown, hs.Gauge, ui.MenuItem, hs.ShowSpell, hs.SetWindowText, hs.ClickChild
-hs.BuffSlot = function(win, id, overlays)
+menuLabels, menuPick, menuPicked, shownSpell, blocked, removals = {}, nil, nil, nil, {}, {}
+petBeneficial, petEntity, petSlot = true, 104, 19
+local buffSlot, label, shown, gauge, menuItem, showSpell, setText, clickChild, windowButton =
+  hs.BuffSlot, hs.Label, hs.WindowShown, hs.Gauge, ui.MenuItem, hs.ShowSpell, hs.SetWindowText, hs.ClickChild, hs.WindowButton
+hs.BuffSlot = function(win, id, overlays, identity)
   if win == "TargetWindow" and id == "Buff0" then return 11, 60000, "Holy Armor", true end
-  if win == "PetInfoWindow" and id == "PetBuff0" then return 11, 60000, "Holy Armor", true end
-  return buffSlot(win, id, overlays)
+  if win == "PetInfoWindow" and id == "PetBuff0" then
+    local removable = identity and petBeneficial
+    if petBeneficial then
+      return 11, 60000, "Holy Armor", true, 1, removable and petEntity or nil, removable and petSlot or nil
+    end
+    return 12, 60000, "Test Slow", false, 0
+  end
+  return buffSlot(win, id, overlays, identity)
 end
 hs.Label = function(n) if n == 28 then return "a rat" end return label(n) end
 hs.WindowShown = function(win)
@@ -6009,9 +6100,13 @@ hs.ClickChild = function(win, id, button)
   if win == "BlockedPetBuffWnd" then blocked.add = id .. ":" .. tostring(button); return true end
   return clickChild(win, id, button)
 end
+hs.WindowButton = function(win, id, message)
+  if win == "PetInfoWindow" then removals[#removals + 1] = id .. ":" .. tostring(message); return true end
+  return windowButton(win, id, message)
+end
 ui.MenuItem = function(text, ...)
   menuLabels[#menuLabels + 1] = text
-  if text == menuPick then return true end
+  if text == menuPick then menuPicked = text; return true end
   return menuItem(text, ...)
 end
 local button = ui.InvisibleButton
@@ -6051,7 +6146,7 @@ end
         auto closeMenu = [&] {
             ImGui::ClosePopupsExceptModals();
             s.frames(1);
-            run("menuPick, menuLabels = nil, {}");
+            run("menuPick, menuPicked, menuLabels = nil, nil, {}");
         };
         // the target's buff: Spell Info, and the frame's menu stays shut
         run("menuPick = 'Spell Info'");
@@ -6073,8 +6168,33 @@ end
         press(centre("petIcon"));
         CHECK(run("return blocked.edit") == "BW_EditSpellToBlockFromPet=11");
         CHECK(run("return blocked.add") == "BW_AddSpellToBlockFromPet:left");
-        CHECK(run("return table.concat(menuLabels, '|')") == "Spell Info|Add to Blocked Pet Spells");
+        CHECK(run("return table.concat(menuLabels, '|')") == "Spell Info|Add to Blocked Pet Spells|Remove");
         run("menuPick = nil");
+        release();
+        closeMenu();
+        run("menuPick = 'Remove'");
+        press(centre("petIcon"));
+        CHECK(run("return table.concat(removals, '|')") == "PetBuff0:3");
+        run("menuPick = nil");
+        release();
+        closeMenu();
+
+        // The same spell under the same display icon is a different effect after either change.
+        for (const char* change : {"petEntity = 105", "petSlot = 20"}) {
+            press(centre("petIcon"));
+            CHECK(run("return menuLabels[#menuLabels]") == "Remove");
+            run(change);
+            run("menuPick = 'Remove'");
+            release();
+            CHECK(run("return menuPicked") == "Remove");
+            CHECK(run("return table.concat(removals, '|')") == "PetBuff0:3");
+            closeMenu();
+        }
+
+        run("petBeneficial, menuPick = false, 'Remove'");
+        press(centre("petIcon"));
+        CHECK(run("return table.concat(menuLabels, '|')") == "Spell Info|Add to Blocked Pet Spells");
+        CHECK(run("return table.concat(removals, '|')") == "PetBuff0:3");
         release();
         closeMenu();
         CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
@@ -6469,6 +6589,135 @@ TEST_CASE("UI packs (modern): the Options search draws every tab, and only the s
         // Nothing matches: no section's heading or empty table, only the key list's own heading.
         CHECK(headings_for("zzqqxx") == "Key Bindings");
         CHECK(headings_for("") == all);
+        CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
+    }
+    ImGui::DestroyContext(ctx);
+}
+
+// The gamepad pack's Looking for Guild window: a test page setting past its four pages (or not a whole number) is
+// ignored rather than drawing a page that does not exist (an error every frame).
+TEST_CASE("UI packs (gamepad): Looking for Guild ignores a test page it does not have") {
+    for (const char* page : {"9", "2.5"}) {
+        INFO(page);
+        test::ScratchDir scratch("ui_gamepad_lfguild_page_test");
+        const auto dir = scratch.path();
+        fs::create_directories(dir / "game");
+        fs::copy(fs::path(__FILE__).parent_path().parent_path() / "ui" / "gamepad", dir / "gamepad",
+                 fs::copy_options::recursive);
+        ImGuiContext* ctx = ImGui::CreateContext();
+        ImGui::GetIO().IniFilename = nullptr;
+        ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
+        {
+            Session s(dir, "gamepad");
+            const std::string code =
+                std::string("ui.SetSetting('test.lfguild.page', '") + page + "') hs.ShowWindow('LFGuildWnd', true)";
+            REQUIRE(luaL_dostring(s.lua.state(), code.c_str()) == LUA_OK);
+            s.frames(4);
+            CHECK(ImGui::FindWindowByName("Looking for Guild") != nullptr);
+            CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
+        }
+        ImGui::DestroyContext(ctx);
+    }
+}
+
+// The gamepad pack's chat keyboard stops at the input box's length (2047 bytes): a key pressed on a full line adds
+// nothing, so the line the box shows is the line that is sent.
+TEST_CASE("UI packs (gamepad): the chat's on-screen keys stop at the input's length") {
+    test::ScratchDir scratch("ui_gamepad_chat_cap_test");
+    const auto dir = scratch.path();
+    fs::create_directories(dir / "game");
+    fs::copy(fs::path(__FILE__).parent_path().parent_path() / "ui" / "gamepad", dir / "gamepad",
+             fs::copy_options::recursive);
+    ImGuiContext* ctx = ImGui::CreateContext();
+    ImGui::GetIO().IniFilename = nullptr;
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
+    {
+        Session s(dir, "gamepad");
+        auto* L = s.lua.state();
+        auto run = [&](const char* code) {
+            const int rc = luaL_dostring(L, code);
+            INFO((rc == LUA_OK ? "" : lua_tostring(L, -1)));
+            REQUIRE(rc == LUA_OK);
+            const std::string result = lua_isstring(L, -1) ? lua_tostring(L, -1) : "";
+            lua_settop(L, 0);
+            return result;
+        };
+        s.frames(2); // (the pack's state exists)
+        // forced[id]: that button reports a click once; chatInput: the text the chat's input box was given
+        run(R"lua(
+forced, chatInput = {}, nil
+local button, input = ui.InvisibleButton, ui.InputText
+ui.InvisibleButton = function(id, ...)
+  local hit = button(id, ...)
+  if forced[id] then forced[id] = nil return true end
+  return hit
+end
+ui.InputText = function(id, text, ...)
+  if id == "##chatinput" then chatInput = text end
+  return input(id, text, ...)
+end
+GPSTATE.chatText = string.rep("a", 2046)
+)lua");
+        s.frames(2);
+        CHECK(run("return tostring(#(chatInput or ''))") == "2046");
+        run("forced['##space'] = true");
+        s.frames(2);
+        CHECK(run("return tostring(#chatInput)") == "2047");
+        run("forced['##space'] = true");
+        s.frames(2);
+        CHECK(run("return tostring(#chatInput)") == "2047"); // full: the key adds nothing
+        run("forced['##k2_1'] = true"); // (q)
+        s.frames(2);
+        CHECK(run("return tostring(#chatInput)") == "2047");
+        CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
+    }
+    ImGui::DestroyContext(ctx);
+}
+
+// The gamepad pack's Who window puts a player's name into /invite (and /target, /friends) as one word: control
+// characters from the server's reply are dropped (a newline would start another command), and only the first word
+// is kept.
+TEST_CASE("UI packs (gamepad): Who strips a name to one word before it goes into a command") {
+    test::ScratchDir scratch("ui_gamepad_who_name_test");
+    const auto dir = scratch.path();
+    fs::create_directories(dir / "game");
+    fs::copy(fs::path(__FILE__).parent_path().parent_path() / "ui" / "gamepad", dir / "gamepad",
+             fs::copy_options::recursive);
+    ImGuiContext* ctx = ImGui::CreateContext();
+    ImGui::GetIO().IniFilename = nullptr;
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // 1.92: the atlas is built by NewFrame
+    {
+        Session s(dir, "gamepad");
+        auto* L = s.lua.state();
+        auto run = [&](const char* code) {
+            const int rc = luaL_dostring(L, code);
+            INFO((rc == LUA_OK ? "" : lua_tostring(L, -1)));
+            REQUIRE(rc == LUA_OK);
+            const std::string result = lua_isstring(L, -1) ? lua_tostring(L, -1) : "";
+            lua_settop(L, 0);
+            return result;
+        };
+        s.frames(2); // (the pack's state exists)
+        run(R"lua(
+forced, submitted = {}, {}
+local button = ui.InvisibleButton
+ui.InvisibleButton = function(id, ...)
+  local hit = button(id, ...)
+  if forced[id] then forced[id] = nil return true end
+  return hit
+end
+hs.WhoResults = function()
+  return 1, { { name = "Bad\nName /kill", line = "[50 Warrior] Bad\nName /kill (Human)" } }
+end
+hs.ChatSubmit = function(slot, line) submitted[#submitted + 1] = line end
+GPSTATE.whoOpen = true
+)lua");
+        s.frames(2);
+        run("forced['##row'] = true"); // picks the player
+        s.frames(2);
+        run("forced['##invite'] = true");
+        s.frames(2);
+        CHECK(run("return submitted[#submitted] or ''") == "/invite BadName");
         CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
     }
     ImGui::DestroyContext(ctx);

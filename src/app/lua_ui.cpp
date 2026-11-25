@@ -1366,17 +1366,20 @@ void push_overlay(lua_State* L, const std::optional<game::BuffOverlayText>& o) {
     lua_pushnumber(L, static_cast<double>(c & 0xff) / 255.0);
 }
 
-// spellId, msLeft, name, beneficial, fade [, counter, cr, cg, cb, limit, lr, lg, lb] = hs.BuffSlot(name, child
-// [, overlays])   -- the buff a buff window's button shows, nil if none; msLeft is negative for a permanent buff; fade
+// spellId, msLeft, name, beneficial, fade [, counter, cr, cg, cb, limit, lr, lg, lb] [, petId, slot] =
+// hs.BuffSlot(name, child [, overlays [, removalDetails]])   -- the buff the button shows, nil if none
+// msLeft is negative for a permanent buff; fade is
 // the buff / song window's alpha factor for it (under 19 s left it fades out once a second,
 // CBuffWindow::OnProcessFrame; 1 otherwise). With overlays true also the button's counter and limit overlays as
 // hs.BuffOverlay(name, child, "counter") and (..., "limit") give them (each text, r, g, b; nils for none), in the one
-// call; without it they are not worked out.
+// call; without it they are not worked out. A true fourth argument appends the entity and server slot of a
+// removable pet buff (two nils otherwise).
 int BuffSlot(lua_State* L) {
     auto& m = Impl::of(L);
     StockWindow* w = m.window(luaL_checkstring(L, 1));
     const char* child = w ? luaL_checkstring(L, 2) : nullptr;
     const bool overlays = lua_toboolean(L, 3) != 0;
+    const bool removal_details = lua_toboolean(L, 4) != 0;
     auto b = w ? w->buff(m.host, child, overlays ? kBuffCounterOverlay | kBuffLimitOverlay : 0u) : std::nullopt;
     if (!b) {
         lua_pushnil(L);
@@ -1387,10 +1390,19 @@ int BuffSlot(lua_State* L) {
     lua_pushstring(L, b->name.c_str());
     lua_pushboolean(L, b->beneficial);
     lua_pushnumber(L, b->fade);
-    if (!overlays) return 5;
-    push_overlay(L, b->counter);
-    push_overlay(L, b->limit);
-    return 13;
+    if (overlays) {
+        push_overlay(L, b->counter);
+        push_overlay(L, b->limit);
+    }
+    if (!removal_details) return overlays ? 13 : 5;
+    if (b->pet) {
+        lua_pushinteger(L, b->pet);
+        lua_pushinteger(L, b->pet_slot);
+    } else {
+        lua_pushnil(L);
+        lua_pushnil(L);
+    }
+    return overlays ? 15 : 7;
 }
 
 // text, r, g, b = hs.BuffOverlay(name, child, which)   -- what a buff window draws over the button, nil if

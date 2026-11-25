@@ -341,7 +341,7 @@ local function generalTab()
     -- menus.lua's menus.scale (this pack's look: the size its context menus draw at; Ctrl+wheel over a menu too)
     row("Menu Size", "The size of right-click menus and their text. Ctrl+mouse wheel over a menu changes it too.", function()
       local v = math.floor((tonumber(ui.GetSetting("menus.scale")) or 1.25) * 100 + 0.5)
-      local nv, changed = ui.SliderInt("##menus.scale", v, 75, 200, v .. " %%")
+      local nv, changed = ui.SliderInt("##menus.scale", v, 75, 200, v .. " %")
       if changed then ui.SetSetting("menus.scale", string.format("%.2f", nv / 100)) end
     end)
     check("pet_window_popup", "Pet Window Auto-Popup", "The pet window opens when you get a pet.")

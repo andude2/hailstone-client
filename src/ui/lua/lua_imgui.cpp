@@ -1168,7 +1168,8 @@ int Foreground(lua_State *L) {
 }
 int DrawRect(lua_State *L) {
 	DrawTarget()->AddRect(ImVec2(F(L, 1), F(L, 2)), ImVec2(F(L, 3), F(L, 4)),
-		ImGui::GetColorU32(Color(L, 5)), F(L, 9), F(L, 10, 1), 0);
+		ImGui::GetColorU32(Color(L, 5)), F(L, 9), F(L, 10, 1),
+		ImDrawFlags_StrokeLegacy); // centred on the edge as before 1.93; packs inset or outset by half the stroke for it
 	return 0;
 }
 int DrawRectFilled(lua_State *L) {

@@ -109,6 +109,8 @@ struct BuffInfo {
     std::optional<game::BuffOverlayText> timer, counter, limit;
     // The buff and song windows' fade under 19 s (game::buff_fade): the button's alpha factor, 1 when not fading.
     double fade = 1.0;
+    // A removable pet buff's entity and wire slot, so a menu can verify its selection before acting.
+    std::uint32_t pet = 0, pet_slot = 0;
 };
 // The overlays StockWindow::buff fills in (`overlays`, a mask of these): each costs a format or a look at every effect,
 // so a window works out only those its caller asks for.

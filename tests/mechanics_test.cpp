@@ -6,6 +6,8 @@
 
 #include <array>
 #include <climits>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <map>
 
@@ -120,6 +122,35 @@ TEST_CASE("Fpu reproduces 24-bit and 53-bit x87 rounding") {
     CHECK(Fpu::ftol(-1.9) == -1);
     CHECK(Fpu::ftol(2147483648.0) == INT_MIN);
     CHECK(Fpu::ftol(std::numeric_limits<double>::quiet_NaN()) == INT_MIN);
+}
+
+// The x87's default NaN is negative on every CPU; ARM's own is positive.
+TEST_CASE("Fpu: an invalid operation gives the x87's negative default NaN on any CPU") {
+    auto bits = [](double d) {
+        std::uint64_t b;
+        std::memcpy(&b, &d, 8);
+        return b;
+    };
+    constexpr std::uint64_t kIndefinite = 0xfff8000000000000u;
+    const double inf = std::numeric_limits<double>::infinity();
+    for (FpuPrecision p : {FpuPrecision::Single24, FpuPrecision::Double53}) {
+        CAPTURE(static_cast<int>(p));
+        Fpu f(p);
+        CHECK(bits(f.add(inf, -inf)) == kIndefinite);
+        CHECK(bits(f.sub(inf, inf)) == kIndefinite);
+        CHECK(bits(f.mul(0.0, inf)) == kIndefinite);
+        CHECK(bits(f.div(0.0, 0.0)) == kIndefinite);
+        CHECK(bits(f.div(-inf, inf)) == kIndefinite);
+        CHECK(bits(f.sqrt(-1.0)) == kIndefinite);
+        CHECK(bits(static_cast<double>(static_cast<float>(f.mul(0.0, inf)))) == kIndefinite);
+        // A NaN operand passes through, quieted: the first one, as SSE gives it.
+        const double pos = std::numeric_limits<double>::quiet_NaN();
+        const double neg = -pos;
+        CHECK(bits(f.add(pos, 1.0)) == bits(pos));
+        CHECK(bits(f.mul(2.0, neg)) == bits(neg));
+        CHECK(bits(f.div(pos, neg)) == bits(pos));
+        CHECK(bits(f.sqrt(pos)) == bits(pos));
+    }
 }
 
 TEST_CASE("BaseData.txt and SkillCaps.txt load as the original reads them") {

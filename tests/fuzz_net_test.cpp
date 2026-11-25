@@ -169,10 +169,18 @@ TEST_CASE("fuzz: the decoder list covers every decode_*(const AppPacket&) declar
     // Run from the source tree (net_ec set when it is not: an installed test binary has nothing to compare), the
     // scan must have found the headers it is meant to check.
     if (!net_ec) CHECK(scanned >= 28);
-    // The in-tree plugins' decoders take the bytes OnPacket hands them.
+    // The in-tree plugins' decoders take the bytes OnPacket hands them. Only a plugin this build compiled in is
+    // checked: its list is included only then, while its checkout may still sit in plugins/.
     std::regex plugin_decl(R"(\b(decode_[a-z_0-9]+)\(Bytes p\))");
-    for (const char* h : {"../../plugins/nms/nms_packets", "../../plugins/projecttriune/triune_packets",
-                          "../../plugins/projecttriune/triune_windows"}) {
+    std::vector<const char*> plugin_headers;
+#if defined(HAILSTONE_HAS_NMS)
+    plugin_headers.push_back("../../plugins/nms/nms_packets");
+#endif
+#if defined(HAILSTONE_HAS_TRIUNE)
+    plugin_headers.push_back("../../plugins/projecttriune/triune_packets");
+    plugin_headers.push_back("../../plugins/projecttriune/triune_windows");
+#endif
+    for (const char* h : plugin_headers) {
         std::ifstream f(dir + h + ".h");
         if (!f) continue;
         std::stringstream ss;

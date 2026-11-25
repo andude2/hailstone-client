@@ -90,8 +90,24 @@ private:
     std::uint32_t prev_caps_ = 0;
     std::string prev_name_;
 };
-// Whether this is the client's thread: the one that started the program (taken before main runs).
+// Whether this is the client's thread: the one that started the program (taken before main runs), or a plugin's
+// thread the client's thread is lent to for one host call (ThreadLent).
 bool on_main_thread();
+// While it lives, this thread acts as the client's: on_main_thread() is true here. For a host call from a plugin's
+// own thread while the plugin lends it the client's thread (lend_thread, native_plugins.cpp), made under the lock
+// that keeps every host call one at a time meanwhile.
+class ThreadLent {
+public:
+    ThreadLent();
+    ~ThreadLent();
+    ThreadLent(const ThreadLent&) = delete;
+    ThreadLent& operator=(const ThreadLent&) = delete;
+
+private:
+    bool prev_ = false;
+};
+// Whether a ThreadLent is live on this thread (on_main_thread() is true here, though it is not the client's own).
+bool on_lent_thread();
 
 enum class FileKind : std::uint8_t { Plugin = 1, Script = 2 };
 

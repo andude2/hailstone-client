@@ -4,6 +4,7 @@
 #include <charconv>
 #include <chrono>
 #include <fstream>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <system_error>
@@ -13,6 +14,7 @@
 #include "core/log.h"
 #include "core/zip_read.h"
 #include "platform/durable_file.h"
+#include "platform/shared_file.h"
 
 namespace hailstone::app {
 
@@ -356,10 +358,29 @@ std::string failed_update_version(const fs::path& install_dir) {
     return lines.empty() ? std::string() : lines[0];
 }
 
+namespace {
+// One process at a time installs or rolls back in a folder: the install clears new/ and the rollback reads the one
+// journal, so a second process doing either at once undoes the first's work (a half-new folder). The lock goes
+// with the process, so a crash never leaves it held.
+std::optional<platform::ScopedFileLock> lock_install(const fs::path& install_dir) {
+    const fs::path dir = update_dir(install_dir);
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    return platform::ScopedFileLock::try_acquire(dir / "install.lock", platform::FileLockMode::Exclusive,
+                                                platform::LockFolder::Ordinary);
+}
+} // namespace
+
 InstallResult install_staged_update(const fs::path& install_dir, const std::string& running,
                                     const std::function<void(float)>& progress) {
     InstallResult r;
     const fs::path dir = update_dir(install_dir);
+    const auto lock = lock_install(install_dir);
+    if (!lock) {
+        r.error = "another Hailstone is installing or rolling back an update in this folder";
+        log::warn("Update: {}; this one leaves it to that one", r.error);
+        return r;
+    }
     auto staged = read_staged(install_dir);
     if (!staged) {
         r.error = "no update is staged";
@@ -521,6 +542,12 @@ InstallResult install_staged_update(const fs::path& install_dir, const std::stri
 StartNote update_at_start(const fs::path& install_dir, const std::string& running) {
     StartNote note;
     const fs::path dir = update_dir(install_dir);
+    // Another Hailstone is installing (its state reads "installing") or rolling back: not this one's to undo.
+    const auto lock = lock_install(install_dir);
+    if (!lock) {
+        log::warn("Update: another Hailstone is installing or rolling back in this folder; leaving it to that one");
+        return note;
+    }
     remove_quietly(dir / "trash");
     // A rollback's news, left by the version that was rolled back for this one to show.
     if (auto text = read_text_file(dir / "note.txt")) {

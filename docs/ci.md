@@ -60,6 +60,16 @@ the code building with Clang and Apple Clang (AGENTS.md's portability rules).
 - With `EQ_GAME_DIR` unset or empty, the tests that need an installed RoF2 game are skipped where they are marked
   `doctest::skip`, and elsewhere return early and pass without checking anything (`tests/game_files.h`,
   `hailstone::test::game_dir()`). Run them with it set.
+  - Any game folder may be set, a live install too. A test whose file the folder lacks (a live install has no
+    `bazaar.s3d` or `velketor_chr.s3d`) prints a `MESSAGE` and returns (`hailstone::test::game_file()`); it never
+    fails or throws for that.
+  - Some checks pin exact values (record counts, texture names, string wording) taken from one folder, the NMS
+    server's client folder. They run only when `hailstone::test::reference_folder()` recognises it, by its
+    `gequip_nms.s3d`; elsewhere a `MESSAGE` says what was not checked. Every folder gets the general checks
+    (non-empty, well-formed, in range). The pinned checks are in `appearance_test.cpp` (GUS textures),
+    `eq_strings_test.cpp`, `eqg_test.cpp` (Crescent Reach counts), `environment_presets_test.cpp`,
+    `fellowship_categories_test.cpp`, `particles_test.cpp`, `spells_test.cpp`, `texture_test.cpp` (badge
+    rectangles) and `ui_more_windows_test.cpp`.
 - `ctest --test-dir build -j <n>` runs `hailstone_tests` as 8 parts at once (`HAILSTONE_TEST_SHARDS`, a CMake
   setting; 1 registers the single test it was before). Each part is the same executable with
   `HAILSTONE_TEST_SHARD=<k>/<n>` set: it shuffles doctest's list with a fixed seed, so the slow UI pack cases spread

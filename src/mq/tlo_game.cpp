@@ -9,7 +9,9 @@
 #include <random>
 
 #include <glm/geometric.hpp>
+#include <glm/trigonometric.hpp>
 
+#include "core/build_info.h"
 #include "game/combat.h"
 #include "game/counter_spas.h"
 #include "game/coords.h"
@@ -35,7 +37,8 @@ using net::GameConnection;
 
 struct Types {
     const Type *spawn, *character, *cls, *race, *heading, *spell, *buff, *timestamp, *item, *zone, *group, *member,
-        *everquest, *window, *plugin, *time, *gametime, *navigation, *stick, *aura;
+        *everquest, *macroquest, *hailstone, *window, *plugin, *time, *gametime, *navigation, *stick, *aura, *debuff,
+        *moveto, *bandolier, *bandolier_item, *advpath;
 };
 
 Types g; // set once by register_game_tlos (the types live in the registry that registered them)
@@ -182,6 +185,56 @@ template <typename Pass> V buff_with_effect(const Context& c, const game::Spawn&
             if (d->effect[e] == spa && pass(d->base[e])) return b.value;
     }
     return V::nil();
+}
+
+// Debuff[...]: the disease, poison, curse and corruption counters on the player (Debuff) or the player's pet
+// (Debuff[pet]), summed over every detrimental buff (spell type 0). Each counter effect with a positive base (a cure's own is negative) adds
+// the counters left once the client knows them (the effect's slot data, as the buff window's counter overlay), else
+// the counters the spell starts with (a zone-in list or the profile fills no slot data). The pet's buffs
+// (OP_PetBuffWindow) carry no slot data, so they always count the starting counters.
+struct DebuffCounters {
+    std::int64_t poison = 0, disease = 0, curse = 0, corruption = 0;
+    std::int64_t total() const { return poison + disease + curse + corruption; }
+};
+DebuffCounters debuff_counters(const Context& c, bool pet) {
+    DebuffCounters out;
+    if (!c.conn) return out;
+    auto add_buff = [&](const game::BuffSlot& b) {
+        if (b.empty()) return;
+        const game::SpellData* d = spell_data(c, b.spell);
+        if (!d || d->beneficial()) return; // a beneficial spell's counter effect (some buffs carry one) is no debuff
+        for (std::size_t e = 0; e < d->effect.size(); ++e) {
+            if (!game::is_counter_spa(d->effect[e]) || d->base[e] <= 0) continue;
+            const std::int64_t n = b.counters_known && e < b.slot_data.size() ? b.slot_data[e] : d->base[e];
+            switch (d->effect[e]) {
+            case game::kSpaPoisonCounter: out.poison += n; break;
+            case game::kSpaDiseaseCounter: out.disease += n; break;
+            case game::kSpaCurseCounter: out.curse += n; break;
+            default: out.corruption += n; break;
+            }
+        }
+    };
+    if (pet)
+        for (const auto& [slot, b] : c.conn->pet_buffs()) add_buff(b);
+    else
+        for (const auto& b : c.conn->spell_state().buffs) add_buff(b);
+    return out;
+}
+
+// Whether any of the player's (or the pet's) buffs has this spell effect: Debuff.Silenced (SPA 96).
+bool debuff_has_effect(const Context& c, bool pet, std::int32_t spa) {
+    if (!c.conn) return false;
+    auto has = [&](const game::BuffSlot& b) {
+        if (b.empty()) return false;
+        const game::SpellData* d = spell_data(c, b.spell);
+        return d && std::find(d->effect.begin(), d->effect.end(), spa) != d->effect.end();
+    };
+    if (pet) {
+        const auto& list = c.conn->pet_buffs();
+        return std::any_of(list.begin(), list.end(), [&](const auto& sb) { return has(sb.second); });
+    }
+    const auto& list = c.conn->spell_state().buffs;
+    return std::any_of(list.begin(), list.end(), has);
 }
 
 // Buff ticks are 6 s; the countdown the client keeps (BuffSlot::tics) is as the server last sent it. A held countdown
@@ -514,6 +567,9 @@ void register_spawn() {
     spawn_member("Slowed", [](const Context& c, const game::Spawn& s, std::string_view) { // attack speed under 100%
         return buff_with_effect(c, s, 11, [](std::int32_t base) { return base < 100; });
     });
+    spawn_member("Silenced", [](const Context& c, const game::Spawn& s, std::string_view) { // MQ's SPA_SILENCE test
+        return buff_with_effect(c, s, 96, [](std::int32_t) { return true; });
+    });
     // What a cure takes off: a buff carrying counters of that kind (a positive base; a cure's own effect is negative).
     spawn_member("Poisoned", [](const Context& c, const game::Spawn& s, std::string_view) {
         return buff_with_effect(c, s, game::kSpaPoisonCounter, [](std::int32_t base) { return base > 0; });
@@ -698,9 +754,16 @@ void register_character() {
     me_member("CountSongs", [](const Context& ctx, const GameConnection&, std::string_view) {
         return V::integer(static_cast<std::int64_t>(buff_slots(ctx, true).size()));
     });
-    me_member("MaxBuffSlots", [](const Context&, const GameConnection&, std::string_view) { return V::integer(42); });
+    // The buff and song windows' slots: RoF2's 42 and 20, whatever the character's level or AAs.
+    me_member("MaxBuffSlots", [](const Context&, const GameConnection&, std::string_view) {
+        return V::integer(game::kLongBuffSlots);
+    });
+    me_member("MaxSongSlots", [](const Context&, const GameConnection&, std::string_view) {
+        return V::integer(game::kShortBuffSlots);
+    });
     me_member("FreeBuffSlots", [](const Context& ctx, const GameConnection&, std::string_view) {
-        return V::integer(std::max<std::int64_t>(0, 42 - static_cast<std::int64_t>(buff_slots(ctx, false).size())));
+        return V::integer(std::max<std::int64_t>(
+            0, std::int64_t{game::kLongBuffSlots} - static_cast<std::int64_t>(buff_slots(ctx, false).size())));
     });
     me_member("Gem", [](const Context& ctx, const GameConnection& c, std::string_view index) -> V {
         const auto& gems = c.spell_state().gems;
@@ -1208,6 +1271,52 @@ void register_misc_types() {
     add(g.everquest, "Server", [](const Context& c, const Value&, std::string_view) { return V::string(c.server_name); });
     add(g.everquest, "UIScale", [](const Context&, const Value&, std::string_view) { return V::number(1.0); });
 
+    // MacroQuest.Path[name]: MQ's folders by name. Only "config" has a counterpart here (the scripts' settings
+    // folder); MQ's other names (root, macros, logs, plugins, ...) and no name answer nil until one is settled.
+    // Hailstone.Path[name] is the same member under the client's own name.
+    auto path = [](const Context& c, const Value&, std::string_view index) -> V {
+        if (iequals(index, "config") && !c.config_path.empty()) return V::string(c.config_path);
+        return V::nil();
+    };
+    add(g.macroquest, "Path", path);
+    add(g.hailstone, "Path", path);
+    // Members neither has are EverQuest's, as MQ's MacroQuest type passes them on (MQ2MacroQuestType::GetMember):
+    // MacroQuest.Server is EverQuest.Server, the server the player logged in to; GameState too.
+    const_cast<Type&>(*g.macroquest).parent = g.everquest;
+    const_cast<Type&>(*g.hailstone).parent = g.everquest;
+    // Build is MQ's build target, an int (BuildTarget: 1 Live, 2 Test, 3 Beta, 4 Emu), not a version: Hailstone is an
+    // emulator client, so 4. E3 reads it as its MQBuild and takes any other value for live. BuildDate is the day the
+    // client was built as yyyymmdd (MQ's is MQ2Main.dll's file date); Version Hailstone's release version
+    // ("0.7.2-beta"), where MQ gives its own file version. Hailstone's members are the same.
+    for (const Type* t : {g.macroquest, g.hailstone}) {
+        add(t, "Build", [](const Context&, const Value&, std::string_view) { return V::integer(4); });
+        add(t, "BuildDate", [](const Context&, const Value&, std::string_view) { return V::integer(build_date()); });
+        add(t, "Version", [](const Context&, const Value&, std::string_view) { return V::string(release_version()); });
+    }
+
+    // Debuff (MQ2Debuffs' TLO, which E3 reads): i 0 the player, 1 the pet (debuff_counters). Its text is Count.
+    Type& deb = const_cast<Type&>(*g.debuff);
+    deb.to_value = [](const Context& c, const Value& v) { return V::integer(debuff_counters(c, v.i != 0).total()); };
+    add(g.debuff, "Count", [](const Context& c, const Value& v, std::string_view) {
+        return V::integer(debuff_counters(c, v.i != 0).total());
+    });
+    add(g.debuff, "Poisoned", [](const Context& c, const Value& v, std::string_view) {
+        return V::integer(debuff_counters(c, v.i != 0).poison);
+    });
+    add(g.debuff, "Diseased", [](const Context& c, const Value& v, std::string_view) {
+        return V::integer(debuff_counters(c, v.i != 0).disease);
+    });
+    add(g.debuff, "Cursed", [](const Context& c, const Value& v, std::string_view) {
+        return V::integer(debuff_counters(c, v.i != 0).curse);
+    });
+    add(g.debuff, "Corrupted", [](const Context& c, const Value& v, std::string_view) {
+        return V::integer(debuff_counters(c, v.i != 0).corruption);
+    });
+    // Silenced: TRUE while a buff silences (SPA 96, as Me.Silenced); E3 asks it before casting.
+    add(g.debuff, "Silenced", [](const Context& c, const Value& v, std::string_view) {
+        return V::boolean(debuff_has_effect(c, v.i != 0, 96));
+    });
+
     Type& win = const_cast<Type&>(*g.window);
     win.to_value = [](const Context& c, const Value& v) {
         return V::string(v.i != 0 || (c.window_open && c.window_open(v.s)) ? "TRUE" : "FALSE");
@@ -1464,8 +1573,191 @@ void register_stick() {
         const game::Spawn* sp = s ? spawn_of(c, s->stick_spawn) : nullptr;
         return sp ? V::string(sp->name) : V::nil();
     });
+    // Behind and Stopped (MQ2MoveUtils'): about the stick's spawn while sticking, else the target, as MQ2MoveUtils
+    // reads its held spawn or the target. Stopped: within the stick's distance on the flat (without a stick, the
+    // target's MaxRangeTo, where MQ2MoveUtils falls back on the melee range). Behind: Stopped, and the player within
+    // 45 degrees of the spawn's back by where it stands, the arc /stick behind holds to (MQ2MoveUtils compares the
+    // two headings, within 45 of its 512 units: Hailstone's own measure).
+    struct Place {
+        float away = 0.0f, reach = 0.0f;
+        bool behind = false;
+    };
+    auto place = [status](const Context& c) -> std::optional<Place> {
+        auto s = status(c);
+        if (!s || !c.conn) return std::nullopt;
+        const game::Spawn* me = c.conn->world().player();
+        const game::Spawn* sp = spawn_of(c, s->stick_spawn ? s->stick_spawn : c.conn->world().target_id);
+        if (!me || !sp || sp == me) return std::nullopt;
+        Place p;
+        p.reach = s->stick_spawn ? s->stick_distance : std::max(sp->melee_radius, 14.0f);
+        const glm::vec2 to_me = glm::vec2(spawn_position(*me) - spawn_position(*sp));
+        p.away = glm::length(to_me);
+        const float yaw = game::heading_to_yaw(sp->display_valid ? sp->display_heading : sp->heading);
+        const glm::vec2 facing(std::cos(yaw), std::sin(yaw));
+        p.behind = p.away > 0.01f && glm::dot(to_me / p.away, -facing) >= std::cos(glm::radians(45.0f));
+        return p;
+    };
+    add(g.stick, "Stopped", [place](const Context& c, const Value&, std::string_view) {
+        auto p = place(c);
+        return V::boolean(p && p->away <= p->reach);
+    });
+    add(g.stick, "Behind", [place](const Context& c, const Value&, std::string_view) {
+        auto p = place(c);
+        return V::boolean(p && p->away <= p->reach && p->behind);
+    });
     Type& t = const_cast<Type&>(*g.stick);
     t.to_value = [on](const Context& c, const Value&) { return V::string(on(c) ? "ON" : "OFF"); };
+}
+
+// The MoveTo TLO (MQ2MoveUtils' members, over the client's /moveto: NavStatus::moveto): Moving, Stopped (the last
+// /moveto arrived; cleared by the next one), ArrivalDist, Broken; "ON", "PAUSED" or "OFF" as its text. Broken is
+// MQ2MoveUtils' walk ended by aggro or a hit, which Hailstone's never is: always FALSE. UseWalk, ArrivalDistY and
+// ArrivalDistX are not here.
+void register_moveto();
+
+// Me.Bandolier[name|#] (MQ's CharacterMembers::Bandolier and MQ2BandolierType): a set by its name, any case, or its
+// number (1..20, clamped as MQ clamps it); NULL for a name no set has. A set without a name answers NULL to every
+// member, as MQ's GetMember fails on it. Its text is its name. i: the set's index (0..19).
+//  - Active: each of its four items (primary, secondary, range, ammo) is the one worn in that slot, an empty one
+//    matching an empty slot, as MQ compares the ids;
+//  - Index (1..20), Name, Item[1..4] (clamped): a bandolieritem (ID, IconID, Name; its text the name). i: set * 4 +
+//    item.
+// MQ's Activate method is not here: /bandolier activate <name> (the game's own command) does it.
+const game::BandolierSet* bandolier_set(const Context& c, std::int64_t index) {
+    if (!c.conn || index < 0 || index >= game::kBandolierSets) return nullptr;
+    const auto& sets = c.conn->bandolier();
+    if (index >= static_cast<std::int64_t>(sets.size())) return nullptr;
+    const game::BandolierSet& s = sets[static_cast<std::size_t>(index)];
+    return s.name.empty() ? nullptr : &s;
+}
+
+// The AdvPath TLO (MQ2AdvPath's members, over the client's /afollow: NavStatus::afollow_*): its text is TRUE, as
+// MQ2AdvPath's. Active: TRUE (the follow is there). State: 1 following, 0 not (MQ2AdvPath's 2 playing and 3 recording
+// are paths, not here). Status: 0 off, 1 on, 2 paused. Following, Paused, WaitingWarp; Playing and Recording FALSE.
+// Waypoints: the trail's points left; Length: its flat length with the gap to the spawn; Monitor: the spawn followed.
+// MQ2AdvPath's path members (Path, CheckPoint, X/Y/Z, Flag1-9 ...) are not here.
+void register_advpath() {
+    auto status = [](const Context& c) { return c.nav ? std::optional(c.nav->status()) : std::nullopt; };
+    auto on = [status](const Context& c) {
+        auto s = status(c);
+        return s && s->afollow_spawn != 0 ? s : std::nullopt;
+    };
+    add(g.advpath, "Active", [](const Context&, const Value&, std::string_view) { return V::boolean(true); });
+    add(g.advpath, "State", [on](const Context& c, const Value&, std::string_view) {
+        return V::integer(on(c) ? 1 : 0);
+    });
+    add(g.advpath, "Status", [on](const Context& c, const Value&, std::string_view) {
+        auto s = on(c);
+        return V::integer(!s ? 0 : s->paused ? 2 : 1);
+    });
+    add(g.advpath, "Following", [on](const Context& c, const Value&, std::string_view) {
+        return V::boolean(on(c).has_value());
+    });
+    add(g.advpath, "Paused", [on](const Context& c, const Value&, std::string_view) {
+        auto s = on(c);
+        return V::boolean(s && s->paused);
+    });
+    add(g.advpath, "WaitingWarp", [on](const Context& c, const Value&, std::string_view) {
+        auto s = on(c);
+        return V::boolean(s && s->afollow_waiting_warp);
+    });
+    add(g.advpath, "Playing", [](const Context&, const Value&, std::string_view) { return V::boolean(false); });
+    add(g.advpath, "Recording", [](const Context&, const Value&, std::string_view) { return V::boolean(false); });
+    add(g.advpath, "Waypoints", [on](const Context& c, const Value&, std::string_view) {
+        auto s = on(c);
+        return V::integer(s ? static_cast<std::int64_t>(s->afollow_waypoints) : 0);
+    });
+    add(g.advpath, "Length", [on](const Context& c, const Value&, std::string_view) {
+        auto s = on(c);
+        return V::number(s ? s->afollow_length : 0.0);
+    });
+    add(g.advpath, "Monitor", [on](const Context& c, const Value&, std::string_view) -> V {
+        auto s = on(c);
+        return s ? spawn_value(spawn_of(c, s->afollow_spawn)) : V::nil();
+    });
+    Type& t = const_cast<Type&>(*g.advpath);
+    t.to_value = [](const Context&, const Value&) { return V::string("TRUE"); };
+}
+
+void register_bandolier() {
+    me_member("Bandolier", [](const Context&, const GameConnection& c, std::string_view index) -> V {
+        std::int64_t n = 0;
+        if (parse_int(index, n))
+            return V::object(g.bandolier, std::clamp<std::int64_t>(n, 1, game::kBandolierSets) - 1);
+        if (index.empty()) return V::nil();
+        const int found = c.bandolier_find(std::string(index));
+        return found >= 0 ? V::object(g.bandolier, found) : V::nil();
+    });
+    Type& t = const_cast<Type&>(*g.bandolier);
+    t.to_value = [](const Context& c, const Value& v) -> V {
+        const game::BandolierSet* s = bandolier_set(c, v.i);
+        return s ? V::string(s->name) : V::nil();
+    };
+    add(g.bandolier, "Active", [](const Context& c, const Value& v, std::string_view) -> V {
+        const game::BandolierSet* s = bandolier_set(c, v.i);
+        if (!s) return V::nil();
+        for (std::size_t k = 0; k < game::kBandolierSlots.size(); ++k) {
+            const net::Item* worn = c.conn->inventory().at(net::ItemSlot::possessions(game::kBandolierSlots[k]));
+            if (s->items[k].id != (worn ? worn->id : 0u)) return V::boolean(false);
+        }
+        return V::boolean(true);
+    });
+    add(g.bandolier, "Index", [](const Context& c, const Value& v, std::string_view) -> V {
+        return bandolier_set(c, v.i) ? V::integer(v.i + 1) : V::nil();
+    });
+    add(g.bandolier, "Name", [](const Context& c, const Value& v, std::string_view) -> V {
+        const game::BandolierSet* s = bandolier_set(c, v.i);
+        return s ? V::string(s->name) : V::nil();
+    });
+    add(g.bandolier, "Item", [](const Context& c, const Value& v, std::string_view index) -> V {
+        std::int64_t n = 0;
+        if (!bandolier_set(c, v.i) || index.empty()) return V::nil();
+        if (!parse_int(index, n)) n = 0; // MQ's GetIntFromString(Index, 0)
+        n = std::clamp<std::int64_t>(n - 1, 0, static_cast<std::int64_t>(game::kBandolierSlots.size()) - 1);
+        return V::object(g.bandolier_item, v.i * 4 + n);
+    });
+    auto item = [](const Context& c, const Value& v) -> const game::BeltItem* {
+        const game::BandolierSet* s = bandolier_set(c, v.i / 4);
+        return s ? &s->items[static_cast<std::size_t>(v.i % 4)] : nullptr;
+    };
+    Type& it = const_cast<Type&>(*g.bandolier_item);
+    it.to_value = [item](const Context& c, const Value& v) -> V {
+        const game::BeltItem* b = item(c, v);
+        return b ? V::string(b->name) : V::nil();
+    };
+    add(g.bandolier_item, "ID", [item](const Context& c, const Value& v, std::string_view) -> V {
+        const game::BeltItem* b = item(c, v);
+        return b ? V::integer(b->id) : V::nil();
+    });
+    add(g.bandolier_item, "IconID", [item](const Context& c, const Value& v, std::string_view) -> V {
+        const game::BeltItem* b = item(c, v);
+        return b ? V::integer(b->icon) : V::nil();
+    });
+    add(g.bandolier_item, "Name", [item](const Context& c, const Value& v, std::string_view) -> V {
+        const game::BeltItem* b = item(c, v);
+        return b ? V::string(b->name) : V::nil();
+    });
+}
+
+void register_moveto() {
+    auto status = [](const Context& c) { return c.nav ? std::optional(c.nav->status()) : std::nullopt; };
+    add(g.moveto, "Moving", [status](const Context& c, const Value&, std::string_view) {
+        auto s = status(c);
+        return V::boolean(s && s->moveto);
+    });
+    add(g.moveto, "Stopped", [status](const Context& c, const Value&, std::string_view) {
+        auto s = status(c);
+        return V::boolean(s && s->moveto_arrived);
+    });
+    add(g.moveto, "ArrivalDist", [](const Context& c, const Value&, std::string_view) -> V {
+        return c.nav ? V::number(c.nav->moveto_distance()) : V::nil();
+    });
+    add(g.moveto, "Broken", [](const Context&, const Value&, std::string_view) { return V::boolean(false); });
+    Type& t = const_cast<Type&>(*g.moveto);
+    t.to_value = [status](const Context& c, const Value&) {
+        auto s = status(c);
+        return V::string(!s || !s->moveto ? "OFF" : s->paused ? "PAUSED" : "ON");
+    };
 }
 
 // MQ's DegToRad is 180/pi: Sin[x] takes degrees, Asin gives them.
@@ -1644,12 +1936,19 @@ void register_game_tlos(Registry& r) {
     g.group = &r.type("group");
     g.member = &r.type("groupmember");
     g.everquest = &r.type("everquest");
+    g.macroquest = &r.type("macroquest");
+    g.hailstone = &r.type("hailstone");
     g.window = &r.type("window");
     g.plugin = &r.type("plugin");
     g.time = &r.type("time");
     g.gametime = &r.type("gametime");
     g.navigation = &r.type("navigation");
     g.stick = &r.type("stick");
+    g.moveto = &r.type("moveto");
+    g.bandolier = &r.type("bandolier");
+    g.bandolier_item = &r.type("bandolieritem");
+    g.advpath = &r.type("advpath");
+    g.debuff = &r.type("debuff");
     register_spawn();
     register_character();
     register_abilities();
@@ -1660,6 +1959,9 @@ void register_game_tlos(Registry& r) {
     register_misc_types();
     register_navigation();
     register_stick();
+    register_moveto();
+    register_bandolier();
+    register_advpath();
 
     // MQ's LineOfSight[y,x,z:y,x,z]: two points in the server's coordinates (MQ's Loc order).
     r.add_tlo("LineOfSight", [](const Context& c, std::string_view index) -> V {
@@ -1695,6 +1997,10 @@ void register_game_tlos(Registry& r) {
         return c.nav ? V::object(g.navigation, 0) : V::nil();
     });
     r.add_tlo("Stick", [](const Context& c, std::string_view) -> V { return c.nav ? V::object(g.stick, 0) : V::nil(); });
+    r.add_tlo("MoveTo", [](const Context& c, std::string_view) -> V { return c.nav ? V::object(g.moveto, 0) : V::nil(); });
+    r.add_tlo("AdvPath", [](const Context& c, std::string_view) -> V {
+        return c.nav ? V::object(g.advpath, 0) : V::nil();
+    });
     r.add_tlo("Me", [](const Context& c, std::string_view) -> V {
         return c.conn && c.conn->world().player() ? V::object(g.character, c.conn->world().player_id) : V::nil();
     });
@@ -1767,6 +2073,8 @@ void register_game_tlos(Registry& r) {
         return c.conn && c.conn->time_of_day() ? V::object(g.gametime, 0) : V::nil();
     });
     r.add_tlo("EverQuest", [](const Context&, std::string_view) { return V::object(g.everquest, 0); });
+    r.add_tlo("MacroQuest", [](const Context&, std::string_view) { return V::object(g.macroquest, 0); });
+    r.add_tlo("Hailstone", [](const Context&, std::string_view) { return V::object(g.hailstone, 0); });
     r.add_tlo("Heading", [](const Context&, std::string_view index) -> V {
         double d = 0;
         return parse_float(index, d) && std::isfinite(d) ? heading_value(std::fmod(std::fmod(d, 360.0) + 360.0, 360.0)) : V::nil();
@@ -1799,6 +2107,15 @@ void register_game_tlos(Registry& r) {
         for (const auto& [id, o] : c.conn->world().spawns)
             if (o.pet_owner_id == c.conn->world().player_id && !o.is_corpse) return spawn_value(&o);
         return V::nil();
+    });
+    // Debuff: the player's counters; Debuff[pet] the pet's, NULL without a pet (as the Pet TLO finds it). Other
+    // indexes are NULL.
+    r.add_tlo("Debuff", [](const Context& c, std::string_view index) -> V {
+        if (!c.conn) return V::nil();
+        if (index.empty()) return V::object(g.debuff, 0);
+        if (!iequals(index, "pet")) return V::nil();
+        const V pet = c.registry ? c.registry->tlo(c, "Pet") : V::nil();
+        return pet.kind == Value::Kind::Object ? V::object(g.debuff, 1) : V::nil();
     });
 }
 

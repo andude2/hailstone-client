@@ -381,8 +381,9 @@ void GameConnection::set_pet_list(std::vector<game::PetInfo> list) {
     pets_.have_list = true;
     bool focused_listed = std::any_of(pets_.list.begin(), pets_.list.end(),
                                       [&](const game::PetInfo& e) { return e.spawn_id == pets_.focused; });
-    if (!focused_listed) pets_.focused = pets_.list.empty() ? 0 : pets_.list.front().spawn_id;
-    update_pet_presence();
+    auto focused = pets_.focused;
+    if (!focused_listed) focused = pets_.list.empty() ? 0 : pets_.list.front().spawn_id;
+    set_window_pet(focused);
     log::debug("pet list: {} pet(s)", pets_.list.size());
 }
 
@@ -650,7 +651,8 @@ void GameConnection::handle_group(Op op, const AppPacket& p) {
     case Op::PetBuffWindow:
         if (auto bi = decode_buff_icons(p)) {
             if (bi->all_buffs || bi->entity_id != pets_.focused) pet_buffs_.clear();
-            if (bi->entity_id) pets_.focused = bi->entity_id;
+            if (!bi->entity_id) break;
+            pets_.focused = bi->entity_id;
             update_pet_presence();
             for (const auto& e : bi->entries) {
                 if (e.slot >= kMaxSpawnBuffSlots) continue;

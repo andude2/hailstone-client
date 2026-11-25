@@ -87,7 +87,9 @@ function T.px(n) return math.floor(n * T.S + 0.5) end
 local fontStack = {}
 -- Text of `size` design pixels from here on (in the current window), until T.unfont().
 function T.font(size)
-  local scale = (size or T.BASE) * T.S / (20 * T.U)
+  -- at least 1 px: a size worked out from the room left (a hotbar's count, T.fit's shrink) can reach 0 or below,
+  -- and a window font scale that is not above 0 fails ImGui's assert
+  local scale = math.max(1, size or T.BASE) * T.S / (20 * T.U)
   table.insert(fontStack, scale)
   ui.PushFont(6)
   ui.SetWindowFontScale(scale)
@@ -337,6 +339,14 @@ function T.hintsWidth(pad, hints, size)
   return x - T.px(26)
 end
 
+-- The mouse over x0, y0 .. x1, y1 of the current window, and not over a window above it (a popup or picker stacked
+-- on a list must not pass its wheel and clicks to the list beneath). Its child windows count (a list in a child);
+-- an active item does not block it (the row's own button holds the active item on a double click's second press).
+function T.mouseOver(x0, y0, x1, y1)
+  return ui.IsMouseHoveringRect(x0, y0, x1, y1)
+    and ui.IsWindowHovered(ui.HoveredFlags.ChildWindows | ui.HoveredFlags.AllowWhenBlockedByActiveItem)
+end
+
 -- ---------------------------------------------------------------- focusable widgets
 -- Every widget is an ImGui item at the layout cursor (so pad navigation and the mouse both reach it), drawn here.
 
@@ -366,7 +376,10 @@ function T.button(id, label, w, h, opts, pad, off)
   local x0, y0 = ui.GetCursorScreenPos()
   local clicked = T.settle(ui.InvisibleButton(id, math.max(1, w), math.max(1, h), ui.ButtonFlags.EnableNav), pad)
   if pad and pad.yActivated(clicked) then clicked = false end
-  local focused = pad and pad.focused() or ui.IsItemHovered()
+  -- (not `pad and pad.focused() or hovered`: pad.focused() is false for an unfocused item while the pad drives,
+  -- and falling through to the mouse would light a second item under a resting pointer)
+  local focused
+  if pad then focused = pad.focused() else focused = ui.IsItemHovered() end
   local active = ui.IsItemActive()
   local x1, y1 = x0 + w, y0 + h
   local r = math.min(T.px(12), h / 2)
@@ -407,7 +420,8 @@ function T.slot(id, item, size, opts, pad)
   local x0, y0 = ui.GetCursorScreenPos()
   local clicked = T.settle(ui.InvisibleButton(id, size, size, ui.ButtonFlags.EnableNav), pad)
   if pad and pad.yActivated(clicked) then clicked = false end
-  local focused = pad and pad.focused() or ui.IsItemHovered()
+  local focused
+  if pad then focused = pad.focused() else focused = ui.IsItemHovered() end
   local x1, y1 = x0 + size, y0 + size
   local r = T.px(10)
   T.rect(x0, y0, x1, y1, item and C.raised or C.sunken, 1, r)

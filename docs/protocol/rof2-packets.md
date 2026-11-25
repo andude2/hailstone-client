@@ -315,7 +315,7 @@ Consent rules:
 | ItemLinkResponse | Z→C | 0x70c0 | same as ItemPacket with type 0 (`SendItemPacket(0, inst, ItemPacketViewLink)`) |
 | MoveItem | both | 0x32ee | 28 B: InventorySlot from, InventorySlot to, u32 count. See note 1 |
 | DeleteItem | both | 0x18ad | same 28 B; the server's resync sends {slot, invalid, 0xffffffff}; the client takes -count off the stack and removes an emptied one |
-| DeleteCharge | Z→C | 0x01b8 | encoded as OP_MoveItem |
+| DeleteCharge | Z→C | 0x01b8 | MoveItem layout. Spends one charge on an item that stays in inventory |
 | MoneyUpdate | Z→C | 0x640c | 16 B: u32 platinum, gold, silver, copper carried |
 | LootRequest | C→Z | 0x0adf | 4 B: u32 corpse spawn id. The server echoes it after the item packets |
 | MoneyOnCorpse | Z→C | 0x5f44 | 20 B: u8 response (0 someone else, 1/3 ok, 2 not now, 4 hostiles, 5 too far, 6 all items sent), u8 0x42/0x5a, u8 0xef/0x40, u8, u32 pp, gp, sp, cp (the coin is already added to the player) |
@@ -329,7 +329,8 @@ Consent rules:
 
 1. MoveItem. InventorySlot = i16 type (0 possessions, 1 bank, 2 shared bank, 3 trade, 4 world, 5 limbo, 9 merchant, 11 corpse), i16, i16 slot, i16 bag sub-slot (-1), i16 augment (-1), i16.
    - Client: count 0 = move/swap a whole item; a count only for stack merges/splits. to = {-1, -1, -1, -1, -1} destroys (`DestroyHeldItemOrMoney`).
-   - Server: to invalid deletes (count = charges for OP_DeleteCharge), else a swap/merge.
+   - Server `OP_MoveItem`: to invalid removes the item, else a swap/merge.
+   - Server `OP_DeleteCharge`: EQEmu sends `{from, invalid, 0xffffffff}` once per charge spent on a retained non-stackable item. When it removes an expended item, it sends `OP_MoveItem`.
 2. LootItem: the corpse slot is 23..56, the header slot of the loot item packet (type 11). Auto loot 1 = into the inventory, 0 = cursor; the server refuses a cursor loot while the cursor is full. Echoed when looted; then the item arrives as an item packet.
 3. AugmentItem: the host serial is instance id, parcel id, ignored by the server. The distiller is (-1, -1, 0xffff and 2 unwritten bytes) when none. The cursor augment is never named. No reply packet: the server answers with OP_ItemPacket 0x67 (the host rebuilt, same serial), OP_MoveItem / OP_DeleteItem, OP_ItemPacket 0x6a (an augment back on the cursor) or red chat.
 4. AugmentInfo request: the augment's SolventItemID and the display's index, the rest 0. Reply: the solvent's name, shown as eqstr 5881 (13325 when the last field is 55, never from EQEmu).

@@ -92,6 +92,7 @@ manifest's `caps` (docs/addons.md).
 | `SpawnCount` | a search | int | how many spawns match (0 when not connected) |
 | `NearestSpawn` | `n`, `n,search` or `search` | `spawn` | the nth nearest that matches (1 the nearest) |
 | `Pet` | | `spawn` | the player's pet: the one the pet window shows, else the first pet the player owns |
+| `Debuff` | none, or `pet` | `debuff` | the disease, poison, curse and corruption counters on the player, or on the player's pet (NULL without one); below |
 | `Group` | | `group` | the player's group; NULL when not grouped |
 | `Zone` | | `zone` | the current zone |
 | `Spell` | id or exact name | `spell` | a spell from the spell file |
@@ -107,6 +108,8 @@ manifest's `caps` (docs/addons.md).
 | `LineOfSight` | `y,x,z:y,x,z` | bool | line of sight between two points through the zone's collision (below) |
 | `Navigation` | | `navigation` | the client's navigation (docs/navigation.md) |
 | `Stick` | | `stick` | `/stick`'s state (docs/navigation.md) |
+| `MoveTo` | | `moveto` | `/moveto`'s state (docs/navigation.md) |
+| `AdvPath` | | `advpath` | `/afollow`'s state (docs/navigation.md) |
 | `Int` | number | int | the number cut toward zero; NULL for NaN, infinity or a number beyond 64 bits |
 | `Float` | number | float | the number |
 | `Bool` | text | bool | false for empty, `false`, `null` or `0`; true otherwise |
@@ -174,13 +177,14 @@ the clean name.
 | `Buff[n\|name]` | `buff` | the nth buff, or one by name (exact first, else a part of it; `=name` exact only). With no index, the count |
 | `MyBuff[n\|name]` | `buff` | the same, counting only buffs the player cast |
 | `BuffDuration[n\|name]`, `MyBuffDuration[n\|name]` | `timestamp` | time left on that buff |
-| `Mezzed`, `Charmed`, `Feared`, `Rooted`, `Snared`, `Slowed`, `Poisoned`, `Diseased`, `Cursed`, `Corrupted` | `buff` | the buff that puts it in that state; NULL when none does (below) |
+| `Mezzed`, `Charmed`, `Feared`, `Rooted`, `Snared`, `Slowed`, `Silenced`, `Poisoned`, `Diseased`, `Cursed`, `Corrupted` | `buff` | the buff that puts it in that state; NULL when none does (below) |
 
 A spawn's buffs are the player's own, or the target's as OP_TargetBuffs gave them. Stock EQEmu sends those only to
 GMs, players with the Inspect Buffs AA or leadership, or when its `AlwaysSendTargetsBuffs` rule is on. Check
 `BuffsPopulated` first. The states use the buff's spell effects (EQEmu's spdat.h): `Mezzed` SPA 31, `Charmed` 22,
-`Feared` 23, `Rooted` 99, `Snared` SPA 3 with a negative value, `Slowed` SPA 11 below 100%. `Poisoned`, `Diseased`,
-`Cursed` and `Corrupted` are a buff with poison (SPA 36), disease (35), curse (116) or corruption (369) counters.
+`Feared` 23, `Rooted` 99, `Snared` SPA 3 with a negative value, `Slowed` SPA 11 below 100%, `Silenced` 96. `Poisoned`,
+`Diseased`, `Cursed` and `Corrupted` are a buff with poison (SPA 36), disease (35), curse (116) or corruption (369)
+counters.
 
 ### character
 
@@ -199,8 +203,9 @@ character's name.
 | `Buff[n\|name]` | `buff` | the nth long buff, or one by name; with no index, the count |
 | `Song[n\|name]` | `buff` | the same for short buffs (songs) |
 | `CountBuffs`, `CountSongs` | int | |
-| `MaxBuffSlots` | int | 42 |
-| `FreeBuffSlots` | int | 42 minus the long buffs |
+| `MaxBuffSlots` | int | the buff window's slots: RoF2's 42, whatever the character's level or AAs |
+| `MaxSongSlots` | int | the song (short buff) window's slots: RoF2's 20 |
+| `FreeBuffSlots` | int | `MaxBuffSlots` minus the long buffs |
 | `Gem[n]` | `spell` | the spell in gem n |
 | `Gem[name]` | int | the gem that holds that spell |
 | `NumGems` | int | how many gems the player can use |
@@ -221,6 +226,7 @@ character's name.
 | `Inventory[slot]` | `item` | the item in a slot, by [name or number](#inventory-slots) |
 | `FreeInventory` | int | empty general slots plus empty bag slots |
 | `Pet` | `spawn` | as the `Pet` TLO |
+| `Bandolier[name\|n]` | `bandolier` | a bandolier set by its name (any case) or number (1..20, clamped); NULL for a name no set has |
 | `AbilityReady[name\|number]` | bool | a skill's reuse timer has run out |
 | `CombatAbilityReady[name]` | bool | the same for a combat ability (a discipline); the name works without its "Rk. II" |
 | `AltAbilityReady[name\|group]` | bool | the same for an activated AA |
@@ -327,11 +333,24 @@ name.
 | `everquest` | `EverQuest` | `GameState` (`INGAME`, `CHARSELECT` or `PRECHARSELECT`), `Server` (the server's name), `UIScale` (always 1.0) |
 | `window` | `TRUE` or `FALSE` | `Open`, `Name` |
 | `plugin` | its name when loaded, else NULL | `IsLoaded`, `Name` |
+| `debuff` | `Count` | `Count` (all four), `Poisoned`, `Diseased`, `Cursed`, `Corrupted`: counters, summed over every buff; `Silenced`: bool, a buff silences (SPA 96) |
 | `time` | `hh:mm:ss` | `Hour`, `Minute`, `Second`, `Day`, `Month`, `Year`, `DayOfWeek` (1 Sunday), `Date` (`MM/DD/YYYY`), `Time24`, `SecondsSinceMidnight`, `Night` (before 6:00 or from 19:00) |
 | `gametime` | `hh:mm` | `Hour`, `Minute`, `Day`, `Month`, `Year`, `Night`, `Time24` |
 | `navigation` | `Active` | `Active`, `Paused`, `MeshLoaded`, `MeshComplete`, `TilesBuilt`, `TilesTotal`, `Destination`, `Remaining`, `PathExists[dest]`, `PathLength[dest]` (-1 for no path); docs/navigation.md "The Navigation TLO" |
-| `stick` | `ON` or `OFF` | `Active`, `Status` (`ON`, `PAUSED` or `OFF`), `Distance`, `StickTarget` (spawn id, 0 none), `StickTargetName` |
+| `stick` | `ON` or `OFF` | `Active`, `Status` (`ON`, `PAUSED` or `OFF`), `Distance`, `StickTarget` (spawn id, 0 none), `StickTargetName`, `Stopped` (within the stick's distance), `Behind` (and at the spawn's back); docs/navigation.md |
+| `bandolier` | its name | `Active` (each of its four items is the one worn in its slot, an empty one an empty slot), `Index` (1..20), `Name`, `Item[1..4]` (primary, secondary, range, ammo; clamped). A set without a name is NULL to every member. To switch sets: `/bandolier activate <name>` |
+| `bandolieritem` | its name | `ID`, `IconID`, `Name` |
+| `advpath` | `TRUE` | `Active`, `State` (1 following, 0 not), `Status` (0 off, 1 on, 2 paused), `Following`, `Paused`, `WaitingWarp`, `Waypoints`, `Length`, `Monitor` (spawn), `Playing` and `Recording` (FALSE); docs/navigation.md |
+| `moveto` | `ON`, `PAUSED` or `OFF` | `Moving`, `Stopped` (the last `/moveto` arrived), `ArrivalDist`, `Broken` (always FALSE); docs/navigation.md |
 | `math` | NULL | `Calc[expr]`, `Sqrt`, `Abs`, `Sin`, `Cos`, `Tan`, `Asin`, `Acos`, `Atan` (degrees), `Rand[max]` or `Rand[min,max]`, `Not`, `Hex`, `Dec[hex]`, `Clamp[n,min,max]`, `Distance[y,x,z:y,x,z]` (a missing point or coordinate is the player's) |
+
+`Debuff` is the MQ2Debuffs plugin's TLO, which E3 reads. Only detrimental spells count: some beneficial buffs carry
+a counter effect too. Each counter effect (SPA 35 disease, 36 poison, 116 curse,
+369 corruption) with a positive base adds the counters left once the client knows them (as the buff window's
+counter numbers), else the counters the spell starts with; a cure's own effect (a negative base) adds none. The
+pet's buffs come from the pet window's list, which carries no counters left, so `Debuff[pet]` always counts the
+starting counters. `Silenced` is TRUE while any of the buffs has SPA 96 (as `Me.Silenced`, which gives the buff).
+Only these members are here; MQ2Debuffs' others are missing.
 
 `Window[name]` asks the UI whether a window of that name is open. The names are the game's own window names, which
 the UI packs use too (`InventoryWindow`, `LootWnd`, `BankWnd`, `GroupWindow`, ...).
@@ -411,6 +430,7 @@ them. These commands come from MacroQuest rather than the game:
 | `/squelch <cmd>` | runs the command without its chat output |
 | `/docommand <cmd>` | runs the command (useful after `${...}` builds it) |
 | `/noparse <cmd>` | runs the command without expanding `${...}` |
+| `/timed <deciseconds> <cmd>` | runs the command that many tenths of a second later, `${...}` expanded then, with the sender's permissions |
 | `/lua run <name> [args]` \| `stop [name]` \| `pause [name]` \| `list` | scripts |
 | `/plugin list` \| `/plugin <name> [load\|unload]` | compiled plugins |
 | `/nav`, `/moveto`, `/stick` | navigation (docs/navigation.md "Commands") |
@@ -448,7 +468,7 @@ The global `mq` (also `require('mq')`) in every script, Lua social and Lua plugi
 | `mq.web.*` | `web` | the script's own browser tabs (below) |
 | `mq.luaDir` | | the script folder the script was found in |
 | `mq.configDir` | | the folder `mq.pickle` writes to: `scripts/config/`, or `scripts/config/<script>/` for a script without every capability |
-| `print(...)`, `printf(fmt, ...)` | | a line in the chat window |
+| `print(...)`, `printf(fmt, ...)` | | a line in the chat window; MacroQuest's colour codes (`\ag`, `\ax` ...) colour it (docs/plugins.md "Colour codes") |
 | `require(name)` | | `mq`, `ImGui`, `hailstone`, or a module file next to the script or in the script folders |
 
 **Event patterns** (`mq/event_pattern.h`): the pattern must match the whole line. `#*#` matches any text, as much as
@@ -971,7 +991,7 @@ send a request. `OpenTask` changes the journal selection and visibility, not tas
 | GemOverlay | (name, child, y0, y1) → top, r, g, b, a \| nil | Gem cool-down rectangle | — |
 | GemInfo | (name, child [, into [, y0, y1]]) → t | All gem looks in one call: {shown, tooltip, tex,u0,v0,u1,v1, tintR..tintA, overlay, coolR..coolA, top}. `into` is filled only when it has no metatable (else a new table) | — |
 | ButtonCoolDown | (name, child, y0, y1) → top, r, g, b, a, remainingMs, reuseMs | A button's cool-down rectangle (nil when idle); combat ability buttons add remaining and focus-adjusted reuse ms (0 when idle or unknown). A shared timer's remaining time can exceed this ability's reuse | — |
-| BuffSlot | (name, child [, overlays]) → spellId, msLeft, name, beneficial, fade [, counter,cr,cg,cb, limit,lr,lg,lb] \| nil | Buff on a buff button. msLeft < 0 = permanent | — |
+| BuffSlot | (name, child [, overlays [, removalDetails]]) → spellId, msLeft, name, beneficial, fade [, counter,cr,cg,cb, limit,lr,lg,lb] [, petId, slot] \| nil | Buff on a buff button. msLeft < 0 = permanent. `removalDetails` appends the entity ID and server slot of a removable pet buff, or two nils. | — |
 | BuffOverlay | (name, child, "timer"\|"counter"\|"limit") → text, r, g, b \| nil | Overlay text on a buff button | — |
 | SpellGemClick | (child [, "left"\|"right"]) → ok | Cast, or forget (right) | actions |
 
@@ -1375,6 +1395,8 @@ return `true` while nothing changed. Reading a view draws that screen in the cli
 A plugin is a `.dll`, `.so` or `.dylib` built against `sdk/hailstone_plugin.h` (plain C, MIT licensed). docs/plugins.md
 "Compiled plugins" has a full example and the build commands, and `plugins/example/MQ2Example.c` uses every part.
 `sdk/hailstone_byte_io.h` (C++20, header only) gives the `ByteReader` and `ByteWriter` the client uses for packets.
+`sdk/hailstone_plugin.hpp` (C++20, header only) takes capturing lambdas as commands and TLOs and fills the readers'
+sizes (docs/plugins.md "C++ plugins: the wrapper").
 
 ```c
 #include "hailstone_plugin.h"
@@ -1435,6 +1457,7 @@ or -1 and say so in the chat window. Only call these on the client's thread, fro
 | `write_chat_color(text, color)` | | a chat line in one of the game's chat colours |
 | `do_command(line)` | per command | |
 | `add_command`, `remove_command` | `commands` | |
+| `command_exists(name)` | | whether a typed `/name` would run a command, in the order the line would: `HAILSTONE_COMMAND_ADDED` (1) when a plugin, a script or the client added it, else `HAILSTONE_COMMAND_GAME` (2) for the game's own (any prefix of its names; GM commands only for a GM), else 0. The `/` is optional; a name with a space is 0. Added later in ABI 3: test `HAILSTONE_HOST_HAS(host, command_exists)` |
 | `parse(text, out, size)` | `read` | |
 | `add_tlo`, `remove_tlo` | | |
 | `send_packet(stream, opcode, data, size)` | `packets` | to the server, through the other plugins' outgoing hooks |

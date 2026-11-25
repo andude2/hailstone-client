@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 # The oldest macOS a build runs on (set before project()). 13.3 is the first whose libc++ formats floating-point
 # numbers (std::format of a float, std::to_chars), which the client uses; the bundled MoltenVK needs 12.0.
 set(CMAKE_OSX_DEPLOYMENT_TARGET "13.3" CACHE STRING "The oldest macOS the build runs on")
-project(hailstone VERSION 0.7.2 LANGUAGES C CXX)
+project(hailstone VERSION 0.7.3 LANGUAGES C CXX)
 # The release's pre-release label (SemVer: "0.1.0-alpha"); empty for a final release. With the version it is what the
 # updater compares against a release's manifest (core/version.h, docs/updater.md), so change both with each release.
 set(HAILSTONE_VERSION_LABEL "beta")
@@ -258,6 +258,7 @@ add_library(hailstone_engine STATIC
   src/game/server_ext.cpp
   src/game/server_ext_chain.cpp
   src/game/chat_text.cpp
+  src/game/mq_colors.cpp
   src/game/chat_windows.cpp
   src/game/client_options.cpp
   src/game/buff_overlays.cpp
@@ -880,6 +881,14 @@ target_include_directories(MQ2Example PRIVATE sdk)
 set_target_properties(MQ2Example PROPERTIES PREFIX "" LIBRARY_OUTPUT_DIRECTORY ${HAILSTONE_TREE_DIR}/plugins$<0:>
                                             RUNTIME_OUTPUT_DIRECTORY ${HAILSTONE_TREE_DIR}/plugins$<0:>)
 
+# HSMono (the MQ2Mono port), a repository of its own: built with the client when cloned into plugins/hsmono (ignored
+# here, as the server plugins below are).
+set(HSMONO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/plugins/hsmono")
+if(EXISTS "${HSMONO_DIR}/CMakeLists.txt")
+    message(STATUS "Found optional subproject: HSMono")
+    add_subdirectory("${HSMONO_DIR}")
+endif()
+
 # The example upscaler provider (plugins/example/upscaler): plain C against sdk/hailstone_upscaler.h, in
 # build/hailstone/upscalers/example/example.<so|dll|dylib> (render/upscaler_provider.h finds it by its folder's name).
 add_library(ExampleUpscaler MODULE plugins/example/upscaler/example.c)
@@ -1416,6 +1425,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/spell_projectiles_test.cpp
     tests/commerce_test.cpp
     tests/bandolier_swap_test.cpp
+    tests/exchange_test.cpp
     tests/bank_test.cpp
     tests/bank_snapshot_test.cpp
     tests/real_estate_test.cpp
@@ -1460,6 +1470,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/achievements_test.cpp
     tests/achievement_connection_test.cpp
     tests/achievement_chat_test.cpp
+    tests/mq_colors_test.cpp
     tests/stml_link_injection_test.cpp
     tests/achievement_chat_input_test.cpp
     tests/lua_ui_achievements_test.cpp
@@ -1596,13 +1607,17 @@ if(HAILSTONE_BUILD_TESTS)
   add_library(HostProbe MODULE tests/plugins/HostProbe.cpp)
   add_library(HostProbeThrow MODULE tests/plugins/HostProbe.cpp)
   target_compile_definitions(HostProbeThrow PRIVATE HAILSTONE_PROBE_THROW_INIT)
+  # A C++ test plugin built with the SDK's C++ wrapper (tests/plugins/CppWrapper.cpp, sdk/hailstone_plugin.hpp), with
+  # the client's warnings: the header must compile cleanly in a plugin.
+  add_library(CppWrapper MODULE tests/plugins/CppWrapper.cpp)
+  target_compile_options(CppWrapper PRIVATE ${HAILSTONE_WARNINGS})
   # A plugin built against the 0.7.1-beta SDK header (a frozen copy): released plugins must keep loading.
   add_library(Sdk071Plugin MODULE tests/plugins/Sdk071Plugin.c)
   target_include_directories(Sdk071Plugin PRIVATE tests/plugins/sdk071)
   target_compile_options(Sdk071Plugin PRIVATE ${HAILSTONE_WARNINGS})
   set_target_properties(Sdk071Plugin PROPERTIES PREFIX "")
   add_dependencies(hailstone_tests Sdk071Plugin)
-  foreach(p ExtendTest ExtendTestV1 ExtendTestNew HostProbe HostProbeThrow)
+  foreach(p ExtendTest ExtendTestV1 ExtendTestNew HostProbe HostProbeThrow CppWrapper)
     target_include_directories(${p} PRIVATE sdk)
     set_target_properties(${p} PROPERTIES PREFIX "")
   endforeach()
@@ -1630,9 +1645,14 @@ if(HAILSTONE_BUILD_TESTS)
   target_compile_definitions(TestUpscaler_newer PRIVATE EXAMPLE_ABI=99)
   target_compile_definitions(TestUpscaler_nodevice PRIVATE EXAMPLE_REFUSE_DEVICE)
   target_compile_definitions(TestUpscaler_failing PRIVATE EXAMPLE_FAIL_EVALUATE)
-  add_dependencies(hailstone_tests MQ2Example ExtendTest ExtendTestV1 ExtendTestNew HostProbe HostProbeThrow hailstone_mock_web_helper)
-  target_compile_definitions(hailstone_tests PRIVATE HAILSTONE_EXAMPLE_PLUGIN="$<TARGET_FILE:MQ2Example>"
-    HAILSTONE_PROBE_PLUGIN="$<TARGET_FILE:HostProbe>" HAILSTONE_PROBE_THROW_PLUGIN="$<TARGET_FILE:HostProbeThrow>"
+  add_dependencies(hailstone_tests MQ2Example ExtendTest ExtendTestV1 ExtendTestNew HostProbe HostProbeThrow CppWrapper
+                   hailstone_mock_web_helper)
+    
+  target_compile_definitions(hailstone_tests PRIVATE 
+    HAILSTONE_EXAMPLE_PLUGIN="$<TARGET_FILE:MQ2Example>"
+    HAILSTONE_PROBE_PLUGIN="$<TARGET_FILE:HostProbe>" 
+    HAILSTONE_PROBE_THROW_PLUGIN="$<TARGET_FILE:HostProbeThrow>"
+    HAILSTONE_CPP_PLUGIN="$<TARGET_FILE:CppWrapper>"
     HAILSTONE_SDK071_PLUGIN="$<TARGET_FILE:Sdk071Plugin>"
     HAILSTONE_EXTEND_PLUGIN="$<TARGET_FILE:ExtendTest>" HAILSTONE_EXTEND_PLUGIN_V1="$<TARGET_FILE:ExtendTestV1>"
     HAILSTONE_EXTEND_PLUGIN_NEW="$<TARGET_FILE:ExtendTestNew>"

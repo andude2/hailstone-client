@@ -504,7 +504,7 @@ local function pageTabs(x0, y0, x1)
     local w = tw + T.px(28)
     T.rect(x, y0, x + w, y0 + h, page == i and C.accent or C.raised, page == i and 0.9 or 1, T.px(10))
     T.textIn(x, y0, x + w, y0 + h, p[1], page == i and C.onAccent or C.text, 0.5)
-    if ui.IsMouseHoveringRect(x, y0, x + w, y0 + h) and ui.IsMouseClicked(ui.Mouse.Left) then showPage(i) end
+    if T.mouseOver(x, y0, x + w, y0 + h) and ui.IsMouseClicked(ui.Mouse.Left) then showPage(i) end
     x = x + w + T.px(8)
   end
   local gw2 = T.glyphWidth(pad, "rb", T.px(28))

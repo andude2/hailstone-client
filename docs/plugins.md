@@ -177,7 +177,7 @@ close.
 | 1 | `read` | read game state: `mq.TLO`, `${...}`, `mq.parse`, `ParseMacroData`, spawn events, `ability_state`, `get_ability_data_bulk`, `get_spells_data_bulk` |
 | 2 | `commands` | run commands outside the groups below: windows, options, `/who`, other plugins' commands, `/lua`; add commands of its own (`mq.bind`, `AddCommand`). The player is told "run other commands (windows, options, /who, other plugins' commands)" |
 | 4 | `target` | change the target: `/target`, `/assist`, `/xtarget`, ... |
-| 8 | `actions` | act: `/cast`, `/disc`, `/doability`, `/useitem`, `/attack`, `/memspellset`, `/pet`, `/loot`, `/autoinventory`, `/alternateadv` (`/alt`), `/split`, `/consent`, `/guilddelete`, non-movement `/keypress`; Hailstone's own item commands `/destroy`, `/destroycursor` and `/stowcursor`, and `use_ability` |
+| 8 | `actions` | act: `/cast`, `/disc`, `/doability`, `/useitem`, `/attack`, `/memspellset`, `/pet`, `/loot`, `/autoinventory`, `/alternateadv` (`/alt`), `/split`, `/consent`, `/guilddelete`, non-movement `/keypress`; Hailstone's own item commands `/destroy`, `/destroycursor`, `/stowcursor`, `/exchange` and `/unequip`, and `use_ability` |
 | 16 | `move` | move: `/face`, movement `/keypress` (forward, jump, ...), `/follow`, `/sit`, `/stand`, `/duck`, `/camp` |
 | 32 | `chat` | speak: plain text, `/say`, `/tell`, `/g`, `/gu`, `/rs`, channels, emotes |
 | 64 | `events` | see chat lines: `mq.event`, `OnIncomingChat`, and hide them (`OnFilterChat`) |
@@ -193,7 +193,7 @@ capabilities (`src/mq/commands.cpp`).
 
 - The game's own commands are classified by their entry in the command table.
 - Hailstone's own commands need `commands`, except those that destroy or move items (`/destroy`, `/destroycursor`,
-  `/stowcursor`), which need `actions`.
+  `/stowcursor`, `/exchange`, `/unequip`), which need `actions`.
 - MQ's and plugins' commands declare what they need.
 
 ## MacroQuest Lua scripts
@@ -307,8 +307,16 @@ clipboard may hold a password, and what a script puts there is pasted where the 
 
 `Me`, `Target`, `Spawn[...]`, `SpawnCount[...]`, `NearestSpawn[n, ...]`, `Group`, `Zone`, `Spell[id|name]`, `Cursor`,
 `FindItem[name|=exact]`, `FindItemCount[...]`, `Pet`, `Window[name]` (`.Open`), `Plugin[name]` (`.IsLoaded`), `Time`,
-`GameTime`, `EverQuest` (`.GameState`, `.Server`), `Heading[deg]`, `Int`, `Float`, `Bool`, `String`, `Select`, `Math`,
-`If`, `Range`, `LineOfSight[...]`, `Navigation` and `Stick` (below). Compiled plugins can add more.
+`GameTime`, `EverQuest` (`.GameState`, `.Server`), `MacroQuest` (`.Path[config]`: `scripts/config/` in Hailstone's
+folder, without a trailing separator; MQ's other folder names are NULL. `.Build`: MQ's build target, 4 for Emu.
+`.BuildDate`: the day the client was built, as an int, yyyymmdd. `.Version`: Hailstone's release version. Other
+members are `EverQuest`'s, as in MQ, so `.Server` is the server's name), `Hailstone` (the same members as
+`MacroQuest`),
+`Heading[deg]`, `Int`, `Float`, `Bool`, `String`, `Select`, `Math`,
+`If`, `Range`, `LineOfSight[...]`, `Debuff` and `Debuff[pet]` (`.Count`, `.Poisoned`, `.Diseased`, `.Cursed`,
+`.Corrupted`: the counters on the player or the pet; `.Silenced`; docs/scripting-reference.md), `Navigation`, `Stick`,
+`MoveTo` and `AdvPath` (below).
+Compiled plugins can add more.
 
 The data types use MQ's member names and inheritance:
 
@@ -379,8 +387,8 @@ The server sends target buffs only to some players (stock EQEmu: GMs, Inspect Bu
 - `Target.Buff[n|name]` (a buff: `.Duration`, `.Caster`, `.ID` the slot ...), `.BuffCount`, `.BuffDuration[name]`;
 - `.MyBuff[name]` and `.MyBuffDuration[name]` (cast by the player);
 - the state a buff puts it in, by spell effect (EQEmu's spdat.h): `.Mezzed` (SPA 31), `.Charmed` (22), `.Feared`
-  (23), `.Rooted` (99), `.Snared` (3, negative), `.Slowed` (11, under 100%); `.Poisoned` (36), `.Diseased` (35),
-  `.Cursed` (116), `.Corrupted` (369), a buff with counters of that kind.
+  (23), `.Rooted` (99), `.Snared` (3, negative), `.Slowed` (11, under 100%), `.Silenced` (96); `.Poisoned` (36),
+  `.Diseased` (35), `.Cursed` (116), `.Corrupted` (369), a buff with counters of that kind.
 
 #### Spawn searches
 
@@ -438,12 +446,13 @@ Not yet:
 `/echo`, `/target` (`id N`, `clear`, `mycorpse`, `myself`, or a spawn search; with nothing, yourself; `next` / `prev`
 walk the search's matches), `/face` (target, `id`, `heading H`, `loc y,x`,
 a search; `fast`), `/keypress <command> [hold|release]` (the game's key command names: `forward`, `jump`, `hot1_1`, ...),
-`/squelch <cmd>`, `/docommand <cmd>`, `/noparse <cmd>`, `/lua ...`, `/plugin ...`. `/nav` (MQ2Nav's commands),
+`/squelch <cmd>`, `/docommand <cmd>`, `/noparse <cmd>`, `/timed <deciseconds> <cmd>`, `/lua ...`, `/plugin ...`. `/nav` (MQ2Nav's commands),
 `/moveto` and `/stick` are built in (`docs/navigation.md`).
 
 `${...}` is parsed in every command line, typed or scripted, except:
 
 - `/noparse`;
+- `/timed`, whose line is parsed when it runs, as in MQ;
 - the lines the client's own windows send for a button (the guild window's Go to URL, Join Channel and Update MOTD, a
   member's or friend's name): their text is what other players and the server wrote.
 
@@ -702,12 +711,87 @@ Callbacks:
 
 Host functions:
 
-- `WriteChatf`, `DoCommand(f)`;
+- `WriteChatf` (MacroQuest's colour codes work: "Colour codes" below), `DoCommand(f)`;
 - `AddCommand` (needs `commands`; 0 for one of the client's own commands, as `mq.bind`), `RemoveCommand`;
+- `host->command_exists(host->host, name)`: whether a typed `/name` would run, and what: `HAILSTONE_COMMAND_ADDED`
+  (a plugin's, a script's or the client's own, such as `/echo`), `HAILSTONE_COMMAND_GAME` (the game's own, which
+  takes any prefix of its names, its GM commands only for a GM) or `HAILSTONE_COMMAND_NONE`. Added commands are
+  looked up first, as a typed line is. Needs no capability. Added later in ABI 3: test
+  `HAILSTONE_HOST_HAS(host, command_exists)` first;
+- `host->lend_thread(host->host, 1 / 0)`: lends the client's thread to the plugin's own threads while its callback
+  waits for them (see **Threads** below). Added later in ABI 4: test `HAILSTONE_HOST_HAS(host, lend_thread)` first;
+- `host->get_scripts_config_dir(host->host, out, size)`: the scripts' settings folder, `scripts/config/` in
+  Hailstone's folder (`${MacroQuest.Path[config]}`, Lua's `mq.configDir`), shared by every plugin and script. Made
+  on demand and written as `config_dir` writes its folder; 0 when the client has none. Needs no capability. Added
+  later in ABI 4: test `HAILSTONE_HOST_HAS(host, get_scripts_config_dir)` first;
 - `ParseMacroData` (`${...}`, any TLO);
 - `AddTopLevelObject`: a TLO with members the plugin answers; refused when the name is already a TLO (as in MQ);
 - `RemoveTopLevelObject` (only the plugin's own);
 - `host->send_packet`, `host->resize_packet`, `host->config_dir`, `host->caps`, `host->imgui_context`.
+
+#### C++ plugins: the wrapper
+
+A C++ plugin may also include `sdk/hailstone_plugin.hpp` (C++20, header only, MIT). It takes any callable for a
+command or a TLO, a capturing lambda among them, as MacroQuest's `mq::AddCommand` does:
+
+```cpp
+#include "hailstone_plugin.h"
+#include "hailstone_plugin.hpp"
+HAILSTONE_PLUGIN
+
+class Bot {
+public:
+    Bot() {
+        for (std::string name : {"/follow", "/stay"})
+            commands_.add(name, [this, name](const char* args) { order(name, args); });
+    }
+private:
+    void order(const std::string& name, const char* args) { WriteChatf("%s %s", name.c_str(), args); }
+    hs::Commands commands_; // last: its commands go before what they capture
+};
+static std::unique_ptr<Bot> bot;
+
+HAILSTONE_API void InitializePlugin(void) { bot = std::make_unique<Bot>(); }
+HAILSTONE_API void ShutdownPlugin(void) { bot.reset(); hs::RemoveAllCommands(); hs::RemoveAllTopLevelObjects(); }
+```
+
+| In `hs::` | What |
+|---|---|
+| `AddCommand(name, fn)`, `RemoveCommand(name)`, `RemoveAllCommands()` | `fn(const char* args)`; adding a name the plugin has replaces it |
+| `Commands` | commands removed with their holder: a member of the object the lambdas capture |
+| `CommandExists(name)` | `command_exists`, empty on a client without it |
+| `LendThread` | `lend_thread` for a scope: lends while it lives; `ok()` false where refused or missing, and nested in a lending scope it leaves the ending to that one |
+| `AddTopLevelObject(name, fn)`, `RemoveTopLevelObject`, `RemoveAllTopLevelObjects()` | `fn(index, member, member_index, HailstoneValue& out)`, true with `out` filled; `member` is null for `${Name}` itself. Adding the plugin's own name again replaces its answer |
+| `Bool`, `Int`, `Float`, `String` | `HailstoneValue`s for a TLO's `out` (a string must live until the TLO returns) |
+| `GetPlayer()`, `GetSpawn(id)`, `NextSpawn(after_id)` | the readers with the struct's `size` filled in, as `std::optional` |
+
+Only C function pointers and `void*` cross into the client: the callables stay in the plugin, one registry per plugin
+binary, so a plugin built with the wrapper loads in any client of its ABI, whatever compiler built either. A handler
+may remove or replace itself while it runs, and the wrapper catches what a handler throws. Call it on the client's
+thread, as the rest of the host table; remove what captures an object before the object goes.
+
+#### Colour codes
+
+A line a plugin or script writes (`WriteChatf`, `write_chat`, `write_chat_color`, Lua's `print`) may colour its parts
+with MacroQuest's colour codes, as `WriteChatColor` takes them: BEL (`\a` in C, C++, C# and Lua) and what follows it.
+
+| Code | Colour |
+|---|---|
+| `\ay` `\ao` `\ag` `\au` `\ar` `\at` `\am` `\ap` `\aw` | yellow, orange, green, blue, red, teal, magenta, purple, white |
+| `\ab` | black |
+| `\a-` and one of the letters above | its dark shade (`\a-w` grey) |
+| `\a#rrggbb` | that colour (six hex digits) |
+| `\ax` | back to the colour before the last code |
+
+- The chat windows draw them as STML colours, as MacroQuest's `MQToSTML` does; the chat log, the client's log and
+  copied text get the line without them.
+- Each code but `\ax` starts a colour and `\ax` ends the last one started. Unlike MacroQuest, an `\ax` with no colour
+  started does nothing (MacroQuest's would end the line's own colour), and colours still started at the end of the
+  line end there.
+- A code for the colour already showing starts nothing, an unknown letter changes nothing, and `\a#` without six hex
+  digits changes nothing.
+- Only plugins and scripts can colour a line: in a server's message or a player's text, a BEL is taken out when the
+  line comes, before any hook sees it.
 
 #### Chat hooks
 
@@ -726,7 +810,28 @@ calling plugin.
 **Threads.** Call host functions only from inside the plugin's callbacks (`InitializePlugin`, `OnPulse`, a command,
 a hook, ...), on the client's thread: its state has no locks. From another thread a call does nothing and returns
 0 / NULL (logged once); `ability_state` returns -1 ("unknown"), since its 0 means "on reuse". Hand a worker thread's
-results over and act on them in `OnPulse`.
+results over and act on them in `OnPulse`. The one exception is chat: `write_chat` and `write_chat_color` (and so
+`WriteChatf`) from another thread queue the line, and the client shows it at the next pulse, in order, as MacroQuest's
+`WriteChatColor` does. At most 1000 lines wait per plugin; past that they are dropped (logged once), and lines still
+waiting when the plugin unloads are not shown.
+
+A plugin whose callback waits while a thread of its own does the work (a script runtime whose script thread runs
+while `OnPulse` blocks, as MQ2Mono's C# scripts do) can lend that thread the client's: `lend_thread(host, 1)` from
+inside the callback, on the client's thread. Until `lend_thread(host, 0)`, or until that callback returns, the
+plugin's threads may call host functions as the client's thread would, with the plugin's capabilities. Every host call
+then takes one lock, the client's thread's own included, so the calls run one at a time; nothing else of the client
+runs meanwhile, since the client's thread is inside the plugin. `lend_thread(host, 1)` returns 1 when it started
+lending, 2 when the plugin already lends (a nested callback: leave the ending to the one that started it), and 0 on a
+lent thread, outside a callback, or inside another plugin's lending callback. `lend_thread(host, 0)` waits for a host
+call another thread is making, then returns 1. C++ plugins can hold an `hs::LendThread` for the waiting.
+
+A host call the client's thread makes while the plugin lends (a `do_command`, a `parse`, a `write_chat` from the
+waiting callback itself) holds that lock until it returns, the callbacks it runs included: a command's handler, a TLO,
+a chat event, in this plugin or another. Such a callback must not wait for the plugin's threads, whose calls wait for
+the lock: the client would hang. `lend_thread(host, 1)` returns 0 there (an `hs::LendThread`'s `ok()` is false), not 2.
+A lent thread may call any host function, commands included. A script runtime does well to keep its threads to reads
+and hand changes to the client's thread, as E3 does (its `MainProcessor` thread queues each command for `OnPulse`),
+and to have its callbacks only queue work, never wait.
 
 **Exceptions.** A C++ plugin must not let an exception out of anything the client calls (callbacks, commands, TLOs,
 hooks, UI functions, options). The client catches what it can: the call counts as unanswered (a TLO is NULL, a hook
@@ -845,6 +950,7 @@ ABI 3, so test `HAILSTONE_HOST_HAS(host, set_class_name)` first. Lua:
   - `character_config_dir` is the character's `characters/<world>/<character>/plugin-config/<name>/` (0 before there
     is one);
   - `config_dir` stays the folder for every server;
+  - `get_scripts_config_dir` is `scripts/config/`, the folder the scripts' settings share;
   - `write_chat_color` writes a line in one of the game's chat colours, and `zone_name` gives a zone's short name.
 - **read and write packets** with the SDK's `hailstone_byte_io.h` (C++20, header only): the client's own
   `ByteReader` and `ByteWriter`.
@@ -922,8 +1028,9 @@ Several plugins may extend the client at once: they are asked in load order and 
   client to Dear ImGui 1.93.0: no `OnUpdateImGui`, `imgui_context` or `web_view` for a plugin of ABI 3 or before. ABI 3
   added the web pages, `web_*`, "Web pages" below.
 - ABI 4 is upstream's layout unchanged: the UI contribution pair sits straight after `get_spells_data_bulk`, then the
-  later spell and bulk-buffer calls (`get_spells_by_name_data_bulk`, `acquire_bulk_buffer`, `release_bulk_buffer`).
-  This branch's ABI 5 appends its own loot and inventory calls after those, so nothing upstream placed has moved. A
+  later ABI 4 calls (`get_spells_by_name_data_bulk`, `acquire_bulk_buffer`, `release_bulk_buffer`, `spell_id_limit`,
+  `spell_data_ready`, `command_exists`, `lend_thread`, `get_scripts_config_dir`).
+  This branch's ABI 5 appends its own loot, inventory and task calls after those, so nothing upstream placed has moved. A
   plugin reporting ABI 3 gets the same append-only table, and only a plugin built for ABI 5 sees the loot calls.
 - Calls added since keep the ABI they were added in: test `HAILSTONE_HOST_HAS(host, open_bank)` before such a call,
   since an older client has a shorter table. `use_ability`, `ability_state`, `get_ability_data_bulk` and the other
@@ -934,6 +1041,19 @@ Several plugins may extend the client at once: they are asked in load order and 
 
 A C++ allocation or provider exception at an SDK entry point returns the ordinary zero/void failure result. Side
 effects completed before it are not retried or undone.
+
+#### Extended spell IDs
+
+The optional `HailstoneHooks::spell_id_limit()` asks for an inclusive wire ceiling above 45,000 for the server
+the add-on is active on. It needs the `extend` capability, and zero abstains. The host selects a compatible
+limit before it sends ZoneEntry. This requires a native spell file with extended records that fit the request.
+The request has no effect on the local spell table's range.
+
+The host calls `spell_id_limit(host)` and `spell_data_ready(host)` need `read`. An add-on should check both with
+`HAILSTONE_HOST_HAS` before it sends any server-specific advertisement. A stock zone entry or an incompatible
+file at zone entry yields 45,000 and false. Reloading assets rechecks readiness, while the selected limit stays
+with the current stream. Hailstone preserves the stock ZoneEntry format and file checksums. An add-on owns its
+server's optional wire negotiation through the existing outgoing packet hook.
 
 #### The cursor item's origin
 
@@ -1063,12 +1183,18 @@ slots, then the one discipline slot, always last.
   | 12 | i32 | hits left |
   | 16 | i32 | the spell's type: 0 detrimental, 1 beneficial, 2 beneficial group-only (0 for a spell not in spells_us.txt) |
   | 20 | i32 | counter type of the spell's first counter effect: -1 none, 0 disease, 1 poison, 2 curse, 3 corruption. An empty slot also has 0 here, so test the spell id before reading it as disease |
-  | 24 | i32 | that effect's base: the counters the buff starts with (MacroQuest's `Spell.CounterNumber`); 0 with no counter effect |
+  | 24 | i32 | that effect's counters left, once the client knows them; until then its base, the counters the buff starts with (MacroQuest's `Spell.CounterNumber`); 0 with no counter effect. See the note below |
   | 28 | u8 | the slot's window: 0 buff (`HAILSTONE_BUFF_SLOT_BUFF`, RoF2's slots 0 to 41), 1 song (`HAILSTONE_BUFF_SLOT_SONG`, 42 to 61), 2 discipline (`HAILSTONE_BUFF_SLOT_DISC`, the last slot, 62); 0 in an empty slot. Taken from the slot, not the spell |
 
 Tics left is the server's count less the 6 s ticks since it came (none while the buff timers are on hold). A permanent
 buff is negative, the server's count as sent, never counted down (EQEmu: -1 for duration formula 50, -4 for an aura's
-buff, formula 51, -1000 for one a script made permanent). The counters left are not included.
+buff, formula 51, -1000 for one a script made permanent).
+
+The counters left are the counter effect's slot data, as MQ2Mono reports them and the buff window's counter overlay
+draws them: a cure that spends some lowers them, and 0 means every counter is cured while the buff is still on. The
+client knows them once the spell lands on the player (it fills the slot data then, as the original client does), or
+once the server sends the buff with slot data that is not all zero (`OP_Buff`; EQEmu sends zeros, so on EQEmu it is the
+landing). A buff that came with the profile or a zone-in list has none yet, and reads its base until then.
 
 ##### `get_buff_name_data_bulk`
 
