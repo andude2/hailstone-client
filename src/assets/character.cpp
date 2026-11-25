@@ -726,8 +726,8 @@ void CharacterTables::add(const CharacterArchive& ca, std::size_t ai, int level,
     for (const auto& w : ca.wlds) {
         w.visit_character_index([&](wld::Ref ref, std::uint32_t type, const std::string& name, const wld::TrackRef* t) {
             if (name.empty()) return;
-            if (luclin_wld && type == 0x30) {
-                luclin_materials.try_emplace(upper(name), FragmentLoc{&w, ref});
+            if (type == 0x30) {
+                (luclin_wld ? luclin_materials : other_materials).try_emplace(upper(name), FragmentLoc{&w, ref});
                 zone_name('l', upper(name));
             }
             if (type == 0x14) {

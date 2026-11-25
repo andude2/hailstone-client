@@ -723,7 +723,7 @@ bool GameConnection::exchange_item(std::string_view name, int worn_slot) {
 
 void GameConnection::cancel_quantity() {
     DriveAction action{};
-    action.kind = DriveActionKind::Quantity;
+    action.kind = drive_control_ ? DriveActionKind::CancelQuantity : DriveActionKind::Quantity;
     if (!relay_drive_action(action)) quantity_.reset();
 }
 
@@ -772,6 +772,7 @@ void GameConnection::finish_quantity(std::uint32_t quantity) {
 }
 
 void GameConnection::destroy_cursor() {
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::DestroyCursor})) return;
     if (state_ != ConnectionState::InZone) return;
     if (!inventory_.cursor()) {
         // DestroyHeldItemOrMoney's coin part: OP_MoveCoin {cursor, -1, the highest coin held twice, its amount}, then
@@ -1118,6 +1119,7 @@ bool GameConnection::can_loot(std::uint32_t corpse_id) const {
 }
 
 void GameConnection::loot(std::uint32_t corpse_id) {
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::Loot, .argument = corpse_id})) return;
     // CEverQuest::LootCorpse @0x536720 (__do_loot, a right click on a corpse): a corpse (type above 1), not while
     // dead, an item request is pending or another corpse is open; beyond its AvatarHeight * 1.6 + 14 (PlayerDistance
     // with z scale 1.2) "You are too far away to loot that corpse." (colour 0xd); else OP_LootRequest.
@@ -1255,6 +1257,11 @@ void GameConnection::continue_extension_loot_all() {
 }
 
 void GameConnection::loot_item(std::int16_t corpse_slot, bool auto_loot, bool shift, bool ctrl) {
+    if (drive_control_) {
+        const std::uint32_t arg = (static_cast<std::uint32_t>(static_cast<std::uint16_t>(corpse_slot)) & 0xffffu) |
+                                  (auto_loot ? 0x10000u : 0u) | (shift ? 0x20000u : 0u) | (ctrl ? 0x40000u : 0u);
+        if (relay_control_action(DriveAction{.kind = DriveActionKind::LootItem, .argument = arg})) return;
+    }
     // CLootWnd::RequestLootSlot(slot, auto loot) @0x6be3a0: nothing while coin is held, or an item without auto loot;
     // a no-drop item may ask first ("%s is a NO DROP item, ...", 20 s; the window's popup flag set until answered).
     // Then, on someone else's corpse, a stack (StackCount +0x98 above 1) keeps the request (+0x39c) and opens
@@ -1468,6 +1475,7 @@ void GameConnection::loot_all_now() {
 }
 
 void GameConnection::end_loot() {
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::EndLoot})) return;
     if (!loot_) return;
     extension_loot_all_ = false;
     if (quantity_ && quantity_->op == QuantityOp::ExtensionLoot) quantity_.reset();
@@ -1540,6 +1548,21 @@ bool GameConnection::item_command(const std::string& command, const std::string&
     }
     if (command == "/destroy") { // this client's own command: the inventory's Destroy button
         destroy_held();
+        return true;
+    }
+    if (command == "/crewtrade") {
+        // Hailstone: /crewtrade <slot> <sub> <target> — trade the item in that possessions
+        // slot to the named player (start_crew_trade; Sentinel walks into reach first).
+        std::istringstream in(args);
+        long slot = -1, sub = -1;
+        std::string target;
+        if (!(in >> slot >> sub >> target) || slot < 0 || slot > kSlotCursor || sub < -1 || sub > 255) {
+            chat(ChatEvent::Kind::System, "[CrewTrade] failed: usage: /crewtrade <slot> <sub> <target>");
+            return true;
+        }
+        const auto why = start_crew_trade(
+            ItemSlot::possessions(static_cast<std::int16_t>(slot), static_cast<std::int16_t>(sub)), target);
+        if (!why.empty()) chat(ChatEvent::Kind::System, "[CrewTrade] failed: " + why);
         return true;
     }
     if (command == "/autoinventory" || command == "/autoinv") {

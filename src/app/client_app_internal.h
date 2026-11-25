@@ -1329,8 +1329,13 @@ private:
     std::filesystem::path parked_ui_character_dir_;
     std::string parked_layout_for_, parked_files_profile_, parked_server_name_;
     bool viewing_observe_ = false; // a crew view (observe or control) is shown for A
-    bool viewing_control_ = false; // ... and it is a control lease, not an observe viewer
+    bool viewing_control_ = false; // ... and it is a control view (Option 3 headless-authoritative)
     bool interacting_observe_ = false;
+    Clock::time_point drive_human_until_{};
+    Clock::time_point last_drive_move_send_{};
+    Clock::time_point last_remote_imgui_send_{};
+    bool drive_human_sent_active_ = false;
+    void apply_drive_resnapshot(const net::DriveSnapshot& snapshot);
     bool crew_window_open_ = false;
     Clock::time_point crew_entries_at_{};
     std::vector<DriveObserveFile> crew_entries_;

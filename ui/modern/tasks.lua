@@ -394,6 +394,327 @@ local function historyDetail(rows, selected, s)
   ui.EndChild()
 end
 
+-- ---------------------------------------------------------------- advanced (crew) view
+-- The crew's journals as ACNet publishes them natively (ezquests/progress.v3, the EZQuests
+-- snapshot format): every peer's active tasks in one list, the selected task's objectives
+-- with each owner's status. This character's own tasks come from hs.Tasks as usual; a peer's
+-- snapshot is decoded only when its revision changes (the hex can be large).
+local QUEST_TOPIC = "ezquests/progress.v3"
+local advCache = {} -- [sender] = { revision, tasks }
+local advSelected, advSource, advFilter = nil, nil, "all"
+
+local function decodeQuests(hex)
+  if type(hex) ~= "string" or hex == "ffff" or #hex % 2 ~= 0 or #hex > 2 * 64 * 1024 then return nil end
+  local ok, tasks = pcall(function()
+    local bytes = (hex:gsub("..", function(h) return string.char(tonumber(h, 16) or 0) end))
+    local count, pos = string.unpack("<I2", bytes)
+    if count > 512 then error("count") end
+    local out = {}
+    for _ = 1, count do
+      local id, kind, duration, left, title, members, leader, objectives
+      id, kind, duration, left, title, members, leader, objectives, pos =
+        string.unpack("<I4BI4I4s2I2s2I2", bytes, pos)
+      if objectives > 512 then error("objectives") end
+      local task = { id = id, type = kind, duration = duration, left = left, title = title,
+        members = members, leader = leader, objectives = {} }
+      for i = 1, objectives do
+        local oid, group, flags, ocount, goal, text, status, zone
+        oid, group, flags, ocount, goal, text, status, zone, pos =
+          string.unpack("<I4I4Bi4i4s2s2s2", bytes, pos)
+        task.objectives[i] = { id = oid, group = group, hidden = (flags & 1) ~= 0,
+          done = (flags & 2) ~= 0, optional = (flags & 4) ~= 0, count = ocount, goal = goal,
+          text = text, status = status, zone = zone }
+      end
+      out[#out + 1] = task
+    end
+    if pos ~= #bytes + 1 then error("trailing") end
+    return out
+  end)
+  return ok and tasks or nil
+end
+
+local function questPeers()
+  local plugin = API.plugins and API.plugins.Get("ACNet")
+  if not plugin or not plugin.BusState then return {} end
+  local revs = plugin.BusState(QUEST_TOPIC) or {}
+  local me = (API.character and API.character.Label(1) or ""):lower()
+  local present, out = {}, {}
+  for name, rev in pairs(revs) do
+    if name ~= me then
+      present[name] = true
+      local cached = advCache[name]
+      if not cached or cached.revision ~= rev then
+        cached = { revision = rev, tasks = plugin.BusStateHex and decodeQuests(plugin.BusStateHex(QUEST_TOPIC, name)) }
+        advCache[name] = cached
+      end
+      if cached.tasks then
+        out[#out + 1] = { key = name, name = name:sub(1, 1):upper() .. name:sub(2), tasks = cached.tasks }
+      end
+    end
+  end
+  for name in pairs(advCache) do if not present[name] then advCache[name] = nil end end
+  table.sort(out, function(a, b) return a.name < b.name end)
+  return out
+end
+
+local function advProgress(objectives)
+  local done, total = 0, 0
+  for _, o in ipairs(objectives or {}) do
+    if not o.hidden and not o.separator then
+      total = total + 1
+      if o.done then done = done + 1 end
+    end
+  end
+  return done, total
+end
+
+-- Unified entries across owners: key "type|id", owners[key] = { task, objectives, done, total }.
+local function advEntries(localTasks, peers)
+  local entries, order = {}, {}
+  local function add(ownerKey, task, objectives)
+    local key = (task.type or 0) .. "|" .. (task.id or 0)
+    local entry = entries[key]
+    if not entry then
+      entry = { key = key, id = task.id, type = task.type, title = task.title or "", owners = {} }
+      entries[key], order[#order + 1] = entry, entry
+    end
+    local done, total = advProgress(objectives)
+    entry.owners[ownerKey] = { task = task, objectives = objectives, done = done, total = total }
+    if ownerKey == "@self" then entry.title = task.title or entry.title end
+  end
+  for _, task in ipairs(localTasks) do add("@self", task, task.objectives) end
+  for _, peer in ipairs(peers) do
+    for _, task in ipairs(peer.tasks) do add(peer.key, task, task.objectives) end
+  end
+  local ownerCount = 1 + #peers
+  for _, entry in ipairs(order) do
+    local have, allDone = 0, true
+    for _, owner in pairs(entry.owners) do
+      have = have + 1
+      if owner.total == 0 or owner.done < owner.total then allDone = false end
+    end
+    entry.have, entry.ownerCount, entry.allDone = have, ownerCount, have > 0 and allDone
+  end
+  table.sort(order, function(a, b)
+    if a.allDone ~= b.allDone then return not a.allDone end
+    return (a.title or ""):lower() < (b.title or ""):lower()
+  end)
+  return order
+end
+
+-- The visible objectives of one owner's copy, in order (EZQuests' numbering and
+-- per-peer matching are by position in this list).
+local function advVisible(objectives)
+  local out = {}
+  for _, o in ipairs(objectives or {}) do
+    if not o.hidden and not o.separator then out[#out + 1] = o end
+  end
+  return out
+end
+
+local function advObjStatus(o)
+  if o.status and o.status ~= "" then return o.status end
+  if o.done then return "Done" end
+  if (o.goal or 0) > 0 then return string.format("%d/%d", o.count or 0, o.goal) end
+  return "In Progress"
+end
+
+-- EZQuests' Advanced right pane: title, type, a "View objectives from" source
+-- picker, status and current step, a "Who has this task" summary table (one row
+-- per owner, however many), then the chosen source's objectives in three
+-- columns. Per-owner columns do not scale to a 24-character crew; the other
+-- owners' progress on an objective is in its Progress cell's tooltip instead.
+local function advDetail(entry, s, myName)
+  if not entry then K.Empty("Select a task to view details."); return end
+  -- owners who have it: you first, then peers by name
+  local owners = {}
+  if entry.owners["@self"] then owners[#owners + 1] = { key = "@self", name = myName } end
+  local peerNames = {}
+  for key in pairs(entry.owners) do if key ~= "@self" then peerNames[#peerNames + 1] = key end end
+  table.sort(peerNames)
+  for _, key in ipairs(peerNames) do
+    owners[#owners + 1] = { key = key, name = key:sub(1, 1):upper() .. key:sub(2) }
+  end
+  -- the source: nil is Auto (self if available, else the first owner)
+  local sourceKey = advSource
+  if sourceKey and not entry.owners[sourceKey] then sourceKey = nil advSource = nil end
+  if not sourceKey then sourceKey = entry.owners["@self"] and "@self" or (owners[1] and owners[1].key) end
+  local source = sourceKey and entry.owners[sourceKey]
+  local visible = source and advVisible(source.objectives) or {}
+  local srcDone, srcTotal = advProgress(source and source.objectives)
+  local complete = srcTotal > 0 and srcDone == srcTotal
+
+  ui.PushFont(T.font.large)
+  ui.PushTextWrapPos(0)
+  ui.TextColored(C.gold[1], C.gold[2], C.gold[3], 1, entry.title or "")
+  ui.PopTextWrapPos()
+  ui.PopFont()
+  K.Muted("Type: " .. (KIND[entry.type] or "Task"))
+  ui.Separator()
+
+  local preview = "Auto (Self if available)"
+  if advSource == "@self" then preview = "Self (" .. myName .. ")"
+  elseif advSource then preview = advSource:sub(1, 1):upper() .. advSource:sub(2) end
+  ui.Text("View objectives from:")
+  ui.SameLine(0, 6 * s)
+  ui.SetNextItemWidth(220 * s)
+  if ui.BeginCombo("##advsource", preview) then
+    if ui.Selectable("Auto (Self if available)", advSource == nil) then advSource = nil end
+    for _, owner in ipairs(owners) do
+      local label = owner.key == "@self" and ("Self (" .. myName .. ")") or owner.name
+      if ui.Selectable(label .. "##advsource." .. owner.key, advSource == owner.key) then advSource = owner.key end
+    end
+    ui.EndCombo()
+  end
+  ui.Separator()
+
+  if not source then K.Empty("No objective data available from selected source."); return end
+  local statusCol = complete and C.pet or C.gold
+  ui.TextColored(statusCol[1], statusCol[2], statusCol[3], 1,
+    "Status: " .. (complete and "Complete" or "In Progress"))
+  for _, o in ipairs(visible) do
+    if not o.done then
+      local a = C.accent
+      ui.TextColored(a[1], a[2], a[3], 1, "Current Step:")
+      ui.PushTextWrapPos(0)
+      ui.TextWrapped(o.text or "")
+      ui.PopTextWrapPos()
+      break
+    end
+  end
+  ui.Separator()
+
+  if ui.CollapsingHeader("Who has this task:###advwho", 32) then
+    local flags = ui.TableFlags.RowBg | ui.TableFlags.BordersInnerV
+    local _, lh = ui.CalcTextSize("Ag")
+    local tableH = #owners > 8 and (lh + 6 * s) * 9 or 0
+    if tableH > 0 then flags = flags | ui.TableFlags.ScrollY end
+    if ui.BeginTable("##advwhohas", 3, flags, 0, tableH) then
+      ui.TableSetupColumn("Peer", ui.TableColumnFlags.WidthStretch, 0)
+      ui.TableSetupColumn("Status", ui.TableColumnFlags.WidthFixed, 110 * s)
+      ui.TableSetupColumn("Progress", ui.TableColumnFlags.WidthFixed, 80 * s)
+      ui.TableHeadersRow()
+      for _, owner in ipairs(owners) do
+        local progress = entry.owners[owner.key]
+        ui.TableNextRow()
+        ui.TableNextColumn()
+        if ui.Selectable(owner.name .. "##advwho." .. owner.key, sourceKey == owner.key,
+            ui.SelectableFlags and ui.SelectableFlags.SpanAllColumns or 0) then
+          advSource = owner.key
+        end
+        ui.TableNextColumn()
+        local col = (progress.total > 0 and progress.done == progress.total) and C.pet or C.text
+        ui.TextColored(col[1], col[2], col[3], 1,
+          (progress.total > 0 and progress.done == progress.total) and "Complete" or "In Progress")
+        ui.TableNextColumn()
+        ui.Text(string.format("%d/%d", progress.done, progress.total))
+      end
+      ui.EndTable()
+    end
+  end
+  ui.Separator()
+
+  if #visible == 0 then K.Empty("No objectives found for this task yet."); return end
+  ui.PushFont(T.font.small)
+  ui.PushStyleVar(ui.StyleVar.CellPadding, 4 * s, 1 * s)
+  if ui.BeginTable("##advObjectives", 3, ui.TableFlags.SizingFixedFit | ui.TableFlags.RowBg | ui.TableFlags.BordersInnerV, 0, 0) then
+    ui.TableSetupColumn("Objective", ui.TableColumnFlags.WidthStretch, 0)
+    ui.TableSetupColumn("Progress", ui.TableColumnFlags.WidthFixed, 110 * s)
+    ui.TableSetupColumn("Zone", ui.TableColumnFlags.WidthFixed, 140 * s)
+    ui.TableHeadersRow()
+    for i, objective in ipairs(visible) do
+      ui.TableNextRow()
+      ui.TableNextColumn()
+      local label = string.format("%d. %s", i, objective.text or "")
+      if objective.optional then label = label .. " (Optional)" end
+      ui.TextWrapped(label)
+      ui.TableNextColumn()
+      local col = objective.done and C.pet or C.gold
+      ui.TextColored(col[1], col[2], col[3], 1, advObjStatus(objective))
+      if ui.IsItemHovered() then
+        local lines = {}
+        for _, owner in ipairs(owners) do
+          local theirs = advVisible(entry.owners[owner.key].objectives)[i]
+          if theirs then lines[#lines + 1] = owner.name .. ": " .. advObjStatus(theirs) end
+        end
+        if #lines > 0 then ui.SetTooltip(table.concat(lines, "\n")) end
+      end
+      ui.TableNextColumn()
+      local zone = objective.zone or ""
+      ui.Text(zone ~= "" and zone ~= "ALL" and zone or "Any")
+    end
+    ui.EndTable()
+  end
+  ui.PopStyleVar()
+  ui.PopFont()
+end
+
+local function advancedView(localTasks, s, width, height)
+  local peers = questPeers()
+  local entries = advEntries(localTasks, peers)
+  -- the owner filter: everyone, you, or one peer (a name that left falls back to everyone)
+  if advFilter ~= "all" and advFilter ~= "@self" then
+    local found = false
+    for _, peer in ipairs(peers) do if peer.key == advFilter then found = true break end end
+    if not found then advFilter = "all" end
+  end
+  local shown = {}
+  for _, entry in ipairs(entries) do
+    if advFilter == "all" or entry.owners[advFilter] then shown[#shown + 1] = entry end
+  end
+  if not advSelected then advSelected = shown[1] and shown[1].key end
+  local selected
+  for _, entry in ipairs(shown) do if entry.key == advSelected then selected = entry break end end
+  if not selected and #shown > 0 then selected, advSelected = shown[1], shown[1].key end
+
+  local listW = math.max(170 * s, math.min((tonumber(ui.GetSetting("tasks.listw")) or state.listW) * s, width * 0.38))
+  ui.BeginChild("##advSidebar", listW, height, false)
+  -- the owner filter drop-down
+  local filterName = advFilter == "all" and "All Peers" or advFilter == "@self" and "Self"
+    or (advFilter:sub(1, 1):upper() .. advFilter:sub(2))
+  ui.SetNextItemWidth(-1)
+  if ui.BeginCombo("##advpeers", filterName) then
+    if ui.Selectable("All Peers", advFilter == "all") then advFilter = "all" end
+    if ui.Selectable("Self", advFilter == "@self") then advFilter = "@self" end
+    for _, peer in ipairs(peers) do
+      if ui.Selectable(peer.name .. "##" .. peer.key, advFilter == peer.key) then advFilter = peer.key end
+    end
+    ui.EndCombo()
+  end
+  local needle = K.Search(state, "advsearch", "Search crew quests")
+  K.Muted("Tasks")
+  ui.Separator()
+  ui.BeginChild("##advList", 0, 0, false)
+  if #peers == 0 then K.Empty("No peers reporting yet.") end
+  -- One line per task, EZQuests' "[Type] (# who have it) Task Name": a crew of
+  -- 24 has far too many quests for two-line cards.
+  local ADV_KIND = { [0] = "Task", [1] = "Shared", [2] = "Quest" }
+  local any = false
+  ui.PushFont(T.font.small)
+  for _, entry in ipairs(shown) do
+    if needle == "" or (entry.title or ""):lower():find(needle, 1, true) then
+      any = true
+      local label = string.format("[%s] (%d) %s", ADV_KIND[entry.type] or "???", entry.have, entry.title or "")
+      if ui.Selectable(label .. "##adv." .. entry.key, entry.key == advSelected) then
+        advSelected, advSource = entry.key, nil
+      end
+      if ui.IsItemHovered() then
+        local mine = entry.owners["@self"]
+        ui.SetTooltip(string.format("%s\n%d of %d have it%s", entry.title or "", entry.have, entry.ownerCount,
+          mine and string.format("  \xC2\xB7  you %d/%d", mine.done, mine.total) or ""))
+      end
+    end
+  end
+  ui.PopFont()
+  if not any then K.Empty("No matching tasks.") end
+  ui.EndChild()
+  ui.EndChild()
+  ui.SameLine(0, 14 * s)
+  ui.BeginChild("##advDetail", 0, height, false)
+  advDetail(selected, s, myName)
+  ui.EndChild()
+end
+
 local WINDOW_OPTS = {
   size = function() return 820, 560 end,
   resizable = { 620, 360 },
@@ -405,7 +726,20 @@ local function drawWindow(_, _, _, _, s)
   local history, historySelected = K.Rows(WINDOW, "QUEST_TaskList")
   categories(tasks, history, s)
   sharedMembers(tasks, s)
+  local advanced = ui.GetSetting("tasks.advanced") == "1"
+  if button(advanced and "Advanced: on" or "Advanced", "advancedView", advanced, s) then
+    ui.SetSetting("tasks.advanced", advanced and "0" or "1")
+    advanced = not advanced
+  end
+  if ui.IsItemHovered() then
+    ui.SetTooltip("The crew's quests together (ACNet quest snapshots), instead of only yours")
+  end
   local width, height = ui.GetContentRegionAvail()
+  if advanced then
+    ui.Dummy(0, 4 * s)
+    advancedView(tasks, s, width, height - 30 * s)
+    return
+  end
   local listW = math.max(155 * s, math.min((tonumber(ui.GetSetting("tasks.listw")) or state.listW) * s, width * 0.38))
   ui.BeginChild("##questSidebar", listW, height, false)
   local needle = K.Search(state, "search", state.category == "history" and "Search history" or "Search quests")

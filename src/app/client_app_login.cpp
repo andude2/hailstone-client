@@ -1094,7 +1094,7 @@ void ClientApp::update_connection() {
     if (!connection_frontend(*conn_, pending_ui_pack_,
         [this](const std::string& skin) { use_ui_pack(skin, std::exchange(ui_reload_pending_, false)); },
         [this](net::GameConnection::QuitRequest request) {
-            if (drive_mode_ && control_client_) {
+            if (drive_mode_ && (control_client_ || drive_client_)) {
                 release_drive_lease();
                 quit_ = true;
                 return;
@@ -1108,7 +1108,7 @@ void ClientApp::update_connection() {
             quit_ = true;
         },
         [this] {
-            if (drive_mode_ && control_client_) {
+            if (drive_mode_ && (control_client_ || drive_client_)) {
                 release_drive_lease();
                 quit_ = true;
                 return;
@@ -1246,7 +1246,10 @@ void ClientApp::update_connection() {
         break;
     }
     if (auto z = conn_->take_zone_to_load()) load_zone(*z);
-    while (auto c = conn_->poll_chat()) game_view_.chat.add(chat_channel(c->kind), c->text, c->rgb, c->color, c->peer);
+    while (auto c = conn_->poll_chat()) {
+        // Under DriveClient, headless streams authoritative ChatEvents (zone, UCS tells/channels, plugins) directly.
+        if (!drive_client_) game_view_.chat.add(chat_channel(c->kind), c->text, c->rgb, c->color, c->peer);
+    }
     // Hailstone: the chat history every few minutes too (a crash keeps most of it).
     if (screen_ == Screen::InGame && Clock::now() - chat_saved_ > std::chrono::minutes(3)) {
         chat_saved_ = Clock::now();

@@ -298,6 +298,10 @@ void GameConnection::xtarget_request(int slot, std::uint32_t type, const std::st
 }
 
 void GameConnection::set_xtarget_auto_haters(bool on) {
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::XTargetAutoHaters, .argument = on ? 1u : 0u})) {
+        xtargets_.auto_haters = on;
+        return;
+    }
     if (on == xtargets_.auto_haters) return;
     xtargets_.auto_haters = on;
     log::info("xtargets: auto add haters {}", on);

@@ -239,6 +239,15 @@ TcpSocket& TcpSocket::operator=(TcpSocket&& other) noexcept {
     return *this;
 }
 
+void TcpSocket::shutdown_write() {
+    if (!valid(handle_)) return;
+#ifdef _WIN32
+    ::shutdown(native(handle_), SD_SEND);
+#else
+    ::shutdown(native(handle_), SHUT_WR);
+#endif
+}
+
 void TcpSocket::close() {
     if (valid(handle_)) close_native(native(handle_));
     handle_ = widen(kInvalid);

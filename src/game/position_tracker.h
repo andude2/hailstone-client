@@ -69,6 +69,13 @@ public:
     std::size_t size() const { return samples_.size(); }
     // +0x1c: copied into every OP_ClientUpdate's sequence field (DoMainLoop, DoTeleportB).
     std::uint16_t sequence() const { return sequence_; }
+    std::uint16_t entries() const { return entries_; }
+    // Continue the monotonic OP_ClientUpdate / OP_FloatListThing counters across a control-lease handoff so the
+    // server does not drop post-swap position updates as out-of-order.
+    void restore(std::uint16_t sequence, std::uint16_t entries) {
+        sequence_ = sequence;
+        entries_ = entries;
+    }
 
 private:
     std::deque<Sample> samples_;

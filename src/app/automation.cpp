@@ -349,10 +349,10 @@ void Automation::answer_plugin_consent(std::optional<bool> allow) {
     if (impl_->plugins) impl_->plugins->answer_consent(allow);
 }
 
-void Automation::set_parked_character(net::GameConnection* connection, std::string server_name) {
+void Automation::set_parked_character(net::GameConnection* connection, std::string server_name, bool draw_plugins) {
     impl_->parked = connection;
     impl_->parked_server_name = std::move(server_name);
-    impl_->draw_parked_plugins = connection != nullptr;
+    impl_->draw_parked_plugins = connection != nullptr && draw_plugins;
 }
 
 void Automation::frame() {

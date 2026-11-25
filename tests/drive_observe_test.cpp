@@ -155,3 +155,196 @@ TEST_CASE("drive observe: a viewer follows the headless snapshot and live state"
     CHECK(observe.take_actions().empty());
     viewer_pipe->close();
 }
+
+TEST_CASE("drive observe: control actions, move, forward filter, chat, and extended state round-trip") {
+    DriveAction cmd;
+    cmd.kind = DriveActionKind::Command;
+    cmd.zone_generation = 3;
+    cmd.text = "/say hello crew";
+    auto cmd_bytes = app::encode_drive_action(cmd);
+    auto cmd_out = app::decode_drive_action(cmd_bytes);
+    REQUIRE(cmd_out);
+    CHECK(cmd_out->kind == DriveActionKind::Command);
+    CHECK(cmd_out->zone_generation == 3);
+    CHECK(cmd_out->text == "/say hello crew");
+
+    DriveMove move;
+    move.position = glm::vec3(12.5f, -45.0f, 3.25f);
+    move.heading = 192.0f;
+    move.velocity = glm::vec3(0.5f, 0.25f, 0.0f);
+    move.speed_run = 0.7f;
+    move.moving = true;
+    move.stand_state = kStandStanding;
+    move.standing_on = 42;
+    move.active = true;
+    auto move_bytes = app::encode_drive_move(move);
+    auto move_out = app::decode_drive_move(move_bytes);
+    REQUIRE(move_out);
+    CHECK(move_out->position.x == doctest::Approx(12.5f));
+    CHECK(move_out->heading == doctest::Approx(192.0f));
+    CHECK(move_out->moving);
+    CHECK(move_out->active);
+    CHECK(move_out->standing_on == 42);
+
+    // Filtered packet forwarding: session/position/inventory opcodes are blocked; AA/task/etc. are allowed.
+    CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::ClientUpdate), {}), false));
+    CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::MoveItem), {}), false));
+    CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::Camp), {}), false));
+    CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::SendLoginInfo), {}), true));
+    CHECK(drive_forward_allowed(AppPacket(to_wire(Op::AAAction), {}), false));
+
+    app::DriveForwardedPacket fwd{AppPacket(to_wire(Op::AAAction), {std::byte{1}, std::byte{2}}), true, false};
+    auto fwd_out = app::decode_drive_forward(app::encode_drive_forward(fwd));
+    REQUIRE(fwd_out);
+    CHECK(fwd_out->packet.opcode == to_wire(Op::AAAction));
+    CHECK(fwd_out->packet.data.size() == 2);
+    CHECK(fwd_out->reliable);
+    CHECK_FALSE(fwd_out->world);
+
+    app::DriveChatLine line{2, 0x112233, 275, "Sender", "hello from ucs"};
+    auto chat_out = app::decode_drive_chat(app::encode_drive_chat(line));
+    REQUIRE(chat_out);
+    CHECK(chat_out->kind == 2);
+    CHECK(chat_out->rgb == 0x112233);
+    CHECK(chat_out->color == 275);
+    CHECK(chat_out->peer == "Sender");
+    CHECK(chat_out->text == "hello from ucs");
+
+    app::DriveLocalState state;
+    state.position = glm::vec3(1.0f, 2.0f, 3.0f);
+    state.target = 77;
+    state.has_status = true;
+    state.stand_state = kStandStanding;
+    state.auto_attack = true;
+    state.hp = 900;
+    state.max_hp = 1000;
+    state.has_xtargets = true;
+    state.xtarget_auto_haters = true;
+    state.xtarget_zone = 4;
+    state.xtarget_slots.push_back({1, 1, 55, "a_rat00"});
+    auto state_out = app::decode_drive_state(app::encode_drive_state(state));
+    REQUIRE(state_out);
+    CHECK(state_out->has_status);
+    CHECK(state_out->auto_attack);
+    CHECK(state_out->hp == 900);
+    CHECK(state_out->has_xtargets);
+    CHECK(state_out->xtarget_auto_haters);
+    REQUIRE(state_out->xtarget_slots.size() == 1);
+    CHECK(state_out->xtarget_slots[0].spawn_id == 55);
+    CHECK(state_out->xtarget_slots[0].name == "a_rat00");
+}
+
+TEST_CASE("drive observe: remote imgui input, frame, texture, and crew command round-trip") {
+    ui::RemoteImGuiInput in;
+    in.display_w = 1920.0f;
+    in.display_h = 1080.0f;
+    in.fb_scale_x = 1.5f;
+    in.fb_scale_y = 1.5f;
+    in.ui_scale = 1.25f;
+    in.dt = 1.0f / 60.0f;
+    in.mouse_x = 420.5f;
+    in.mouse_y = 310.25f;
+    in.wheel_x = 0.0f;
+    in.wheel_y = -2.0f;
+    in.mods = 3u;
+    in.mouse_valid = true;
+    in.focused = true;
+    in.mouse_buttons.push_back({0, true});
+    in.mouse_buttons.push_back({0, false});
+    in.keys.push_back({513, true});
+    in.chars.push_back('A');
+    auto in_bytes = app::encode_drive_imgui_input(in);
+    auto in_out = app::decode_drive_imgui_input(in_bytes);
+    REQUIRE(in_out);
+    CHECK(in_out->display_w == doctest::Approx(1920.0f));
+    CHECK(in_out->ui_scale == doctest::Approx(1.25f));
+    CHECK(in_out->mouse_x == doctest::Approx(420.5f));
+    CHECK(in_out->wheel_y == doctest::Approx(-2.0f));
+    CHECK(in_out->mods == 3u);
+    CHECK(in_out->mouse_valid);
+    CHECK(in_out->focused);
+    REQUIRE(in_out->mouse_buttons.size() == 2);
+    CHECK(in_out->mouse_buttons[0].down);
+    CHECK_FALSE(in_out->mouse_buttons[1].down);
+    REQUIRE(in_out->keys.size() == 1);
+    CHECK(in_out->keys[0].key == 513);
+    REQUIRE(in_out->chars.size() == 1);
+    CHECK(in_out->chars[0] == 'A');
+    CHECK_FALSE(app::decode_drive_imgui_input(std::span(in_bytes).first(in_bytes.size() - 1)));
+    in_bytes[0] = std::byte{1};
+    CHECK_FALSE(app::decode_drive_imgui_input(in_bytes));
+
+    ui::RemoteImGuiFrame frame;
+    frame.display_w = 1920.0f;
+    frame.display_h = 1080.0f;
+    frame.fb_scale_x = 1.0f;
+    frame.fb_scale_y = 1.0f;
+    frame.want_capture_mouse = true;
+    frame.want_capture_keyboard = false;
+    frame.want_text_input = true;
+    frame.mouse_cursor = 2;
+    ui::RemoteDrawList dl;
+    dl.vertices.push_back({10.0f, 20.0f, 0.25f, 0.5f, 0xffffffffu});
+    dl.vertices.push_back({30.0f, 20.0f, 0.75f, 0.5f, 0xff00ff00u});
+    dl.vertices.push_back({30.0f, 40.0f, 0.75f, 0.75f, 0xffff0000u});
+    dl.indices = {0, 1, 2};
+    dl.cmds.push_back({0.0f, 0.0f, 200.0f, 100.0f, 7u, 0u, 0u, 3u});
+    frame.lists.push_back(std::move(dl));
+    auto frame_bytes = app::encode_drive_imgui_frame(frame);
+    auto frame_out = app::decode_drive_imgui_frame(frame_bytes);
+    REQUIRE(frame_out);
+    CHECK(frame_out->want_capture_mouse);
+    CHECK_FALSE(frame_out->want_capture_keyboard);
+    CHECK(frame_out->want_text_input);
+    CHECK(frame_out->mouse_cursor == 2);
+    REQUIRE(frame_out->lists.size() == 1);
+    REQUIRE(frame_out->lists[0].vertices.size() == 3);
+    CHECK(frame_out->lists[0].vertices[1].col == 0xff00ff00u);
+    REQUIRE(frame_out->lists[0].indices.size() == 3);
+    REQUIRE(frame_out->lists[0].cmds.size() == 1);
+    CHECK(frame_out->lists[0].cmds[0].tex_id == 7u);
+    CHECK_FALSE(app::decode_drive_imgui_frame(std::span(frame_bytes).first(frame_bytes.size() - 1)));
+
+    ui::RemoteImGuiTexture tex;
+    tex.id = 7u;
+    tex.tex_w = 16;
+    tex.tex_h = 8;
+    tex.x = 2;
+    tex.y = 1;
+    tex.w = 4;
+    tex.h = 2;
+    tex.full = false;
+    tex.destroy = false;
+    tex.rgba.assign(4u * 2u * 4u, std::byte{0xab});
+    auto tex_bytes = app::encode_drive_imgui_texture(tex);
+    auto tex_out = app::decode_drive_imgui_texture(tex_bytes);
+    REQUIRE(tex_out);
+    CHECK(tex_out->id == 7u);
+    CHECK(tex_out->tex_w == 16);
+    CHECK(tex_out->tex_h == 8);
+    CHECK(tex_out->w == 4);
+    CHECK(tex_out->h == 2);
+    CHECK_FALSE(tex_out->full);
+    CHECK_FALSE(tex_out->destroy);
+    CHECK(tex_out->rgba.size() == 32u);
+
+    // Reject out-of-bounds texture rect and non-empty destroy payload.
+    ui::RemoteImGuiTexture bad = tex;
+    bad.x = 15;
+    CHECK_FALSE(app::decode_drive_imgui_texture(app::encode_drive_imgui_texture(bad)));
+    ui::RemoteImGuiTexture destroy_tex;
+    destroy_tex.id = 7u;
+    destroy_tex.destroy = true;
+    auto destroy_out = app::decode_drive_imgui_texture(app::encode_drive_imgui_texture(destroy_tex));
+    REQUIRE(destroy_out);
+    CHECK(destroy_out->destroy);
+    CHECK(destroy_out->rgba.empty());
+    destroy_tex.rgba.push_back(std::byte{1});
+    CHECK_FALSE(app::decode_drive_imgui_texture(app::encode_drive_imgui_texture(destroy_tex)));
+
+    auto crew_bytes = app::encode_drive_crew_command("release");
+    auto crew_out = app::decode_drive_crew_command(crew_bytes);
+    REQUIRE(crew_out);
+    CHECK(*crew_out == "release");
+    CHECK_FALSE(app::decode_drive_crew_command(std::span(crew_bytes).first(1)));
+}

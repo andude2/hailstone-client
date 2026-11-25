@@ -47,6 +47,8 @@ public:
     bool send_message(std::span<const std::byte> body, int timeout_ms = 5000);
     // timeout_ms < 0 waits for a message or close; 0 polls the queue.
     std::optional<std::vector<std::byte>> receive_message(int timeout_ms = 0);
+    // Half-close the outgoing direction (FIN) before closing so buffered messages reach the peer without a RST.
+    void shutdown_write() noexcept;
     void close() noexcept;
     bool closed() const;
     std::string error() const;

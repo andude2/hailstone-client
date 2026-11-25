@@ -376,6 +376,8 @@ private:
 };
 
 void GameConnection::cast_gem(int gem) {
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::CastGem, .argument = static_cast<std::uint32_t>(gem)}))
+        return;
     if (state_ != ConnectionState::InZone || pstatus_.dead || gem < 0 || gem >= game::kSpellGems) return;
     const std::uint32_t id = spells_.gems[static_cast<std::size_t>(gem)].spell;
     if (id == game::kNoSpell || !spell_table_->get(id)) return;

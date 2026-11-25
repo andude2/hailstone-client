@@ -51,6 +51,8 @@ void GameConnection::open_bank(std::uint32_t banker_id) {
     if (bank_) return; // pinstActiveBanker already set
     glm::vec3 at = motion_known_ ? position_ : me->position;
     if (glm::distance(at, it->second.position) >= kInteractRange) return;
+    // In Control mode, also open the bank on the headless authority so bank slot clicks execute there.
+    (void)relay_control_action(DriveAction{.kind = DriveActionKind::OpenBank, .argument = banker_id});
     activate_bank(banker_id);
 }
 
@@ -87,6 +89,7 @@ bool GameConnection::activate_bank(std::uint32_t banker_id) {
 }
 
 void GameConnection::close_bank() {
+    (void)relay_control_action(DriveAction{.kind = DriveActionKind::CloseBank});
     // CBankWnd::Show(false) @0x627680: "%1 tells you, 'Come back soon!'"
     // (12143) while a banker is set, then the banker is cleared. AboutToHide
     // sends nothing; the quantity dialog closes with the window (OnShow).
@@ -177,6 +180,16 @@ std::uint32_t* GameConnection::coin_pile(int location, int type) {
 }
 
 bool GameConnection::move_coin(int from, int to, int from_type, int to_type, std::uint32_t amount) {
+    if (drive_control_) {
+        const std::uint64_t packed = (static_cast<std::uint64_t>(static_cast<std::uint16_t>(to)) << 16) |
+                                     (static_cast<std::uint64_t>(from_type & 0xff) << 8) |
+                                     static_cast<std::uint64_t>(to_type & 0xff);
+        if (relay_control_action(DriveAction{.kind = DriveActionKind::MoveCoin,
+                                             .argument = amount,
+                                             .socket = from,
+                                             .dialog = packed}))
+            return true;
+    }
     // CEverQuest::MoveMoney @0x51ad70 (game::move_money; types here are the wire's, 0 copper
     // .. 3 platinum, the original's coins 3 - type). The packet carries the amount asked, not the converted one
     // (the server converts again, as EQEmu's OPMoveCoin does).

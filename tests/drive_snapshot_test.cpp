@@ -9,7 +9,9 @@
 #include "mock_server/harness.h"
 #include "net/drive_snapshot.h"
 #include "net/game_connection.h"
+#include "net/group_packets.h"
 #include "net/opcodes.h"
+#include "net/spell_packets.h"
 #include "net/zone_packets.h"
 #include "plugin/hooks.h"
 
@@ -169,4 +171,123 @@ TEST_CASE("drive snapshot: a zone journal replays into a fresh connection") {
     CHECK(from_wire.world().spawns.count(101) == 1);
     CHECK(from_wire.inventory().items().size() == 2);
     CHECK(from_wire.target() == 101);
+}
+
+TEST_CASE("drive snapshot: compaction preserves multi-slot xtargets and incremental buffs") {
+    auto xtarget_one = [](std::uint32_t slot, std::uint8_t status, std::uint32_t id, const std::string& name) {
+        ByteWriter w;
+        w.le<std::uint32_t>(5);
+        w.le<std::uint32_t>(1);
+        w.le<std::uint32_t>(slot);
+        w.le<std::uint8_t>(status);
+        w.le<std::uint32_t>(id);
+        w.fixed_string(name, name.size() + 1);
+        return AppPacket(to_wire(Op::XTargetResponse), w.take());
+    };
+    auto buff_icons = [](std::uint32_t entity, bool all, std::uint32_t slot, std::uint32_t spell) {
+        ByteWriter w;
+        w.le(entity);
+        w.le<std::uint32_t>(1);
+        w.le<std::uint8_t>(all ? 1 : 0);
+        w.le<std::uint32_t>(slot);
+        w.le<std::uint32_t>(spell);
+        w.le<std::uint32_t>(60);
+        w.le<std::uint32_t>(0);
+        w.le<std::uint32_t>(0);
+        w.le<std::uint32_t>(0);
+        w.le<std::uint8_t>(0); // empty caster cstring
+        return AppPacket(to_wire(Op::BuffCreate), w.take());
+    };
+
+    std::vector<AppPacket> packets;
+    // Three single-slot xtarget additions followed by clearing slot 0 must not wipe slots 1 and 2.
+    packets.push_back(xtarget_one(0, 1, 101, "mob_a"));
+    packets.push_back(xtarget_one(1, 1, 102, "mob_b"));
+    packets.push_back(xtarget_one(2, 1, 103, "mob_c"));
+    packets.push_back(xtarget_one(0, 0, 0, ""));
+    // A full buff list followed by an incremental single-slot update must keep both.
+    packets.push_back(buff_icons(10, true, 0, 200));
+    packets.push_back(buff_icons(10, false, 1, 201));
+
+    const auto kept = compact_journal_packets(std::move(packets));
+    int xt_count = 0, buff_count = 0;
+    for (const auto& p : kept) {
+        if (p.opcode == to_wire(Op::XTargetResponse)) ++xt_count;
+        if (p.opcode == to_wire(Op::BuffCreate)) ++buff_count;
+    }
+    CHECK(xt_count == 3);   // latest for slots 0, 1, and 2
+    CHECK(buff_count == 2); // full list + incremental slot 1
+}
+
+TEST_CASE("drive snapshot: stand state, xtargets, and transient casts/dialogs survive cleanly") {
+    MockEqServer server;
+    EmptyGameDir dir;
+    GameDir game(dir.path());
+    net::ConnectionOptions options = quick_options();
+    options.snapshot_journal = true;
+
+    net::GameConnection source(game, options);
+    auto step = [&] {
+        source.update();
+        server.poll();
+    };
+    source.start(server.ticket());
+    REQUIRE(pump(step, [&] { return source.state() == ConnectionState::CharacterSelect; }));
+    source.enter_world("Gennro");
+    REQUIRE(pump(step, [&] { return source.state() == ConnectionState::InZone; }));
+    REQUIRE(pump(step, [&] { return source.player_status().max_hp != 0; }));
+
+    const std::uint32_t me = source.world().player_id;
+    REQUIRE(me != 0);
+
+    // Server puts the player into a sitting/looting stand state and starts a cast; the player then stands up locally
+    // (which EQEmu does not echo back). A snapshot must keep the player standing and not mid-cast.
+    SpawnAppearance sit;
+    sit.spawn_id = static_cast<std::uint16_t>(me);
+    sit.type = kAppearanceAnimation;
+    sit.parameter = kStandLooting;
+    source.receive_zone_packet_for_test(encode(sit));
+    REQUIRE(pump(step, [&] { return source.player_status().stand_state == kStandLooting; }));
+
+    ByteWriter cast_w;
+    cast_w.le<std::uint16_t>(static_cast<std::uint16_t>(me));
+    cast_w.le<std::uint16_t>(200);
+    cast_w.le<std::uint32_t>(5000);
+    source.receive_zone_packet_for_test(AppPacket(to_wire(Op::BeginCast), cast_w.take()));
+
+    source.set_stand_state(kStandStanding);
+    source.set_xtarget_auto_haters(true);
+    auto xtarget_one = [](std::uint32_t slot, std::uint8_t status, std::uint32_t id, const std::string& name) {
+        ByteWriter w;
+        w.le<std::uint32_t>(5);
+        w.le<std::uint32_t>(1);
+        w.le<std::uint32_t>(slot);
+        w.le<std::uint8_t>(status);
+        w.le<std::uint32_t>(id);
+        w.fixed_string(name, name.size() + 1);
+        return AppPacket(to_wire(Op::XTargetResponse), w.take());
+    };
+    source.receive_zone_packet_for_test(xtarget_one(0, 1, 101, "a_rat01"));
+    source.receive_zone_packet_for_test(xtarget_one(1, 1, 102, "a_bat02"));
+    source.receive_zone_packet_for_test(xtarget_one(0, 0, 0, ""));
+    REQUIRE(pump(step, [&] { return source.xtargets().slots.size() >= 2 && source.xtargets().slots[1].spawn_id == 102; }));
+
+    const auto encoded = encode_drive_snapshot(source.capture_snapshot());
+    const auto decoded = decode_drive_snapshot(encoded);
+    REQUIRE(decoded);
+
+    net::GameConnection restored(game, quick_options());
+    restored.apply_snapshot(*decoded);
+    CHECK(restored.player_status().stand_state == kStandStanding);
+    CHECK_FALSE(restored.player_status().dead);
+    CHECK_FALSE(restored.spell_state().casting.casting());
+    CHECK(restored.xtargets().auto_haters);
+    CHECK(restored.xtargets().zone >= 1u);
+    REQUIRE(restored.xtargets().slots.size() >= 2);
+    CHECK(restored.xtargets().slots[0].spawn_id == 0);
+    CHECK(restored.xtargets().slots[1].spawn_id == 102);
+    // Inventory interaction works immediately on the restored connection.
+    REQUIRE(restored.inventory().at(ItemSlot::possessions(kSlotGeneral1)) != nullptr);
+    restored.click_slot(ItemSlot::possessions(kSlotGeneral1));
+    CHECK(restored.inventory().cursor() != nullptr);
 }

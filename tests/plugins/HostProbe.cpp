@@ -77,6 +77,8 @@ static_assert(offsetof(PluginHostApi, loot_item_modifiers) == offsetof(PluginHos
 static_assert(offsetof(PluginHostApi, zone_long_name) == offsetof(PluginHostApi, caps) + 125 * sizeof(PluginHostApi::caps));
 static_assert(offsetof(PluginHostApi, answer_loot_confirmation) == offsetof(PluginHostApi, caps) + 126 * sizeof(PluginHostApi::caps));
 static_assert(offsetof(PluginHostApi, inventory_rows) == offsetof(PluginHostApi, caps) + 127 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, inventory_rows_v2) == offsetof(PluginHostApi, caps) + 128 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, task_rows) == offsetof(PluginHostApi, caps) + 129 * sizeof(PluginHostApi::caps));
 static_assert(sizeof(HS_BulkLootHeader) == HS_BULK_LOOT_HEADER_SIZE);
 static_assert(sizeof(HS_BulkLootRecord) == HS_BULK_LOOT_RECORD_SIZE);
 
@@ -1175,6 +1177,26 @@ HAILSTONE_API void InitializePlugin(void) {
                        row.item_id, row.ac, row.hp, row.mana, row.name);
         }
     }, nullptr);
+    AddCommand("/probetasks", +[](void*, const char*) {
+        if (!HAILSTONE_HOST_HAS(host, task_rows)) return;
+        std::uint32_t obj_total = 0, revision = 0;
+        const int total = host->task_rows(host->host, nullptr, 0, nullptr, 0, &obj_total, &revision);
+        HailstoneTaskRow tasks[3]{};
+        HailstoneTaskObjective objectives[8]{};
+        std::uint32_t obj_total2 = 0, revision2 = 0;
+        const int copied = host->task_rows(host->host, tasks, 3, objectives, 8, &obj_total2, &revision2);
+        WriteChatf("[Probe] tasks %d %d obj %u rev %u", total, copied, obj_total, revision);
+        for (int i = 0; i < copied && i < 3; ++i) {
+            const auto& row = tasks[i];
+            WriteChatf("[Probe] task %u %u %s", row.id, row.type, row.title);
+        }
+        const std::uint32_t shown = obj_total2 < 8 ? obj_total2 : 8;
+        for (std::uint32_t i = 0; i < shown; ++i) {
+            const auto& row = objectives[i];
+            WriteChatf("[Probe] obj %u %u %u %u %d %d %s %s", row.task_index, row.id, row.group, row.flags,
+                       row.count, row.goal, row.status, row.text);
+        }
+    }, nullptr);
     AddCommand("/probefreeinv", probe_free_inventory, nullptr);
     AddCommand("/probecanloot", probe_can_loot, nullptr);
     AddCommand("/probeloot", probe_loot, nullptr);
@@ -1220,6 +1242,7 @@ HAILSTONE_API void ShutdownPlugin(void) {
     RemoveCommand("/proberaid");
     RemoveCommand("/probecursor");
     RemoveCommand("/probeinventoryrows");
+    RemoveCommand("/probetasks");
     RemoveCommand("/probefreeinv");
     RemoveCommand("/probecanloot");
     RemoveCommand("/probebinary");

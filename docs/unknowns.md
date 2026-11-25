@@ -1005,6 +1005,16 @@ The experimental texture broker (docs/graphics.md "Shared GPU textures", docs/re
   - Unknown: whether the original drops only the tint or also the armour texture variant (SKE's chest has red, blue and
     grey bones as variants 01..04, which Hailstone still swaps in); whether it holds for every non-player race.
   - Settle: tracing SwapBodyMaterial's ReplaceMaterial calls (`ActorClient_SwapBodyMaterial.jsonl`) for an illusioned player.
+- **A Luclin body-material variant with no Luclin material definition.**
+  - Male Half Elf plate legs have `HAMLG0301/0302_MDF` in `globalham_chr` but no `HAMLG0303_MDF` (the shin piece;
+    leather and chain `0103/0203` exist, and female Half Elf has `HAFLG0303`). The only `HAMLG0303_MDF` loaded is the
+    classic BMP definition in `global_chr`.
+  - Hailstone resolves it through that classic definition (material definitions of the other archives are indexed as
+    a fallback, by name as the graphics DLL's resources are), so the piece swaps to the BMP texture and takes the
+    slot's tint.
+  - Settle: trace SwapBodyMaterial's ReplaceMaterial calls for a dyed male Half Elf in plate legs with hero's forge
+    filtered out; whether the original draws that same BMP texture on the Luclin mesh, fails the swap leaving
+    variant 00, or tints without swapping.
 - **Luclin faces.**
   - A beard tint on a one-texture face material (female dwarf face variants 2 and 3 have no beard layer) colours the
     whole face here; how the original draws one-texture Luclin materials is not known.

@@ -4,8 +4,10 @@
 
 #include <doctest/doctest.h>
 
+#include <atomic>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include "app/drive_control.h"
 #include "mock_server/harness.h"
@@ -274,4 +276,115 @@ TEST_CASE("drive control: the lease pipe drives the headless character's live zo
     const int messages2 = MockEqServer::count(server.zone_log, Op::ChannelMessage);
     resumed.send_command("/say back on the headless");
     REQUIRE(pump(resumed_step, [&] { return MockEqServer::count(server.zone_log, Op::ChannelMessage) > messages2; }));
+}
+
+TEST_CASE("drive control: inventory clicks cross the lease and acked release preserves xtargets and ticket") {
+    MockEqServer server;
+    EmptyGameDir dir;
+    GameDir game(dir.path());
+    net::ConnectionOptions options = quick_options();
+    options.snapshot_journal = true;
+
+    net::GameConnection owner(game, options);
+    auto owner_step = [&] {
+        owner.update();
+        server.poll();
+    };
+    owner.start(server.ticket());
+    REQUIRE(pump(owner_step, [&] { return owner.state() == ConnectionState::CharacterSelect; }));
+    owner.enter_world("Gennro");
+    REQUIRE(pump(owner_step, [&] { return owner.state() == ConnectionState::InZone; }));
+    REQUIRE(pump(owner_step, [&] { return owner.player_status().max_hp != 0; }));
+    owner.set_xtarget_auto_haters(true);
+    owner.receive_zone_packet_for_test(xtarget_slot(0, 101, "a_rat01"));
+    owner.receive_zone_packet_for_test(xtarget_slot(1, 102, "a_bat02"));
+    REQUIRE(pump(owner_step, [&] { return owner.xtargets().slots.size() >= 2 && owner.xtargets().slots[1].spawn_id == 102; }));
+
+    app::DriveRelay relay(platform::make_local_pipe_session());
+    std::string error;
+    auto client = app::DriveControlClient::connect(relay.session(), 10000, error);
+    REQUIRE_MESSAGE(client != nullptr, error);
+    auto mirror_world = client->make_session();
+    auto mirror_zone = client->make_session();
+    REQUIRE(pump([] {}, [&] { return relay.viewer_waiting(); }, std::chrono::milliseconds(2000)));
+    relay.begin_lease(owner.capture_snapshot());
+    auto [world, zone] = owner.release_sessions();
+    relay.adopt(1, std::move(world));
+    relay.adopt(2, std::move(zone));
+
+    std::optional<net::DriveSnapshot> snapshot;
+    for (int i = 0; i < 1000 && (!snapshot || !client->session_connected(2)); ++i) {
+        relay.pump();
+        client->pump();
+        if (!snapshot) snapshot = client->take_snapshot();
+        if (!snapshot || !client->session_connected(2)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(snapshot);
+    REQUIRE(client->session_connected(2));
+
+    net::GameConnection viewer(game, options);
+    viewer.adopt_sessions(std::move(mirror_world), std::move(mirror_zone));
+    viewer.apply_snapshot(*snapshot);
+    CHECK(viewer.xtargets().auto_haters);
+    REQUIRE(viewer.xtargets().slots.size() >= 2);
+    CHECK(viewer.xtargets().slots[0].spawn_id == 101);
+    CHECK(viewer.xtargets().slots[1].spawn_id == 102);
+
+    // Click general slot 1 in the viewer: OP_MoveItem must cross the lease to the server.
+    const int moves_before = MockEqServer::count(server.zone_log, Op::MoveItem);
+    REQUIRE(viewer.inventory().at(ItemSlot::possessions(kSlotGeneral1)) != nullptr);
+    viewer.click_slot(ItemSlot::possessions(kSlotGeneral1));
+    CHECK(viewer.inventory().cursor() != nullptr);
+    auto step = [&] {
+        relay.pump();
+        viewer.update();
+        server.poll();
+    };
+    REQUIRE(pump(step, [&] { return MockEqServer::count(server.zone_log, Op::MoveItem) > moves_before; }));
+
+    // Release with ReleaseAck while the relay pumps on another thread (matches live two-process release).
+    std::atomic<bool> stop_pump{false};
+    std::thread relay_thread([&] {
+        while (!stop_pump.load() && !relay.released()) {
+            relay.pump();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    });
+    auto returned_snapshot = viewer.capture_snapshot();
+    auto [vw, vz] = viewer.release_sessions();
+    client->release(std::move(returned_snapshot), vw.get(), vz.get(), 2000);
+    stop_pump.store(true);
+    relay_thread.join();
+    REQUIRE(relay.released());
+
+    const DriveSnapshot returned = relay.take_release();
+    auto back_world = relay.take_world_session();
+    auto back_zone = relay.take_zone_session();
+    REQUIRE(back_zone);
+
+    net::GameConnection resumed(game, options);
+    resumed.adopt_sessions(std::move(back_world), std::move(back_zone));
+    resumed.adopt_ticket_from(owner);
+    resumed.apply_snapshot(returned);
+    CHECK(resumed.ticket().world_host == owner.ticket().world_host);
+    CHECK(resumed.xtargets().auto_haters);
+    REQUIRE(resumed.xtargets().slots.size() >= 2);
+    CHECK(resumed.xtargets().slots[0].spawn_id == 101);
+    CHECK(resumed.xtargets().slots[1].spawn_id == 102);
+    CHECK(resumed.inventory().cursor() != nullptr);
+}
+
+TEST_CASE("drive control: mirror session reports disconnected when the lease pipe drops") {
+    auto relay = std::make_unique<app::DriveRelay>(platform::make_local_pipe_session());
+    std::string error;
+    auto client = app::DriveControlClient::connect(relay->session(), 10000, error);
+    REQUIRE_MESSAGE(client != nullptr, error);
+    auto mirror_world = client->make_session();
+    auto mirror_zone = client->make_session();
+    REQUIRE(pump([] {}, [&] { return relay->viewer_waiting(); }, std::chrono::milliseconds(2000)));
+    relay->begin_lease(net::DriveSnapshot{.character = "Gennro"});
+    relay->pump();
+    relay.reset(); // unclean relay shutdown drops the pipe
+    REQUIRE(pump([&] { client->pump(); }, [&] { return client->closed(); }, std::chrono::milliseconds(2000)));
+    CHECK(mirror_zone->state() == net::SessionState::Disconnected);
 }

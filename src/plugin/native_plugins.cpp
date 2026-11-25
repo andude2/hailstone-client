@@ -34,6 +34,8 @@
 #include "game/dbstr_types.h"
 #include "game/eq_names.h"
 #include "game/item_links.h"
+#include "game/item_sort.h"
+#include "game/task_window.h"
 #include "game/merchant.h"
 #include "game/server_ext_chain.h"
 #include "game/spa_ids.h"
@@ -1770,6 +1772,152 @@ int h_inventory_rows(void* h, HailstoneInventoryRow* out, std::uint32_t capacity
         }
     }
     return static_cast<int>(count);
+}
+
+int h_inventory_rows_v2(void* h, HailstoneInventoryRowV2* out, std::uint32_t capacity) {
+    const net::GameConnection* c = readable(Loaded::of(h), "inventory_rows_v2");
+    if (!c || !c->in_zone()) return -1;
+    const auto& inventory = c->inventory();
+    std::uint32_t count = 0;
+    auto append = [&](const net::ItemSlot& slot, const net::Item& item) {
+        if (out && count < capacity) {
+            auto& row = out[count];
+            row = {};
+            row.slot = slot.slot;
+            row.sub = slot.sub;
+            row.item_id = item.id;
+            row.icon = item.icon;
+            row.count = item.stackable() ? item.stack_count : 1;
+            row.max_stack = item.max_stack;
+            row.ac = item.ac;
+            row.hp = item.hp;
+            row.mana = item.mana;
+            row.value = item.value;
+            row.tribute = item.favor;
+            row.weight = item.weight;
+            row.req_level = static_cast<std::int32_t>(item.req_level);
+            row.rec_level = static_cast<std::int32_t>(item.rec_level);
+            row.bag_slots = item.bag_slots;
+            if (item.magic) row.flags |= HAILSTONE_INV_F_MAGIC;
+            if (item.is_lore()) row.flags |= HAILSTONE_INV_F_LORE;
+            if (item.no_trade()) row.flags |= HAILSTONE_INV_F_NO_TRADE;
+            if (item.no_rent == 0) row.flags |= HAILSTONE_INV_F_TEMPORARY;
+            if (item.attuned) row.flags |= HAILSTONE_INV_F_ATTUNED;
+            if (item.stackable()) row.flags |= HAILSTONE_INV_F_STACKABLE;
+            if (game::sell_refusal(item) == 0) row.flags |= HAILSTONE_INV_F_SELLABLE;
+            if (item.tradeskills) row.flags |= HAILSTONE_INV_F_TRADESKILL;
+            if (item.aug_type != 0 && item.item_type == 54) row.flags |= HAILSTONE_INV_F_AUGMENT;
+            if (item.no_destroy()) row.flags |= HAILSTONE_INV_F_NO_DESTROY;
+            if (item.collectible()) row.flags |= HAILSTONE_INV_F_COLLECTIBLE;
+            const auto cat = game::category_name(game::item_category(item));
+            std::copy_n(cat.data(), std::min(cat.size(), sizeof(row.category) - 1), row.category);
+            std::copy_n(item.name.data(), std::min(item.name.size(), sizeof(row.name) - 1), row.name);
+            // Socketed augments' names, for search (the aug slots of this very item).
+            std::string augs;
+            for (std::int16_t a = 0; a < 6; ++a) {
+                net::ItemSlot at = slot;
+                at.aug = a;
+                if (const net::Item* aug = inventory.at(at)) {
+                    if (!augs.empty()) augs += ';';
+                    augs += aug->name;
+                }
+            }
+            std::copy_n(augs.data(), std::min(augs.size(), sizeof(row.augs) - 1), row.augs);
+            // The nonzero stats a viewer filters and sorts by, hs.ItemStats keys.
+            std::string stats;
+            auto add = [&](const char* key, std::int64_t v) {
+                if (!v) return;
+                if (!stats.empty()) stats += ';';
+                stats += key;
+                stats += '=';
+                stats += std::to_string(v);
+            };
+            add("ac", item.ac); add("hp", item.hp); add("mana", item.mana);
+            add("endurance", item.endurance);
+            add("str", item.astr); add("sta", item.asta); add("agi", item.aagi); add("dex", item.adex);
+            add("wis", item.awis); add("int", item.aint); add("cha", item.acha);
+            add("mr", item.mr); add("fr", item.fr); add("cr", item.cr); add("pr", item.pr); add("dr", item.dr);
+            add("attack", item.attack); add("haste", item.haste);
+            add("damage", item.damage); add("delay", item.delay);
+            std::copy_n(stats.data(), std::min(stats.size(), sizeof(row.stats) - 1), row.stats);
+        }
+        ++count;
+    };
+    for (int i = net::kSlotCharm; i <= net::kSlotGeneral10; ++i) {
+        net::ItemSlot slot{net::kInvPossessions, static_cast<std::int16_t>(i), -1, -1, 0, 0};
+        const auto* item = inventory.at(slot);
+        if (!item) continue;
+        append(slot, *item);
+        if (i < net::kSlotGeneral1 || !item->is_bag()) continue;
+        for (int sub = 0; sub < item->bag_slots; ++sub) {
+            slot.sub = static_cast<std::int16_t>(sub);
+            if (const auto* child = inventory.at(slot)) append(slot, *child);
+        }
+    }
+    return static_cast<int>(count);
+}
+
+int h_task_rows(void* h, HailstoneTaskRow* tasks, std::uint32_t tasks_cap, HailstoneTaskObjective* objectives,
+                std::uint32_t objectives_cap, std::uint32_t* objectives_total, std::uint32_t* revision) {
+    const net::GameConnection* c = readable(Loaded::of(h), "task_rows");
+    if (!c || !c->in_zone()) return -1;
+    const auto& state = c->tasks();
+    if (revision) *revision = state.revision;
+    const auto now = net::GameConnection::now_ms();
+    std::uint32_t task_total = 0, objective_total = 0;
+    for (const auto type : {game::kTaskTypeTask, game::kTaskTypeShared, game::kTaskTypeQuest}) {
+        for (const auto& listed : game::collect_task_rows(state, type, now)) {
+            const game::Task* t = state.find(type, listed.index);
+            if (!t || !t->task_id) continue;
+            if (tasks && task_total < tasks_cap) {
+                auto& row = tasks[task_total];
+                row = {};
+                row.id = t->task_id;
+                row.type = t->type;
+                row.duration = t->duration;
+                row.left = t->duration ? static_cast<std::uint32_t>(std::max(0, game::task_seconds_left(*t, now))) : 0;
+                if (t->type == game::kTaskTypeShared) {
+                    row.members = static_cast<std::uint32_t>(state.shared_members.size());
+                    std::copy_n(state.shared_leader.data(),
+                                std::min(state.shared_leader.size(), sizeof(row.leader) - 1), row.leader);
+                }
+                std::copy_n(t->title.data(), std::min(t->title.size(), sizeof(row.title) - 1), row.title);
+            }
+            // The window's objective order (step, then slot), as hs.Tasks lists them.
+            for (std::uint32_t step = 0; step < 20; ++step) {
+                for (std::uint32_t slot = 0; slot < 20; ++slot) {
+                    const auto it = t->elements.find(slot);
+                    if (it == t->elements.end()) continue;
+                    const game::TaskElement& e = it->second;
+                    if (e.step != step || e.type == 0) continue;
+                    if (objectives && objective_total < objectives_cap) {
+                        auto& row = objectives[objective_total];
+                        row = {};
+                        row.task_index = task_total;
+                        row.id = e.activity_id;
+                        row.group = e.step;
+                        const bool hidden = e.hidden || e.type == -1;
+                        const bool done = !hidden && e.done();
+                        if (hidden) row.flags |= HAILSTONE_TASK_OBJ_HIDDEN;
+                        if (done) row.flags |= HAILSTONE_TASK_OBJ_DONE;
+                        if (e.optional) row.flags |= HAILSTONE_TASK_OBJ_OPTIONAL;
+                        row.count = hidden ? 0 : e.done_count;
+                        row.goal = e.goal_count;
+                        const std::string text = c->task_element_text(e);
+                        std::copy_n(text.data(), std::min(text.size(), sizeof(row.text) - 1), row.text);
+                        const std::string status = hidden ? "" : done ? "Done" : std::format("{}/{}", e.done_count, e.goal_count);
+                        std::copy_n(status.data(), std::min(status.size(), sizeof(row.status) - 1), row.status);
+                        const std::string zone = e.zones.empty() ? "ALL" : game::task_zone_names(e.zones, game::zone_long_name);
+                        std::copy_n(zone.data(), std::min(zone.size(), sizeof(row.zone) - 1), row.zone);
+                    }
+                    ++objective_total;
+                }
+            }
+            ++task_total;
+        }
+    }
+    if (objectives_total) *objectives_total = objective_total;
+    return static_cast<int>(task_total);
 }
 
 std::uint32_t h_cursor_origin(void* h) {
@@ -3647,6 +3795,8 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
     p.table.loot_item_modifiers = main_only<h_loot_item_modifiers>;
     p.table.answer_loot_confirmation = main_only<h_answer_loot_confirmation>;
     p.table.inventory_rows = main_only_or<h_inventory_rows, -1>;
+    p.table.inventory_rows_v2 = main_only_or<h_inventory_rows_v2, -1>;
+    p.table.task_rows = main_only_or<h_task_rows, -1>;
     Hooks& hooks = *m.env.hooks;
     Loaded* lp = &p;
     // Each callback runs with the plugin's capabilities and counts as the plugin being busy (no unloading under it).

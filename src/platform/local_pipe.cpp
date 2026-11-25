@@ -186,6 +186,11 @@ struct LocalPipeConnection::Impl {
         }
     }
 
+    void shutdown_write() noexcept {
+        std::lock_guard write_lock(write_mutex);
+        if (!closed.load()) socket.shutdown_write();
+    }
+
     void close() noexcept {
         if (stop.exchange(true)) return;
         socket.close();
@@ -310,6 +315,10 @@ bool LocalPipeConnection::send_message(std::span<const std::byte> body, int time
 
 std::optional<std::vector<std::byte>> LocalPipeConnection::receive_message(int timeout_ms) {
     return impl_ ? impl_->receive(timeout_ms) : std::nullopt;
+}
+
+void LocalPipeConnection::shutdown_write() noexcept {
+    if (impl_) impl_->shutdown_write();
 }
 
 void LocalPipeConnection::close() noexcept {

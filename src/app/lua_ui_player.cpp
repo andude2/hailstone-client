@@ -718,6 +718,7 @@ public:
         endurance_ = read("Endurancebars", endurance_);
         aggro_ = read("AggroPct", aggro_);
         auto_haters_ = read("AutoAddHaters", true); // 0x578400: sent when it differs from the list's
+        stored_auto_haters_ = auto_haters_;
         zone_ = 0;                                  // sent again with the next zone-in
     }
     void frame(UiHost& host) override {
@@ -762,7 +763,7 @@ public:
                 host.actions->write_char_ini("ExternalTargetRoles", "Current", roles);
             }
         }
-        if (list.auto_haters != stored_auto_haters_) store(host); // /xtarget auto stores the window's settings
+        if (zone_ != 0 && list.auto_haters != stored_auto_haters_) store(host); // /xtarget auto stores the window's settings
     }
     void child(UiHost& host, std::string_view id, Child& out) override {
         if (!host.conn) return;

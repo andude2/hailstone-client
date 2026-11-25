@@ -90,6 +90,10 @@ local function readSettings()
 end
 local search = ""
 local statFilter = "" -- the stat menu's own filter
+-- Declared here, before the sidebar and toolbar that use them: a local declared later in the
+-- file would not be an upvalue inside those functions, and the names would read as globals.
+local owner = "@self" -- whose inventory the window shows: "@self", "@all" or a peer's key
+local crewPeers = nil -- the connected peers while the ACNet provider is loaded (the sidebar's OWNER section)
 
 -- ---------------------------------------------------------------- the items
 local data = { rows = {}, inv = -1, keep = -1, at = -100, stamp = 0 }
@@ -489,6 +493,21 @@ local function markPill(id, x, y, w, h, s, label, on, color, enabled, tip)
   return clicked and enabled
 end
 
+-- Ask an item's owner to trade it to a character (Advanced Inventory's Trade to,
+-- EZInventory's Give/Trade): ACNet hands Sentinel its /crewtradeask, the owner
+-- publishes it to its own Sentinel, which walks to the recipient and runs the
+-- client's /crewtrade job. The answer arrives in chat.
+local function askTrade(ownerName, slot, sub, item, targetName)
+  local plugin = crew.Provider()
+  if not plugin or not plugin.TradeRequest then
+    note("Trade requests need the ACNet add-on and Sentinel")
+    return
+  end
+  local ok = plugin.TradeRequest(ownerName, slot, sub, item.id or 0, targetName, item.name or "")
+  note(ok and ("Asked " .. ownerName .. " to trade " .. (item.name or "the item") .. " to " .. targetName)
+    or "Could not ask for that trade (ACNet or Sentinel unavailable)")
+end
+
 local function itemMenu(r)
   local it = r.item
   if it.magic then ui.TextColored(C.magic[1], C.magic[2], C.magic[3], 1, it.name) else ui.Text(it.name) end
@@ -510,6 +529,23 @@ local function itemMenu(r)
     else API.inventory.ClickSlot(r.slot, r.sub >= 0 and r.sub or nil, "right") end
   end
   if r.sub >= 0 and r.where ~= "shared" and ui.MenuItem("Open its bag", false, reach) then API.inventory.PlaceClick(r.place, "open") end
+  -- Trade to a connected character (crew rows and your own): the owner walks
+  -- to them and trades it. Only for what the crew snapshot can address (worn
+  -- and carried, not the bank).
+  if not banked and crew.Provider() then
+    ui.Separator()
+    if ui.BeginMenu("Trade to") then
+      local peers = crew.Peers()
+      if #peers == 0 then ui.TextDisabled("No connected characters") end
+      for _, peer in ipairs(peers) do
+        if ui.MenuItem(peer.name) then
+          askTrade(API.character.Label(1) or "", r.slot, r.sub, it, peer.name)
+        end
+        if ui.IsItemHovered() then ui.SetTooltip("Ask you to walk to " .. peer.name .. " and trade it") end
+      end
+      ui.EndMenu()
+    end
+  end
   ui.Separator()
   if ui.MenuItem("Show only \"" .. T.Fit(it.name, 200, T.font.small) .. "\"") then search = it.name end
   if r.stale then ui.TextDisabled("Your bank as last seen: visit a banker to move or use it")
@@ -698,6 +734,31 @@ local function sideRow(id, x, y, w, s, label, count, on, check)
   return clicked, y + h + 1 * s
 end
 
+-- The owner as a drop-down (a crew is long: one row per character would fill the sidebar).
+-- Returns the next y. Inside whichever sidebar child is open.
+local function ownerPicker(cx, yy, cw, s, peers)
+  yy = sideHeading(cx, yy, cw, "OWNER", s)
+  local name = owner == "@self" and "My Character" or "All Connected"
+  for _, peer in ipairs(peers) do
+    if peer.key == owner then name = peer.name break end
+  end
+  local wx, wy = ui.GetWindowPos()
+  ui.SetCursorPos(cx + 4 * s - wx, yy - wy + ui.GetScrollY())
+  ui.SetNextItemWidth(cw - 8 * s)
+  ui.PushStyleVar(ui.StyleVar.FramePadding, 8 * s, 5 * s)
+  if ui.BeginCombo("##advowner", name) then
+    if ui.Selectable("My Character", owner == "@self") then owner = "@self" end
+    if ui.Selectable("All Connected", owner == "@all") then owner = "@all" end
+    for _, peer in ipairs(peers) do
+      local suffix = peer.snapshot and (" (" .. #peer.snapshot.rows .. ")") or " (unavailable)"
+      if ui.Selectable(peer.name .. suffix .. "##" .. peer.key, owner == peer.key) then owner = peer.key end
+    end
+    ui.EndCombo()
+  end
+  ui.PopStyleVar()
+  return yy + 30 * s
+end
+
 local function sidebar(x, y, w, h, s, v)
   local wx, wy = ui.GetWindowPos()
   ui.DrawRectFilled(x, y, x + w, y + h, C.ink[1], C.ink[2], C.ink[3], 0.03, 8 * s)
@@ -708,6 +769,9 @@ local function sidebar(x, y, w, h, s, v)
   cx, cw = cx + 4 * s, cw - 8 * s
   local yy = cy + 2 * s
   local counts = v.counts
+  if crewPeers then
+    yy = ownerPicker(cx, yy, cw, s, crewPeers) + 4 * s
+  end
   yy = sideHeading(cx, yy, cw, "PLACE", s)
   for _, p in ipairs(PLACES) do
     local clicked
@@ -1249,91 +1313,451 @@ local DIALOG = {
   keepTitle = true,
 }
 
-local owner = "@self"
-local filter = ""
+-- ---------------------------------------------------------------- crew (cross-character) view
+-- The same window as My Character -- toolbar, filter sidebar, list or grid, footer -- over the
+-- connected characters' shared snapshots (lib/crewinventory.lua). Read-only: a click selects a
+-- row, a hover shows its details; nothing here picks an item up. With a detailed (inventory.v2)
+-- snapshot the sidebar filters by kind, flags and a stat, and the columns sort by value, tribute
+-- and level too; a legacy (v1) snapshot has name, icon, count and AC/HP/mana only, and the
+-- sections it cannot answer are left out rather than shown empty.
+local CREW_PLACES = { { "all", "Everything" }, { "worn", "Equipped" }, { "carried", "Carried" }, { "bags", "In bags" } }
+local CREW_FLAGS = { { "noTrade", "No Trade only" }, { "lore", "Lore" }, { "magic", "Magic" },
+  { "stackable", "Stackable" }, { "temporary", "Temporary" }, { "collectible", "Collectible" } }
+local CREW_SORTS = { "Name", "Owner", "Place", "Level", "Quantity", "Value", "Tribute", "Weight" }
+local CREW_SORT_OK = {}
+for _, m in ipairs(CREW_SORTS) do CREW_SORT_OK[m] = true end
+local crewCfg = { flags = {} }
+local crewLoaded = false
+local function crewRead()
+  if crewLoaded then return end
+  crewLoaded = true
+  crewCfg.place = setting("crew.place", "all")
+  crewCfg.kind = setting("crew.kind", "all")
+  crewCfg.sort = setting("crew.sort", "Name")
+  if not CREW_SORT_OK[crewCfg.sort] then crewCfg.sort = "Name" end
+  crewCfg.desc = setting("crew.desc", false)
+  crewCfg.minValue = tonumber(setting("crew.minValue", "")) or nil
+  crewCfg.maxValue = tonumber(setting("crew.maxValue", "")) or nil
+  crewCfg.minTribute = tonumber(setting("crew.minTribute", "")) or nil
+  for _, f in ipairs(CREW_FLAGS) do crewCfg.flags[f[1]] = setting("crew.flag." .. f[1], false) end
+end
+local function crewSet(key, v) setSetting("crew." .. key, v) crewCfg[key] = v end
 
-local function crewItems(x, y, w, h, s, peers)
-  ui.SetCursorScreenPos(x, y)
-  ui.SetNextItemWidth(260 * s)
-  search = ui.InputTextWithHint("##crewsearch", "Search item names", search, 64)
-  ui.SameLine()
-  ui.SetNextItemWidth(120 * s)
-  if ui.BeginCombo("##crewwhere", filter == "" and "Any location" or filter) then
-    for _, place in ipairs({ "Any location", "Equipped", "Carried", "In bags" }) do
-      if ui.Selectable(place, place == filter or (filter == "" and place == "Any location")) then
-        filter = place == "Any location" and "" or place
-      end
-    end
-    ui.EndCombo()
-  end
+local function crewPlaceOf(r)
+  if r.slot < 23 then return "worn", API.inventory.SlotName(r.slot) or "Equipped" end
+  if r.sub >= 0 then return "bags", ("General %d, bag slot %d"):format(r.slot - 22, r.sub + 1) end
+  return "carried", ("General %d"):format(r.slot - 22)
+end
 
-  local query = search:lower()
-  local rows, ready = {}, 0
-  local function add(name, slot, sub, item, count)
-    local kind = slot < 23 and "Equipped" or (sub < 0 and "Carried" or "In bags")
-    if (filter ~= "" and filter ~= kind) or not item:lower():find(query, 1, true) then return end
-    local location
-    if slot < 23 then location = API.inventory.SlotName(slot) or tostring(slot)
-    else
-      location = ("General %d"):format(slot - 22)
-      if sub >= 0 then location = location .. (", bag slot %d"):format(sub + 1) end
-    end
-    rows[#rows + 1] = { item, name, location, count }
+-- Every shown crew row: {owner, slot, sub, item, place, placeText, legacy, kind, level, value, tribute}.
+local function crewRows(peers, myName)
+  local rows = {}
+  local function add(ownerName, r, isLocal)
+    local place, placeText = crewPlaceOf(r)
+    local it = r.item
+    rows[#rows + 1] = { owner = ownerName, slot = r.slot, sub = r.sub, item = it, legacy = r.legacy == true,
+      local_ = isLocal, place = place, placeText = placeText, kind = kindOf(it),
+      level = math.max(it.reqLevel or 0, it.recLevel or 0),
+      count = it.stackable and (it.count or 1) or (it.count or 1),
+      value = (it.value or 0) * (it.count or 1), tribute = (it.tribute or 0) * (it.count or 1),
+      weight = (it.weight or 0) * (it.count or 1) }
   end
   if owner == "@all" then
-    local name = API.character.Label(1) or "My character"
     for _, r in ipairs(data.rows) do
       if r.where == "worn" or r.where == "carried" then
-        add(name, r.slot, r.sub, r.item.name, r._count)
+        add(myName, { slot = r.slot, sub = r.sub, item = r.item }, true)
       end
     end
   end
   for _, peer in ipairs(peers) do
     if peer.snapshot and (owner == "@all" or owner == peer.key) then
-      ready = ready + 1
-      for _, r in ipairs(peer.snapshot.rows) do add(peer.name, r[1], r[2], r[9], r[5]) end
+      for _, r in ipairs(peer.snapshot.rows) do add(peer.name, r, false) end
     end
   end
-  table.sort(rows, function(a, b)
-    if a[1] ~= b[1] then return a[1] < b[1] end
-    if a[2] ~= b[2] then return a[2] < b[2] end
-    return a[3] < b[3]
-  end)
-  if ready == 0 and owner ~= "@all" then ui.Text("Inventory unavailable"); return end
-  ui.Text(("%d items  |  %d of %d peer inventories available"):format(#rows, ready,
-    owner == "@all" and #peers or 1))
-  local flags = ui.TableFlags.ScrollY | ui.TableFlags.RowBg | ui.TableFlags.Resizable
-  if ui.BeginTable("##crewitems", 4, flags, w, math.max(60 * s, h - 60 * s)) then
-    for _, label in ipairs({ "Item", "Owner", "Location", "Qty" }) do ui.TableSetupColumn(label) end
-    ui.TableSetupScrollFreeze(0, 1)
-    ui.TableHeadersRow()
-    for _, row in ipairs(rows) do
-      ui.TableNextRow()
-      for _, value in ipairs(row) do
-        if ui.TableNextColumn() then ui.Text(tostring(value)) end
-      end
-    end
-    ui.EndTable()
-  end
+  return rows
 end
 
-local function ownerControl(x, y, s, peers)
-  local name = owner == "@self" and "My Character" or "All Connected"
-  local found = owner == "@self" or owner == "@all"
-  for _, peer in ipairs(peers) do
-    if peer.key == owner then name, found = peer.name, true; break end
-  end
-  if not found then owner, name = "@all", "All Connected" end
-  ui.SetCursorScreenPos(x, y)
-  ui.SetNextItemWidth(180 * s)
-  if ui.BeginCombo("##advowner", name) then
-    if ui.Selectable("My Character", owner == "@self") then owner = "@self" end
-    if ui.Selectable("All Connected", owner == "@all") then owner = "@all" end
-    for _, peer in ipairs(peers) do
-      if ui.Selectable(peer.name .. "##" .. peer.key, owner == peer.key) then owner = peer.key end
+local function crewShown(rows)
+  local q = search:lower()
+  local out, counts = {}, { place = { all = 0 }, kind = { all = 0 }, flag = {} }
+  local detailed = false
+  for _, r in ipairs(rows) do if not r.legacy then detailed = true break end end
+  for _, r in ipairs(rows) do
+    local it = r.item
+    local lname = (it.name or ""):lower()
+    local okSearch = q == "" or lname:find(q, 1, true) ~= nil
+      or (it.augs and it.augs:lower():find(q, 1, true) ~= nil)
+    local okPlace = crewCfg.place == "all" or r.place == crewCfg.place
+    local okKind = crewCfg.kind == "all" or r.kind == crewCfg.kind
+    local okFlags, okValue = true, true
+    for _, f in ipairs(CREW_FLAGS) do
+      if crewCfg.flags[f[1]] and not it[f[1]] then okFlags = false end
     end
-    ui.EndCombo()
+    if crewCfg.minValue and r.value < crewCfg.minValue then okValue = false end
+    if crewCfg.maxValue and r.value > crewCfg.maxValue then okValue = false end
+    if crewCfg.minTribute and r.tribute < crewCfg.minTribute then okValue = false end
+    if okSearch then
+      if okKind and okFlags and okValue then
+        counts.place[r.place] = (counts.place[r.place] or 0) + 1
+        counts.place.all = counts.place.all + 1
+      end
+      if okPlace and okFlags and okValue then
+        counts.kind[r.kind] = (counts.kind[r.kind] or 0) + 1
+        counts.kind.all = counts.kind.all + 1
+      end
+      if okPlace and okKind and okValue then
+        for _, f in ipairs(CREW_FLAGS) do
+          if it[f[1]] then counts.flag[f[1]] = (counts.flag[f[1]] or 0) + 1 end
+        end
+      end
+    end
+    if okSearch and okPlace and okKind and okFlags and okValue then out[#out + 1] = r end
   end
+  local mode, desc = crewCfg.sort, crewCfg.desc
+  table.sort(out, function(a, b)
+    local ka, kb
+    if mode == "Owner" then ka, kb = a.owner:lower(), b.owner:lower()
+    elseif mode == "Place" then ka, kb = (a.place == "worn" and 0 or a.place == "carried" and 1 or 2), (b.place == "worn" and 0 or b.place == "carried" and 1 or 2)
+    elseif mode == "Level" then ka, kb = a.level, b.level
+    elseif mode == "Quantity" then ka, kb = a.count, b.count
+    elseif mode == "Value" then ka, kb = a.value, b.value
+    elseif mode == "Tribute" then ka, kb = a.tribute, b.tribute
+    elseif mode == "Weight" then ka, kb = a.weight, b.weight
+    else ka, kb = (a.item.name or ""):lower(), (b.item.name or ""):lower() end
+    if ka ~= kb then
+      if desc then return ka > kb end
+      return ka < kb
+    end
+    if (a.item.name or ""):lower() ~= (b.item.name or ""):lower() then
+      return (a.item.name or ""):lower() < (b.item.name or ""):lower()
+    end
+    return a.owner < b.owner
+  end)
+  return out, counts, detailed
+end
+
+local crewSel = nil -- the selected crew row (highlighted; its menu is the way to act on it)
+local crewMenuRow = nil -- the crew row whose right-click menu opens this frame
+local function crewRowDraw(r, px, py, cw, s, th, col)
+  local rh = ROW_H * s
+  local it = r.item
+  local isz = rh - 8 * s
+  local ix, iy = px + 8 * s, py + 3 * s
+  if T.Hit("##crewrow" .. r.owner .. "." .. r.slot .. "." .. r.sub, px, py, px + cw, py + rh - 2 * s) then
+    crewSel = crewSel == r and nil or r
+  end
+  local hov = ui.IsItemHovered()
+  if hov and ui.IsMouseClicked(ui.Mouse.Right) then
+    crewSel, crewMenuRow = r, r
+    T.TakeRightClick() -- the item's menu, not the window's
+  end
+  if crewSel == r then
+    local a = C.accent
+    ui.DrawRectFilled(px, py, px + cw, py + rh - 2 * s, a[1], a[2], a[3], hov and 0.20 or 0.15, 6 * s)
+  elseif hov then
+    ui.DrawRectFilled(px, py, px + cw, py + rh - 2 * s, C.ink[1], C.ink[2], C.ink[3], 0.05, 6 * s)
+  end
+  local tex, u0, v0, u1, v1 = API.assets.ItemIcon(it.icon or 0)
+  T.Icon(ix, iy, isz, s, tex, u0, v0, u1, v1, it.magic and { C.magic[1], C.magic[2], C.magic[3], 0.45 } or nil,
+    { radius = 6 })
+  if it.stackable and (it.count or 1) > 1 then
+    T.Text(ix + isz - 3 * s, iy + isz - 15 * s, tostring(it.count), C.text, T.font.tiny, "right")
+  end
+  if hov then items.Tooltip(it, r.owner .. " - " .. r.placeText) end
+  local nx = ix + isz + 10 * s
+  local nameW = col.owner - nx - 10 * s
+  T.Text(nx, py + 4 * s, T.Fit(it.name or "", nameW, T.font.small), it.magic and C.magic or C.text, T.font.small)
+  local tg = tags(it)
+  if it.augs and it.augs ~= "" then tg = (tg ~= "" and tg .. "  \xC2\xB7  " or "") .. "Aug: " .. it.augs:gsub(";", ", ") end
+  if tg ~= "" then T.Text(nx, py + 4 * s + th + 1 * s, T.Fit(tg, nameW, T.font.tiny), C.faint, T.font.tiny) end
+  local cy = py + (rh - 2 * s - th) / 2
+  T.Text(col.owner, cy, T.Fit(r.owner, col.place - col.owner - 8 * s, T.font.small),
+    r.local_ and C.accent or C.text, T.font.small)
+  T.Text(col.place, cy, T.Fit(r.placeText, col.level - col.place - 30 * s, T.font.small), C.muted, T.font.small)
+  if r.level > 0 then T.Text(col.level, cy, tostring(r.level), C.muted, T.font.small, "right") end
+  T.Text(col.qty, cy, T.Thousands(r.count), C.text, T.font.small, "right")
+  local mv, coin = money(r.value)
+  if mv ~= "" then T.Text(col.value, cy, mv, C[coin] or C.gold, T.font.small, "right") end
+  if r.tribute > 0 then T.Text(col.tribute, cy, T.Thousands(r.tribute), C.muted, T.font.small, "right") end
+  T.Text(col.weight, cy, weightText(r.weight), C.faint, T.font.small, "right")
+end
+
+local function crewColumns(px, cw, s)
+  local c = {}
+  c.weight = px + cw - 12 * s
+  c.tribute = c.weight - 54 * s
+  c.value = c.tribute - 70 * s
+  c.qty = c.value - 84 * s
+  c.level = c.qty - 48 * s
+  local nameX = px + 8 * s + (ROW_H - 8) * s + 10 * s
+  local rest = c.level - nameX
+  c.owner = nameX + rest * 0.52
+  c.place = nameX + rest * 0.74
+  return c
+end
+
+local function crewGrid(rows, x, y, w, h, s)
+  local wx, wy = ui.GetWindowPos()
+  ui.SetCursorPos(x - wx, y - wy)
+  ui.BeginChild("##crewgridview", w, h, false)
+  local px0, py0 = ui.GetCursorScreenPos()
+  local cw = ui.GetContentRegionAvail()
+  local _, top = ui.GetWindowPos()
+  local bottom = top + h
+  if #rows == 0 then emptyState(px0, py0, cw, s) end
+  local t, g = TILE * s, TILE_GAP * s
+  local cols = math.max(1, math.floor((cw + g) / (t + g)))
+  local yy, coln = py0, 0
+  local _, th = T.TextSize("Ag", T.font.tiny)
+  for _, r in ipairs(rows) do
+    local tx = px0 + coln * (t + g)
+    if yy + t >= top and yy <= bottom then
+      local it = r.item
+      local tex, u0, v0, u1, v1 = API.assets.ItemIcon(it.icon or 0)
+      T.Icon(tx, yy, t - 14 * s, s, tex, u0, v0, u1, v1,
+        crewSel == r and C.accent or (it.magic and { C.magic[1], C.magic[2], C.magic[3], 0.45 } or nil), { radius = 6 })
+      if T.Hit("##crewgrid" .. r.owner .. "." .. r.slot .. "." .. r.sub, tx, yy, tx + t, yy + t) then
+        crewSel = crewSel == r and nil or r
+      end
+      if ui.IsItemHovered() and ui.IsMouseClicked(ui.Mouse.Right) then
+        crewSel, crewMenuRow = r, r
+        T.TakeRightClick()
+      end
+      if ui.IsItemHovered() then items.Tooltip(it, r.owner .. " - " .. r.placeText) end
+      if it.stackable and (it.count or 1) > 1 then
+        T.Text(tx + t - 16 * s, yy + t - 28 * s, tostring(it.count), C.text, T.font.tiny, "right")
+      end
+      T.Text(tx + t / 2, yy + t - 12 * s, T.Fit(it.name or "", t, T.font.tiny), C.muted, T.font.tiny, "center")
+      local _ = th
+    end
+    coln = coln + 1
+    if coln >= cols then yy, coln = yy + t + g, 0 end
+  end
+  if coln > 0 then yy = yy + t + g end
+  ui.SetCursorScreenPos(px0, yy)
+  ui.Dummy(cw, 6 * s)
+  ui.EndChild()
+end
+
+local function crewList(rows, x, y, w, h, s)
+  local wx, wy = ui.GetWindowPos()
+  ui.SetCursorPos(x - wx, y - wy)
+  ui.BeginChild("##crewitems", w, h, false)
+  local px0, py0 = ui.GetCursorScreenPos()
+  local cw = ui.GetContentRegionAvail()
+  local _, top = ui.GetWindowPos()
+  local bottom = top + h
+  local _, th = T.TextSize("Ag", T.font.small)
+  if #rows == 0 then emptyState(px0, py0, cw, s) end
+  local col = crewColumns(px0, cw, s)
+  local yy, rh = py0, ROW_H * s
+  for _, r in ipairs(rows) do
+    if yy + rh >= top and yy <= bottom then crewRowDraw(r, px0, yy, cw, s, th, col) end
+    yy = yy + rh
+  end
+  ui.SetCursorScreenPos(px0, yy)
+  ui.Dummy(cw, 6 * s)
+  ui.EndChild()
+end
+
+local function crewHeader(x, y, w, s)
+  local _, tth = T.TextSize("Ag", T.font.tiny)
+  local col = crewColumns(x, w, s)
+  local function head(cx, text, align, mode)
+    local tw = T.TextSize(text, T.font.tiny)
+    local x0 = align == "right" and cx - tw or cx
+    local on = crewCfg.sort == mode
+    local clicked = T.Hit("##ch" .. mode, x0 - 4 * s, y - 3 * s, x0 + tw + 12 * s, y + tth + 3 * s)
+    local hov = ui.IsItemHovered()
+    T.Text(cx, y, text, (on or hov) and C.text or C.faint, T.font.tiny, align)
+    if on then
+      local a, ax, my = C.accent, x0 + tw + 3 * s, y + tth / 2
+      if crewCfg.desc then
+        ui.DrawTriangleFilled(ax, my - 2 * s, ax + 6 * s, my - 2 * s, ax + 3 * s, my + 2.5 * s, a[1], a[2], a[3], 1)
+      else
+        ui.DrawTriangleFilled(ax, my + 2 * s, ax + 6 * s, my + 2 * s, ax + 3 * s, my - 2.5 * s, a[1], a[2], a[3], 1)
+      end
+    end
+    if clicked then
+      if crewCfg.sort == mode then crewSet("desc", not crewCfg.desc)
+      else crewSet("sort", mode) crewSet("desc", mode ~= "Name" and mode ~= "Owner" and mode ~= "Place") end
+    end
+  end
+  head(x + 8 * s + (ROW_H - 4) * s, "ITEM", nil, "Name")
+  head(col.owner, "OWNER", nil, "Owner")
+  head(col.place, "WHERE", nil, "Place")
+  head(col.level, "LVL", "right", "Level")
+  head(col.qty, "QTY", "right", "Quantity")
+  head(col.value, "VALUE", "right", "Value")
+  head(col.tribute, "TRIBUTE", "right", "Tribute")
+  head(col.weight, "WEIGHT", "right", "Weight")
+end
+
+local function crewToolbar(x, y, w, s, shown, total)
+  local wx, wy = ui.GetWindowPos()
+  ui.SetCursorPos(x - wx, y - wy + 3 * s)
+  ui.SetNextItemWidth(260 * s)
+  ui.PushStyleVar(ui.StyleVar.FramePadding, 10 * s, 6 * s)
+  ui.PushStyleVar(ui.StyleVar.FrameRounding, 14 * s)
+  search = ui.InputTextWithHint("##advsearch", "Search items and augments", search, 64)
+  ui.PopStyleVar(2)
+  if search ~= "" then
+    if T.Button("##advclear", x + 236 * s, y + 7 * s, x + 256 * s, y + 25 * s, s, "x",
+        { tooltip = "Clear the search" }) then search = "" end
+  end
+  local cx = x + 270 * s
+  local any = crewCfg.place ~= "all" or crewCfg.kind ~= "all" or crewCfg.minValue or crewCfg.maxValue
+    or crewCfg.minTribute or search ~= ""
+  for _, f in ipairs(CREW_FLAGS) do if crewCfg.flags[f[1]] then any = true end end
+  if T.Button("##crewreset", cx, y + 3 * s, cx + 104 * s, y + 31 * s, s, "Clear filters",
+      { enabled = any, tooltip = any and "Show everything" or "No filters are on" }) then
+    crewSet("place", "all") crewSet("kind", "all")
+    crewSet("minValue", "") crewSet("maxValue", "") crewSet("minTribute", "")
+    crewCfg.minValue, crewCfg.maxValue, crewCfg.minTribute = nil, nil, nil
+    for _, f in ipairs(CREW_FLAGS) do if crewCfg.flags[f[1]] then crewSet("flag." .. f[1], false) crewCfg.flags[f[1]] = false end end
+    search = ""
+  end
+  cx = cx + 116 * s
+  local c1, w1 = chip("##advlist", cx, y + 4 * s, "List", cfg.view == "list", s, "Rows with each item's details")
+  if c1 then setSetting("view", "list") end
+  local c2 = chip("##advgrid", cx + w1 + 4 * s, y + 4 * s, "Grid", cfg.view == "grid", s, "Icons only, as in a bag")
+  if c2 then setSetting("view", "grid") end
+  local _, th = T.TextSize("Ag", T.font.small)
+  T.Text(x + w, y + 3 * s + (28 * s - th) / 2,
+    string.format("%d of %d items", shown, total), C.muted, T.font.small, "right")
+end
+
+local function crewSidebar(x, y, w, h, s, peers, counts, detailed, myName)
+  local wx, wy = ui.GetWindowPos()
+  ui.DrawRectFilled(x, y, x + w, y + h, C.ink[1], C.ink[2], C.ink[3], 0.03, 8 * s)
+  ui.SetCursorPos(x - wx, y - wy)
+  ui.BeginChild("##advside", w, h, false)
+  local cx, cy = ui.GetCursorScreenPos()
+  local cw = ui.GetContentRegionAvail()
+  cx, cw = cx + 4 * s, cw - 8 * s
+  local yy = cy + 2 * s
+  local clicked
+  yy = ownerPicker(cx, yy, cw, s, peers)
+  yy = sideHeading(cx, yy + 4 * s, cw, "PLACE", s)
+  for _, p in ipairs(CREW_PLACES) do
+    clicked, yy = sideRow("##cp" .. p[1], cx, yy, cw, s, p[2], counts.place[p[1]] or 0, crewCfg.place == p[1])
+    if clicked then crewSet("place", p[1]) end
+  end
+  if detailed then
+    yy = sideHeading(cx, yy + 4 * s, cw, "KIND", s)
+    for _, k in ipairs(KINDS) do
+      local n = counts.kind[k[1]] or 0
+      if k[1] == "all" or n > 0 or crewCfg.kind == k[1] then
+        clicked, yy = sideRow("##ck" .. k[1], cx, yy, cw, s, k[2], n, crewCfg.kind == k[1])
+        if clicked then crewSet("kind", k[1]) end
+      end
+    end
+    yy = sideHeading(cx, yy + 4 * s, cw, "ONLY", s)
+    for _, f in ipairs(CREW_FLAGS) do
+      local on = crewCfg.flags[f[1]]
+      clicked, yy = sideRow("##cf" .. f[1], cx, yy, cw, s, f[2], counts.flag[f[1]] or 0, on, true)
+      if clicked then crewSet("flag." .. f[1], not on) crewCfg.flags[f[1]] = not on end
+    end
+    yy = sideHeading(cx, yy + 4 * s, cw, "VALUE (COPPER)", s)
+    local wx2, wy2 = ui.GetWindowPos()
+    local function numField(id, key, hint)
+      ui.SetCursorPos(cx + 4 * s - wx2, yy - wy2 + ui.GetScrollY())
+      ui.SetNextItemWidth(cw - 8 * s)
+      local cur = crewCfg[key] and tostring(crewCfg[key]) or ""
+      local v = ui.InputTextWithHint(id, hint, cur, 12, ui.InputTextFlags.CharsDecimal)
+      if v ~= cur then
+        crewSet(key, v)
+        crewCfg[key] = tonumber(v)
+      end
+      yy = yy + 26 * s
+    end
+    numField("##crewminv", "minValue", "Min value")
+    numField("##crewmaxv", "maxValue", "Max value")
+    numField("##crewmint", "minTribute", "Min tribute")
+  else
+    yy = yy + 8 * s
+    T.Text(cx + 8 * s, yy, "Detailed filters need a", C.faint, T.font.tiny)
+    T.Text(cx + 8 * s, yy + 13 * s, "current ACNet snapshot.", C.faint, T.font.tiny)
+    yy = yy + 30 * s
+  end
+  ui.SetCursorScreenPos(cx, yy)
+  ui.Dummy(cw, 6 * s)
+  ui.EndChild()
+  local _ = myName
+end
+
+local crewMenuSaved = nil -- the crew row whose menu is open (crewMenuRow, kept while the popup is)
+local function crewItemMenu(r, peers, myName)
+  local it = r.item
+  if it.magic then ui.TextColored(C.magic[1], C.magic[2], C.magic[3], 1, it.name) else ui.Text(it.name) end
+  ui.TextDisabled(r.owner .. " - " .. r.placeText)
+  ui.Separator()
+  if ui.BeginMenu("Trade to") then
+    local any = false
+    if r.owner ~= myName then
+      if ui.MenuItem("You") then askTrade(r.owner, r.slot, r.sub, it, myName) end
+      any = true
+    end
+    for _, peer in ipairs(peers) do
+      if peer.name ~= r.owner then
+        if ui.MenuItem(peer.name) then askTrade(r.owner, r.slot, r.sub, it, peer.name) end
+        any = true
+      end
+    end
+    if not any then ui.TextDisabled("No one else connected") end
+    ui.EndMenu()
+  end
+  if ui.IsItemHovered() then
+    ui.SetTooltip("Ask " .. r.owner .. " to walk to them and trade it (Sentinel)")
+  end
+  ui.Separator()
+  if ui.MenuItem("Show only \"" .. T.Fit(it.name, 200, T.font.small) .. "\"") then search = it.name end
+end
+
+local function crewBody(x, y, w, h, s, peers)
+  crewRead()
+  readSettings()
+  local myName = API.character.Label(1) or "My character"
+  local all = crewRows(peers, myName)
+  local rows, counts, detailed = crewShown(all)
+  crewToolbar(x, y, w, s, #rows, #all)
+  local by = y + TOOL_H * s
+  local bodyH = h - TOOL_H * s - FOOT_H * s
+  crewSidebar(x, by, SIDE_W * s, bodyH, s, peers, counts, detailed, myName)
+  local lx = x + SIDE_W * s + 14 * s
+  local lw = x + w - lx
+  if cfg.view == "grid" then
+    crewGrid(rows, lx, by, lw, bodyH, s)
+  else
+    crewHeader(lx, by, lw - 14 * s, s)
+    crewList(rows, lx, by + 18 * s, lw, bodyH - 18 * s, s)
+  end
+  if crewMenuRow then
+    crewMenuSaved, crewMenuRow = crewMenuRow, nil
+    ui.OpenPopup("##crewitemmenu")
+  end
+  if ui.BeginPopup("##crewitemmenu") then
+    if crewMenuSaved then crewItemMenu(crewMenuSaved, peers, myName) end
+    ui.EndPopup()
+  end
+  local fy = y + h - FOOT_H * s
+  ui.DrawLine(x, fy, x + w, fy, C.ink[1], C.ink[2], C.ink[3], 0.06, 1)
+  local _, th = T.TextSize("Ag", T.font.small)
+  local ready, totalPeers = 0, 0
+  for _, peer in ipairs(peers) do
+    if owner == "@all" or owner == peer.key then
+      totalPeers = totalPeers + 1
+      if peer.snapshot then ready = ready + 1 end
+    end
+  end
+  local label = string.format("%d of %d items  \xC2\xB7  %d of %d peer inventories available  \xC2\xB7  read-only",
+    #rows, #all, ready, totalPeers)
+  if not detailed and #all > 0 then label = label .. "  \xC2\xB7  basic snapshot (no kind, value or flags)" end
+  T.Text(x, fy + 15 * s, label, C.muted, T.font.small)
+  if crewSel then
+    T.Text(x + w, fy + 15 * s, (crewSel.item.name or "") .. " - " .. crewSel.owner, C.text, T.font.small, "right")
+  end
+  local _ = th
 end
 
 local function body(x, y, w, h, s)
@@ -1346,13 +1770,19 @@ local function body(x, y, w, h, s)
     search = q
     selClear()
   end
+  crewPeers = nil
   if crew.Provider() then
     local peers = crew.Peers()
+    crewPeers = peers
     local testOwner = ui.GetSetting("test.adv.owner")
     if testOwner then owner = testOwner end
-    ownerControl(x, y, s, peers)
-    y, h = y + 34 * s, h - 34 * s
-    if owner ~= "@self" then return crewItems(x, y, w, h, s, peers) end
+    -- A peer the list no longer has (it left) falls back to everyone connected.
+    if owner ~= "@self" and owner ~= "@all" then
+      local found = false
+      for _, peer in ipairs(peers) do if peer.key == owner then found = true break end end
+      if not found then owner = "@all" end
+    end
+    if owner ~= "@self" then return crewBody(x, y, w, h, s, peers) end
   else
     owner = "@self"
   end

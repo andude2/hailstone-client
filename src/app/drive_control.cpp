@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <mutex>
 #include <span>
@@ -127,6 +128,7 @@ struct DriveRelay::Impl {
     std::atomic<bool> stop{false};
     std::mutex mutex;
     std::shared_ptr<platform::LocalPipeConnection> pipe;
+    std::shared_ptr<platform::LocalPipeConnection> retiring_pipe;
     std::optional<net::DriveSnapshot> snapshot;
     bool snapshot_sent = false;
     bool released_flag = false;
@@ -135,6 +137,8 @@ struct DriveRelay::Impl {
     std::atomic<bool> new_viewer{false};
     net::SessionOptions options;
     std::unordered_map<std::uint64_t, Link> links;
+    std::uint64_t active_world_id = 1;
+    std::uint64_t active_zone_id = 2;
 
     Impl(platform::LocalPipeSession s, net::SessionOptions o)
         : server(s), session(server.session()), options(std::move(o)) {
@@ -144,12 +148,14 @@ struct DriveRelay::Impl {
     ~Impl() {
         stop.store(true);
         if (accept_thread.joinable()) accept_thread.join();
-        std::shared_ptr<platform::LocalPipeConnection> p;
+        std::shared_ptr<platform::LocalPipeConnection> p, old_p;
         {
             std::lock_guard lock(mutex);
             p = std::move(pipe);
+            old_p = std::move(retiring_pipe);
         }
         if (p) p->close();
+        if (old_p) old_p->close();
     }
 
     void accept_loop() {
@@ -176,6 +182,15 @@ struct DriveRelay::Impl {
         ByteReader r(message);
         const auto kind = static_cast<DriveLeaseMessage>(r.le<std::uint8_t>());
         if (kind == DriveLeaseMessage::Bye) return false;
+        if (kind == DriveLeaseMessage::ActiveSessions) {
+            try {
+                active_world_id = r.le<std::uint64_t>();
+                active_zone_id = r.le<std::uint64_t>();
+            } catch (const std::exception&) {
+                return false;
+            }
+            return true;
+        }
         if (kind == DriveLeaseMessage::Release) {
             try {
                 ByteReader body(message.subspan(1));
@@ -186,6 +201,8 @@ struct DriveRelay::Impl {
                 if (auto returned = net::decode_drive_snapshot(release_in.bytes)) {
                     release = std::move(*returned);
                     released_flag = true;
+                    send_kind(p, DriveLeaseMessage::ReleaseAck, {});
+                    p.shutdown_write();
                 }
                 release_in.reset();
             } catch (const std::exception&) {
@@ -193,7 +210,7 @@ struct DriveRelay::Impl {
             }
             return false; // the lease ends: the headless takes the sessions back
         }
-        if (kind == DriveLeaseMessage::Snapshot) return true; // the viewer never sends one
+        if (kind == DriveLeaseMessage::Snapshot || kind == DriveLeaseMessage::ReleaseAck) return true;
         try {
             const auto id = r.le<std::uint64_t>();
             auto it = links.find(id);
@@ -280,7 +297,16 @@ void DriveRelay::begin_lease(net::DriveSnapshot snapshot) {
     impl_->release_in.reset();
     impl_->release.reset();
     impl_->released_flag = false;
+    impl_->links.clear();
+    impl_->active_world_id = 1;
+    impl_->active_zone_id = 2;
     impl_->snapshot = std::move(snapshot);
+    std::shared_ptr<platform::LocalPipeConnection> old_p;
+    {
+        std::lock_guard lock(impl_->mutex);
+        old_p = std::move(impl_->retiring_pipe);
+    }
+    if (old_p) old_p->close();
 }
 
 void DriveRelay::set_snapshot(net::DriveSnapshot snapshot) {
@@ -302,6 +328,18 @@ bool DriveRelay::released() const { return impl_->released_flag; }
 net::DriveSnapshot DriveRelay::take_release() {
     net::DriveSnapshot snapshot = impl_->release.value_or(net::DriveSnapshot{});
     impl_->release.reset();
+    impl_->released_flag = false;
+    impl_->snapshot.reset();
+    impl_->snapshot_sent = false;
+    // Detach the released pipe immediately so accept_loop() can admit a subsequent swap without waiting for the
+    // prior client's FIN to propagate, while keeping the prior pipe alive briefly so ReleaseAck drains cleanly.
+    std::shared_ptr<platform::LocalPipeConnection> prev_retiring;
+    {
+        std::lock_guard lock(impl_->mutex);
+        prev_retiring = std::move(impl_->retiring_pipe);
+        impl_->retiring_pipe = std::move(impl_->pipe);
+    }
+    if (prev_retiring) prev_retiring->close();
     return snapshot;
 }
 
@@ -309,6 +347,14 @@ std::unique_ptr<net::Session> DriveRelay::take_session(std::uint64_t id) {
     auto it = impl_->links.find(id);
     if (it == impl_->links.end()) return nullptr;
     return std::move(it->second.real);
+}
+
+std::unique_ptr<net::Session> DriveRelay::take_world_session() {
+    return impl_->active_world_id ? take_session(impl_->active_world_id) : nullptr;
+}
+
+std::unique_ptr<net::Session> DriveRelay::take_zone_session() {
+    return impl_->active_zone_id ? take_session(impl_->active_zone_id) : nullptr;
 }
 
 bool DriveRelay::closed() const {
@@ -345,7 +391,7 @@ struct DriveControlClient::Impl : std::enable_shared_from_this<DriveControlClien
             const std::span<const std::byte> bytes(message->data(), message->size());
             ByteReader r(bytes);
             const auto kind = static_cast<DriveLeaseMessage>(r.le<std::uint8_t>());
-            if (kind == DriveLeaseMessage::Bye) {
+            if (kind == DriveLeaseMessage::Bye || kind == DriveLeaseMessage::ReleaseAck) {
                 closed_flag = true;
                 break;
             }
@@ -394,7 +440,10 @@ struct DriveControlClient::Impl : std::enable_shared_from_this<DriveControlClien
         body.le(id);
         body.le(static_cast<std::uint8_t>(reliable ? 1 : 0));
         put_packet(body, packet);
-        send_kind(*pipe, DriveLeaseMessage::Send, body.take());
+        if (!send_kind(*pipe, DriveLeaseMessage::Send, body.take())) {
+            closed_flag = true;
+            error = pipe->error();
+        }
     }
 
     void connect(std::uint64_t id, const std::string& host, std::uint16_t port) {
@@ -403,22 +452,30 @@ struct DriveControlClient::Impl : std::enable_shared_from_this<DriveControlClien
         body.le(id);
         body.le(port);
         put_string(body, host);
-        send_kind(*pipe, DriveLeaseMessage::Connect, body.take());
+        if (!send_kind(*pipe, DriveLeaseMessage::Connect, body.take())) {
+            closed_flag = true;
+            error = pipe->error();
+        }
     }
 
     void disconnect(std::uint64_t id) {
         if (!pipe || closed_flag) return;
         ByteWriter body;
         body.le(id);
-        send_kind(*pipe, DriveLeaseMessage::Disconnect, body.take());
+        if (!send_kind(*pipe, DriveLeaseMessage::Disconnect, body.take())) {
+            closed_flag = true;
+            error = pipe->error();
+        }
     }
 
     net::SessionState state(std::uint64_t id) const {
+        if (closed_flag || !pipe || pipe->closed()) return net::SessionState::Disconnected;
         auto it = links.find(id);
         return it == links.end() ? net::SessionState::Disconnected : it->second.state;
     }
 
     std::string error_for(std::uint64_t id) const {
+        if (closed_flag || !pipe || pipe->closed()) return !error.empty() ? error : (pipe ? pipe->error() : std::string());
         auto it = links.find(id);
         return it == links.end() ? std::string() : it->second.error;
     }
@@ -431,12 +488,33 @@ struct DriveControlClient::Impl : std::enable_shared_from_this<DriveControlClien
         return packet;
     }
 
-    void release(net::DriveSnapshot returned) {
+    void release(net::DriveSnapshot returned, std::optional<std::pair<std::uint64_t, std::uint64_t>> active_sessions,
+                 int ack_timeout_ms) {
         if (!pipe || closed_flag) return;
+        if (active_sessions) {
+            ByteWriter body;
+            body.le(active_sessions->first);
+            body.le(active_sessions->second);
+            (void)send_kind(*pipe, DriveLeaseMessage::ActiveSessions, body.take());
+        }
         const auto encoded = net::encode_drive_snapshot(returned);
-        if (!send_snapshot(*pipe, DriveLeaseMessage::Release, encoded))
+        const bool sent = send_snapshot(*pipe, DriveLeaseMessage::Release, encoded);
+        if (!sent)
             log::error("drive control: the release snapshot ({} bytes) could not be sent; the headless cannot resume",
                        encoded.size());
+        // Half-close (FIN) so the headless can read the whole Release payload cleanly without a Windows TCP RST
+        // dropping buffered chunks when incoming zone packets are sitting in our receive buffer.
+        pipe->shutdown_write();
+        if (sent && ack_timeout_ms > 0) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(ack_timeout_ms);
+            while (std::chrono::steady_clock::now() < deadline && !pipe->closed()) {
+                const auto msg = pipe->receive_message(20);
+                if (!msg) continue;
+                if (msg->empty()) continue;
+                const auto kind = static_cast<DriveLeaseMessage>(std::to_integer<std::uint8_t>((*msg)[0]));
+                if (kind == DriveLeaseMessage::ReleaseAck || kind == DriveLeaseMessage::Bye) break;
+            }
+        }
         pipe->close();
         closed_flag = true;
     }
@@ -446,6 +524,7 @@ struct DriveControlClient::Impl : std::enable_shared_from_this<DriveControlClien
 class DriveLeaseMirrorSession final : public net::Session {
 public:
     DriveLeaseMirrorSession(std::shared_ptr<DriveControlClient::Impl> impl, std::uint64_t id);
+    std::uint64_t lease_id() const { return id_; }
     void connect(const std::string& host, std::uint16_t port) override;
     void update() override;
     net::SessionState state() const override;
@@ -507,7 +586,16 @@ bool DriveControlClient::session_connected(std::uint64_t id) const {
 
 void DriveControlClient::pump() { impl_->pump(); }
 
-void DriveControlClient::release(net::DriveSnapshot snapshot) { impl_->release(std::move(snapshot)); }
+void DriveControlClient::release(net::DriveSnapshot snapshot, const net::Session* world, const net::Session* zone,
+                                 int ack_timeout_ms) {
+    std::optional<std::pair<std::uint64_t, std::uint64_t>> active;
+    if (world || zone) {
+        const auto* wm = dynamic_cast<const DriveLeaseMirrorSession*>(world);
+        const auto* zm = dynamic_cast<const DriveLeaseMirrorSession*>(zone);
+        active = {wm ? wm->lease_id() : 0u, zm ? zm->lease_id() : 0u};
+    }
+    impl_->release(std::move(snapshot), active, ack_timeout_ms);
+}
 
 bool DriveControlClient::closed() const { return impl_->closed_flag || !impl_->pipe || impl_->pipe->closed(); }
 

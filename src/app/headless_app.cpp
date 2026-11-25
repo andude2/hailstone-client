@@ -1,8 +1,11 @@
 #include "app/headless_app.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <cfloat>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -10,6 +13,9 @@
 #include <filesystem>
 #include <fstream>
 #include <thread>
+
+#include <imgui.h>
+#include <imgui_internal.h>
 
 #include "app/automation.h"
 #include "app/actions_ui.h"
@@ -46,6 +52,8 @@
 #include "platform/credentials.h"
 #include "platform/paths.h"
 #include "platform/private_file.h"
+#include "ui/imgui_layer.h"
+#include "ui/remote_imgui.h"
 
 namespace hailstone::app {
 namespace {
@@ -61,6 +69,282 @@ void stub_once(const char* what) {
     *flag = true;
     log::warn("headless: {} is not wired yet (docs/headless.md); automation that needs it will see it unavailable", what);
 }
+
+// CPU-only Dear ImGui context used when a headless character serves a drive pipe (--drive-observe / --drive-control).
+// Created before Automation so plugins can cache the context pointer; NewFrame/Render run only while a GUI viewer is
+// attached, streaming ImDrawData and on-demand RGBA32 font atlas updates over the drive pipe.
+class HeadlessImGui {
+public:
+    explicit HeadlessImGui(const std::filesystem::path& ini_file) {
+        IMGUI_CHECKVERSION();
+        ctx_ = ImGui::CreateContext();
+        ImGui::SetCurrentContext(ctx_);
+        ImGuiIO& io = ImGui::GetIO();
+        const std::u8string u8 = ini_file.u8string();
+        ini_path_.assign(reinterpret_cast<const char*>(u8.data()), u8.size());
+        io.IniFilename = ini_path_.empty() ? nullptr : ini_path_.c_str();
+        io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+        io.ConfigErrorRecovery = true;
+        io.ConfigErrorRecoveryEnableAssert = false;
+        io.ConfigErrorRecoveryEnableTooltip = true;
+        io.DisplaySize = ImVec2(display_w_, display_h_);
+        io.DisplayFramebufferScale = ImVec2(fb_scale_x_, fb_scale_y_);
+        io.DeltaTime = 1.0f / 60.0f;
+        ui::configure_keys();
+        apply_scale(1.0f);
+    }
+
+    ~HeadlessImGui() {
+        if (ctx_) {
+            ImGui::DestroyContext(ctx_);
+            ctx_ = nullptr;
+        }
+    }
+
+    HeadlessImGui(const HeadlessImGui&) = delete;
+    HeadlessImGui& operator=(const HeadlessImGui&) = delete;
+
+    void reset_input() {
+        if (!ctx_) return;
+        ImGui::SetCurrentContext(ctx_);
+        ImGuiIO& io = ImGui::GetIO();
+        io.ClearEventsQueue();
+        io.ClearInputKeys();
+        io.ClearInputMouse();
+        ImGui::ClearActiveID();
+        ImGui::ClearDragDrop();
+        io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+        io.AddFocusEvent(false);
+    }
+
+    void render_frame(Automation& automation, DriveObserveServer& observe,
+                      const std::optional<ui::RemoteImGuiInput>& input, bool interactive, bool& send_full_atlas) {
+        if (!ctx_) return;
+        ImGui::SetCurrentContext(ctx_);
+        ImGuiIO& io = ImGui::GetIO();
+
+        if (input) {
+            if (input->display_w >= 64.0f && input->display_h >= 64.0f) {
+                display_w_ = input->display_w;
+                display_h_ = input->display_h;
+            }
+            if (input->fb_scale_x > 0.0f && input->fb_scale_y > 0.0f) {
+                fb_scale_x_ = input->fb_scale_x;
+                fb_scale_y_ = input->fb_scale_y;
+            }
+            const float wanted_scale = std::clamp(input->ui_scale, 0.5f, 3.0f);
+            if (std::fabs(wanted_scale - scale_) > 0.01f) {
+                apply_scale(wanted_scale);
+                send_full_atlas = true;
+            }
+            io.DeltaTime = std::clamp(input->dt, 1.0e-4f, 0.25f);
+            if (interactive) {
+                io.AddFocusEvent(input->focused);
+                io.AddKeyEvent(ImGuiMod_Ctrl, (input->mods & 1u) != 0);
+                io.AddKeyEvent(ImGuiMod_Shift, (input->mods & 2u) != 0);
+                io.AddKeyEvent(ImGuiMod_Alt, (input->mods & 4u) != 0);
+                io.AddKeyEvent(ImGuiMod_Super, (input->mods & 8u) != 0);
+                if (input->mouse_valid) io.AddMousePosEvent(input->mouse_x, input->mouse_y);
+                else io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+                for (const auto& mb : input->mouse_buttons) {
+                    if (mb.button < ImGuiMouseButton_COUNT) io.AddMouseButtonEvent(mb.button, mb.down);
+                }
+                if (input->wheel_x != 0.0f || input->wheel_y != 0.0f)
+                    io.AddMouseWheelEvent(input->wheel_x, input->wheel_y);
+                for (const auto& ke : input->keys) {
+                    if (ke.key >= ImGuiKey_NamedKey_BEGIN && ke.key < ImGuiKey_NamedKey_END)
+                        io.AddKeyEvent(static_cast<ImGuiKey>(ke.key), ke.down);
+                }
+                for (std::uint32_t c : input->chars) io.AddInputCharacter(c);
+            }
+        } else {
+            io.DeltaTime = 1.0f / 30.0f;
+        }
+
+        io.DisplaySize = ImVec2(display_w_, display_h_);
+        io.DisplayFramebufferScale = ImVec2(fb_scale_x_, fb_scale_y_);
+        const int kbd_req = GImGui->WantCaptureKeyboardNextFrame;
+        ui::keep_tab_from_windows();
+        ImGui::NewFrame();
+        automation.imgui(false);
+        ImGui::Render();
+
+        ImDrawData* dd = ImGui::GetDrawData();
+        if (!dd) return;
+
+        if (dd->Textures) {
+            for (ImTextureData* tex : *dd->Textures) {
+                if (!tex) continue;
+                const auto id = static_cast<std::uint32_t>(tex->UniqueID);
+                if (tex->Status == ImTextureStatus_WantCreate) {
+                    tex->SetTexID(static_cast<ImTextureID>(id));
+                    send_texture_rect(observe, tex, 0, 0, static_cast<std::uint16_t>(tex->Width),
+                                      static_cast<std::uint16_t>(tex->Height), true);
+                    tex->SetStatus(ImTextureStatus_OK);
+                } else if (tex->Status == ImTextureStatus_WantUpdates) {
+                    if (tex->TexID == ImTextureID_Invalid) tex->SetTexID(static_cast<ImTextureID>(id));
+                    if (send_full_atlas) {
+                        send_texture_rect(observe, tex, 0, 0, static_cast<std::uint16_t>(tex->Width),
+                                          static_cast<std::uint16_t>(tex->Height), true);
+                    } else if (tex->UpdateRect.w > 0 && tex->UpdateRect.h > 0) {
+                        send_texture_rect(observe, tex, tex->UpdateRect.x, tex->UpdateRect.y, tex->UpdateRect.w,
+                                          tex->UpdateRect.h, false);
+                    }
+                    tex->SetStatus(ImTextureStatus_OK);
+                } else if (tex->Status == ImTextureStatus_WantDestroy) {
+                    ui::RemoteImGuiTexture msg;
+                    msg.id = id;
+                    msg.destroy = true;
+                    observe.publish_imgui_texture(msg);
+                    tex->SetTexID(ImTextureID_Invalid);
+                    tex->SetStatus(ImTextureStatus_Destroyed);
+                } else if (tex->Status == ImTextureStatus_OK && send_full_atlas && tex->Pixels && tex->Width > 0 &&
+                           tex->Height > 0) {
+                    if (tex->TexID == ImTextureID_Invalid) tex->SetTexID(static_cast<ImTextureID>(id));
+                    send_texture_rect(observe, tex, 0, 0, static_cast<std::uint16_t>(tex->Width),
+                                      static_cast<std::uint16_t>(tex->Height), true);
+                }
+            }
+        }
+        send_full_atlas = false;
+
+        static_assert(sizeof(ImDrawIdx) == sizeof(std::uint16_t));
+        ui::RemoteImGuiFrame frame;
+        frame.display_w = dd->DisplaySize.x;
+        frame.display_h = dd->DisplaySize.y;
+        frame.fb_scale_x = dd->FramebufferScale.x;
+        frame.fb_scale_y = dd->FramebufferScale.y;
+        frame.want_capture_mouse = io.WantCaptureMouse;
+        frame.want_capture_keyboard = ui::keyboard_for_ui(kbd_req);
+        frame.want_text_input = io.WantTextInput;
+        frame.mouse_cursor = static_cast<std::int8_t>(ImGui::GetMouseCursor());
+        frame.lists.reserve(static_cast<std::size_t>(dd->CmdLists.Size));
+        for (const ImDrawList* src : dd->CmdLists) {
+            if (!src || src->CmdBuffer.empty() || src->VtxBuffer.empty() || src->IdxBuffer.empty()) continue;
+            ui::RemoteDrawList dl;
+            dl.vertices.resize(static_cast<std::size_t>(src->VtxBuffer.Size));
+            for (int i = 0; i < src->VtxBuffer.Size; ++i) {
+                const ImDrawVert& v = src->VtxBuffer[i];
+                dl.vertices[static_cast<std::size_t>(i)] = {v.pos.x, v.pos.y, v.uv.x, v.uv.y, v.col};
+            }
+            dl.indices.assign(src->IdxBuffer.Data, src->IdxBuffer.Data + src->IdxBuffer.Size);
+            dl.cmds.reserve(static_cast<std::size_t>(src->CmdBuffer.Size));
+            for (int i = 0; i < src->CmdBuffer.Size; ++i) {
+                const ImDrawCmd& c = src->CmdBuffer[i];
+                if (c.UserCallback != nullptr || c.ElemCount == 0) continue;
+                dl.cmds.push_back({c.ClipRect.x, c.ClipRect.y, c.ClipRect.z, c.ClipRect.w,
+                                   static_cast<std::uint32_t>(c.GetTexID()), c.VtxOffset, c.IdxOffset, c.ElemCount});
+            }
+            if (!dl.cmds.empty()) frame.lists.push_back(std::move(dl));
+        }
+        observe.publish_imgui_frame(frame);
+    }
+
+private:
+    void apply_scale(float scale) {
+        scale_ = scale;
+        ImGuiStyle& style = ImGui::GetStyle();
+        style = ImGuiStyle();
+        ImGui::StyleColorsDark(&style);
+        style.WindowRounding = 4.0f;
+        style.FrameRounding = 3.0f;
+        style.ScaleAllSizes(scale_);
+
+        ImGuiIO& io = ImGui::GetIO();
+        io.Fonts->Clear();
+        const ImFontConfig cfg = ui::detail::ui_font_config();
+        static constexpr std::array kFontCandidates = {
+            "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+            "C:/Windows/Fonts/segoeui.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/Library/Fonts/Arial.ttf",
+        };
+        std::filesystem::path found;
+        std::error_code ec;
+        for (const char* p : kFontCandidates) {
+            if (std::filesystem::is_regular_file(p, ec)) {
+                found = p;
+                break;
+            }
+        }
+        ImFont* loaded = nullptr;
+        if (!found.empty()) {
+            const std::u8string u8 = found.u8string();
+            const std::string utf8_path(reinterpret_cast<const char*>(u8.data()), u8.size());
+            loaded = io.Fonts->AddFontFromFileTTF(utf8_path.c_str(), std::round(15.0f * scale_), &cfg);
+        }
+        if (!loaded || !ui::detail::build_ui_font_atlas(*io.Fonts)) {
+            io.Fonts->Clear();
+            ImFontConfig def = cfg;
+            def.SizePixels = std::round(13.0f * scale_);
+            io.Fonts->AddFontDefault(&def);
+            ui::detail::build_ui_font_atlas(*io.Fonts);
+        }
+    }
+
+    static void send_texture_rect(DriveObserveServer& observe, const ImTextureData* tex, std::uint16_t rx,
+                                  std::uint16_t ry, std::uint16_t rw, std::uint16_t rh, bool full) {
+        if (!tex || !tex->Pixels || rw == 0 || rh == 0 || tex->Width <= 0 || tex->Height <= 0) return;
+        const auto tw = static_cast<std::uint16_t>(tex->Width);
+        const auto th = static_cast<std::uint16_t>(tex->Height);
+        if (static_cast<std::uint32_t>(rx) + rw > tw || static_cast<std::uint32_t>(ry) + rh > th) return;
+        // Split large uploads into <= 4 MiB horizontal bands so every pipe message stays well under kLocalPipeMaxMessage.
+        const std::size_t row_bytes = static_cast<std::size_t>(rw) * 4u;
+        const std::uint16_t max_rows =
+            static_cast<std::uint16_t>(std::max<std::size_t>(1u, (std::size_t{4} << 20) / std::max<std::size_t>(row_bytes, 1u)));
+        bool first_band = full;
+        for (std::uint16_t y_off = 0; y_off < rh; y_off = static_cast<std::uint16_t>(y_off + max_rows)) {
+            const std::uint16_t bh = static_cast<std::uint16_t>(std::min<std::uint32_t>(max_rows, rh - y_off));
+            ui::RemoteImGuiTexture msg;
+            msg.id = static_cast<std::uint32_t>(tex->UniqueID);
+            msg.tex_w = tw;
+            msg.tex_h = th;
+            msg.x = rx;
+            msg.y = static_cast<std::uint16_t>(ry + y_off);
+            msg.w = rw;
+            msg.h = bh;
+            msg.full = first_band;
+            first_band = false;
+            msg.rgba.resize(static_cast<std::size_t>(rw) * bh * 4u);
+            if (tex->BytesPerPixel == 4) {
+                const std::size_t src_stride = static_cast<std::size_t>(tw) * 4u;
+                for (std::uint16_t y = 0; y < bh; ++y) {
+                    const auto* src = tex->Pixels + (static_cast<std::size_t>(msg.y) + y) * src_stride +
+                                      static_cast<std::size_t>(rx) * 4u;
+                    std::memcpy(msg.rgba.data() + static_cast<std::size_t>(y) * row_bytes, src, row_bytes);
+                }
+            } else if (tex->BytesPerPixel == 1) {
+                for (std::uint16_t y = 0; y < bh; ++y) {
+                    const auto* src = tex->Pixels + (static_cast<std::size_t>(msg.y) + y) * tw + rx;
+                    auto* dst = reinterpret_cast<std::uint8_t*>(msg.rgba.data() + static_cast<std::size_t>(y) * row_bytes);
+                    for (std::uint16_t x = 0; x < rw; ++x) {
+                        dst[x * 4 + 0] = 255;
+                        dst[x * 4 + 1] = 255;
+                        dst[x * 4 + 2] = 255;
+                        dst[x * 4 + 3] = src[x];
+                    }
+                }
+            } else {
+                return;
+            }
+            observe.publish_imgui_texture(msg);
+        }
+    }
+
+    ImGuiContext* ctx_ = nullptr;
+    std::string ini_path_;
+    float scale_ = 1.0f;
+    float display_w_ = 1280.0f;
+    float display_h_ = 720.0f;
+    float fb_scale_x_ = 1.0f;
+    float fb_scale_y_ = 1.0f;
+};
 
 } // namespace
 
@@ -628,49 +912,45 @@ int run_headless(HeadlessOptions options) {
     env.nav = [&navigator]() -> nav::NavControl* { return &navigator; };
     PlayerMovement movement;
     game::ZoneLineTrigger zone_line;
+    // Create the CPU-only ImGui context before Automation so plugins can cache its pointer at init.
+    std::unique_ptr<HeadlessImGui> headless_imgui;
+    if (options.drive_observe || options.drive_control) {
+        const auto ini =
+            platform::data_dir() / ("imgui-headless-" + sanitize_file_name(options.character) + ".ini");
+        headless_imgui = std::make_unique<HeadlessImGui>(ini);
+    }
     Automation automation(env);
 
     std::unique_ptr<DriveObserveServer> observe;
-    if (options.drive_observe) {
+    if (options.drive_observe || options.drive_control) {
         try {
-            observe = std::make_unique<DriveObserveServer>(platform::make_local_pipe_session(), options.drive_interact);
+            observe = std::make_unique<DriveObserveServer>(
+                platform::make_local_pipe_session(), options.drive_interact || options.drive_control,
+                options.drive_control);
         } catch (const std::exception& e) {
-            log::error("headless: --drive-observe could not start: {}", e.what());
+            log::error("headless: {} could not start: {}",
+                       options.drive_control ? "--drive-control" : "--drive-observe", e.what());
             return 1;
         }
+        // Forward /crew commands issued by plugins on headless (e.g. Sentinel's peer switcher) to the attached GUI.
+        automation.hooks().add_command(plugin::Hooks::kClient, "/crew", [&observe](std::string_view args) {
+            if (observe && observe->viewer_connected()) observe->publish_crew_command(args);
+        });
         if (const auto parent = std::filesystem::path(options.drive_file).parent_path(); !parent.empty()) {
             std::error_code ec;
             std::filesystem::create_directories(parent, ec);
         }
-        log::info("headless: drive observe at {} (the file is written at the first zone-in)",
-                  observe->session().endpoint);
-    }
-
-    // --drive-control: the same pipe, but the viewer lends the sessions and plays the character (D3). One viewer
-    // at a time; the headless stops updating its own connection while the lease is live.
-    std::unique_ptr<DriveRelay> control_relay;
-    if (options.drive_control) {
-        try {
-            control_relay = std::make_unique<DriveRelay>(platform::make_local_pipe_session());
-        } catch (const std::exception& e) {
-            log::error("headless: --drive-control could not start: {}", e.what());
-            return 1;
-        }
-        if (const auto parent = std::filesystem::path(options.drive_file).parent_path(); !parent.empty()) {
-            std::error_code ec;
-            std::filesystem::create_directories(parent, ec);
-        }
-        log::info("headless: drive control at {} (the file is written at the first zone-in)",
-                  control_relay->session().endpoint);
+        log::info("headless: drive {} at {} (the file is written at the first zone-in)",
+                  options.drive_control ? "control" : "observe", observe->session().endpoint);
     }
 
     net::ConnectionOptions copts;
     copts.hooks = &automation.hooks();
     copts.diagnostic_chat_log = options.chat_log;
     copts.plugins = automation.extensions();
-    if (observe || control_relay) {
+    if (observe) {
         copts.snapshot_journal = true;
-        if (observe) copts.zone_packet_tap = [server = observe.get()](const net::AppPacket& p) {
+        copts.zone_packet_tap = [server = observe.get()](const net::AppPacket& p) {
             server->publish_zone_packet(p);
         };
     }
@@ -695,7 +975,6 @@ int run_headless(HeadlessOptions options) {
     const auto start = Clock::now();
     bool entered = false, first_zone = true, consent_logged = false;
     bool movement_ready = false; // the movement body placed at a zone-in
-    bool resuming = false;       // the viewer just released; the same zone's collision and nav goal stay
     std::string loaded_zone;     // the zone whose collision is loaded
     bool nav_was_active = false; // for the walk's speed line, once per walk
     glm::vec3 feet{0.0f};
@@ -737,6 +1016,7 @@ int run_headless(HeadlessOptions options) {
             feet = glm::vec3(p.x, p.y, p.z - floor_offset);
             yaw = game::heading_to_yaw(p.heading);
             movement.place(feet);
+            conn->set_player_motion({p.x, p.y, p.z}, p.heading, glm::vec3(0), false);
             log::info("headless: moved within the zone to ({:.1f}, {:.1f}, {:.1f})", p.x, p.y, p.z);
         }
         return ok;
@@ -796,69 +1076,16 @@ int run_headless(HeadlessOptions options) {
         return !collision || collision->line_of_sight(a, b);
     });
     conn->set_teleport_handler([&teleport_b](const game::TeleportBArgs& a) { teleport_b(a); });
-    Clock::time_point in_zone_at{}, last_status{}, last_observe_state{};
+    Clock::time_point in_zone_at{}, last_status{}, last_observe_state{}, human_drive_until{}, last_remote_imgui{};
     bool drive_file_written = false, drive_file_failed = false;
-    bool control_lent = false, control_active = false; // --drive-control: the viewer has the sessions
+    bool viewer_was_connected = false;
+    bool send_full_imgui_atlas = false;
     std::uint64_t last_inventory_revision = ~std::uint64_t{0};
+    std::uint64_t last_xtarget_hash = ~std::uint64_t{0};
     std::string zone_seen;
     net::ConnectionState last = net::ConnectionState::Idle;
     int result = 1;
     while (!stop_requested) {
-        if (control_relay) {
-            control_relay->pump();
-            if (control_active) {
-                if (control_relay->released()) {
-                    // The viewer handed the exact state back: a fresh connection adopts the same sessions.
-                    net::DriveSnapshot returned = control_relay->take_release();
-                    auto world_session = control_relay->take_session(1);
-                    auto zone_session = control_relay->take_session(2);
-                    auto resumed = std::make_unique<net::GameConnection>(game, copts);
-                    resumed->adopt_sessions(std::move(world_session), std::move(zone_session));
-                    resumed->adopt_server_rules_from(*conn); // the same server: the plugins must not see a policy change
-                    resumed->apply_snapshot(returned);
-                    // L's chat server stayed in this process: carry it over instead of logging out and back in.
-                    net::GameConnection::transfer_chat_server(*conn, *resumed);
-                    resumed->set_teleport_handler([&teleport_b](const game::TeleportBArgs& a) { teleport_b(a); });
-                    conn = std::move(resumed);
-                    control_lent = false;
-                    control_active = false;
-                    movement_ready = false; // the movement body places again from the returned position
-                    // The zone, its collision and the navigation goal survive the lease: the headless never left
-                    // them. Re-running the zone-in commands would reload the collision and clear a plugin's
-                    // navigation goal (and /mono load would restart Sentinel), so a resumed same-zone character
-                    // would stand still. A real zone change under the viewer still reloads below.
-                    resuming = true;
-                    in_zone_at = Clock::now();
-                    log::info("headless: drive control released; back as {}", conn->character_name());
-                } else if (control_relay->closed()) {
-                    // Held, not resumed: resuming automation on the viewer's state would be a guess. The relay's
-                    // sessions go with it, so the character disconnects rather than acting on stale state.
-                    // A crew supervisor relaunches a link death; a standalone run must be restarted.
-                    log::error("headless: the drive viewer left without releasing; stopping (a crew relaunches it)");
-                    result = 3;
-                    break;
-                } else if (conn) {
-                    // The zone and world sessions are in the relay, but L's UCS connection is neither: keep it
-                    // pumped so channel chat and tells keep arriving for the viewer's relay.
-                    conn->pump_chat_server();
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                continue;
-            }
-            if (!control_lent && conn && conn->in_zone() && control_relay->viewer_waiting()) {
-                // Lend: the snapshot first, then the live sessions, and stop updating the headless's own model.
-                // Only a newly accepted viewer starts a lease; a released lease is never re-lent to its closing pipe.
-                control_relay->begin_lease(conn->capture_snapshot());
-                auto [world_session, zone_session] = conn->release_sessions();
-                control_relay->adopt(1, std::move(world_session));
-                control_relay->adopt(2, std::move(zone_session));
-                control_lent = true;
-                control_active = true;
-                log::info("headless: drive control lent to a viewer");
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                continue;
-            }
-        }
         const auto now_us = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start).count());
         auto steps = step_clock.advance(now_us);
@@ -882,9 +1109,49 @@ int run_headless(HeadlessOptions options) {
             conn->set_game_steps(std::move(at));
         }
         conn->update();
-        if (observe && options.drive_interact) {
-            for (const auto& action : observe->take_actions()) {
-                if (!conn->apply_drive_action(action)) break;
+        bool force_state_push = false;
+        if (observe) {
+            const bool connected = observe->viewer_connected();
+            if (connected != viewer_was_connected) {
+                viewer_was_connected = connected;
+                human_drive_until = {};
+                last_inventory_revision = ~std::uint64_t{0};
+                last_xtarget_hash = ~std::uint64_t{0};
+                send_full_imgui_atlas = connected;
+                last_remote_imgui = {};
+                if (!connected && headless_imgui) headless_imgui->reset_input();
+                log::info("headless: drive viewer {}", connected ? "attached" : "detached");
+            }
+            if (options.drive_interact || options.drive_control) {
+                for (const auto& action : observe->take_actions()) {
+                    const bool ok = conn->apply_drive_action(action, options.drive_control, nav_radius);
+                    force_state_push = true;
+                    if (!ok && !options.drive_control) break;
+                }
+            }
+            if (options.drive_control) {
+                for (const auto& fwd : observe->take_forwarded()) {
+                    if (!net::drive_forward_allowed(fwd.packet, fwd.world)) continue;
+                    if (fwd.world) conn->send_world_packet(fwd.packet);
+                    else conn->send_zone_packet(fwd.packet);
+                }
+                if (auto move = observe->take_move(); move && conn->in_zone() && movement_ready) {
+                    const auto now_move = Clock::now();
+                    if (move->active) {
+                        if (navigator.status().active) navigator.stop("Player took movement control");
+                        human_drive_until = now_move + std::chrono::milliseconds(450);
+                    } else {
+                        human_drive_until = {};
+                    }
+                    feet = move->position - glm::vec3(0, 0, floor_offset);
+                    yaw = game::heading_to_yaw(move->heading);
+                    movement.place(feet);
+                    conn->set_speed_run(move->speed_run);
+                    conn->set_standing_on(move->standing_on);
+                    conn->set_player_motion(move->position, move->heading, move->velocity, move->moving);
+                    if (zone)
+                        if (auto text = zone_line.update(feet, zone->regions)) region_teleport(*text);
+                }
             }
         }
         if (observe && conn->in_zone()) {
@@ -895,19 +1162,31 @@ int run_headless(HeadlessOptions options) {
                                          "character=" + character_name + "\n" +
                                          "profile=" + saved_profile_id + "\n" +
                                          "game_dir=" + options.game_dir + "\n" +
-                                         "interactive=" + (options.drive_interact ? "1\n" : "0\n");
+                                         "interactive=" + ((options.drive_interact || options.drive_control) ? "1\n" : "0\n") +
+                                         "control=" + (options.drive_control ? "1\n" : "0\n");
                 if (platform::write_private_file(options.drive_file, text)) {
                     drive_file_written = true;
-                    log::info("headless: drive observe file {} written", options.drive_file);
+                    log::info("headless: drive {} file {} written",
+                              options.drive_control ? "control" : "observe", options.drive_file);
                 } else {
                     drive_file_failed = true;
                     log::error("headless: --drive-file {} could not be written (it must not exist yet)",
                                options.drive_file);
                 }
             }
-            if (observe->needs_snapshot()) observe->set_snapshot(conn->capture_snapshot());
+            if (observe->needs_snapshot()) {
+                auto snap = conn->capture_snapshot();
+                last_inventory_revision = conn->inventory().revision();
+                last_xtarget_hash = ~std::uint64_t{0};
+                log::info("headless: sending snapshot for {} at ({:.1f}, {:.1f}, {:.1f})",
+                          conn->character_name(), snap.position.x, snap.position.y, snap.position.z);
+                observe->set_snapshot(std::move(snap));
+            }
             const auto now = Clock::now();
-            if (now - last_observe_state >= std::chrono::milliseconds(100)) {
+            const auto interval = options.drive_control ? std::chrono::milliseconds(50) : std::chrono::milliseconds(100);
+            const std::uint64_t inv_rev = conn->inventory().revision();
+            if (observe->viewer_connected() &&
+                (force_state_push || inv_rev != last_inventory_revision || now - last_observe_state >= interval)) {
                 last_observe_state = now;
                 const auto local = conn->capture_local_state();
                 DriveLocalState state;
@@ -916,36 +1195,50 @@ int run_headless(HeadlessOptions options) {
                 state.velocity = local.velocity;
                 state.moving = local.moving;
                 state.target = local.target;
-                const std::uint64_t revision = conn->inventory().revision();
-                if (revision != last_inventory_revision) {
-                    last_inventory_revision = revision;
+                if (inv_rev != last_inventory_revision) {
+                    last_inventory_revision = inv_rev;
                     state.inventory_packet = local.inventory_packet;
                 }
-                if (options.drive_interact) state.ui = conn->capture_drive_ui();
+                if (options.drive_interact || options.drive_control) state.ui = conn->capture_drive_ui();
+                if (options.drive_control) {
+                    state.has_status = true;
+                    state.stand_state = local.stand_state;
+                    state.owner_status = local.owner_status;
+                    state.dead = local.dead;
+                    state.auto_attack = local.auto_attack;
+                    state.auto_fire = local.auto_fire;
+                    state.running = local.running;
+                    state.hp = local.hp;
+                    state.max_hp = local.max_hp;
+                    state.mana = local.mana;
+                    state.max_mana = local.max_mana;
+                    state.endurance = local.endurance;
+                    state.max_endurance = local.max_endurance;
+                    // Hash xtargets so we only transmit the slot list when it changes.
+                    std::uint64_t xh = 14695981039346656037ull;
+                    auto mix = [&](std::uint64_t v) { xh = (xh ^ v) * 1099511628211ull; };
+                    mix(local.xtarget_auto_haters ? 1u : 0u);
+                    mix(local.xtarget_zone);
+                    mix(local.xtarget_slots.size());
+                    for (const auto& s : local.xtarget_slots) {
+                        mix(s.type);
+                        mix(s.status);
+                        mix(s.spawn_id);
+                        mix(s.name.size());
+                    }
+                    if (xh != last_xtarget_hash) {
+                        last_xtarget_hash = xh;
+                        state.has_xtargets = true;
+                        state.xtarget_auto_haters = local.xtarget_auto_haters;
+                        state.xtarget_zone = local.xtarget_zone;
+                        state.xtarget_slots = local.xtarget_slots;
+                    }
+                }
                 observe->publish_state(state);
             }
         }
-        if (control_relay && conn->in_zone() && !drive_file_written && !drive_file_failed) {
-            const std::string character_name = !options.character.empty() ? options.character : conn->character_name();
-            const std::string text = "endpoint=" + control_relay->session().endpoint + "\n" +
-                                     "token=" + control_relay->session().token + "\n" +
-                                     "character=" + character_name + "\n" +
-                                     "profile=" + saved_profile_id + "\n" +
-                                     "game_dir=" + options.game_dir + "\n" +
-                                     "control=1\n";
-            if (platform::write_private_file(options.drive_file, text)) {
-                drive_file_written = true;
-                log::info("headless: drive control file {} written", options.drive_file);
-            } else {
-                drive_file_failed = true;
-                log::error("headless: --drive-file {} could not be written (it must not exist yet)",
-                           options.drive_file);
-            }
-        }
         if (auto z = conn->take_zone_to_load()) {
-            const bool same_zone = resuming && !loaded_zone.empty() && *z == loaded_zone;
-            resuming = false;
-            if (!same_zone) {
+            if (*z != loaded_zone) {
                 navigator.zone_unloaded();
                 movement_ready = false;
                 zone.reset();
@@ -969,8 +1262,6 @@ int run_headless(HeadlessOptions options) {
                 }
                 loaded_zone = *z;
             }
-        } else {
-            resuming = false;
         }
         ability_host.conn = conn.get();
         ability_host.in_game = conn->state() == net::ConnectionState::InZone;
@@ -992,6 +1283,15 @@ int run_headless(HeadlessOptions options) {
             conn->set_own_hp_items(sheet->vitals.cur_hp ? 0 : items, sheet->vitals.max_hp ? 0 : items);
         }
         automation.frame();
+        if (observe && headless_imgui && observe->viewer_connected()) {
+            const auto now_ui = Clock::now();
+            auto imgui_in = observe->take_imgui_input();
+            if (imgui_in || now_ui - last_remote_imgui >= std::chrono::milliseconds(33)) {
+                last_remote_imgui = now_ui;
+                headless_imgui->render_frame(automation, *observe, imgui_in,
+                                             options.drive_interact || options.drive_control, send_full_imgui_atlas);
+            }
+        }
         // A lease's resume must keep the loop and the plugin frames coming; a line every 10 s says whether it does.
         {
             static std::uint64_t frames = 0;
@@ -1013,8 +1313,12 @@ int run_headless(HeadlessOptions options) {
             log::error("headless: a server plugin waits for consent and cannot be asked here; "
                        "allow it from the graphical client on this server first (docs/headless.md)");
         }
-        // The connection has already dispatched the chat hooks.
-        while (conn->poll_chat()) {}
+        // The connection has already dispatched the chat hooks; mirror lines to an attached GUI viewer.
+        while (auto c = conn->poll_chat()) {
+            if (observe && observe->viewer_connected()) {
+                observe->publish_chat({static_cast<std::uint8_t>(c->kind), c->rgb, c->color, c->peer, c->text});
+            }
+        }
         if (conn->state() != last) {
             last = conn->state();
             log::info("[{}] {}", net::to_string(last), conn->status());
@@ -1028,10 +1332,18 @@ int run_headless(HeadlessOptions options) {
             if (zone_seen != conn->world().zone_short_name) {
                 zone_seen = conn->world().zone_short_name;
                 in_zone_at = Clock::now();
+                // Headless has no ExtendedTargetWindow; match the stock client's AutoAddHaters=true default so
+                // xtargets stay populated and a GUI control lease adopts true instead of a stale false.
+                conn->set_xtarget_auto_haters(true);
                 log::info("headless: in {} as {}", zone_seen, options.character);
                 for (const auto& line : headless_zone_commands(options, first_zone)) {
                     log::info("headless: exec: {}", line);
                     conn->send_command(line);
+                }
+                if (!first_zone && observe && observe->viewer_connected()) {
+                    last_inventory_revision = conn->inventory().revision();
+                    last_xtarget_hash = ~std::uint64_t{0};
+                    observe->publish_snapshot(conn->capture_snapshot());
                 }
                 first_zone = false;
             }
@@ -1052,7 +1364,7 @@ int run_headless(HeadlessOptions options) {
                 zone_line.reset();
                 if (zone) (void)zone_line.update(feet, zone->regions);
             }
-            if (movement_ready) {
+            if (movement_ready && Clock::now() >= human_drive_until) {
                 for (const auto& st : steps) {
                     const game::Spawn* me = conn->world().player();
                     if (!me) break;

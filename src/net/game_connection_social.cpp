@@ -157,6 +157,25 @@ void GameConnection::send_command(const std::string& typed) {
     // /crew is the graphical client's command (the crew window and the chat relay's /crew relay); a headless
     // connection has no such command, so a relay line meant for the GUI is not an unknown command here.
     if (line.rfind("/crew", 0) == 0) return;
+    if (drive_control_ && !line.empty()) {
+        // Keep local GUI-only window commands on the graphical client; forward all gameplay/chat/plugin commands
+        // to the headless authority so it executes them natively with its own UCS session and plugins.
+        std::string_view rest = line;
+        std::string word = game::next_cmd_arg(rest);
+        for (char& c : word) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        while (!rest.empty() && rest.front() == ' ') rest.remove_prefix(1);
+        if (word == "/abilitybook" && client_commands_ && client_commands_("Hailstone_abilitybook", std::string(rest)))
+            return;
+        if (word == "/camera" && client_commands_ && client_commands_("Hailstone_camera", std::string(rest))) return;
+        if (word == "/chattabs" && client_commands_ && client_commands_("Hailstone_chattabs", std::string(rest)))
+            return;
+        if (word == "/import" && client_commands_ && client_commands_("Hailstone_import", std::string(rest)))
+            return;
+        if ((word == "/finditem" || word == "/advi") && client_commands_ &&
+            client_commands_("Hailstone_finditem", std::string(rest)))
+            return;
+        if (relay_control_action(DriveAction{.kind = DriveActionKind::Command, .text = line})) return;
+    }
     if (!zone_session_ || line.empty()) return;
     // InterpretCmd @0x51fce0: with the interface locked (/safelock) only /safelock gets through.
     if (interface_locked() && !game::locked_line_allowed(line, fmt_eq(strings_, 14193))) return system(game::kStrInterfaceLocked);

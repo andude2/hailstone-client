@@ -4,10 +4,14 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <volk.h>
+
+#include "ui/remote_imgui.h"
 
 struct ImFont;
 struct ImFontAtlas;
@@ -105,7 +109,18 @@ public:
     // Testing (app/input_script.h): the focused window, the active and nav items and what ImGui captures, in a line.
     std::string debug_state() const;
 
+    // Remote ImGui overlay streamed from an attached headless character (docs/headless.md).
+    void set_remote_enabled(bool enabled);
+    void push_remote_texture(RemoteImGuiTexture tex);
+    void set_remote_frame(RemoteImGuiFrame frame);
+    // Records staging uploads for pending remote font atlas textures; call before begin_scene/begin_overlay.
+    void record_remote_uploads(const render::FrameInfo& frame);
+    std::optional<RemoteImGuiInput> take_remote_input();
+    bool remote_wants_text_input() const;
+
 private:
+    struct RemoteState;
+    std::unique_ptr<RemoteState> remote_;
     void apply_pad_navigation();
     void feed_pad_pointer();
     platform::Window& window_;

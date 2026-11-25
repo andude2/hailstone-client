@@ -609,7 +609,9 @@ shields, among them most of the fixed list's, but not IT11004..11012 or 11014..1
 #### Tints
 
 RGB 0 becomes white, so black means untinted. Armour colours are `RGB | 0xff000000`; hero's forge pieces are
-untinted. Classic models draw `lit × Tint.rgb`.
+untinted, and so is the body slot under a piece that is shown. A piece the filter hides, or with no tag for the
+model, leaves the slot to its own armour and its tint (the legs have no classic piece to fall back on, so the
+body material itself is the pants there). A Luclin body variant with no Luclin material definition resolves by name through the other archives' definitions (male Half Elf plate shins: `HAMLG0303_MDF` exists only as a classic BMP definition in `global_chr`). Classic models draw `lit × Tint.rgb`.
 
 #### Drakkin and other new models of classic races
 

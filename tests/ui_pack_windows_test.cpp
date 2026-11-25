@@ -2393,7 +2393,7 @@ TEST_CASE("UI packs (modern): crew inventory compares a slot and searches remote
             if name ~= 'MQACNet' then return get(name) end
             return {
                 InventorySupported = function() return true end,
-                InventoryPeers = function() return { sharer = 1, missing = 0 } end,
+                InventoryPeers = function() return { sharer = crew_rev or 1, missing = 0 } end,
                 InventoryRows = function(key)
                     if key == 'sharer' then
                         return { character = 'Sharer', rows = {
@@ -2402,11 +2402,44 @@ TEST_CASE("UI packs (modern): crew inventory compares a slot and searches remote
                         } }
                     end
                 end,
+                InventoryDetails = function(key)
+                    if key == 'sharer' and crew_legacy then
+                        -- a legacy (v1) snapshot, but already in named fields, as the plugin gives it
+                        return { character = 'Sharer', legacy = true, rows = {
+                            { slot = 13, sub = -1, id = 100, icon = 500, count = 1, name = 'Remote sword',
+                              stats = { ac = 15, hp = 30, mana = 60 } },
+                            { slot = 23, sub = 2, id = 101, icon = 501, count = 4, name = 'Remote gem', stats = {} },
+                        } }
+                    end
+                    if key == 'sharer' then
+                        return { character = 'Sharer', legacy = false, rows = {
+                            { slot = 13, sub = -1, id = 100, icon = 500, count = 1, stackSize = 1,
+                              category = 'weapons', value = 12000, tribute = 300, weight = 45,
+                              reqLevel = 10, recLevel = 0, bagSlots = 0, magic = true,
+                              name = 'Remote sword', augs = 'Shiny aug', stats = { ac = 15, hp = 30, mana = 60 } },
+                            { slot = 23, sub = 2, id = 101, icon = 501, count = 4, stackSize = 20,
+                              category = 'tradeskill', value = 200, tribute = 0, weight = 10,
+                              reqLevel = 0, recLevel = 0, bagSlots = 0, stackable = true,
+                              name = 'Remote gem', augs = '', stats = {} },
+                        } }
+                    end
+                end,
             }
         end
         crew_text = {}
         local text = ui.Text
         ui.Text = function(value) crew_text[value] = true; text(value) end
+        local draw_text = ui.DrawText
+        ui.DrawText = function(...)
+            local args = { ... }
+            if type(args[#args]) == 'string' then crew_text[args[#args]] = true end
+            return draw_text(...)
+        end
+        local begin_combo = ui.BeginCombo
+        ui.BeginCombo = function(id, preview, ...)
+            if type(preview) == 'string' then crew_text[preview] = true end
+            return begin_combo(id, preview, ...)
+        end
         compare_width = 0
         local begin_child = ui.BeginChild
         ui.BeginChild = function(id, w, h, border)
@@ -2445,15 +2478,34 @@ TEST_CASE("UI packs (modern): crew inventory compares a slot and searches remote
     REQUIRE(luaL_dostring(L, R"lua(
         crew_text = {}
         local input = ui.InputTextWithHint
-        ui.InputTextWithHint = function(id, hint, val, limit)
-            if id == '##crewsearch' then val = 'gem' end
-            return input(id, hint, val, limit)
+        ui.InputTextWithHint = function(id, hint, val, limit, flags)
+            if id == '##advsearch' then val = crew_query or 'gem' end
+            return input(id, hint, val, limit, flags)
         end
     )lua") == LUA_OK);
     s.frames(3);
     CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
     REQUIRE(luaL_dostring(L, "return crew_text['Remote gem'] and crew_text['Sharer'] and "
                             "crew_text['General 1, bag slot 3'] and not crew_text['Remote sword']") == LUA_OK);
+    CHECK(lua_toboolean(L, -1));
+    lua_pop(L, 1);
+
+    // Back on My Character, the sidebar's owner drop-down still offers the crew (the way in).
+    REQUIRE(luaL_dostring(L, "ui.SetSetting('test.adv.owner', '@self') crew_text = {}") == LUA_OK);
+    s.frames(3);
+    CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
+    REQUIRE(luaL_dostring(L, "return crew_text['My Character']") == LUA_OK);
+    CHECK(lua_toboolean(L, -1));
+    lua_pop(L, 1);
+    REQUIRE(luaL_dostring(L, "ui.SetSetting('test.adv.owner', '@all')") == LUA_OK);
+
+    // The same view over a legacy snapshot: named v1 rows (no kind, value or flags) still draw,
+    // with no nil-slot error in lib/crewinventory.lua.
+    REQUIRE(luaL_dostring(L, "crew_legacy = true crew_rev = 2 crew_query = '' crew_text = {}") == LUA_OK);
+    s.frames(3);
+    CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
+    REQUIRE(luaL_dostring(L, "return crew_text['Remote sword'] and crew_text['Remote gem'] and crew_text['Sharer']") ==
+            LUA_OK);
     CHECK(lua_toboolean(L, -1));
     lua_pop(L, 1);
 }

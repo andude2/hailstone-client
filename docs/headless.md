@@ -196,25 +196,44 @@ second. Movement, chat, casting, bank and trade actions, and full character
 control are outside this mode. The standalone `hailstone --drive-file F`
 diagnostic viewer stays read-only.
 
-### Control lease (headless side in)
+### Control mode (always-headless authority)
 
-`--drive-control` (or `control=1` in a crew) serves the same authenticated pipe for a **control lease** instead of
-an observe one: the viewer plays the character rather than watching it. The headless writes a `control=1` drive file
-at the first zone-in; when a viewer connects it sends its snapshot, hands the live sessions to the relay and stops
-updating its own connection and automation — exactly one model acts. The viewer drives a normal `GameConnection`
-over the pipe, so movement, chat, inventory and NPC actions go out for real. On release the viewer sends its whole
-state back, the headless builds a fresh connection on the same sessions, applies it and carries on. An unclean
-viewer exit (a crash, a killed process) stops the headless rather than resuming automation on a state it cannot
-vouch for.
+`--drive-control` (or `control=1` in a crew) serves the same authenticated pipe for **full interactive control** over
+the headless character's live `GameConnection`:
 
-State snapshots cross the pipe in 1 MiB chunks (`send_snapshot`/`SnapshotReader` in `src/app/drive_control.cpp`): one
-pipe message is capped at 8 MiB, and the viewer's return or a zone-in burst can be larger. A single oversized message
-used to fail the release and end the headless run.
+- **Headless stays the single authority:** the headless never freezes, never stops its plugins or scripts
+  (Sentinel/ACNet keep pulsing continuously), never lends or closes its UDP/UCS sessions, and never tears down or
+  rebuilds `GameConnection`.
+- **One-way view stream + live actions:** on attach, the headless sends a compacted state snapshot (chunked in 1 MiB
+  pieces when over 1 MiB) and streams live zone packets, chat lines (including UCS tells and plugin output), and local
+  state (position, heading, stand state, vitals, auto-attack/fire, extended targets, inventory revisions, dialogs) to
+  the graphical client's mirror `GameConnection`.
+- **Full interactive control:** inventory/bank/trade/loot/merchant/augment clicks, targeting, combat toggles, casting,
+  doors, ground objects, and slash commands execute semantically on the headless's live `GameConnection`, while other
+  server-authoritative UI requests (AA, tasks, bazaar, guild, mail, merc, rewards, tradeskills, etc.) cross via a
+  filtered packet forwarder. Manual WASD/mouse steering runs locally in the GUI for zero-latency feel and streams
+  poses to the headless (temporarily pausing `Navigator` until manual input stops); otherwise the GUI smoothly follows
+  the headless's own movement.
+- **Remote plugin ImGui:** when `--drive-observe` or `--drive-control` is active, the headless creates a lightweight
+  CPU-only Dear ImGui context (layout stored per character in `imgui-headless-<character>.ini`) and runs
+  `automation.imgui(false)` only while a graphical viewer is attached. The GUI hides the parked character's plugin
+  windows, forwards mouse/keyboard/text input to the headless (read-only in plain Observe), uploads on-demand RGBA32
+  font atlas updates, and composites the headless character's live plugin windows (such as Sentinel's mini-UI and peer
+  table) directly over the scene. `/crew` commands triggered by plugins on the headless (including clicking another
+  member or the parked character in Sentinel's peer table) are forwarded back to the GUI.
+- **Fearless switching and zone changes:** switching away, releasing, closing, or even crashing the GUI window simply
+  closes the local pipe — the headless keeps playing without dropping a single tick or losing state. If the headless
+  character zones while controlled, it pushes a fresh zone snapshot over the same pipe so the GUI loads the new zone
+  automatically.
 
 The snapshot is a **state**, not the whole session. The journal is reset at each zone connection, repeated updates
 collapse to the latest per entity/slot (position and HP per spawn, appearance per spawn and type, buffs per entity and
-slot, the connection-wide profile/inventory/weather/target values), and chat and pure visual packets are not replayed.
-A character logged in for hours in one zone therefore attaches with a bounded snapshot.
+slot, single-slot extended target updates by slot, the connection-wide profile/inventory/weather/target values), and
+chat, pure visual packets, and transient interaction packets (casts, loot/trade/merchant dialogs, zone-change requests)
+are not replayed. Authoritative client-side state (stand state, vitals, extended targets and `AutoAddHaters`, and the
+`OP_ClientUpdate` / position-history sequence counters) travels alongside the journal so repeated takeovers and
+releases keep movement, inventory, and automation in sync. A character logged in for hours in one zone therefore
+attaches with a bounded snapshot.
 
 The UCS (chat-server) connection is not one of the leased world/zone sessions. While a viewer drives, the headless
 keeps pumping it (`pump_chat_server`), so channel chat, tells and mail still arrive, and on release it is moved to the

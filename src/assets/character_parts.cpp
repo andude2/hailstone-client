@@ -541,13 +541,19 @@ void CharacterLibrary::dress_luclin(const CharacterModel& model, const game::App
     look.luclin_model = true;
     game::find_eye_materials(look, env); // UpdateDAGPointers, when the actor is made
     // ActorClient::SwapAllBodyMaterials @0x40bf80: every body slot from
-    // material 0, untinted with a hero's forge piece. Under a robe the sleeves
+    // material 0, untinted under a shown hero's forge piece. Under a robe the sleeves
     // are the chest's (game::luclin_armor_slot).
     if (a.texture == game::kNoTexture)
         for (std::int32_t slot = 1; slot <= 6; ++slot) {
             auto s = static_cast<std::size_t>(game::luclin_armor_slot(a, look.race, slot));
+            // The body slot is left untinted only under a hero's-forge piece that will be shown for it: with the
+            // piece filtered out (ActorNewArmorFilter) or without a tag for this model, ApplyArmorTexture falls
+            // back to the slot's own armour with its tint, so the body takes the tint too (else a slot with no
+            // classic piece to fall back on, the legs, shows the body material untinted whatever its dye).
+            const bool piece_shown = a.hero_forge[s] != 0 && !look.new_armor_filtered &&
+                                      env.find_new_armor_tag(a.hero_forge[s], code).has_value();
             game::swap_body_material(look, env, slot, 0, static_cast<std::int32_t>(a.material[s]), a.tint[s], 0,
-                                     a.class_id, a.hero_forge[s] != 0 ? 1u : 0u);
+                                     a.class_id, piece_shown ? 1u : 0u);
         }
     // PlayerClient_DressSpawn @0x595c70: SwapFace(face, 0, class) on the fresh
     // model (only with a face when the body texture is fixed); then the

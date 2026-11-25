@@ -36,6 +36,8 @@ public:
     // done within the timeout), hands over to the next. False (and error set) when none of them can even start.
     bool connect(std::vector<Endpoint> to, std::string& error);
     void set_connect_timeout(std::chrono::milliseconds timeout) { connect_timeout_ = timeout; }
+    // Half-close the send side (TCP FIN) so the peer can finish reading buffered bytes without a RST.
+    void shutdown_write();
     void close();
 
     // Connecting until the connection is made or refused (or times out, on the last address); Closed after an error

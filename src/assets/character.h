@@ -540,6 +540,10 @@ struct CharacterTables {
     std::unordered_map<std::string, FragmentLoc> meshes;
     // Materials of the Luclin model and armour WLDs ("HUMCH0101_MDF").
     std::unordered_map<std::string, FragmentLoc> luclin_materials;
+    // Material definitions of the other archives, by the same name. A Luclin body variant some models only
+    // have as a classic definition (HAMLG0303_MDF is in global_chr, not globalham_chr) still resolves through
+    // these, as the graphics DLL's by-name material resources do; consulted only on a miss above.
+    std::unordered_map<std::string, FragmentLoc> other_materials;
     std::unordered_map<std::string, FragmentLoc> luclin_parts; // "IT1012"
     // The resource levels each name of actors, luclin_parts, meshes and tracks has a definition at (one bit each).
     std::unordered_map<std::string, std::uint64_t> actor_levels, part_levels, mesh_levels;
@@ -775,6 +779,7 @@ private:
     auto files() const { return view<'f'>(&Tables::files, false); }
     auto meshes() const { return view<'m'>(&Tables::meshes, true); }
     auto luclin_materials() const { return view<'l'>(&Tables::luclin_materials, false); }
+    auto other_materials() const { return view<'l'>(&Tables::other_materials, false); }
     auto luclin_parts() const { return view<'p'>(&Tables::luclin_parts, true); }
     // What the zone's own archives define, as CharacterLookups names them.
     std::unordered_set<std::string> zone_names_;

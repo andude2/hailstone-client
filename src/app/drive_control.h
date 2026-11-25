@@ -32,8 +32,10 @@ enum class DriveLeaseMessage : std::uint8_t {
     State = 4,      // id, state, error (headless -> viewer)
     Packet = 5,     // id, opcode, data (headless -> viewer)
     Bye = 6,
-    Snapshot = 7, // encode_drive_snapshot (headless -> viewer, once)
-    Release = 8,  // encode_drive_snapshot (viewer -> headless)
+    Snapshot = 7,       // encode_drive_snapshot (headless -> viewer, once)
+    Release = 8,        // encode_drive_snapshot (viewer -> headless)
+    ReleaseAck = 9,     // empty (headless -> viewer: Release decoded, safe to close)
+    ActiveSessions = 10, // world_id, zone_id (viewer -> headless, before Release)
 };
 
 // The headless side. Construct it with a fresh pipe session, write the endpoint and token where the viewer reads
@@ -65,6 +67,9 @@ public:
     bool released() const;
     net::DriveSnapshot take_release();
     std::unique_ptr<net::Session> take_session(std::uint64_t id);
+    // The active world and zone sessions at release (tracks zone changes that created new mirror session ids).
+    std::unique_ptr<net::Session> take_world_session();
+    std::unique_ptr<net::Session> take_zone_session();
     // The viewer's pipe went away (clean release or not).
     bool closed() const;
 
@@ -88,8 +93,11 @@ public:
     // A session's state as the headless reported it (a GameConnection must not send before its zone is Connected).
     bool session_connected(std::uint64_t id) const;
     void pump();
-    // Send the viewer's whole state back and end the lease.
-    void release(net::DriveSnapshot snapshot);
+    // Send the viewer's whole state back and end the lease. Passing the viewer's current world/zone mirror sessions
+    // tells the relay which session ids are live (in case the character zoned during the lease). ack_timeout_ms > 0
+    // waits for ReleaseAck after half-closing the write side so buffered release chunks are not reset on close.
+    void release(net::DriveSnapshot snapshot, const net::Session* world = nullptr, const net::Session* zone = nullptr,
+                 int ack_timeout_ms = 0);
     bool closed() const;
 
 private:

@@ -816,3 +816,60 @@ TEST_CASE("Luclin eyes: CHR_EYE<colour + race offset> on the eye palette entries
     CHECK(f.eye_left == 1);
     CHECK(f.eye_right == 1);
 }
+
+TEST_CASE("a hero's forge slot whose piece is not shown keeps its body tint (Luclin legs)" *
+          doctest::skip(!hailstone::test::game_dir())) {
+    const auto& game = *hailstone::test::game_dir();
+    auto lib = CharacterLibrary::load(game, "", true);
+    auto hum = lib.model("HUM");
+    REQUIRE(hum);
+    REQUIRE(hum->luclin);
+    // The legs are the slot this bites: they have no classic armour piece to fall back on (there is no
+    // IT<offset + 4020 + material> actor in the equipment archives), so the body material is the pants.
+    auto legs_tints = [](const CharacterMesh& m) {
+        std::vector<std::uint32_t> out;
+        for (std::size_t i = 0; i < m.materials.size(); ++i)
+            if (m.materials[i].name.starts_with("HUMLG")) out.push_back(i < m.tints.size() ? m.tints[i] : 0u);
+        return out;
+    };
+    constexpr std::uint32_t kPink = 0xffb349bau;
+    game::Appearance a;
+    for (int s = 1; s <= 6; ++s) {
+        a.material[static_cast<std::size_t>(s)] = 3; // plate
+        a.tint[static_cast<std::size_t>(s)] = kPink;
+        a.hero_forge[static_cast<std::size_t>(s)] = 6400 + static_cast<std::uint32_t>(s); // a hero's forge set
+    }
+    // Filtered out (ActorNewArmorFilter shows the piece for nobody here): the body legs take the dye.
+    a.new_armor_bits = 0;
+    auto filtered = lib.dress(*hum, a);
+    REQUIRE(filtered);
+    auto tints = legs_tints(*filtered);
+    REQUIRE_FALSE(tints.empty());
+    CHECK(std::find(tints.begin(), tints.end(), kPink) != tints.end());
+    // An id without a tag for this model is no piece either, filtered or not: tinted the same way.
+    a.new_armor_bits = game::kNewArmorAllBits;
+    for (int s = 1; s <= 6; ++s) a.hero_forge[static_cast<std::size_t>(s)] = 999999;
+    auto untagged = lib.dress(*hum, a);
+    REQUIRE(untagged);
+    tints = legs_tints(*untagged);
+    REQUIRE_FALSE(tints.empty());
+    CHECK(std::find(tints.begin(), tints.end(), kPink) != tints.end());
+    // A variant piece with no Luclin material of its own (male Half Elf plate shins: HAMLG0303 is only a
+    // classic definition in global_chr) still swaps and tints instead of leaving the shin bare.
+    auto ham = lib.model("HAM");
+    REQUIRE(ham);
+    game::Appearance plate;
+    for (int s = 1; s <= 6; ++s) {
+        plate.material[static_cast<std::size_t>(s)] = 3;
+        plate.tint[static_cast<std::size_t>(s)] = kPink;
+    }
+    auto legs = lib.dress(*ham, plate);
+    REQUIRE(legs);
+    bool shin = false;
+    for (std::size_t i = 0; i < legs->materials.size(); ++i)
+        if (legs->materials[i].name == "HAMLG0303_MDF") {
+            shin = true;
+            CHECK(legs->tints[i] == kPink);
+        }
+    CHECK(shin);
+}

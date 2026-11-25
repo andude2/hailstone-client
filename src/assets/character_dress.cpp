@@ -498,6 +498,7 @@ std::vector<std::string> CharacterLibrary::luclin_layers(std::string_view materi
     wld::WldFile::ReadScope wld_reads;
     std::vector<std::string> out;
     const FragmentLoc* loc = luclin_materials().find(upper(material));
+    if (!loc) loc = other_materials().find(upper(material));
     if (!loc) return out;
     const wld::WldFile& w = *loc->first;
     const auto& def = loc->fragment()->as<wld::MaterialDef>();

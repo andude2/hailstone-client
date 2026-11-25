@@ -460,3 +460,67 @@ TEST_CASE("player trade: another player's request is refused as busy while our o
     CHECK(c.trade()->open);
     CHECK(c.trade()->partner_id == kPartner);
 }
+
+TEST_CASE("player trade: /crewtrade picks the stack up, offers it, accepts and reports") {
+    mq_test::World world("crew_trade");
+    auto& c = *world.conn;
+    add_partner(c);
+    net::Item relic;
+    relic.id = 5001;
+    relic.name = "Crew Relic";
+    relic.stack_count = 3;
+    relic.max_stack = 20;
+    relic.no_rent = 255;
+    relic.no_drop = 255;
+    net::GameConnectionTestAccess::inventory(c).put(net::ItemSlot::possessions(23), relic);
+
+    // Too far is refused before anything moves.
+    c.world_for_test().spawns[kPartner].position = c.world().player()->position + glm::vec3{100, 0, 0};
+    CHECK(c.start_crew_trade(net::ItemSlot::possessions(23), "Partner") ==
+          "too far from Partner to trade");
+    c.world_for_test().spawns[kPartner].position = c.world().player()->position + glm::vec3{3, 0, 0};
+
+    // (/crewtrade parses to this call in GameConnection::item_command.)
+    CHECK(c.start_crew_trade(net::ItemSlot::possessions(23), "Partner").empty());
+    REQUIRE(c.trade());
+    CHECK(c.trade()->requested);
+    REQUIRE(c.inventory().cursor()); // picked up, waiting for the trade to open
+    CHECK(c.inventory().cursor()->id == 5001);
+
+    c.receive_zone_packet_for_test(net::encode_trade_request_ack({c.world().player_id, kPartner}));
+    REQUIRE(c.trade());
+    REQUIRE(c.trade()->open);
+    check_now(c); // the job drops the item into the trade and accepts
+    CHECK(c.trade()->my_ready);
+
+    c.receive_zone_packet_for_test(net::AppPacket(net::to_wire(net::Op::FinishTrade)));
+    CHECK_FALSE(c.trade());
+    check_now(c);
+    CHECK(c.crew_trade_result() == "gave Crew Relic to Partner");
+    // The stack is gone from the possessions.
+    CHECK_FALSE(c.inventory().at(net::ItemSlot::possessions(23)));
+}
+
+TEST_CASE("player trade: a crew trade the partner cancels puts the item back and reports the failure") {
+    mq_test::World world("crew_trade_cancel");
+    auto& c = *world.conn;
+    add_partner(c);
+    net::Item relic;
+    relic.id = 5002;
+    relic.name = "Returned Relic";
+    relic.stack_count = 1;
+    relic.no_rent = 255;
+    relic.no_drop = 255;
+    net::GameConnectionTestAccess::inventory(c).put(net::ItemSlot::possessions(24), relic);
+    REQUIRE(c.start_crew_trade(net::ItemSlot::possessions(24), "Partner").empty());
+    c.receive_zone_packet_for_test(net::encode_trade_request_ack({c.world().player_id, kPartner}));
+    check_now(c);
+    REQUIRE(c.trade());
+    // The partner cancels; the server returns the offered item as an item packet
+    // in a live session, but the close alone must settle the job as failed once
+    // the item is back in the possessions (the harness puts it back directly).
+    c.trade_cancel();
+    net::GameConnectionTestAccess::inventory(c).put(net::ItemSlot::possessions(24), relic);
+    check_now(c);
+    CHECK(c.crew_trade_result() == "failed: the trade with Partner was cancelled");
+}

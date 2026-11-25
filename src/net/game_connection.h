@@ -509,12 +509,15 @@ public:
     DriveSnapshot capture_local_state() const;
     void apply_snapshot(const DriveSnapshot& snapshot);
     void set_drive_input(std::function<void(const DriveAction&)> input) { drive_input_ = std::move(input); }
+    void set_drive_control(bool on) { drive_control_ = on; }
+    bool drive_control() const { return drive_control_; }
     DriveUiState capture_drive_ui() const;
-    bool apply_drive_action(const DriveAction& action);
-    // Observe mode (docs/research/drive-headless.md, D2): receive zone packets over `zone_session` and apply the
-    // local state that the server does not echo. Nothing this connection sends leaves it.
-    void start_observe(std::unique_ptr<Session> zone_session);
-    void apply_local_state(const DriveSnapshot& local);
+    bool apply_drive_action(const DriveAction& action, bool full_control = false, float actor_radius = 1.78f);
+    // Observe / Control mirror mode: receive zone packets over `zone_session` and apply local state that the server
+    // does not echo. In Control mode, semantic actions cross via `drive_input_` and filtered server-authoritative
+    // packets may forward through the mirror sessions.
+    void start_observe(std::unique_ptr<Session> zone_session, std::unique_ptr<Session> world_session = nullptr);
+    void apply_local_state(const DriveSnapshot& local, bool skip_motion = false);
     // D3 (docs/research/drive-headless.md): a control lease. release_sessions leaves this connection without its
     // sessions (update() then does nothing) and hands them to the caller. adopt_sessions installs sessions that
     // another connection already authenticated, so this connection starts InZone and sends no login of its own.
@@ -2000,6 +2003,13 @@ public:
     void trade_accept();
     void trade_cancel();
     const std::optional<TradeSession>& trade() const { return trade_; }
+    // Hailstone: a crew trade (/crewtrade): trade the item at a possessions slot to the named
+    // player, who must be in this zone and within trade reach (the caller walks to them first;
+    // Sentinel does, for a headless character). The job picks the whole stack up, opens the
+    // trade, offers it and accepts, then reports a "[CrewTrade] ..." system line and keeps it
+    // in crew_trade_result(). Empty when it started, else why not.
+    std::string start_crew_trade(const ItemSlot& slot, std::string_view target_name);
+    const std::string& crew_trade_result() const { return crew_trade_result_; }
 
     // ---- bank (game/bank.h; net/game_connection_bank.cpp) ----
     // A right click on a banker (RightClickedOnPlayer: class 40, no banker
@@ -2167,6 +2177,13 @@ public:
     void adopt_server_rules_from(const GameConnection& other) {
         server_rules_ = other.server_rules_;
         server_rules_serial_ = other.server_rules_serial_;
+    }
+    // A headless control-lease resume keeps the process's own world ticket so plugin server_info queries and
+    // subsequent zone changes continue to work without crossing the lease pipe with the session key.
+    void adopt_ticket_from(const GameConnection& other) {
+        ticket_ = other.ticket_;
+        zone_host_ = other.zone_host_;
+        zone_port_ = other.zone_port_;
     }
     // Zone packets the abilities code reads (OP_SpawnAppearance, OP_CancelSneakHide, OP_SkillUpdate, OP_Taunt,
     // OP_Begging, OP_PickPocket, OP_Track, OP_FeignDeath), oldest first; OP_SkillUpdate also updates the profile.
@@ -3686,6 +3703,19 @@ private:
         npc_checks_.recruiter = now_ms();
     }
     std::optional<TradeSession> trade_;
+    struct CrewTrade {
+        ItemSlot slot;
+        std::uint32_t item_id = 0;
+        std::string item_name, target_name;
+        std::uint32_t target_id = 0;
+        int held_before = 0; // the item's total count in possessions when the job started
+        int phase = 0;       // 0 waiting for the trade to open, 1 accepted, 2 cancelling
+        std::int64_t deadline = 0;
+    };
+    std::optional<CrewTrade> crew_trade_;
+    std::string crew_trade_result_;
+    void update_crew_trade(std::int64_t now);
+    void crew_trade_finish(const std::string& result, std::int64_t now);
     std::optional<BankSession> bank_;
     game::BankSnapshot bank_seen_;     // Hailstone: the bank as last seen (bank.dat)
     bool bank_live_ = false;
@@ -4041,7 +4071,10 @@ private:
     std::deque<Confirmation> confirm_queue_;
     void ask(Confirmation c);
     bool relay_drive_action(DriveAction action);
+    bool relay_control_action(DriveAction action);
     std::function<void(const DriveAction&)> drive_input_;
+    bool drive_control_ = false;
+    bool applying_local_state_ = false;
     std::optional<DriveUiState> drive_ui_;
     std::uint64_t drive_question_sequence_ = 0;
     // Drops the questions `which` picks (all of them without one), on screen and waiting, without answering: the state

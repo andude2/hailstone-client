@@ -301,6 +301,7 @@ void GameConnection::toggle_inspect_command(const std::string& args) {
 // ---------------------------------------------------------------- right click
 
 void GameConnection::right_click_player(std::uint32_t spawn_id) {
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::RightClickPlayer, .argument = spawn_id})) return;
     // CEverQuest::RightClickedOnPlayer @0x536d80, after the service classes: a
     // trader (+0x320) opens its shop and a buyer (+0x3d4) its barter window,
     // whether the spawn is a player or an NPC (the test reads only the flag; a
@@ -1039,6 +1040,9 @@ const Item* GameConnection::potion_belt_first_item(int slot) const {
 }
 
 bool GameConnection::potion_belt_use(int slot) {
+    if (relay_control_action(
+            DriveAction{.kind = DriveActionKind::PotionBeltUse, .argument = static_cast<std::uint32_t>(slot)}))
+        return true;
     const ProfileBeltItem* b = potion_belt_item(slot);
     if (!b) return false;
     auto at = find_possession(b->id);

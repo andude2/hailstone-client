@@ -126,7 +126,7 @@ public:
     bool autoskill_held();
     // Keep callbacks on the live character while the graphical window borrows a crew member's view.
     // Clear this binding after restoring the normal connection and before destroying the parked one.
-    void set_parked_character(net::GameConnection* connection, std::string server_name = {});
+    void set_parked_character(net::GameConnection* connection, std::string server_name = {}, bool draw_plugins = true);
     // Once a frame after the connection's update: the server's rules, OnPulse, the scripts.
     void frame();
     // Inside the ImGui frame: the scripts' and plugins' windows, the server plugins' question when no UI pack window

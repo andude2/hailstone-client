@@ -54,6 +54,7 @@ ItemSlot trade_slot(std::int16_t n) { return {kInvTrade, n, -1, -1, 0, 0}; }
 // ---------------------------------------------------------------- merchants
 
 void GameConnection::open_merchant(std::uint32_t npc_id) {
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::OpenMerchant, .argument = npc_id})) return;
     if (state_ != ConnectionState::InZone || pstatus_.dead) return;
     auto it = world_.spawns.find(npc_id);
     const game::Spawn* me = world_.player();
@@ -175,6 +176,9 @@ void GameConnection::update_npc_interactions() {
 }
 
 void GameConnection::merchant_buy(std::uint32_t merchant_slot, std::uint32_t quantity) {
+    if (relay_control_action(
+            DriveAction{.kind = DriveActionKind::MerchantBuy, .argument = merchant_slot, .dialog = quantity}))
+        return;
     // CMerchantWnd::PurchasePageHandler::RequestGetItem @0x6f5be0.
     if (!merchant_ || !merchant_->open || quantity < 1) return;
     if (merchant_->pending > 0) return; // PendingRequestLog report 0x4b
@@ -245,6 +249,9 @@ void GameConnection::set_parcel_money(int coin, std::uint32_t amount) {
 }
 
 void GameConnection::merchant_sell(const ItemSlot& slot, std::uint32_t quantity) {
+    if (relay_control_action(
+            DriveAction{.kind = DriveActionKind::MerchantSell, .slot = slot, .argument = quantity}))
+        return;
     // CMerchantWnd::PurchasePageHandler::RequestPutItem @0x6f6650.
     if (!merchant_ || !merchant_->open || merchant_->trader || quantity < 1 || slot.type != kInvPossessions) return;
     const Item* item = inventory_.at(slot);
@@ -368,6 +375,10 @@ void GameConnection::next_parcel_claim() {
 }
 
 void GameConnection::close_merchant() {
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::CloseMerchant})) {
+        merchant_.reset();
+        return;
+    }
     // CMerchantWnd::AboutToHide: OP_ShopEnd {merchant, me}; the window goes now.
     if (!merchant_) return;
     // At a player trader the window sends OP_TraderShop {4} instead.
@@ -379,6 +390,7 @@ void GameConnection::close_merchant() {
 // ---------------------------------------------------------------- dialogue
 
 void GameConnection::hail() {
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::Hail})) return;
     // Hail @0x4f3010: eqstr 13084 "Hail", or 13085 "Hail, %1" with the
     // target's trimmed name, said in /say (CEverQuest::send_chat).
     if (state_ != ConnectionState::InZone) return;
@@ -394,6 +406,7 @@ void GameConnection::hail() {
 // ---------------------------------------------------------------- trade
 
 void GameConnection::give_to(std::uint32_t spawn_id) {
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::GiveTo, .argument = spawn_id})) return;
     // CEverQuest::DropItemOrMoneyOnPlayer @0x5331f0.
     if (state_ != ConnectionState::InZone || pstatus_.dead) return;
     auto it = world_.spawns.find(spawn_id);
@@ -434,6 +447,7 @@ void GameConnection::give_to(std::uint32_t spawn_id) {
 }
 
 void GameConnection::trade_drop_cursor() {
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::TradeDropCursor})) return;
     // CTradeWnd::DropItemIntoTrade @0x77f6d0: 4 slots for an NPC, 8 for a
     // player; a stack merges into a matching trade stack first.
     if (!trade_ || !trade_->open) return;
@@ -482,6 +496,7 @@ void GameConnection::trade_coin(int type, std::uint32_t amount) {
 }
 
 void GameConnection::trade_accept() {
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::TradeAccept})) return;
     // Send_OP_TradeAcceptClick @0x77f490 (the Trade button; CGiveWnd's Give
     // button sends the same after warning about augmented items).
     if (!trade_ || !trade_->open) return;
@@ -490,10 +505,155 @@ void GameConnection::trade_accept() {
 }
 
 void GameConnection::trade_cancel() {
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::TradeCancel})) {
+        close_trade(false);
+        return;
+    }
     // CTradeWnd_CancelAndClose → Send_OP_CancelTrade_00780550: {partner, me}.
     if (!trade_) return;
     if (state_ == ConnectionState::InZone) send_zone(encode(CancelTrade{trade_->partner_id, world_.player_id}));
     close_trade(false);
+}
+
+// ---------------------------------------------------------------- crew trades (/crewtrade)
+
+namespace {
+
+// How many of an item the possessions hold (general slots and their bags; the
+// cursor and the trade slots are not possessions).
+int possessions_count(const game::Inventory& inv, std::uint32_t item_id) {
+    int total = 0;
+    for (int slot = kSlotCharm; slot <= kSlotGeneral10; ++slot) {
+        const Item* top = inv.at(ItemSlot::possessions(static_cast<std::int16_t>(slot)));
+        if (!top) continue;
+        if (top->id == item_id) total += static_cast<int>(top->stack_count);
+        if (!top->is_bag()) continue;
+        for (int sub = 0; sub < top->bag_slots; ++sub) {
+            const Item* in = inv.at(ItemSlot::possessions(static_cast<std::int16_t>(slot),
+                                                           static_cast<std::int16_t>(sub)));
+            if (in && in->id == item_id) total += static_cast<int>(in->stack_count);
+        }
+    }
+    return total;
+}
+
+} // namespace
+
+std::string GameConnection::start_crew_trade(const ItemSlot& slot, std::string_view target_name) {
+    if (state_ != ConnectionState::InZone || pstatus_.dead) return "not in a zone";
+    if (crew_trade_) return "a crew trade is already running";
+    if (item_job_) return "busy with your items";
+    if (trade_) return "a trade is already open";
+    if (inventory_.cursor()) return "your cursor is not empty";
+    if (slot.type != kInvPossessions) return "only a carried or worn item can be crew-traded";
+    const Item* item = inventory_.at(slot);
+    if (!item) return "nothing in that slot";
+    if (item_kept(*item)) return item->name + " is marked Keep";
+    if (!game::is_droppable(*item)) return item->name + " cannot be traded";
+    if (item->is_bag()) {
+        for (int sub = 0; sub < item->bag_slots; ++sub) {
+            if (inventory_.at(ItemSlot::possessions(slot.slot, static_cast<std::int16_t>(sub))))
+                return "a bag with anything in it cannot be crew-traded";
+        }
+    }
+    const game::Spawn* me = world_.player();
+    const game::Spawn* target = nullptr;
+    for (const auto& [id, sp] : world_.spawns) {
+        if (id == world_.player_id || sp.is_npc || sp.is_corpse) continue;
+        const std::string name = game::display_name(sp.name);
+        if (name.size() == target_name.size() &&
+            std::equal(name.begin(), name.end(), target_name.begin(), [](char a, char b) {
+                return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+            })) {
+            target = &sp;
+            break;
+        }
+    }
+    if (!target) return "no player named " + std::string(target_name) + " in this zone";
+    if (!me) return "no player";
+    const glm::vec3 at = motion_known_ ? position_ : me->position;
+    if (glm::distance(at, target->position) > target->heights.avatar_height + kInteractRange)
+        return "too far from " + std::string(target_name) + " to trade";
+    CrewTrade job;
+    job.slot = slot;
+    job.item_id = item->id;
+    job.item_name = item->name;
+    job.target_name = std::string(target_name);
+    job.target_id = target->id;
+    job.held_before = possessions_count(inventory_, item->id);
+    job.deadline = now_ms() + 20000;
+    crew_trade_ = job;
+    click_slot(slot, true); // the whole stack, no quantity question
+    if (!inventory_.cursor()) {
+        crew_trade_.reset();
+        return "could not pick up " + job.item_name;
+    }
+    give_to(job.target_id);
+    return {};
+}
+
+void GameConnection::crew_trade_finish(const std::string& result, std::int64_t now) {
+    (void)now;
+    if (crew_trade_) {
+        // A failed trade can leave the item on the cursor: put it back where
+        // it came from (or anywhere it fits) before reporting.
+        if (const Item* held = inventory_.cursor(); held && held->id == crew_trade_->item_id) {
+            click_slot(crew_trade_->slot, true);
+            if (inventory_.cursor()) {
+                bool equipped = false;
+                auto_inventory(&equipped);
+            }
+        }
+    }
+    crew_trade_.reset();
+    crew_trade_result_ = result;
+    chat(ChatEvent::Kind::System, "[CrewTrade] " + result);
+}
+
+void GameConnection::update_crew_trade(std::int64_t now) {
+    if (!crew_trade_) return;
+    CrewTrade& job = *crew_trade_;
+    if (job.phase == 0) {
+        if (!trade_) {
+            crew_trade_finish("failed: the trade with " + job.target_name + " did not open", now);
+            return;
+        }
+        if (trade_->open) {
+            trade_drop_cursor();
+            if (inventory_.cursor()) {
+                trade_cancel();
+                crew_trade_finish("failed: no room in the trade for " + job.item_name, now);
+                return;
+            }
+            trade_accept();
+            job.phase = 1;
+            job.deadline = now + 60000;
+            return;
+        }
+        if (now > job.deadline) {
+            trade_cancel();
+            crew_trade_finish("failed: " + job.target_name + " did not answer the trade", now);
+        }
+        return;
+    }
+    if (job.phase == 1) {
+        if (!trade_) {
+            const bool traded = possessions_count(inventory_, job.item_id) < job.held_before;
+            crew_trade_finish(traded ? "gave " + job.item_name + " to " + job.target_name
+                                     : "failed: the trade with " + job.target_name + " was cancelled", now);
+            return;
+        }
+        if (now > job.deadline) {
+            trade_cancel();
+            job.phase = 2;
+            job.deadline = now + 5000;
+        }
+        return;
+    }
+    // Cancelling: the session ending settles it.
+    if (!trade_ || now > job.deadline) {
+        crew_trade_finish("failed: the trade with " + job.target_name + " was cancelled", now);
+    }
 }
 
 void GameConnection::close_trade(bool completed) {

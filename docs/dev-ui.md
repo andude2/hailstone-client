@@ -135,6 +135,10 @@ TaskSelectWnd has Preview Reward in both packs (`TSEL_PreviewRewardButton`, the 
 
 The header's Shared members control shows the roster count and opens a management popup over the native `STASK_MemberList` (Member, Role). Add target, Remove member, Make leader, Invite raid and Invite expedition use the native controls and their permission checks.
 
+#### Advanced (crew) view
+
+The header's Advanced toggle (`tasks.advanced`) replaces the journal's own list and detail with the crew's: ACNet publishes every connected client's journal natively on `ezquests/progress.v3` (the EZQuests snapshot format; the script-published v2 topic is not read), and `tasks.lua` decodes each peer's snapshot when its revision changes (`BusState`/`BusStateHex`). The pane follows EZQuests' Advanced View: a one-line task list (`[Type] (# who have it) Task Name`) with a peer filter, and a detail pane with a "View objectives from" source picker (Auto = self if available), status and current step, a "Who has this task" table (one row per owner, however large the crew), then the chosen source's numbered objectives in three columns, each Progress cell's tooltip listing every owner's progress on that objective. No publisher script is needed on the crew; the EZQuests GUI window is a separate reader of its own v2 data.
+
 #### The tracker
 
 Track puts a quest in `questtracker.lua`, a `hud.Window` independent of `TaskWnd`: a Hailstone presentation feature, with no extra server requests or rules.
@@ -162,9 +166,20 @@ The client target copies the UI packs after linking. For a Lua-only edit that do
 
 Modern Inventory arranges equipment around an open paper doll, with weapons and ammo at the bottom. With the
 MQACNet inventory add-on loaded, its Compare tab selects slots on the doll and shows the local item alongside
-the items worn in that slot by connected peers. Advanced Inventory's owner picker offers My Character,
-All Connected and individual peers. Crew results show equipped, carried and bagged items and are read-only.
+the items worn in that slot by connected peers. Advanced Inventory's sidebar OWNER section offers My Character,
+All Connected and individual peers; a peer view keeps the same toolbar, filter sidebar, list/grid and footer
+as My Character, with icons, owner/place/level/quantity/value/tribute/weight columns and, on a detailed
+(inventory.v2) snapshot, kind, flag and value/tribute filters. Crew results show equipped, carried and bagged
+items and are read-only. A legacy (v1) snapshot shows name, icon, count and AC/HP/mana only.
 An empty equipment slot and an unavailable peer inventory have separate labels.
+
+Trading: a row's right-click menu (**Trade to**), in your view and the crew view alike, asks the
+item's owner to trade it to a chosen character (EZInventory's Give/Trade). ACNet hands Sentinel its
+`/crewtradeask`; the owner publishes it (`traderequest`), walks to the recipient and runs the client's
+`/crewtrade <slot> <sub> <target>` job, which picks the whole stack up, opens the trade, offers it and
+accepts; the recipient's Sentinel accepts as a crew peer, and the outcome returns (`traderesult`, shown
+with `/crew relay`). Worn and carried items only: the bank is not in the crew snapshot, and a bag with
+anything in it, a kept item and a No Trade item are refused by the job.
 
 
 ### UI packs

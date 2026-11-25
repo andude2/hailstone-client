@@ -224,8 +224,9 @@ std::unique_ptr<Session> GameConnection::create_session() {
 DriveSnapshot GameConnection::capture_local_state() const {
     DriveSnapshot snapshot;
     snapshot.character = character_;
-    snapshot.position = position_;
-    snapshot.heading = heading_;
+    const game::Spawn* me = world_.player();
+    snapshot.position = (motion_known_ || !me) ? position_ : me->position;
+    snapshot.heading = (motion_known_ || !me) ? heading_ : me->heading;
     snapshot.velocity = velocity_;
     snapshot.moving = moving_;
     snapshot.target = world_.target_id;
@@ -233,6 +234,27 @@ DriveSnapshot GameConnection::capture_local_state() const {
     items.reserve(inventory_.items().size());
     for (const auto& entry : inventory_.items()) items.push_back(entry.second);
     snapshot.inventory_packet = encode_char_inventory(items);
+    snapshot.has_vitals = true;
+    snapshot.stand_state = pstatus_.stand_state;
+    snapshot.owner_status = pstatus_.owner_status;
+    snapshot.dead = pstatus_.dead;
+    snapshot.auto_attack = auto_attack_;
+    snapshot.auto_fire = auto_fire_;
+    snapshot.running = running_;
+    snapshot.hp = pstatus_.hp;
+    snapshot.max_hp = pstatus_.max_hp;
+    snapshot.mana = pstatus_.mana;
+    snapshot.max_mana = pstatus_.max_mana;
+    snapshot.endurance = pstatus_.endurance;
+    snapshot.max_endurance = pstatus_.max_endurance;
+    snapshot.position_sequence = position_tracker_.sequence();
+    snapshot.position_entries = position_tracker_.entries();
+    snapshot.has_xtargets = true;
+    snapshot.xtarget_auto_haters = xtargets_.auto_haters;
+    snapshot.xtarget_zone = std::max<std::uint32_t>(xtargets_.zone, 1u);
+    snapshot.xtarget_slots.reserve(xtargets_.slots.size());
+    for (const auto& s : xtargets_.slots)
+        snapshot.xtarget_slots.push_back({s.type, s.status, s.spawn_id, s.name});
     return snapshot;
 }
 
@@ -263,6 +285,65 @@ void GameConnection::apply_snapshot(const DriveSnapshot& snapshot) {
     applying_snapshot_ = false;
     state_ = ConnectionState::InZone;
     zone_ready_ = true;
+    // adopt_sessions sets zone_ready_ before apply_snapshot runs, which causes OP_WorldObjectsSent to skip its
+    // zone-in completion side effects; establish the post-zone-in invariants explicitly here.
+    position_tracker_.enable();
+    if (snapshot.has_vitals) position_tracker_.restore(snapshot.position_sequence, snapshot.position_entries);
+    report_state_ = 1;
+    ++tasks_.revision;
+    task_compass_dirty_ = true;
+    // Leave last_position_send_ at epoch so the first update() immediately reports our restored pose and sequence.
+    last_position_send_ = {};
+    // Replaying historical packets must not leave phantom casts, loot/trade/merchant windows, dialogs, or cues.
+    spells_.casting = {};
+    spells_.pending = 0;
+    loot_.reset();
+    trade_.reset();
+    merchant_.reset();
+    quantity_.reset();
+    confirmation_.reset();
+    confirm_queue_.clear();
+    item_displays_.clear();
+    item_refreshes_.clear();
+    sound_cues_.clear();
+    effect_cues_.clear();
+    blood_spurts_.clear();
+    // Restore authoritative local status BEFORE set_player_motion (which ignores updates while pstatus_.dead is true).
+    if (snapshot.has_vitals) {
+        pstatus_.dead = snapshot.dead;
+        pstatus_.owner_status = snapshot.owner_status;
+        pstatus_.stand_state = snapshot.stand_state;
+        auto_attack_ = sent_auto_attack_ = snapshot.auto_attack;
+        auto_fire_ = sent_auto_fire_ = snapshot.auto_fire;
+        running_ = snapshot.running;
+        pstatus_.hp = snapshot.hp;
+        pstatus_.max_hp = snapshot.max_hp;
+        pstatus_.mana = snapshot.mana;
+        pstatus_.max_mana = snapshot.max_mana;
+        pstatus_.endurance = snapshot.endurance;
+        pstatus_.max_endurance = snapshot.max_endurance;
+        if (!pstatus_.dead) {
+            respawn_.reset();
+            respawn_spawn_pending_ = false;
+            respawn_placement_.reset();
+        }
+        if (auto it = world_.spawns.find(world_.player_id); it != world_.spawns.end())
+            it->second.stand_state = pstatus_.stand_state;
+        set_own_spawn_hp();
+    }
+    if (snapshot.has_xtargets) {
+        xtargets_.auto_haters = snapshot.xtarget_auto_haters;
+        xtargets_.zone = std::max<std::uint32_t>(snapshot.xtarget_zone, 1u);
+        xtargets_.slots.clear();
+        xtargets_.slots.reserve(snapshot.xtarget_slots.size());
+        for (const auto& s : snapshot.xtarget_slots)
+            xtargets_.slots.push_back({s.type, s.status, s.spawn_id, s.name});
+        const int n = static_cast<int>(xtargets_.slots.size());
+        if (xtargets_.current >= n) xtargets_.current = n > 0 ? n - 1 : 0;
+        if (xtargets_.selected >= n) xtargets_.selected = -1;
+    } else if (xtargets_.zone == 0) {
+        xtargets_.zone = 1;
+    }
     // A viewer that later hands the session back must return the whole stream, not only what it saw while driving.
     if (options_.snapshot_journal) {
         snapshot_journal_ = snapshot.packets;
@@ -282,11 +363,15 @@ void GameConnection::apply_snapshot(const DriveSnapshot& snapshot) {
     hook_spawns_.clear();
 }
 
-void GameConnection::start_observe(std::unique_ptr<Session> zone_session) {
+void GameConnection::start_observe(std::unique_ptr<Session> zone_session, std::unique_ptr<Session> world_session) {
     zone_session_ = std::move(zone_session);
+    if (world_session) {
+        world_session_ = std::move(world_session);
+        world_login_sent_ = true;
+    }
     state_ = ConnectionState::InZone;
     zone_ready_ = true;
-    status_ = "Observing";
+    status_ = drive_control_ ? "Controlling" : "Observing";
 }
 
 std::pair<std::unique_ptr<Session>, std::unique_ptr<Session>> GameConnection::release_sessions() {
@@ -310,10 +395,52 @@ void GameConnection::adopt_sessions(std::unique_ptr<Session> world_session, std:
     }
 }
 
-void GameConnection::apply_local_state(const DriveSnapshot& local) {
+void GameConnection::apply_local_state(const DriveSnapshot& local, bool skip_motion) {
+    applying_local_state_ = true;
+    struct Guard {
+        bool& flag;
+        ~Guard() { flag = false; }
+    } guard{applying_local_state_};
     set_target(local.target);
-    set_player_motion(local.position, local.heading, local.velocity, local.moving);
-    set_player_drawn(local.position, local.heading);
+    if (local.has_vitals) {
+        pstatus_.dead = local.dead;
+        pstatus_.owner_status = local.owner_status;
+        if (!skip_motion) {
+            pstatus_.stand_state = local.stand_state;
+            if (auto it = world_.spawns.find(world_.player_id); it != world_.spawns.end())
+                it->second.stand_state = pstatus_.stand_state;
+        }
+        auto_attack_ = sent_auto_attack_ = local.auto_attack;
+        auto_fire_ = sent_auto_fire_ = local.auto_fire;
+        running_ = local.running;
+        pstatus_.hp = local.hp;
+        pstatus_.max_hp = local.max_hp;
+        pstatus_.mana = local.mana;
+        pstatus_.max_mana = local.max_mana;
+        pstatus_.endurance = local.endurance;
+        pstatus_.max_endurance = local.max_endurance;
+        if (!pstatus_.dead) {
+            respawn_.reset();
+            respawn_spawn_pending_ = false;
+            respawn_placement_.reset();
+        }
+        set_own_spawn_hp();
+    }
+    if (local.has_xtargets) {
+        xtargets_.auto_haters = local.xtarget_auto_haters;
+        xtargets_.zone = std::max<std::uint32_t>(local.xtarget_zone, 1u);
+        xtargets_.slots.clear();
+        xtargets_.slots.reserve(local.xtarget_slots.size());
+        for (const auto& s : local.xtarget_slots)
+            xtargets_.slots.push_back({s.type, s.status, s.spawn_id, s.name});
+        const int n = static_cast<int>(xtargets_.slots.size());
+        if (xtargets_.current >= n) xtargets_.current = n > 0 ? n - 1 : 0;
+        if (xtargets_.selected >= n) xtargets_.selected = -1;
+    }
+    if (!skip_motion) {
+        set_player_motion(local.position, local.heading, local.velocity, local.moving);
+        set_player_drawn(local.position, local.heading);
+    }
     if (local.inventory_packet.opcode != 0) handle_zone(local.inventory_packet);
     if (!local.ui) return;
     drive_ui_ = local.ui;
@@ -346,27 +473,163 @@ DriveUiState GameConnection::capture_drive_ui() const {
 
 bool GameConnection::relay_drive_action(DriveAction action) {
     if (!drive_input_) return drive_ui_.has_value();
-    if (drive_ui_) {
-        action.zone_generation = drive_ui_->zone_generation;
-        action.inventory_revision = drive_ui_->inventory_revision;
+    if (drive_ui_ || drive_control_) {
+        action.zone_generation = drive_ui_ ? drive_ui_->zone_generation : xtargets_.zone;
+        action.inventory_revision = drive_ui_ ? drive_ui_->inventory_revision : inventory_.revision();
         if (confirmation_) action.dialog = confirmation_->drive_id;
-        if (action.kind == DriveActionKind::Quantity && quantity_) action.slot = quantity_->slot;
+        if ((action.kind == DriveActionKind::Quantity || action.kind == DriveActionKind::CancelQuantity) && quantity_)
+            action.slot = quantity_->slot;
         if (action.kind != DriveActionKind::Quantity || quantity_) drive_input_(action);
     }
     return true;
 }
 
-bool GameConnection::apply_drive_action(const DriveAction& action) {
-    if (state_ != ConnectionState::InZone || action.zone_generation != xtargets_.zone ||
-        action.inventory_revision != inventory_.revision()) return false;
+bool GameConnection::relay_control_action(DriveAction action) {
+    if (!drive_control_ || !drive_input_ || applying_snapshot_ || applying_local_state_) return false;
+    action.zone_generation = drive_ui_ ? drive_ui_->zone_generation : xtargets_.zone;
+    action.inventory_revision = drive_ui_ ? drive_ui_->inventory_revision : inventory_.revision();
+    drive_input_(action);
+    return true;
+}
+
+bool GameConnection::apply_drive_action(const DriveAction& action, bool full_control, float actor_radius) {
+    if (state_ != ConnectionState::InZone) return false;
+    if (full_control) {
+        if (action.zone_generation != 0 && action.zone_generation != xtargets_.zone) return false;
+    } else {
+        if (action.zone_generation != xtargets_.zone || action.inventory_revision != inventory_.revision()) return false;
+    }
     if (action.kind == DriveActionKind::Answer) {
-        if (!confirmation_ || !action.dialog || confirmation_->drive_id != action.dialog || action.argument > 1)
+        if (!confirmation_ || (!full_control && (!action.dialog || confirmation_->drive_id != action.dialog)) ||
+            action.argument > 1)
             return false;
         answer_confirmation(action.argument != 0);
         return true;
     }
+    if (action.kind == DriveActionKind::CancelQuantity) {
+        cancel_quantity();
+        return true;
+    }
+    if (full_control) {
+        switch (action.kind) {
+        case DriveActionKind::Command:
+            if (!action.text.empty()) send_command(action.text);
+            return true;
+        case DriveActionKind::Target:
+            set_target(action.argument);
+            return true;
+        case DriveActionKind::AutoAttack:
+            if (action.argument == 2) toggle_auto_attack();
+            else set_auto_attack(action.argument != 0);
+            return true;
+        case DriveActionKind::AutoFire:
+            if (action.argument == 2) autofire_command();
+            else set_auto_fire(action.argument != 0);
+            return true;
+        case DriveActionKind::StandState:
+            set_stand_state(action.argument);
+            return true;
+        case DriveActionKind::SitToggle:
+            sit_toggle();
+            return true;
+        case DriveActionKind::RightClickItem: {
+            KeyFlags keys{};
+            keys.shift = (action.argument & 1u) != 0;
+            keys.ctrl = (action.argument & 2u) != 0;
+            keys.alt = (action.argument & 4u) != 0;
+            (void)right_click_item(action.slot, keys);
+            return true;
+        }
+        case DriveActionKind::DestroyCursor:
+            destroy_cursor();
+            return true;
+        case DriveActionKind::MoveCoin: {
+            const int from = action.socket;
+            const int to = static_cast<int>((action.dialog >> 16) & 0xffffu);
+            const int from_type = static_cast<int>((action.dialog >> 8) & 0xffu);
+            const int to_type = static_cast<int>(action.dialog & 0xffu);
+            (void)move_coin(from, to, from_type, to_type, action.argument);
+            return true;
+        }
+        case DriveActionKind::CastGem:
+            cast_gem(static_cast<int>(action.argument));
+            return true;
+        case DriveActionKind::ClickDoor:
+            (void)click_door(static_cast<std::uint8_t>(action.argument), actor_radius, action.socket,
+                             static_cast<std::int32_t>(action.dialog));
+            return true;
+        case DriveActionKind::ClickObject:
+            (void)click_object(action.argument);
+            return true;
+        case DriveActionKind::RightClickPlayer:
+            right_click_player(action.argument);
+            return true;
+        case DriveActionKind::GiveTo:
+            give_to(action.argument);
+            return true;
+        case DriveActionKind::LootItem:
+            loot_item(static_cast<std::int16_t>(action.argument & 0xffffu), (action.argument & 0x10000u) != 0,
+                      (action.argument & 0x20000u) != 0, (action.argument & 0x40000u) != 0);
+            return true;
+        case DriveActionKind::EndLoot:
+            end_loot();
+            return true;
+        case DriveActionKind::OpenMerchant:
+            open_merchant(action.argument);
+            return true;
+        case DriveActionKind::MerchantBuy:
+            merchant_buy(action.argument, static_cast<std::uint32_t>(action.dialog));
+            return true;
+        case DriveActionKind::MerchantSell:
+            merchant_sell(action.slot, action.argument);
+            return true;
+        case DriveActionKind::CloseMerchant:
+            close_merchant();
+            return true;
+        case DriveActionKind::CloseBank:
+            close_bank();
+            return true;
+        case DriveActionKind::OpenBank:
+            open_bank(action.argument);
+            return true;
+        case DriveActionKind::Loot:
+            loot(action.argument);
+            return true;
+        case DriveActionKind::TradeAccept:
+            trade_accept();
+            return true;
+        case DriveActionKind::TradeCancel:
+            trade_cancel();
+            return true;
+        case DriveActionKind::TradeDropCursor:
+            trade_drop_cursor();
+            return true;
+        case DriveActionKind::PotionBeltUse:
+            (void)potion_belt_use(static_cast<int>(action.argument));
+            return true;
+        case DriveActionKind::XTargetAutoHaters:
+            set_xtarget_auto_haters(action.argument != 0);
+            return true;
+        case DriveActionKind::Hail:
+            hail();
+            return true;
+        default:
+            break;
+        }
+    }
     if (pstatus_.dead || confirmation_) return false;
     const ItemSlot& slot = action.slot;
+    if (full_control) {
+        if (action.kind == DriveActionKind::Quantity) {
+            if (!quantity_) return false;
+            finish_quantity(action.argument);
+            return true;
+        }
+        if (action.kind == DriveActionKind::InventoryClick && action.argument <= 3) {
+            click_slot(slot, (action.argument & 1) != 0, (action.argument & 2) != 0);
+            return true;
+        }
+    }
     if (slot.type != kInvPossessions || slot.slot < 0 || slot.slot > kSlotCursor ||
         slot.sub < -1 || slot.aug != -1) return false;
     if (!slot.top_level()) {
@@ -601,6 +864,7 @@ void GameConnection::update() {
         update_doors();
         process_cursor_queue();
         update_item_job();
+        update_crew_trade(now_ms());
         update_tradeskill_batch();
         // The server extension may run the zone-in's last step again (NMS: its client check was not echoed).
         if (server_ext().retry_zone_entry(*this)) finish_zone_in();
@@ -2857,6 +3121,7 @@ void GameConnection::set_target(std::uint32_t spawn_id) {
                 group_member_targeted_ = group_.slot_of(n);
             }
     }
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::Target, .argument = spawn_id})) return;
     if (state_ != ConnectionState::InZone) return;
     send_zone(encode_target(false, spawn_id));
 }
@@ -2887,6 +3152,10 @@ void GameConnection::target_by_name(const std::string& name) {
 }
 
 void GameConnection::set_auto_attack(bool on) {
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::AutoAttack, .argument = on ? 1u : 0u})) {
+        auto_attack_ = on;
+        return;
+    }
     auto_attack_ = on;
     if (!on) attack_held_for_xtarget_ = false;
     if (on == sent_auto_attack_ || state_ != ConnectionState::InZone) return;
@@ -2897,6 +3166,10 @@ void GameConnection::set_auto_attack(bool on) {
 }
 
 void GameConnection::set_auto_fire(bool on) {
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::AutoFire, .argument = on ? 1u : 0u})) {
+        auto_fire_ = on;
+        return;
+    }
     // SetAutoRangeAttack @0x520b40.
     const bool changed = auto_fire_ != on;
     auto_fire_ = on;
@@ -3035,6 +3308,12 @@ void GameConnection::report_hit(const game::HitLine& line, std::uint32_t source,
 }
 
 bool GameConnection::set_stand_state(std::uint32_t state, bool room_to_stand) {
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::StandState, .argument = state})) {
+        pstatus_.stand_state = static_cast<std::uint8_t>(state);
+        if (auto it = world_.spawns.find(world_.player_id); it != world_.spawns.end())
+            it->second.stand_state = pstatus_.stand_state;
+        return true;
+    }
     // PlayerZoneClient::ChangePosition while camping: the camp is abandoned (12290).
     if (state_ == ConnectionState::Camping && static_cast<std::uint8_t>(state) != pstatus_.stand_state) cancel_camp(12290);
     if (state_ != ConnectionState::InZone || pstatus_.dead || world_.player_id == 0) return false;
@@ -3080,6 +3359,7 @@ bool GameConnection::set_stand_state(std::uint32_t state, bool room_to_stand) {
 }
 
 void GameConnection::sit_toggle() {
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::SitToggle})) return;
     // Also while camping: CEverQuest::Sit stands a camping player up through ChangePosition, which abandons the
     // camp (set_stand_state: 12290). This is the sit key and moving forward with AllowAutoStand.
     if (state_ != ConnectionState::InZone && state_ != ConnectionState::Camping) return;

@@ -111,7 +111,7 @@ local function compareRows(x, y, s, w, h)
     else row("My Character", nil, true) end
     for _, peer in ipairs(peers) do
       local worn = peer.snapshot and peer.snapshot.worn[compareSlot]
-      if worn then row(peer.name, worn[9], true)
+      if worn then row(peer.name, worn.item and worn.item.name or worn[9], true)
       else row(peer.name, nil, peer.snapshot ~= nil) end
     end
     ui.EndTable()

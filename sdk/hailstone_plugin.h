@@ -878,6 +878,60 @@ typedef struct HailstoneInventoryRow {
     char name[64];
 } HailstoneInventoryRow;
 
+/* inventory_rows_v2 flags (HailstoneInventoryRowV2.flags). */
+#define HAILSTONE_INV_F_MAGIC 1u
+#define HAILSTONE_INV_F_LORE 2u
+#define HAILSTONE_INV_F_NO_TRADE 4u
+#define HAILSTONE_INV_F_TEMPORARY 8u
+#define HAILSTONE_INV_F_ATTUNED 16u
+#define HAILSTONE_INV_F_STACKABLE 32u
+#define HAILSTONE_INV_F_SELLABLE 64u
+#define HAILSTONE_INV_F_TRADESKILL 128u
+#define HAILSTONE_INV_F_AUGMENT 256u
+#define HAILSTONE_INV_F_NO_DESTROY 512u
+#define HAILSTONE_INV_F_COLLECTIBLE 1024u
+/* One equipped or carried item with the detail a cross-character inventory view filters and sorts by
+ * (inventory_rows_v2). stats is "key=value" pairs joined by ';' (the hs.ItemStats keys, nonzero only);
+ * augs is the socketed augments' names joined by ';'. Added in ABI 5 after inventory_rows: test
+ * HAILSTONE_HOST_HAS(host, inventory_rows_v2) first. */
+#define HAILSTONE_SDK_HAS_INVENTORY_ROWS_V2 1
+typedef struct HailstoneInventoryRowV2 {
+    int16_t slot, sub; /* as HailstoneInventoryRow */
+    uint32_t item_id, icon, count, max_stack;
+    int32_t ac, hp, mana;
+    uint32_t value, tribute; /* copper; favour */
+    int32_t weight;          /* tenths, as on the wire */
+    int32_t req_level, rec_level;
+    uint32_t bag_slots, flags;
+    char category[24]; /* the hs.Item category ("" none) */
+    char name[64];
+    char augs[128];
+    char stats[256];
+} HailstoneInventoryRowV2;
+
+/* One active task (task_rows). members/leader are the shared task's (type 1), 0/"" otherwise. */
+#define HAILSTONE_SDK_HAS_TASK_ROWS 1
+typedef struct HailstoneTaskRow {
+    uint32_t id, type; /* type: 0 task, 1 shared task, 2 quest */
+    uint32_t duration, left; /* seconds; left 0 when untimed or out of time */
+    uint32_t members;
+    char title[64];
+    char leader[32];
+} HailstoneTaskRow;
+/* One objective of a task_rows task. flags: 1 hidden, 2 done, 4 optional. */
+#define HAILSTONE_TASK_OBJ_HIDDEN 1u
+#define HAILSTONE_TASK_OBJ_DONE 2u
+#define HAILSTONE_TASK_OBJ_OPTIONAL 4u
+typedef struct HailstoneTaskObjective {
+    uint32_t task_index; /* the task's index in task_rows' order */
+    uint32_t id, group;
+    uint32_t flags;
+    int32_t count, goal;
+    char text[160];
+    char status[32]; /* "Done", "n/m", or "" while hidden */
+    char zone[96];   /* the zone names, or "ALL" */
+} HailstoneTaskObjective;
+
 typedef struct PluginHostApi {
     uint32_t abi;  /* HAILSTONE_PLUGIN_ABI */
     uint32_t size; /* sizeof(PluginHostApi) of the client: later ABIs only add fields at the end */
@@ -1235,6 +1289,17 @@ typedef struct PluginHostApi {
      * before entering a zone or without read permission. Test HAILSTONE_HOST_HAS first.
      * Added in ABI 5. */
     int (*inventory_rows)(void* host, HailstoneInventoryRow* out, uint32_t capacity);
+    /* READ. As inventory_rows, with HailstoneInventoryRowV2 detail. Returns -1 as inventory_rows does.
+     * Added in ABI 5 after inventory_rows: test HAILSTONE_HOST_HAS(host, inventory_rows_v2) first. */
+    int (*inventory_rows_v2)(void* host, HailstoneInventoryRowV2* out, uint32_t capacity);
+    /* READ. The active tasks and their objectives, for a cross-character quest view. Returns the
+     * task total, or -1 before entering a zone or without read permission; pass NULL/0 to size.
+     * *objectives_total (when non-NULL) receives the objective total, *revision the task revision
+     * both were read at. Added in ABI 5 after inventory_rows_v2: test
+     * HAILSTONE_HOST_HAS(host, task_rows) first. */
+    int (*task_rows)(void* host, HailstoneTaskRow* tasks, uint32_t tasks_capacity,
+                     HailstoneTaskObjective* objectives, uint32_t objectives_capacity,
+                     uint32_t* objectives_total, uint32_t* revision);
 } PluginHostApi;
 /* What use_ability and ability_state take: the kinds of ability the Ability Book lists. The values are stable. */
 enum HS_AbilityKinds {

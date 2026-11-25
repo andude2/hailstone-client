@@ -602,6 +602,12 @@ void ClientApp::update_ui_host() {
         h.game = &game_;
         h.chat = &game_view_.chat;
         h.submit_chat = [this](const std::string& line) {
+            // /crew is always handled locally by the GUI window even while controlling a headless character whose
+            // mirror GameConnection does not attach automation_->hooks().
+            if (line == "/crew" || line.rfind("/crew ", 0) == 0) {
+                crew_command(line.size() > 5 ? std::string_view(line).substr(5) : std::string_view{});
+                return;
+            }
             if (conn_) conn_->send_command(line);
         };
         h.click_link = [this](const game::ItemLink& link) {

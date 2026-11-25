@@ -197,6 +197,11 @@ void GameConnection::update_doors() {
 
 bool GameConnection::click_door(std::uint8_t door_id, float actor_radius, std::int32_t key, std::int32_t skill,
                                 std::optional<glm::vec3> hit) {
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::ClickDoor,
+                                         .argument = door_id,
+                                         .socket = key,
+                                         .dialog = static_cast<std::uint64_t>(skill)}))
+        return true;
     return use_switch(door_id, world_.player_id, actor_radius, key, skill, hit);
 }
 
@@ -242,6 +247,7 @@ void GameConnection::set_door_state_now(std::uint8_t door_id, std::uint8_t state
 }
 
 bool GameConnection::click_object(std::uint32_t drop_id) {
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::ClickObject, .argument = drop_id})) return true;
     if (state_ != ConnectionState::InZone) return false;
     auto it = std::find_if(ground_objects_.begin(), ground_objects_.end(),
                            [&](const game::GroundObject& o) { return o.drop_id == drop_id; });

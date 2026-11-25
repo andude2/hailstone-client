@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <stdexcept>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
 
 #include <SDL3/SDL_events.h>
@@ -17,7 +20,9 @@
 
 #include "core/log.h"
 #include "platform/window.h"
+#include "render/gpu.h"
 #include "render/vk_context.h"
+#include "render/vk_util.h"
 #include "ui/imgui_vk_textures.h"
 #include "ui/lua/lua_host.h"
 
@@ -188,6 +193,230 @@ bool detail::ImGuiVisibility::wants_keyboard(int requested) const {
     return visible_ && ImGui::GetCurrentContext() && keyboard_for_ui(requested);
 }
 
+struct ImGuiLayer::RemoteState {
+    static constexpr std::uint64_t kRetireFrames = render::VkContext::kFramesInFlight + 1;
+
+    struct TexEntry {
+        VkImage image = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        std::uint16_t width = 0;
+        std::uint16_t height = 0;
+        bool ready = false;
+    };
+
+    struct Staging {
+        render::Buffer buffer;
+        void* mapped = nullptr;
+    };
+
+    render::VkContext& vk;
+    bool enabled = false;
+    bool want_capture_mouse = false;
+    bool want_capture_keyboard = false;
+    bool want_text_input = false;
+    std::int8_t mouse_cursor = 0;
+    float mouse_x = 0.0f;
+    float mouse_y = 0.0f;
+    bool mouse_valid = false;
+    bool focused = true;
+    std::uint8_t mods = 0;
+    std::optional<RemoteImGuiInput> captured_input;
+    std::optional<RemoteImGuiFrame> frame;
+    std::vector<RemoteImGuiTexture> pending_uploads;
+    std::unordered_map<std::uint32_t, TexEntry> textures;
+    std::vector<std::pair<std::uint64_t, TexEntry>> retired;
+    std::vector<Staging> staging;
+    std::vector<std::unique_ptr<ImDrawList>> built_lists;
+
+    explicit RemoteState(render::VkContext& context)
+        : vk(context), staging(render::VkContext::kFramesInFlight) {}
+
+    ~RemoteState() {
+        for (auto& [id, e] : textures) destroy_tex(e);
+        for (auto& [when, e] : retired) destroy_tex(e);
+        for (Staging& s : staging) s.buffer.destroy(vk.allocator());
+    }
+
+    TexEntry make_tex(std::uint16_t w, std::uint16_t h) {
+        TexEntry e;
+        e.width = w;
+        e.height = h;
+        VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        info.imageType = VK_IMAGE_TYPE_2D;
+        info.format = VK_FORMAT_R8G8B8A8_UNORM;
+        info.extent = {w, h, 1};
+        info.mipLevels = 1;
+        info.arrayLayers = 1;
+        info.samples = VK_SAMPLE_COUNT_1_BIT;
+        info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VmaAllocationCreateInfo ai{};
+        ai.usage = VMA_MEMORY_USAGE_AUTO;
+        render::vk_check(vmaCreateImage(vk.allocator(), &info, &ai, &e.image, &e.allocation, nullptr),
+                         "create remote imgui image");
+        e.view = render::create_image_view(vk.device(), e.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+        e.set = ui::add_imgui_texture(e.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        return e;
+    }
+
+    void destroy_tex(TexEntry& e) {
+        if (e.set) ui::remove_imgui_texture(e.set);
+        if (e.view) vkDestroyImageView(vk.device(), e.view, nullptr);
+        if (e.image) vmaDestroyImage(vk.allocator(), e.image, e.allocation);
+        e = TexEntry{};
+    }
+
+    void retire(TexEntry e) {
+        if (e.image || e.view || e.set) retired.emplace_back(vk.frames_begun() + kRetireFrames, e);
+    }
+
+    void collect() {
+        if (retired.empty()) return;
+        const std::uint64_t now = vk.frames_begun();
+        std::erase_if(retired, [&](auto& r) {
+            if (r.first > now) return false;
+            destroy_tex(r.second);
+            return true;
+        });
+    }
+
+    void clear_session() {
+        frame.reset();
+        pending_uploads.clear();
+        captured_input.reset();
+        want_capture_mouse = false;
+        want_capture_keyboard = false;
+        want_text_input = false;
+        mouse_cursor = 0;
+        for (auto& [id, e] : textures) retire(e);
+        textures.clear();
+    }
+
+    void record_uploads(const render::FrameInfo& f) {
+        collect();
+        if (pending_uploads.empty()) return;
+        auto uploads = std::exchange(pending_uploads, {});
+
+        VkDeviceSize total = 0;
+        for (const auto& u : uploads) {
+            if (!u.destroy) total += u.rgba.size();
+        }
+        Staging& s = staging[f.frame_slot];
+        if (total > 0 && s.buffer.size < total) {
+            s.buffer.destroy(vk.allocator());
+            VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            info.size = std::max<VkDeviceSize>(total, VkDeviceSize{2} << 20);
+            info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+            VmaAllocationCreateInfo ai{};
+            ai.usage = VMA_MEMORY_USAGE_AUTO;
+            ai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+            VmaAllocationInfo out{};
+            render::vk_check(vmaCreateBuffer(vk.allocator(), &info, &ai, &s.buffer.buffer, &s.buffer.allocation, &out),
+                             "create remote imgui staging buffer");
+            s.buffer.size = info.size;
+            s.mapped = out.pMappedData;
+        }
+
+        VkDeviceSize offset = 0;
+        auto* dst = static_cast<std::byte*>(s.mapped);
+        struct Op {
+            std::uint32_t id = 0;
+            VkBufferImageCopy region{};
+        };
+        std::vector<Op> ops;
+        ops.reserve(uploads.size());
+        for (const auto& u : uploads) {
+            if (u.destroy) {
+                if (auto it = textures.find(u.id); it != textures.end()) {
+                    retire(it->second);
+                    textures.erase(it);
+                }
+                continue;
+            }
+            if (u.tex_w == 0 || u.tex_h == 0 || u.w == 0 || u.h == 0 || u.rgba.empty()) continue;
+            if (static_cast<std::uint32_t>(u.x) + u.w > u.tex_w ||
+                static_cast<std::uint32_t>(u.y) + u.h > u.tex_h)
+                continue;
+            TexEntry& e = textures[u.id];
+            if (u.full || !e.image || e.width != u.tex_w || e.height != u.tex_h) {
+                if (e.image) retire(e);
+                e = make_tex(u.tex_w, u.tex_h);
+            }
+            if (e.image && !e.set) e.set = ui::add_imgui_texture(e.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            std::memcpy(dst + offset, u.rgba.data(), u.rgba.size());
+            VkBufferImageCopy c{};
+            c.bufferOffset = offset;
+            c.bufferRowLength = u.w;
+            c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            c.imageOffset = {u.x, u.y, 0};
+            c.imageExtent = {u.w, u.h, 1};
+            ops.push_back({u.id, c});
+            offset += u.rgba.size();
+        }
+        if (ops.empty()) return;
+        vmaFlushAllocation(vk.allocator(), s.buffer.allocation, 0, offset);
+
+        for (const Op& op : ops) {
+            auto it = textures.find(op.id);
+            if (it == textures.end() || !it->second.image) continue;
+            TexEntry& e = it->second;
+            render::image_barrier(f.cmd, e.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                                  e.ready ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                  VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            vkCmdCopyBufferToImage(f.cmd, s.buffer.buffer, e.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                                   &op.region);
+            render::image_barrier(f.cmd, e.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                  VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            e.ready = true;
+        }
+    }
+
+    void append_to_draw_data(ImDrawData* data) {
+        if (!enabled || !frame || frame->lists.empty() || !data) return;
+        ImDrawListSharedData* shared = ImGui::GetDrawListSharedData();
+        if (!shared) return;
+        const std::size_t need = frame->lists.size();
+        while (built_lists.size() < need) built_lists.push_back(std::make_unique<ImDrawList>(shared));
+        for (std::size_t i = 0; i < need; ++i) {
+            const RemoteDrawList& src = frame->lists[i];
+            ImDrawList* dst = built_lists[i].get();
+            dst->CmdBuffer.resize(0);
+            dst->IdxBuffer.resize(0);
+            dst->VtxBuffer.resize(0);
+            if (src.vertices.empty() || src.indices.empty() || src.cmds.empty()) continue;
+            dst->VtxBuffer.resize(static_cast<int>(src.vertices.size()));
+            for (std::size_t v = 0; v < src.vertices.size(); ++v) {
+                const RemoteDrawVert& sv = src.vertices[v];
+                dst->VtxBuffer[static_cast<int>(v)] = ImDrawVert{ImVec2(sv.x, sv.y), ImVec2(sv.u, sv.v), sv.col};
+            }
+            dst->IdxBuffer.resize(static_cast<int>(src.indices.size()));
+            std::memcpy(dst->IdxBuffer.Data, src.indices.data(), src.indices.size() * sizeof(std::uint16_t));
+            for (const RemoteDrawCmd& sc : src.cmds) {
+                if (sc.elem_count == 0) continue;
+                if (static_cast<std::size_t>(sc.idx_offset) + sc.elem_count > src.indices.size()) continue;
+                if (sc.vtx_offset > src.vertices.size()) continue;
+                auto it = textures.find(sc.tex_id);
+                if (it == textures.end() || !it->second.ready || !it->second.set) continue;
+                ImDrawCmd cmd{};
+                cmd.ClipRect = ImVec4(sc.clip_x, sc.clip_y, sc.clip_z, sc.clip_w);
+                cmd.TexRef = ImTextureRef(reinterpret_cast<ImTextureID>(it->second.set));
+                cmd.VtxOffset = sc.vtx_offset;
+                cmd.IdxOffset = sc.idx_offset;
+                cmd.ElemCount = sc.elem_count;
+                cmd.UserCallback = nullptr;
+                dst->CmdBuffer.push_back(cmd);
+            }
+            if (!dst->CmdBuffer.empty()) data->AddDrawList(dst);
+        }
+    }
+};
+
 ImGuiLayer::ImGuiLayer(platform::Window& window, render::VkContext& vk, const ImGuiLayerDesc& desc)
     : window_(window), vk_(vk) {
     IMGUI_CHECKVERSION();
@@ -253,10 +482,12 @@ ImGuiLayer::ImGuiLayer(platform::Window& window, render::VkContext& vk, const Im
     info.CheckVkResultFn = check_vk;
     if (!ImGui_ImplVulkan_Init(&info)) throw std::runtime_error("ImGui_ImplVulkan_Init failed");
     init_imgui_textures(vk_.device());
+    remote_ = std::make_unique<RemoteState>(vk_);
 }
 
 ImGuiLayer::~ImGuiLayer() {
     vk_.wait_idle();
+    remote_.reset();
     shutdown_imgui_textures();
     window_.set_event_listener({});
     ImGui_ImplVulkan_Shutdown();
@@ -369,6 +600,101 @@ void ImGuiLayer::new_frame() {
     apply_pad_navigation();
     ImGui_ImplSDL3_NewFrame();
     feed_pad_pointer();
+    // Minimized (or not sized yet) the display is 0 x 0: ImGui would pull every window onto that empty screen, and
+    // the UI ini would keep those places. The last real size stands in until the window is back.
+    ImGuiIO& io = ImGui::GetIO();
+    if (window_.minimized() || io.DisplaySize.x < 64.0f || io.DisplaySize.y < 64.0f) {
+        if (last_w_ > 0.0f) io.DisplaySize = ImVec2(last_w_, last_h_);
+    } else {
+        last_w_ = io.DisplaySize.x;
+        last_h_ = io.DisplaySize.y;
+    }
+    if (remote_ && remote_->enabled) {
+        RemoteImGuiInput in;
+        in.display_w = io.DisplaySize.x;
+        in.display_h = io.DisplaySize.y;
+        in.fb_scale_x = io.DisplayFramebufferScale.x;
+        in.fb_scale_y = io.DisplayFramebufferScale.y;
+        in.ui_scale = scale_;
+        in.dt = io.DeltaTime;
+        const bool local_active = GImGui->ActiveId != 0;
+        const bool allow_input = visibility_.visible() && !mouse_locked_;
+        ImVector<ImGuiInputEvent>& q = GImGui->InputEventsQueue;
+        for (int i = 0; i < q.Size; ++i) {
+            const ImGuiInputEvent& e = q[i];
+            switch (e.Type) {
+            case ImGuiInputEventType_MousePos:
+                remote_->mouse_x = e.MousePos.PosX;
+                remote_->mouse_y = e.MousePos.PosY;
+                remote_->mouse_valid =
+                    e.MousePos.PosX > -FLT_MAX * 0.5f && e.MousePos.PosY > -FLT_MAX * 0.5f;
+                break;
+            case ImGuiInputEventType_MouseButton:
+                if (allow_input && (!local_active || !e.MouseButton.Down))
+                    in.mouse_buttons.push_back({static_cast<std::uint8_t>(e.MouseButton.Button), e.MouseButton.Down});
+                break;
+            case ImGuiInputEventType_MouseWheel:
+                if (allow_input && !local_active) {
+                    in.wheel_x += e.MouseWheel.WheelX;
+                    in.wheel_y += e.MouseWheel.WheelY;
+                }
+                break;
+            case ImGuiInputEventType_Key:
+                if (e.Key.Key == ImGuiMod_Ctrl)
+                    remote_->mods = e.Key.Down ? static_cast<std::uint8_t>(remote_->mods | 1u)
+                                               : static_cast<std::uint8_t>(remote_->mods & ~1u);
+                else if (e.Key.Key == ImGuiMod_Shift)
+                    remote_->mods = e.Key.Down ? static_cast<std::uint8_t>(remote_->mods | 2u)
+                                               : static_cast<std::uint8_t>(remote_->mods & ~2u);
+                else if (e.Key.Key == ImGuiMod_Alt)
+                    remote_->mods = e.Key.Down ? static_cast<std::uint8_t>(remote_->mods | 4u)
+                                               : static_cast<std::uint8_t>(remote_->mods & ~4u);
+                else if (e.Key.Key == ImGuiMod_Super)
+                    remote_->mods = e.Key.Down ? static_cast<std::uint8_t>(remote_->mods | 8u)
+                                               : static_cast<std::uint8_t>(remote_->mods & ~8u);
+                else if (allow_input &&
+                         (remote_->want_capture_keyboard || remote_->want_capture_mouse || !e.Key.Down))
+                    in.keys.push_back({static_cast<std::uint16_t>(e.Key.Key), e.Key.Down});
+                break;
+            case ImGuiInputEventType_Text:
+                if (allow_input && (remote_->want_capture_keyboard || remote_->want_text_input))
+                    in.chars.push_back(e.Text.Char);
+                break;
+            case ImGuiInputEventType_Focus:
+                remote_->focused = e.AppFocused.Focused;
+                break;
+            default:
+                break;
+            }
+        }
+        in.mouse_x = remote_->mouse_x;
+        in.mouse_y = remote_->mouse_y;
+        in.mouse_valid = allow_input && remote_->mouse_valid;
+        in.focused = allow_input && remote_->focused;
+        in.mods = allow_input ? remote_->mods : 0u;
+        remote_->captured_input = std::move(in);
+
+        // Remote plugin windows draw over local Hailstone UI: prevent clicks/scrolls/keys meant for remote windows
+        // from falling through to local windows behind them, while still allowing releases so nothing stays held.
+        const bool eat_mouse = allow_input && remote_->want_capture_mouse && !local_active;
+        const bool eat_kbd = allow_input && remote_->want_capture_keyboard;
+        if (eat_mouse || eat_kbd) {
+            for (int i = 0; i < q.Size;) {
+                const ImGuiInputEvent& e = q[i];
+                const bool drop_mouse =
+                    eat_mouse &&
+                    ((e.Type == ImGuiInputEventType_MouseButton && e.MouseButton.Down) ||
+                     e.Type == ImGuiInputEventType_MouseWheel);
+                const bool drop_kbd =
+                    eat_kbd &&
+                    ((e.Type == ImGuiInputEventType_Key && e.Key.Down && e.Key.Key != ImGuiMod_Ctrl &&
+                      e.Key.Key != ImGuiMod_Shift && e.Key.Key != ImGuiMod_Alt && e.Key.Key != ImGuiMod_Super) ||
+                     e.Type == ImGuiInputEventType_Text);
+                if (drop_mouse || drop_kbd) q.erase(q.Data + i);
+                else ++i;
+            }
+        }
+    }
     if (mouse_locked_) {
         // set_mouse_locked: this frame's presses and wheel turns are dropped before ImGui sees them.
         ImVector<ImGuiInputEvent>& q = GImGui->InputEventsQueue;
@@ -381,15 +707,6 @@ void ImGuiLayer::new_frame() {
         }
     }
     visibility_.prepare_input();
-    // Minimized (or not sized yet) the display is 0 x 0: ImGui would pull every window onto that empty screen, and
-    // the UI ini would keep those places. The last real size stands in until the window is back.
-    ImGuiIO& io = ImGui::GetIO();
-    if (window_.minimized() || io.DisplaySize.x < 64.0f || io.DisplaySize.y < 64.0f) {
-        if (last_w_ > 0.0f) io.DisplaySize = ImVec2(last_w_, last_h_);
-    } else {
-        last_w_ = io.DisplaySize.x;
-        last_h_ = io.DisplaySize.y;
-    }
     keyboard_request_ = GImGui->WantCaptureKeyboardNextFrame; // (NewFrame applies it to io, then clears it)
     keep_tab_from_windows();
     ImGui::NewFrame();
@@ -529,13 +846,52 @@ std::string ImGuiLayer::debug_state() const {
 void ImGuiLayer::render(const render::FrameInfo& frame) {
     vk_.begin_overlay(frame);
     if (!frame_open_) return;
+    if (visible() && remote_ && remote_->enabled && remote_->want_capture_mouse &&
+        remote_->mouse_cursor >= 0 && remote_->mouse_cursor < ImGuiMouseCursor_COUNT) {
+        ImGui::SetMouseCursor(static_cast<ImGuiMouseCursor>(remote_->mouse_cursor));
+    }
     const bool draw = visibility_.finish_frame(true);
     frame_open_ = false;
     if (!draw) return;
     ImDrawData* data = ImGui::GetDrawData();
     if (data->DisplaySize.x <= 0.0f || data->DisplaySize.y <= 0.0f) return;
+    if (remote_) remote_->append_to_draw_data(data);
     // The backend sets its own viewport and scissor, replacing the frame's Y-flipped viewport.
     ImGui_ImplVulkan_RenderDrawData(data, frame.cmd);
+}
+
+void ImGuiLayer::set_remote_enabled(bool enabled) {
+    if (!remote_) return;
+    if (remote_->enabled == enabled) return;
+    remote_->enabled = enabled;
+    remote_->clear_session();
+}
+
+void ImGuiLayer::push_remote_texture(RemoteImGuiTexture tex) {
+    if (!remote_ || !remote_->enabled) return;
+    if (remote_->pending_uploads.size() < 128) remote_->pending_uploads.push_back(std::move(tex));
+}
+
+void ImGuiLayer::set_remote_frame(RemoteImGuiFrame frame) {
+    if (!remote_ || !remote_->enabled) return;
+    remote_->want_capture_mouse = frame.want_capture_mouse;
+    remote_->want_capture_keyboard = frame.want_capture_keyboard;
+    remote_->want_text_input = frame.want_text_input;
+    remote_->mouse_cursor = frame.mouse_cursor;
+    remote_->frame = std::move(frame);
+}
+
+void ImGuiLayer::record_remote_uploads(const render::FrameInfo& frame) {
+    if (remote_) remote_->record_uploads(frame);
+}
+
+std::optional<RemoteImGuiInput> ImGuiLayer::take_remote_input() {
+    if (!remote_ || !remote_->enabled) return std::nullopt;
+    return std::exchange(remote_->captured_input, std::nullopt);
+}
+
+bool ImGuiLayer::remote_wants_text_input() const {
+    return visible() && remote_ && remote_->enabled && remote_->want_text_input;
 }
 
 void ImGuiLayer::end_frame_without_render() {
@@ -554,8 +910,13 @@ void ImGuiLayer::set_visible(bool visible) {
         pad_windows_.clear();
     }
 }
-bool ImGuiLayer::wants_mouse() const { return visibility_.wants_mouse(); }
-bool ImGuiLayer::wants_keyboard() const { return visibility_.wants_keyboard(keyboard_request_); }
+bool ImGuiLayer::wants_mouse() const {
+    return visibility_.wants_mouse() || (visible() && remote_ && remote_->enabled && remote_->want_capture_mouse);
+}
+bool ImGuiLayer::wants_keyboard() const {
+    return visibility_.wants_keyboard(keyboard_request_) ||
+           (visible() && remote_ && remote_->enabled && remote_->want_capture_keyboard);
+}
 
 void configure_keys() { ImGui::GetIO().ConfigMacOSXBehaviors = false; }
 

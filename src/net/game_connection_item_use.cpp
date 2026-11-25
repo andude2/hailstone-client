@@ -58,6 +58,15 @@ bool GameConnection::bard_cast_bard(const game::SpellData& spell, std::uint8_t c
 }
 
 GameConnection::SlotRightClick GameConnection::right_click_item(const ItemSlot& slot, KeyFlags keys) {
+    if (drive_control_) {
+        const Item* item = inventory_.at(slot);
+        // Right-clicking a bag opens/closes the local bag window in the GUI without talking to the server.
+        if (!item || !item->is_bag()) {
+            const std::uint32_t flags = (keys.shift ? 1u : 0u) | (keys.ctrl ? 2u : 0u) | (keys.alt ? 4u : 0u);
+            if (relay_control_action(DriveAction{.kind = DriveActionKind::RightClickItem, .slot = slot, .argument = flags}))
+                return SlotRightClick::None;
+        }
+    }
     // A server may supply an optional direct-sale protocol. Validate the actual
     // carried click before exposing a context; the extension owns no inventory state.
     if (!keys.alt && !keys.ctrl && !keys.shift && state_ == ConnectionState::InZone && !zone_change_pending_ &&

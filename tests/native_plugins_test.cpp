@@ -13,6 +13,7 @@
 #include "core/sha256.h"
 #include "core/binary_measurement.h"
 #include "net/item_packets.h"
+#include "net/task_packets.h"
 #include "game/nameplate_canvas.h"
 #include "game/server_ext_chain.h"
 #include "mq/commands.h"
@@ -559,6 +560,50 @@ TEST_CASE("native plugins: free_inventory_slots counts the bags' room, not only 
     h.run("/probeinventoryrows");
     CHECK(h.printed_line("[Probe] inventory -1 -1"));
     CHECK(h.printed_line("[Probe] free inventory -1"));
+}
+
+TEST_CASE("native plugins: task_rows gives the active tasks and objectives for a quest view") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll);
+    REQUIRE(h.plugins->load("HostProbe"));
+    auto& conn = *h.world.conn;
+    game::Task t;
+    t.task_id = 101;
+    t.type = game::kTaskTypeQuest;
+    t.sequence = 4;
+    t.title = "Task 101";
+    conn.receive_zone_packet_for_test(net::encode_task_description(t));
+    auto element = [&](std::uint32_t activity, int count, int goal, bool hidden = false) {
+        net::TaskActivity packet;
+        packet.task_id = 101;
+        packet.type = game::kTaskTypeQuest;
+        packet.sequence = 4;
+        auto& e = packet.element;
+        e.activity_id = activity;
+        e.step = 0;
+        e.hidden = hidden;
+        e.type = hidden ? -1 : 2;
+        e.description = "Objective " + std::to_string(activity);
+        e.goal_count = goal;
+        e.done_count = count;
+        e.zones = "1;2";
+        conn.receive_zone_packet_for_test(net::encode(packet));
+    };
+    element(0, 1, 1);
+    element(2, 2, 5);
+    element(3, 0, 5, true);
+    h.run("/probetasks");
+    CHECK(h.printed_line("[Probe] tasks 1 1 obj 3 rev " + std::to_string(conn.tasks().revision)));
+    CHECK(h.printed_line("[Probe] task 101 2 Task 101"));
+    CHECK(h.printed_line("[Probe] obj 0 0 0 2 1 1 Done Objective 0"));
+    CHECK(h.printed_line("[Probe] obj 0 2 0 0 2 5 2/5 Objective 2"));
+    CHECK(h.printed_line("[Probe] obj 0 3 0 1 0 5  Objective 3"));
+    // Without read the call is refused (-1), as inventory_rows is.
+    h.approve(plugin::kCapAll & ~plugin::kCapRead);
+    h.plugins->policy_changed({});
+    h.printed.clear();
+    h.run("/probetasks");
+    CHECK(h.printed_line("[Probe] tasks -1 -1 obj 0 rev 0"));
 }
 
 TEST_CASE("native plugins: can_loot_corpse uses the corpse's own reach, so a giant is in range from further") {

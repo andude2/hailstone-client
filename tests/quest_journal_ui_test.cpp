@@ -273,3 +273,71 @@ TEST_CASE("quest journal UI: native shared roster popup and membership updates w
     CHECK(session.run("return tostring(hs.Tasks().selectedId)") == "202");
     CHECK(session.run("return tostring(hs.TabPage('TaskWnd','TaskSubwindows'))") == "0");
 }
+
+TEST_CASE("quest journal UI: the Advanced toggle shows the crew's tasks and per-owner progress") {
+    JournalSession session;
+    session.task(101, game::kTaskTypeQuest, "First quest");
+    session.activity(101, game::kTaskTypeQuest, 0, 0, "Known objective", false);
+    session.activity(101, game::kTaskTypeQuest, 3, 2, "Another objective", false);
+    session.frames();
+    session.run(R"lua(
+        advSeen = {}
+        local draw = ui.DrawText
+        ui.DrawText = function(x,y,r,g,b,a,value)
+            advSeen[value] = (advSeen[value] or 0) + 1
+            return draw(x,y,r,g,b,a,value)
+        end
+        local colored = ui.TextColored
+        ui.TextColored = function(r,g,b,a,value)
+            advSeen[value] = (advSeen[value] or 0) + 1
+            return colored(r,g,b,a,value)
+        end
+        local wrapped = ui.TextWrapped
+        ui.TextWrapped = function(value)
+            advSeen[value] = (advSeen[value] or 0) + 1
+            return wrapped(value)
+        end
+        local selectable = ui.Selectable
+        ui.Selectable = function(label, ...)
+            if type(label) == 'string' then advSeen[(label:gsub('##.*$', ''))] = true end
+            return selectable(label, ...)
+        end
+        local plain = ui.Text
+        ui.Text = function(value)
+            advSeen[value] = (advSeen[value] or 0) + 1
+            return plain(value)
+        end
+        -- A peer's native quest snapshot (ezquests/progress.v3), packed as ACNet publishes it:
+        -- Sharer has the same quest, further along (one objective Done).
+        local function hex(bytes) return (bytes:gsub('.', function(c) return string.format('%02x', c:byte()) end)) end
+        local payload = string.pack('<I2', 1)
+            .. string.pack('<I4BI4I4s2I2s2I2', 101, 2, 0, 0, 'First quest', 0, '', 2)
+            .. string.pack('<I4I4Bi4i4s2s2s2', 0, 0, 2, 1, 1, 'Known objective', 'Done', 'ALL')
+            .. string.pack('<I4I4Bi4i4s2s2s2', 3, 0, 0, 2, 5, 'Another objective', '2/5', 'Qeynos')
+        hs.UI.plugins.Get = function(name)
+            if name ~= 'ACNet' then return nil end
+            return {
+                BusState = function(topic) return topic == 'ezquests/progress.v3' and { sharer = 3 } or {} end,
+                BusStateHex = function(topic, who)
+                    if topic == 'ezquests/progress.v3' and who == 'sharer' then return hex(payload) end
+                end,
+            }
+        end
+        assert(hs.OpenTask(101))
+        ui.SetSetting('tasks.tracker.visible', '0')
+        ui.SetSetting('tasks.advanced', '1')
+    )lua");
+    session.frames();
+    // EZQuests' layout: a one-line "[Quest] (2) First quest" entry, the source's
+    // (Auto = self) numbered objectives, and Sharer in the Who-has-this-task table.
+    CHECK(session.run("return tostring(advSeen['[Quest] (2) First quest'] ~= nil)") == "true");
+    CHECK(session.run("return tostring(advSeen['First quest'] ~= nil)") == "true");
+    CHECK(session.run("return tostring(advSeen['1. Known objective'] ~= nil)") == "true");
+    CHECK(session.run("return tostring(advSeen['2. Another objective'] ~= nil)") == "true");
+    CHECK(session.run("return tostring(advSeen['Sharer'] ~= nil)") == "true");
+    CHECK(session.run("return tostring(advSeen['Status: In Progress'] ~= nil)") == "true");
+    // Toggling back leaves the ordinary journal.
+    session.run("advSeen = {}; ui.SetSetting('tasks.advanced', '0')");
+    session.frames();
+    CHECK(session.run("return tostring(advSeen['[Quest] (2) First quest'] == nil)") == "true");
+}

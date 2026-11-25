@@ -498,7 +498,11 @@ void ClientApp::update_player(float dt) {
             return !collision_ || collision_->line_of_sight(a, b);
         });
         // OP_RequestClientZoneChange: DoTeleportB on the player (a #goto in this zone moves without zoning).
-        conn_->set_teleport_handler([this](const game::TeleportBArgs& a) { teleport_b(a, "zone change request"); });
+        // Capture the owning connection so a parked character's summon never moves the active crew view's body.
+        const net::GameConnection* owner = conn_.get();
+        conn_->set_teleport_handler([this, owner](const game::TeleportBArgs& a) {
+            if (conn_.get() == owner) teleport_b(a, "zone change request");
+        });
         // The slash commands whose original works on the Actions window's state (net::GameConnection::
         // set_app_commands).
         conn_->set_app_commands([this](std::string_view handler, const std::string& args) {
@@ -1115,7 +1119,8 @@ void ClientApp::update_player(float dt) {
             conn_->set_air_supply(movement_.air_supply());
         }
         // Zone lines (game/zone_lines.h): CheckRegionChange -> DoTeleport (game/zoning.h).
-        if (zone_ && !local_body_movement_)
+        // Under DriveClient control, the headless authority owns zone-line crossings.
+        if (zone_ && !local_body_movement_ && !drive_client_)
             if (auto text = zone_line_.update(feet_, zone_->regions)) region_teleport(*text);
         // What this step moved and turned, for the drawing between it and the next (below).
         step_move_ = feet_ - step_from_feet;
@@ -1123,7 +1128,54 @@ void ClientApp::update_player(float dt) {
         step_turn_ = std::remainder(yaw_ - step_from_yaw, glm::two_pi<float>());
         step_pitch_ = pitch_ - step_from_pitch;
     };
-    for (const auto& st : frame_steps_) run_step(st);
+    if (drive_client_) {
+        if (viewing_control_) {
+            const bool manual_move =
+                player_moved || player_autorun_pressed || movement_.moving_keys() ||
+                (movement_.controller().autorun() & 1) || mouse_look_.both_buttons ||
+                (mouse_look_.active && !iso() &&
+                 !mouse_look_.turns_camera(camera_type_ == game::kCameraWheelFollow)) ||
+                iso_walking_;
+            const auto now_drive = Clock::now();
+            if (manual_move) drive_human_until_ = now_drive + std::chrono::milliseconds(350);
+            if (now_drive < drive_human_until_) {
+                for (const auto& st : frame_steps_) run_step(st);
+                if (!drive_human_sent_active_ ||
+                    now_drive - last_drive_move_send_ >= std::chrono::milliseconds(33)) {
+                    last_drive_move_send_ = now_drive;
+                    net::DriveMove m{};
+                    m.position = feet_ + glm::vec3(0, 0, floor_offset_);
+                    m.heading = game::yaw_to_heading(yaw_);
+                    m.velocity = last_velocity_;
+                    m.speed_run = last_speed_run_;
+                    m.moving = motion_.moving;
+                    m.stand_state = conn_->player_status().stand_state;
+                    m.standing_on = conn_->standing_on();
+                    m.active = true;
+                    drive_client_->send_move(m);
+                    drive_human_sent_active_ = true;
+                }
+            } else {
+                if (drive_human_sent_active_) {
+                    net::DriveMove stop{};
+                    stop.position = feet_ + glm::vec3(0, 0, floor_offset_);
+                    stop.heading = game::yaw_to_heading(yaw_);
+                    stop.stand_state = conn_->player_status().stand_state;
+                    stop.standing_on = conn_->standing_on();
+                    stop.active = false;
+                    drive_client_->send_move(stop);
+                    drive_human_sent_active_ = false;
+                }
+                step_move_ = glm::vec3(0.0f);
+                step_turn_ = 0.0f;
+            }
+        } else {
+            step_move_ = glm::vec3(0.0f);
+            step_turn_ = 0.0f;
+        }
+    } else {
+        for (const auto& st : frame_steps_) run_step(st);
+    }
     // The wheel (CEverQuest::MouseWheelHandler) is __ProcessMouseEvents', which stops at a locked interface. It
     // zooms between first person and the camera behind the player; in the cameras 1..5 it does nothing.
     iso_turn_keys(dt);
