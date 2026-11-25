@@ -25,3 +25,4 @@ luac.out
 /hailstone_headless.exe
 /zlib1.dll
 /shaders/*.spv
+/docs/research/hailstorm-private-review.md
