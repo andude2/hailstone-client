@@ -362,7 +362,8 @@ void ClientApp::rebind_observe_scene() {
         switch_particles_->clear();
         conn_->set_door_particles(&door_particles_);
     }
-    weather_.clear_particles();
+    weather_.reset();
+    weather_look_ = {};
     point_shadows_.reset();
     vk_.reset_history();
     conn_->reground();

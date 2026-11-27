@@ -985,6 +985,9 @@ int run_headless(HeadlessOptions options) {
         return use_ability(ability_host, kind, name);
     };
     env.window_open = [](std::string_view) { stub_once("window"); return false; };
+    env.window_act = [&ability_host](std::string_view w, std::string_view c, std::string_view action) {
+        return run_window_act(ability_host, nullptr, w, c, action);
+    };
     env.face = [](double, bool) { stub_once("face"); };
     env.keypress = [](std::string_view, int) { stub_once("keypress"); return false; };
     env.raise_window = [] { log::info("headless: /foreground ignored (no window)"); };
@@ -1069,6 +1072,9 @@ int run_headless(HeadlessOptions options) {
     env.headless = true;
     env.viewer_connected = [&observe] { return observe && observe->viewer_connected(); };
     Automation automation(env);
+    automation.hooks().add_command(plugin::Hooks::kClient, "/notify", [&ability_host](std::string_view args) {
+        run_notify_command(ability_host, nullptr, args);
+    }, plugin::kCapActions);
 
     if (options.drive_observe || options.drive_control) {
         try {

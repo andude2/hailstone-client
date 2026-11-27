@@ -83,12 +83,10 @@ struct GameConnectionTestAccess {
     static game::BankCoins& bank_coins(GameConnection& c) { return c.bank_coins_; }
     static game::MercManager& merc(GameConnection& c) { return c.merc_; }
     static std::vector<AuraUpdate>& auras(GameConnection& c) { return c.auras_; }
-    static std::uint32_t& target_of_target(GameConnection& c) { return c.target_of_target_; }
     static glm::vec3& velocity(GameConnection& c) { return c.velocity_; }
     static bool item_command(GameConnection& c, const std::string& command, const std::string& args) {
         return c.item_command(command, args);
     }
-    static std::optional<GameConnection::LootSession>& loot(GameConnection& c) { return c.loot_; }
     static void drop_on_doll(GameConnection& c) { c.drop_on_doll(); }
     static void apply_spawn(GameConnection& c, const Spawn& s) { c.apply_spawn(s); }
     // How often the evolving transfer's item list was built, and its pair compared with the snapshots.

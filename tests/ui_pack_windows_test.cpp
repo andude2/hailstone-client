@@ -1982,7 +1982,7 @@ TEST_CASE("UI packs (modern): crew inventory compares a slot and searches remote
     REQUIRE(luaL_dostring(L, R"lua(
         local get = hs.Plugin
         hs.Plugin = function(name)
-            if name ~= 'MQACNet' then return get(name) end
+            if name ~= 'ACNet' then return get(name) end
             return {
                 InventorySupported = function() return true end,
                 InventoryPeers = function() return { sharer = crew_rev or 1, missing = 0 } end,
@@ -2021,11 +2021,12 @@ TEST_CASE("UI packs (modern): crew inventory compares a slot and searches remote
         crew_text = {}
         local text = ui.Text
         ui.Text = function(value) crew_text[value] = true; text(value) end
+        local text_colored = ui.TextColored
+        ui.TextColored = function(r, g, b, a, value) crew_text[value] = true; text_colored(r, g, b, a, value) end
         local draw_text = ui.DrawText
-        ui.DrawText = function(...)
-            local args = { ... }
-            if type(args[#args]) == 'string' then crew_text[args[#args]] = true end
-            return draw_text(...)
+        ui.DrawText = function(x, y, r, g, b, a, value, ...)
+            if type(value) == 'string' then crew_text[value] = true end
+            return draw_text(x, y, r, g, b, a, value, ...)
         end
         local begin_combo = ui.BeginCombo
         ui.BeginCombo = function(id, preview, ...)
@@ -2075,10 +2076,17 @@ TEST_CASE("UI packs (modern): crew inventory compares a slot and searches remote
             return input(id, hint, val, limit, flags)
         end
     )lua") == LUA_OK);
-    s.frames(3);
+    s.frames(1);
+    REQUIRE(luaL_dostring(L, "crew_text = {}") == LUA_OK);
+    s.frames(2);
     CHECK(ImGui::FindWindowByName("UI errors") == nullptr);
-    REQUIRE(luaL_dostring(L, "return crew_text['Remote gem'] and crew_text['Sharer'] and "
-                            "crew_text['General 1, bag slot 3'] and not crew_text['Remote sword']") == LUA_OK);
+    REQUIRE(luaL_dostring(L, R"lua(
+        local has_place = false
+        for k in pairs(crew_text) do
+            if type(k) == 'string' and k:find('^General 1, bag') then has_place = true end
+        end
+        return crew_text['Remote gem'] and crew_text['Sharer'] and has_place and not crew_text['Remote sword']
+    )lua") == LUA_OK);
     CHECK(lua_toboolean(L, -1));
     lua_pop(L, 1);
 

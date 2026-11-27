@@ -502,11 +502,12 @@ TEST_CASE("TLO: Pet and Me.Pet expose pet combat, target, toggles and buffs") {
     CHECK(p("${Me.Pet.BuffCount}") == "2");
     CHECK(p("${Me.Pet.Buff}") == "2");
     CHECK(p("${Me.Pet.Buff[1]}") == "Holy Armor");
-    CHECK(p("${Me.Pet.Buff[1].ID}") == "11");
+    CHECK(p("${Me.Pet.Buff[1].ID}") == "1");
+    CHECK(p("${Me.Pet.Buff[1].Spell.ID}") == "11");
     CHECK(p("${Me.Pet.Buff[2]}") == "NULL");
     CHECK(p("${Me.Pet.Buff[4]}") == "Test Slow");
     CHECK(p("${Me.Pet.Buff[Holy Armor]}") == "1");
-    CHECK(p("${Me.Pet.Buff[Slow]}") == "4");
+    CHECK(p("${Me.Pet.Buff[Test]}") == "4");
     CHECK(p("${Me.Pet.Buff[=Slow]}") == "NULL");
     CHECK(p("${Me.Pet.Buff[=Test Slow]}") == "4");
     const auto dur_secs = std::stoi(p("${Me.Pet.BuffDuration[Holy Armor].TotalSeconds}"));

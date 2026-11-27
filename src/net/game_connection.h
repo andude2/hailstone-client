@@ -3284,10 +3284,6 @@ private:
     // character has neither ConfirmationDialogBox nor RespawnWnd to click; only a kConfirmRezz question or
     // the reserved resurrection option is acted on.
     bool rez_command();
-    // /notify without a UI (game/window_notify.h): the named button's one connection call,
-    // behind the state checks its window clicks under. With a UI the client's own handler
-    // clicks the stock window first (Hailstone_notify) and this is not reached for it.
-    void notify_fallback(std::string_view args);
     // Hailstone: MQ2Exchange's /exchange "<item name|id>" <slot> and /unequip <slot> (game/exchange.h), through the
     // inventory's own clicks (click_slot) so the original's checks hold.
     void exchange_command(const std::string& args);

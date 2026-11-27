@@ -656,7 +656,7 @@ TEST_CASE("native plugins: task_rows gives the active tasks and objectives for a
     CHECK(h.printed_line("[Probe] task 101 2 Task 101"));
     CHECK(h.printed_line("[Probe] obj 0 0 0 2 1 1 Done Objective 0"));
     CHECK(h.printed_line("[Probe] obj 0 2 0 0 2 5 2/5 Objective 2"));
-    CHECK(h.printed_line("[Probe] obj 0 3 0 1 0 5  Objective 3"));
+    CHECK(h.printed_line("[Probe] obj 0 3 0 1 0 0  "));
     // Without read the call is refused (-1), as inventory_rows is.
     h.approve(plugin::kCapAll & ~plugin::kCapRead);
     h.plugins->policy_changed({});

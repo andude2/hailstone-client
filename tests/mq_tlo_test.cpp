@@ -251,12 +251,12 @@ TEST_CASE("TLO: Sentinel reads aura updates and distinguishes learned skills, di
     CHECK(std::stoll(f.p("${Me.CastTimeLeft}")) > 0);
     spells.casting = {};
 
-    CHECK(f.p("${Me.PctAggro} ${Target.PctAggro}") == "NULL NULL");
+    CHECK(f.p("${Me.PctAggro} ${Target.PctAggro}") == "0 0");
     c.receive_zone_packet_for_test(net::encode(net::AggroTargetInfo{0, 10}));
     c.receive_zone_packet_for_test(net::encode(net::AggroUpdate{std::nullopt, {{net::kAggroPlayer, 60}}}));
     CHECK(f.p("${Me.PctAggro} ${Target.PctAggro}") == "60 60");
     c.set_target(11);
-    CHECK(f.p("${Me.PctAggro} ${Target.PctAggro}") == "NULL NULL");
+    CHECK(f.p("${Me.PctAggro} ${Target.PctAggro}") == "0 0");
     c.receive_zone_packet_for_test(net::encode(net::DzInvite{"Friend", "Training", false, {}, 2, 0}));
     CHECK(f.p("${Window[ConfirmationDialogBox].Requester}") == "Friend");
 }

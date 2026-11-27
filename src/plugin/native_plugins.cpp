@@ -2053,7 +2053,7 @@ int h_task_rows(void* h, HailstoneTaskRow* tasks, std::uint32_t tasks_cap, Hails
                         if (e.optional) row.flags |= HAILSTONE_TASK_OBJ_OPTIONAL;
                         row.count = hidden ? 0 : e.done_count;
                         row.goal = e.goal_count;
-                        const std::string text = c->task_element_text(e);
+                        const std::string text = hidden ? std::string() : c->task_element_text(e);
                         std::copy_n(text.data(), std::min(text.size(), sizeof(row.text) - 1), row.text);
                         const std::string status = hidden ? "" : done ? "Done" : std::format("{}/{}", e.done_count, e.goal_count);
                         std::copy_n(status.data(), std::min(status.size(), sizeof(row.status) - 1), row.status);

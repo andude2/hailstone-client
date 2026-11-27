@@ -38,7 +38,7 @@ bool run_notify_command(UiHost& host, UiApi* api, std::string_view args) {
                     // A guarded click (Sentinel's AutoAccept): requires a ready player trade with that partner and
                     // an empty outgoing side so /notify can receive a trade without giving anything away.
                     if (c.trade() && c.trade()->open && !c.trade()->with_npc && c.trade()->their_ready &&
-                        !c.trade()->my_ready && game::iequals(c.trade()->partner_name, n.expected)) {
+                        !c.trade()->my_ready && iequals(c.trade()->partner_name, n.expected)) {
                         const bool coins = std::any_of(c.trade()->my_coins.begin(), c.trade()->my_coins.end(),
                                                        [](auto amount) { return amount != 0; });
                         const bool items = std::any_of(c.inventory().items().begin(), c.inventory().items().end(),
@@ -60,16 +60,16 @@ bool run_notify_command(UiHost& host, UiApi* api, std::string_view args) {
             // calls: only the player answers it (the player's own typed /notify has no caller name).
             case A::ConfirmYes:
                 if (refuse_code_destroy_yes(host, !plugin::caller_name().empty())) return false;
-                if (!n.expected.empty() && !game::iequals(c.confirmation_requester(), n.expected)) break;
+                if (!n.expected.empty() && !iequals(c.confirmation_requester(), n.expected)) break;
                 answer_confirmation_question(host, true);
                 break;
             case A::ConfirmOk:
                 if (refuse_code_destroy_yes(host, !plugin::caller_name().empty())) return false;
-                if (!n.expected.empty() && !game::iequals(c.confirmation_requester(), n.expected)) break;
+                if (!n.expected.empty() && !iequals(c.confirmation_requester(), n.expected)) break;
                 answer_confirmation_question(host, c.confirmation() && c.confirmation()->ok_only);
                 break;
             case A::ConfirmNo:
-                if (!n.expected.empty() && !game::iequals(c.confirmation_requester(), n.expected)) break;
+                if (!n.expected.empty() && !iequals(c.confirmation_requester(), n.expected)) break;
                 answer_confirmation_question(host, false);
                 break;
             case A::LargeDialogOk: if (c.large_dialog() && !c.large_dialog()->buttons) c.answer_large_dialog(0); break;

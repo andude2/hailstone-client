@@ -188,17 +188,6 @@ struct SpawnBuff {
     V value;
     const game::BuffSlot* buff;
 };
-// The player's pet: the one the pet window shows, else the first the player owns (MQ's Me.Pet and Pet).
-const game::Spawn* my_pet(const Context& c) {
-    if (!c.conn) return nullptr;
-    if (c.conn->pets().focused) return spawn_of(c, c.conn->pets().focused);
-    for (const auto& [id, o] : c.conn->world().spawns)
-        if (o.pet_owner_id == c.conn->world().player_id && !o.is_corpse) return &o;
-    return nullptr;
-}
-
-// The pet as MQ's pet type (a spawn whose Buff reads the pet window), NULL without one.
-V pet_value(const game::Spawn* pet) { return pet ? V::object(g.pet, pet->id) : V::nil(); }
 
 std::vector<SpawnBuff> spawn_buffs(const Context& c, const game::Spawn& s) {
     std::vector<SpawnBuff> out;
@@ -1850,7 +1839,10 @@ V character_member(const Context& c, const char* name) {
 // 7..26 the extended targets); 0 until the server sends one, as MQ's pAggroInfo reads.
 V aggro_pct(const Context& c, int type) {
     if (!c.conn || type < 0 || type >= net::kAggroTypes) return V::integer(0);
-    return V::integer(c.conn->aggro().pct[static_cast<std::size_t>(type)]);
+    const auto& a = c.conn->aggro();
+    if ((type == net::kAggroPlayer || type == net::kAggroSecondary) && a.target_id && a.target_id != c.conn->target())
+        return V::integer(0);
+    return V::integer(a.pct[static_cast<std::size_t>(type)]);
 }
 
 // MQ's FindItemByID / FindItemByName over the carried items (worn, packs and their bags, the cursor): a number is an
@@ -1873,8 +1865,9 @@ std::optional<net::ItemSlot> find_carried(const Context& c, std::string_view ind
 
 // The seconds until an item's click effect may be used again (GetItemTimer); nullopt without a click effect.
 std::optional<std::int64_t> item_click_seconds(const Context& c, const net::Item& it) {
-    if (!c.conn || !it.effects[net::kEffectClick].present()) return std::nullopt;
-    const auto ready_at = static_cast<std::int64_t>(c.conn->item_recast_timer(&it));
+    const net::Item& click = net::item_click_source(it);
+    if (!c.conn || !click.effects[net::kEffectClick].present()) return std::nullopt;
+    const auto ready_at = static_cast<std::int64_t>(c.conn->item_recast_timer(&click));
     const auto now = static_cast<std::int64_t>(std::time(nullptr));
     return ready_at > now ? ready_at - now : 0;
 }
@@ -2027,7 +2020,8 @@ void register_e3_members() {
             const game::SpellData* s = spell_data(ctx, c.combat_ability(i));
             if (s && iequals(s->name, index)) return V::integer(i + 1);
         }
-        return V::nil();
+        const auto st = ability(ctx, AbilityKind::Discipline, index);
+        return st && st->id >= 0 ? V::integer(static_cast<std::int64_t>(st->id) + 1) : V::nil();
     });
     // MQ reads the Combat Abilities window's effect label: the discipline in the last buff slot.
     me_member("ActiveDisc", [](const Context& ctx, const GameConnection& c, std::string_view) -> V {
@@ -2165,14 +2159,15 @@ void register_e3_members() {
     im("NoTrade", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::boolean(it.no_trade()); });
     im("Tradeskills", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::boolean(it.tradeskills != 0); });
     im("Clicky", [](const Context& c, const Value&, const net::Item& it, std::string_view) -> V {
-        const auto& e = it.effects[net::kEffectClick];
+        const auto& e = net::item_click_source(it).effects[net::kEffectClick];
         return e.present() ? spell_value(c, static_cast<std::uint32_t>(e.effect)) : V::nil();
     });
     // MQ's EffectType: the first of scroll, click (worn / inventory), worn or focus, combat.
     im("EffectType", [](const Context&, const Value&, const net::Item& it, std::string_view) -> V {
         if (it.effects[net::kEffectScroll].present()) return V::string("Spell Scroll");
-        if (it.effects[net::kEffectClick].present()) {
-            switch (it.effects[net::kEffectClick].type) {
+        const auto& click = net::item_click_source(it).effects[net::kEffectClick];
+        if (click.present()) {
+            switch (click.type) {
             case 4: return V::string("Click Worn");
             case 1:
             case 5: return V::string("Click Inventory");
@@ -2501,22 +2496,33 @@ void register_e3_members2() {
     // pPetInfoWnd), whether or not the server sent its buffs as a target's
     Type& pet = const_cast<Type&>(*g.pet);
     pet.parent = g.spawn;
-    // Buff[n]: pet window slot n (NULL when empty); Buff[name]: the slot (1-based) of the first whose name starts so.
+    // Buff[n]: pet window slot n (NULL when empty); Buff[name]: the slot (1-based) of the first whose name starts so
+    // (=name for exact); Buff with no index: count of active pet buffs.
     auto pet_buff = [](const Context& c, std::string_view index) -> V {
-        if (!c.conn || index.empty()) return V::nil();
+        if (!c.conn) return V::nil();
+        if (index.empty()) {
+            std::int64_t count = 0;
+            for (const auto& [slot, b] : c.conn->pet_buffs()) count += !b.empty();
+            return V::integer(count);
+        }
         std::int64_t n = 0;
         if (parse_int(index, n)) {
             if (n < 1) return V::nil();
             V v = V::object(g.buff, n - 1, kPetBuffs);
             return buff_of(c, v) ? v : V::nil();
         }
+        const bool exact = index.front() == '=';
+        const std::string_view wanted = exact ? index.substr(1) : index;
+        if (wanted.empty()) return V::nil();
         std::vector<std::pair<std::uint32_t, std::uint32_t>> list; // slot, spell
         for (const auto& [slot, b] : c.conn->pet_buffs())
             if (!b.empty()) list.emplace_back(slot, b.spell);
         std::sort(list.begin(), list.end());
         for (const auto& [slot, spell] : list) {
             const game::SpellData* d = spell_data(c, spell);
-            if (d && d->name.size() >= index.size() && iequals(std::string_view(d->name).substr(0, index.size()), index))
+            if (!d) continue;
+            if (exact ? iequals(d->name, wanted)
+                      : (d->name.size() >= wanted.size() && iequals(std::string_view(d->name).substr(0, wanted.size()), wanted)))
                 return V::integer(std::int64_t{slot} + 1);
         }
         return V::nil();
@@ -2524,6 +2530,7 @@ void register_e3_members2() {
     add(g.pet, "Buff", [pet_buff](const Context& c, const Value&, std::string_view index) { return pet_buff(c, index); });
     // BuffDuration[n|name]: the time left on that pet buff; NULL for none or a permanent one.
     add(g.pet, "BuffDuration", [pet_buff](const Context& c, const Value&, std::string_view index) -> V {
+        if (index.empty()) return V::nil();
         V b = pet_buff(c, index);
         if (b.kind == Value::Kind::Int) b = V::object(g.buff, b.i - 1, kPetBuffs);
         const game::BuffSlot* s = b.kind == Value::Kind::Object ? buff_of(c, b) : nullptr;

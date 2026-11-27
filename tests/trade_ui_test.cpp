@@ -117,12 +117,15 @@ TEST_CASE("Sentinel trade: the host rechecks recipient and the outgoing side on 
     auto& inv = net::GameConnectionTestAccess::inventory(c);
     inv.put(slot, make_item(1001, "Outgoing item", 0));
     CHECK(parse("${Window[TradeWnd].Child[TRDW_TradeSlot0].Tooltip}") == "Outgoing item");
-    c.send_command("/notify TradeWnd TRDW_Trade_Button leftmouseup Friend");
+    app::UiHost host;
+    host.conn = &c;
+    host.in_game = true;
+    app::run_notify_command(host, nullptr, "TradeWnd TRDW_Trade_Button leftmouseup Friend");
     CHECK_FALSE(c.trade()->my_ready);
     inv.take(slot);
-    c.send_command("/notify TradeWnd TRDW_Trade_Button leftmouseup Different");
+    app::run_notify_command(host, nullptr, "TradeWnd TRDW_Trade_Button leftmouseup Different");
     CHECK_FALSE(c.trade()->my_ready);
-    c.send_command("/notify TradeWnd TRDW_Trade_Button leftmouseup Friend");
+    app::run_notify_command(host, nullptr, "TradeWnd TRDW_Trade_Button leftmouseup Friend");
     CHECK(c.trade()->my_ready);
 }
 
