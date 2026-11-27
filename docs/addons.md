@@ -174,6 +174,8 @@ next start (docs/graphics.md "Upscaler providers").
     header is checked for this platform; none is loaded at the install.
 - **While it runs** the client has a copy loaded (`cache/upscalers/`), so an update or removal takes effect at the
   next start.
+- **Hailstone's own updates** never write or remove anything in `upscalers/` (docs/updater.md "The install"), so a
+  release cannot replace an upscaler add-on that shares a name with one it might ship.
 
 An older Hailstone refuses an upscaler's manifest ("the kind is script, plugin or tool").
 
@@ -278,6 +280,8 @@ min_client 0.2.0
 author Some One
 description Loots what you tell it to.
 caps read,events,actions,ui
+required_tlos Me,Target
+suggested_tlos Spawn
 notes https://github.com/owner/autoloot/releases/tag/v1.3.0
 package any 41233 <sha256> autoloot-1.3.0.zip
 key <Ed25519 public key, 64 hex digits>
@@ -292,12 +296,21 @@ signature <128 hex digits>
 | `version`, `min_client` | SemVer (`core/version.h`); `min_client` is optional |
 | `author`, `description` | optional, one line each of at most 200 bytes |
 | `caps` | what it needs (docs/plugins.md "Capabilities"); required, and the ceiling below; a tool's and an upscaler's are `none` |
+| `required_tlos` | TLO roots a script or native plugin needs for its main function, or `none` |
+| `suggested_tlos` | TLO roots for features the add-on can turn off or work without, or `none` |
 | `notes` | optional: its release notes |
 | `package <platform> <size> <sha256> <file>` | a script has one, for `any`; a plugin, a tool or an upscaler one per platform it is built for (`linux-x64`, `windows-x64`, `macos-arm64` ...); see the note below |
 | `key`, `signature` | optional, together: Ed25519 over every byte before the `signature` line, which ends the file |
 
 A `package` file is a name beside the manifest's address (the same release's asset, or the same branch's file) or an
 https address on GitHub. Unknown records are skipped; a known record that does not parse refuses the whole manifest.
+
+List the root name only. For `${Me.Name}` declare `Me`, and for `${Spawn[123].Name}` declare `Spawn`. Separate roots
+with commas. Names are case-insensitive, and a root in both lists counts as required. Each list can use up to 8,192
+bytes. Server Management displays these declarations when a GM reviews an add-on and when a declared root conflicts
+with server policy. A declaration alone grants no access. If you sign the manifest, the signature covers both lists.
+Older releases with omitted lists still install and show those dependencies as unknown. Use `none` to explicitly
+declare an empty list.
 
 **Where the client looks:**
 
@@ -313,8 +326,10 @@ repository answers 404 and is reported as not an add-on.
 
 ```sh
 tools/make_addon.py --name autoloot --kind script --version 1.3.0 --caps read,events,actions,ui \
+    --required-tlos Me,Target --suggested-tlos Spawn \
     --dir path/to/autoloot --author "Some One" --description "Loots what you tell it to." --out release/
 tools/make_addon.py --name MQ2Hud --kind plugin --version 2.0.0 --caps read,ui \
+    --required-tlos Me --suggested-tlos none \
     --platform linux-x64=build-linux/MQ2Hud --platform windows-x64=build-win/MQ2Hud --out release/
 build/hailstone_sign keygen <secret-key-file>                  # once; keep it off GitHub
 build/hailstone_sign sign <secret-key-file> release/hailstone-addon.txt
@@ -323,11 +338,16 @@ build/hailstone_sign sign <secret-key-file> release/hailstone-addon.txt
 - The script checks the client's rules for what a package may hold before it makes anything:
   - the names its zip reader takes (no `\`, `:` or control character, no part ending in `.` or a space, no Windows
     device name such as `aux.lua`);
-  - the version as the client parses it (no leading zeros).
+  - the version as the client parses it (no leading zeros);
+  - the TLO roots given in `--required-tlos` and `--suggested-tlos`. Both are optional. One that is left out prints
+    a warning and writes no line, so Server Management shows that list as unknown; give `none` to declare an empty
+    list;
+  - one `--platform` a platform (a second would overwrite the first's zip and leave two package lines).
 - It leaves out files and folders whose name starts with `.`, stores a link as what it points to only when that lies
   inside the package's folder, and refuses an `--out` inside a package's folder, where old zips would be packed.
 - Its zips are reproducible (sorted, dated 1980-01-01), so an unchanged package keeps its hash.
-- `hailstone_sign sign` writes the key's line into the manifest and signs it; `verify` checks it.
+- `hailstone_sign sign` writes the key's line into the manifest and signs it (refusing a manifest with lines after
+  an old signature line, which it would otherwise drop); `verify` checks it.
 - Upload everything in `release/` to a GitHub release.
 
 The repository has to be public. A plugin whose source must stay private can be released from a second, public
@@ -502,6 +522,7 @@ addons/
   journal.txt     an install's or a removal's moves, one a line, and a line once installed.txt is saved
   installed.prev.txt installed.txt as it was before an install or a removal rewrote it, until that has finished
   kept-<time>/    what an undo found in previous/ that the journal did not name (never removed by the client)
+  install.lock    held by the one Hailstone that unpacks, installs, removes or records add-ons in this folder
 scripts/<name>/   an installed script
 plugins/<name>/   an installed plugin
 tools/<name>/     an installed tool (its program, its libraries, its data)
@@ -515,8 +536,22 @@ ui-addons/<addon>/ an installed interface add-on (its ui/<pack>/ folders, UI pac
   update.
 - **A removal** takes out the add-on's files and record. The player's files stay; the folder goes once empty.
 - **A cut-off install or removal** (the client died between moves) is undone at the next start from the journal.
+- **One Hailstone at a time** unpacks, installs, removes or writes `installed.txt` in a folder: each takes
+  `addons/install.lock` (`lock_addons`, released when the process ends). Two windows started on their own would
+  otherwise undo each other's journal at start, empty each other's `new/`, or write `installed.txt` from an older read
+  and lose a line (a lost line makes that add-on's files hand-installed ones, with every capability on a server
+  without `hailstone.cfg`). While another process holds it:
+  - the start leaves the journal, `new/` and `previous/` alone (that install is under way, not cut off); a later
+    start looks again;
+  - what is downloaded stays staged, and the login screen installs it once the lock is free;
+  - a download's unpacking, a removal and a change of the auto-update or enable switch fail with a message, to be
+    tried again.
+
+  Within one process the hold is shared: its add-on thread may unpack one add-on while the login screen installs
+  another, as before.
 - **The core updater** (docs/updater.md) never writes `addons/`. It skips its optional plugin package for a folder an
-  add-on installed (checked at download and again at install). `scripts/` and `tools/` are the player's to it already.
+  add-on installed (checked at download and again at install). `scripts/`, `tools/`, `upscalers/` and `ui-addons/`
+  are the player's to it already.
   Its `core` package's files in such a plugin folder are left out of the install, and those it shipped there before
   are not taken out.
 
@@ -576,7 +611,7 @@ cannot install another.
 
 Tests: `tests/addon_*_test.cpp` (manifest, install, manager against GitHub in memory, index and store, upscaler,
 tool, requirements, upscaler policy), plus `tests/plugin_policy_test.cpp`, `tests/lua_ui_pregame_test.cpp`,
-`tests/ui_pack_windows_test.cpp` and `tests/dev_ui_test.cpp`.
+`tests/ui_pack_windows*_test.cpp` and `tests/dev_ui_test.cpp`.
 
 Not checked yet:
 

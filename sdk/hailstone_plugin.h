@@ -1286,8 +1286,25 @@ typedef struct PluginHostApi {
      * config_dir writes it (the full length returned; cut to fit), 0 when the client has none. Needs no capability.
      * Added later in ABI 4: test HAILSTONE_HOST_HAS(host, get_scripts_config_dir) first. */
     int (*get_scripts_config_dir)(void* host, char* out, size_t out_size);
+    /* UI + EXTEND. Arm a one-shot ground aim for the player. Only one owner can aim at a time.
+     * Start returns 1 when armed. Get requires out->size and returns 1 when it writes the current
+     * status and zone identity. CONFIRMED and CANCELLED are consumed by the owner on the first read.
+     * Cancellation affects only the caller's placement. These calls run on the client's own thread.
+     * After the player cancels an aim (Escape, a right click), start returns 0 for that plugin until the
+     * player presses a mouse button over one of the windows (its own button, say).
+     * Check HAILSTONE_WORLD_PLACEMENT via world_capabilities in the world, then check all three
+     * entries with HAILSTONE_HOST_HAS. Added later in ABI 4: test HAILSTONE_HOST_HAS(host,
+     * world_placement_start), world_placement_get and world_placement_cancel first. */
+    int (*world_placement_start)(void* host);
+    int (*world_placement_get)(void* host, HailstoneWorldPlacement* out);
+    void (*world_placement_cancel)(void* host);
+    /* Local chat group. Pass a NUL-terminated title (1 to 80 bytes) and 1 to 32 NUL-terminated rows
+     * (1 to 1024 bytes each). The client copies the strings during the call. Returns 1 accepted, 0 invalid or
+     * unavailable. Needs no capability. Call on the client's thread or on a thread using lend_thread. Use
+     * HAILSTONE_HOST_HAS(host, write_chat_group) before calling this appended ABI 4 service. */
+    int (*write_chat_group)(void* host, const char* title, const char* const* lines, uint32_t count);
     /* ---- ABI 5: this branch's own calls, appended after upstream's ABI 4 table (set_ui_contribution through
-     * get_scripts_config_dir above). Nothing there moved; test HAILSTONE_HOST_HAS before using any of these. ---- */
+     * write_chat_group above). Nothing there moved; test HAILSTONE_HOST_HAS before using any of these. ---- */
     /* READ. The open loot session (a corpse's items and coin) as records, as get_raid_data_bulk lays its list
      * out. Added in ABI 5: test HAILSTONE_HOST_HAS(host, get_loot_data_bulk) first. */
     int32_t (*get_loot_data_bulk)(void* host, unsigned char* out, int32_t out_size);

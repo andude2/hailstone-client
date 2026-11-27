@@ -11,6 +11,7 @@
 #include <format>
 #include <fstream>
 
+#include "core/capped_map.h"
 #include "core/character_files.h"
 #include "core/ini_file.h"
 #include "core/log.h"
@@ -402,7 +403,8 @@ void GameConnection::handle_trader_purchase(const TraderBuy& in) {
             system(1437, {game::money_words(total), merchant_ ? merchant_->name : b.seller_name}, kMerchantsColour);
         }
     } else {
-        --search_pending_;
+        // As the merchant path above: an answer to no purchase of ours must not count one in advance.
+        if (search_pending_ > 0) --search_pending_;
         if (b.sub_action == 0) {
             std::int64_t total = static_cast<std::int64_t>(b.quantity) * b.price + b.already_sold;
             if (!game::take_money(coins_, total)) coins_ = {};
@@ -539,7 +541,7 @@ void GameConnection::bazaar_find_trader(std::size_t result, bool throttled) {
         bazaar_.found_trader = spawn;
         if (bazaar_.find_sent && eq_time() - bazaar_.last_find_ms < kFindWaitMs) return;
     }
-    if (auto it = world_.spawns.find(spawn); it != world_.spawns.end()) send_find_path(it->second, true);
+    if (auto it = world_.spawns.find(spawn); it != world_.spawns.end()) send_find_path(it->second, {true});
     bazaar_.last_find_ms = eq_time();
     bazaar_.find_sent = true;
     bazaar_.found_trader = spawn;
@@ -1221,7 +1223,7 @@ void GameConnection::barter_search_find() {
     s.found_buyer = l.buyer_spawn_id;
     send_zone(encode_find_market_spawn(l.buyer_spawn_id));
     auto it = world_.spawns.find(l.buyer_spawn_id);
-    if (it != world_.spawns.end()) send_find_path(it->second, true);
+    if (it != world_.spawns.end()) send_find_path(it->second, {true});
     s.last_find_ms = static_cast<std::uint32_t>(now_ms());
 }
 
@@ -1461,7 +1463,7 @@ void GameConnection::handle_market(Op op, const AppPacket& p) {
                 if (m->buy) handle_trader_purchase(*m->buy);
                 break;
             case kBazaarAddTrader:
-                bazaar_.traders[m->trader.trader_id] = m->trader;
+                core::assign_capped(bazaar_.traders, m->trader.trader_id, m->trader, game::kBazaarTradersKept);
                 break;
             case kBazaarRemoveTrader:
                 bazaar_.traders.erase(m->trader.trader_id);
@@ -1491,7 +1493,7 @@ void GameConnection::handle_market(Op op, const AppPacket& p) {
     case Op::TraderBulkSend:
         if (auto v = decode_trader_bulk(p)) {
             bazaar_.traders.clear();
-            for (auto& t : *v) bazaar_.traders[t.trader_id] = std::move(t);
+            for (auto& t : *v) core::assign_capped(bazaar_.traders, t.trader_id, std::move(t), game::kBazaarTradersKept);
         }
         break;
     case Op::BazaarSearch:
@@ -1503,7 +1505,8 @@ void GameConnection::handle_market(Op op, const AppPacket& p) {
                 bazaar_.searching = false; // the server's "done" (and the delivery costs)
                 break;
             }
-            for (auto& e : r->results) bazaar_.results.push_back(std::move(e));
+            for (auto& e : r->results)
+                if (bazaar_.results.size() < game::kBazaarResultsKept) bazaar_.results.push_back(std::move(e));
         }
         break;
     case Op::Barter:

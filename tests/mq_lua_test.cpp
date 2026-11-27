@@ -3,7 +3,9 @@
 #include <doctest/doctest.h>
 
 #include <chrono>
+#include <cmath>
 #include <fstream>
+#include <limits>
 #include <thread>
 #include <utility>
 
@@ -12,9 +14,11 @@
 #include "core/ini_file.h"
 #include "core/log.h"
 #include "core/sha256.h"
+#include "game/coords.h"
 #include "mq/commands.h"
 #include "mq/lua_mq.h"
 #include "mq/lua_script.h" // ScriptRun, HostWork (the host's insides)
+#include "mq/map_filter.h"
 #include "mq_test_world.h"
 #include "scratch_dir.h"
 #include "app/web_service.h"
@@ -34,8 +38,10 @@ struct Host {
     plugin::Policy policy;
     mq::Registry reg;
     mq::Context ctx;
+    mq::MapFilters filters;
     std::vector<std::string> printed, sent;
     std::vector<std::pair<std::string, int>> keys; // /keypress: the command and its mode (0 tap, 1 hold, 2 release)
+    std::vector<double> faced; // /face: the MQ degrees asked for
     std::uint32_t target = 0;
     std::int64_t clock = 0;
     std::unique_ptr<mq::Commands> commands;
@@ -51,6 +57,7 @@ struct Host {
         mq::CommandEnv ce;
         ce.hooks = &hooks;
         ce.registry = &reg;
+        ce.map_filters = &filters;
         ce.context = [this]() -> const mq::Context& { return ctx; };
         ce.echo = [this](const std::string& t) { printed.push_back(t); };
         ce.run = [this](const std::string& l) { run(l); };
@@ -59,6 +66,7 @@ struct Host {
             keys.emplace_back(command, mode);
             return true;
         };
+        ce.face = [this](double degrees, bool) { faced.push_back(degrees); };
         ce.now_ms = [this] { return clock; };
         commands = std::make_unique<mq::Commands>(ce);
         mq::ScriptEnv se;
@@ -120,6 +128,47 @@ struct Host {
 
 } // namespace
 
+TEST_CASE("MQ Lua: TLO policy also gates retained named references when rules change") {
+    Host h;
+    h.write("tlo_policy.lua", R"lua(
+local mq = require('mq')
+local root = mq.TLO.Me
+local member = root.Name
+local indexed = mq.TLO.Float('25')
+local child = indexed.Int
+assert(member() == 'Tester')
+assert(indexed() == 25 and child() == 25)
+print('references made')
+mq.delay(10)
+assert(root() == nil and member() == nil)
+assert(indexed() == nil and child() == nil)
+assert(mq.TLO.mE.Name() == nil and mq.TLO.Float('25').Int() == nil)
+assert(mq.parse('${mE.Name} ${Float[25]}') == 'NULL NULL')
+local spawns = mq.getAllSpawns()
+assert(#spawns > 0 and spawns[1].ID() ~= nil)
+print('references denied')
+mq.delay(10)
+assert(root.Name() == 'Tester' and member() == 'Tester')
+assert(indexed() == 25 and child() == 25)
+print('references restored')
+)lua");
+    std::vector<std::string> told;
+    h.reg.set_denial_notice([&](const std::string& text) { told.push_back(text); });
+    REQUIRE(h.scripts->run("tlo_policy", {}));
+    h.pulses(1);
+    REQUIRE(h.printed_line("references made"));
+    net::GameConnectionTestAccess::set_server_rules(
+        *h.world.conn, plugin::parse_server_cfg("[tlos]\nblock = Me, Float\n"));
+    h.pulses(1, 10);
+    REQUIRE(h.printed_line("references denied"));
+    // Each blocked root is told once for the script, however many of its lookups were refused.
+    CHECK(told == std::vector<std::string>{"[MQ] tlo_policy: the server blocks TLO Me",
+                                           "[MQ] tlo_policy: the server blocks TLO Float"});
+    net::GameConnectionTestAccess::set_server_rules(*h.world.conn, std::nullopt);
+    h.pulses(1, 10);
+    CHECK(h.printed_line("references restored"));
+}
+
 TEST_CASE("MQ Lua: spell data exposes raw display fields") {
     Host h;
     h.write("spell_fields.lua", R"(
@@ -139,6 +188,131 @@ print('spell fields ok')
     REQUIRE(h.scripts->run("spell_fields", {}));
     h.pulses(1);
     CHECK(h.printed_line("spell fields ok"));
+}
+
+TEST_CASE("MQ Lua: TLO grants follow the verified managed entry and its verified modules") {
+    Host h;
+    const std::string entry = R"lua(
+local mq = require('mq')
+if ... == 'copy' then
+    assert(mq.TLO.Me.Name() == nil)
+    print('copy denied')
+    return
+end
+local member = mq.TLO.Me.Name
+assert(member() == 'Tester')
+assert(require('same_addon') == 'Tester')
+assert(mq.parse('${mE.Name} ${Float[25]}') == 'Tester NULL')
+local spawns = mq.getAllSpawns()
+assert(#spawns > 0 and spawns[1].ID() ~= nil)
+mq.cmd('/timed 1 /echo grant ${Me.Name}')
+mq.cmd('/timed 2 /echo revoked ${Me.Name}')
+mq.delay(110)
+assert(require('foreign'))
+assert(member() == nil and mq.parse('${Me.Name}') == 'NULL')
+print('retained reference denied')
+mq.delay(200)
+)lua";
+    const std::string module = "return require('mq').TLO.Me.Name()";
+    h.write("verified/init.lua", entry);
+    h.write("verified/same_addon.lua", module);
+    h.write("copied/init.lua", entry);
+    h.write("foreign.lua", R"lua(
+assert(require('mq').TLO.Me.Name() == nil)
+return true
+)lua");
+    h.policy.set_ceilings({
+        {plugin::FileKind::Script, sha256(entry), plugin::kCapAll, "Verified", "OWNER/Verified", true, true,
+         h.lua_dir / "verified/init.lua"},
+        {plugin::FileKind::Script, sha256(module), plugin::kCapAll, "Verified", "owner/verified", true, false,
+         h.lua_dir / "verified/same_addon.lua"},
+    });
+    net::GameConnectionTestAccess::set_server_rules(
+        *h.world.conn, plugin::parse_server_cfg("[tlos]\nblock = Me, Float\naddon_allow = owner/verified:Me\n"));
+    REQUIRE(h.scripts->run("verified", {}));
+    REQUIRE(h.scripts->run("copied", {"copy"}));
+    h.pulses(1);
+    REQUIRE(h.printed_line("copy denied"));
+    CHECK(h.reg.tlo(h.ctx, "Me", {}).kind == mq::Value::Kind::Nil);
+    h.clock = 100;
+    h.hooks.pulse();
+    CHECK(h.printed_line("grant Tester"));
+    h.pulses(1, 10);
+    REQUIRE(h.printed_line("retained reference denied"));
+    h.clock = 200;
+    h.hooks.pulse();
+    CHECK(h.printed_line("revoked NULL"));
+}
+
+TEST_CASE("MQ Lua: a managed TLO grant carries over to deferred work across a policy refresh, and a revoked one does not") {
+    Host h;
+    const std::string entry = R"lua(
+local mq = require('mq')
+mq.cmd('/timed 1 /echo kept ${Me.Name}')
+mq.cmd('/timed 2 /echo dropped ${Me.Name}')
+mq.delay(1000)
+)lua";
+    h.write("verified/init.lua", entry);
+    const plugin::Ceiling verified{plugin::FileKind::Script, sha256(entry), plugin::kCapAll, "Verified", "owner/verified",
+                                   true, true, h.lua_dir / "verified/init.lua"};
+    h.policy.set_ceilings({verified});
+    net::GameConnectionTestAccess::set_server_rules(
+        *h.world.conn, plugin::parse_server_cfg("[tlos]\nblock = Me\naddon_allow = owner/verified:Me\n"));
+    REQUIRE(h.scripts->run("verified", {}));
+    h.pulses(1);
+    // A re-sync (a zone-in) makes a new policy generation; the grant is still there.
+    h.policy.set(*h.policy.current());
+    h.scripts->policy_changed({});
+    h.clock = 100;
+    h.hooks.pulse();
+    CHECK(h.printed_line("kept Tester"));
+    // The add-on's record is gone (it no longer verifies): its queued line fails closed.
+    h.policy.set_ceilings({});
+    h.scripts->policy_changed({});
+    h.clock = 200;
+    h.hooks.pulse();
+    CHECK(h.printed_line("dropped NULL"));
+}
+
+TEST_CASE("MQ Lua: external bind and synthetic chat cannot borrow a managed TLO grant after yielding") {
+    Host h;
+    const std::string entry = R"lua(
+local mq = require('mq')
+local function check(source)
+    print(source .. ' before ' .. (mq.TLO.Me.Name() or 'denied'))
+    mq.delay(1)
+    print(source .. ' after ' .. (mq.TLO.Me.Name() or 'denied'))
+end
+mq.bind('/tlofixture', check)
+mq.event('fixture', 'fixture!', function() check('chat') end)
+while true do
+    mq.doevents()
+    mq.delay(1)
+end
+)lua";
+    h.write("verified/init.lua", entry);
+    h.policy.set_ceilings({
+        {plugin::FileKind::Script, sha256(entry), plugin::kCapAll, "Verified", "owner/verified", true, true,
+         h.lua_dir / "verified/init.lua"},
+    });
+    net::GameConnectionTestAccess::set_server_rules(
+        *h.world.conn, plugin::parse_server_cfg("[tlos]\nblock = Me\naddon_allow = owner/verified:Me\n"));
+    REQUIRE(h.scripts->run("verified", {}));
+    h.pulses(1);
+    h.run("/tlofixture player");
+    {
+        plugin::CallerScope unverified(plugin::kCapAll, "Verified");
+        h.run("/tlofixture foreign");
+        plugin::ChatLine line{"fixture!", 0, 0, true, plugin::kCapAll};
+        h.hooks.chat(line);
+    }
+    h.pulses(4, 10);
+    CHECK(h.printed_line("player before Tester"));
+    CHECK(h.printed_line("player after Tester"));
+    CHECK(h.printed_line("foreign before denied"));
+    CHECK(h.printed_line("foreign after denied"));
+    CHECK(h.printed_line("chat before denied"));
+    CHECK(h.printed_line("chat after denied"));
 }
 
 TEST_CASE("MQ Lua: hailstone.raid is a columnar roster") {
@@ -914,6 +1088,35 @@ print('read', dofile('f1.lua').v)
     CHECK_FALSE(fs::exists(own / "more.lua"));
 }
 
+TEST_CASE("MQ Lua: mq.pickle's byte limit counts a replaced file once and the script's own new files") {
+    Host h(plugin::kCapRead | plugin::kCapCommands); // scripts/config/bytes/
+    const fs::path own = h.config_dir / "bytes";
+    fs::create_directories(own / "deep");
+    std::ofstream(own / "deep" / "pad.bin", std::ios::binary).close();
+    fs::resize_file(own / "deep" / "pad.bin", std::uintmax_t{56} << 20); // sparse: 56 of the 64 MiB
+    h.write("bytes.lua", R"(
+local mq = require('mq')
+local three = string.rep('a', 3 * 1024 * 1024)
+print('a', pcall(mq.pickle, 'a.lua', {s = three}))
+for i = 1, 6 do print('again' .. i, pcall(mq.pickle, 'a.lua', {s = three})) end
+print('b', pcall(mq.pickle, 'sub/b.lua', {s = three}))
+print('c', pcall(mq.pickle, 'c.lua', {s = three}))
+print('small', pcall(mq.pickle, 'a.lua', {v = 1}))
+print('c2', pcall(mq.pickle, 'c.lua', {s = three}))
+)");
+    REQUIRE(h.scripts->run("bytes", {}));
+    h.pulses(20); // (several 3 MiB pickles may take more than one slice)
+    CHECK(h.printed_line("a true"));
+    for (int i = 1; i <= 6; ++i) CHECK(h.printed_line("again" + std::to_string(i) + " true")); // 59 MiB, not 77
+    CHECK(h.printed_line("b true"));                                                     // 62 MiB
+    bool full = false;
+    for (const auto& l : h.printed) full |= l.rfind("c false", 0) == 0 && l.find("config directory is full") != std::string::npos;
+    CHECK(full); // 65 MiB: the count has b in it, written after it was taken
+    CHECK(h.printed_line("small true"));
+    CHECK(h.printed_line("c2 true")); // a's shrinking freed its room
+    CHECK(fs::exists(own / "sub" / "b.lua"));
+}
+
 TEST_CASE("MQ Lua: require of a huge name that is not there is a plain error, and the script goes on") {
     Host h;
     h.write("huge_require.lua", R"(
@@ -998,6 +1201,26 @@ TEST_CASE("MQ commands: /target, ${} for typed lines, /noparse, /squelch") {
     CHECK(h.printed.back() == "There are no spawns matching: (next Groupie)");
 }
 
+TEST_CASE("MQ commands: /mapfilter shares its state with the map model") {
+    Host h;
+    h.run("/mapfilter npc show");
+    CHECK(h.filters.enabled(mq::MapFilter::Npc));
+    h.run("/mapfilter npcconcolor show");
+    CHECK(h.filters.enabled(mq::MapFilter::NpcConColor));
+    h.run("/mapfilter target show");
+    h.run("/mapfilter targetradius 40");
+    CHECK(h.filters.state(mq::MapFilter::TargetRadius).radius == 40.0f);
+    h.run("/mapfilter custom npc radius 25");
+    REQUIRE(h.filters.custom_search());
+    CHECK(h.filters.custom_search()->radius == 25.0);
+    h.run("/mapfilter");
+    bool custom_status = false;
+    for (const auto& line : h.printed)
+        custom_status |= line.find("Custom: npc radius 25") != std::string::npos;
+    CHECK(custom_status);
+    CHECK(h.sent.empty()); // the hook took the command; nothing went to the server
+}
+
 TEST_CASE("MQ commands: /keypress reads hold only after a space") {
     Host h;
     h.run("/keypress forward hold");
@@ -1008,6 +1231,42 @@ TEST_CASE("MQ commands: /keypress reads hold only after a space") {
     h.run("/keypress forward hold\t");
     REQUIRE(h.keys.size() == 2);
     CHECK(h.keys.back().second == 0);
+}
+
+TEST_CASE("MQ commands: /face takes only a finite heading or loc") {
+    Host h;
+    h.run("/face heading 450");
+    REQUIRE(h.faced.size() == 1);
+    CHECK(h.faced.back() == doctest::Approx(90.0)); // one turn's degrees
+    h.run("/face heading -90");
+    REQUIRE(h.faced.size() == 2);
+    CHECK(h.faced.back() == doctest::Approx(270.0));
+    // "nan", "inf" and 1e300 parse as numbers; none turns the player, nor falls back to the target.
+    for (const char* bad : {"/face heading nan", "/face heading inf", "/face heading -inf",
+                            "/face loc nan,0", "/face loc 0,inf", "/face loc 1e300,0", "/face loc 1,x"})
+        h.run(bad);
+    CHECK(h.faced.size() == 2);
+    h.run("/face heading 1e300"); // finite but past float: wrapped, not cast
+    CHECK(h.faced.size() == 3);
+    CHECK(h.faced.back() >= 0.0);
+    CHECK(h.faced.back() < 360.0);
+    h.run("/face loc 10,0"); // the server's y first: due north of the player at the origin
+    REQUIRE(h.faced.size() == 4);
+    CHECK(h.faced.back() == doctest::Approx(0.0));
+}
+
+TEST_CASE("MQ degrees to an EQ heading: wrapped, and nothing for NaN or an infinity") {
+    CHECK(*game::mq_degrees_to_heading(0.0) == doctest::Approx(0.0f));
+    CHECK(*game::mq_degrees_to_heading(90.0) == doctest::Approx(384.0f)); // clockwise vs counter-clockwise
+    CHECK(*game::mq_degrees_to_heading(450.0) == doctest::Approx(384.0f));
+    CHECK(*game::mq_degrees_to_heading(-90.0) == doctest::Approx(128.0f));
+    auto huge = game::mq_degrees_to_heading(1e300);
+    REQUIRE(huge);
+    CHECK(*huge >= 0.0f);
+    CHECK(*huge < 512.0f);
+    CHECK_FALSE(game::mq_degrees_to_heading(std::nan("")));
+    CHECK_FALSE(game::mq_degrees_to_heading(std::numeric_limits<double>::infinity()));
+    CHECK_FALSE(game::mq_degrees_to_heading(-std::numeric_limits<double>::infinity()));
 }
 
 TEST_CASE("MQ commands: /target prefers an exact player name over a mount") {
@@ -1129,6 +1388,19 @@ mq.cmd('/docommand /hpbind')
     CHECK(std::find(h.sent.begin(), h.sent.end(), "/tell Groupie bind 75") != h.sent.end());
     CHECK(std::find(h.sent.begin(), h.sent.end(), "/tell Groupie x${Me.PctHPs}") != h.sent.end());
     CHECK(std::find(h.sent.begin(), h.sent.end(), "/tell Groupie x75") == h.sent.end());
+}
+
+TEST_CASE("MQ commands: /nomodkey, /shiftkey and /ctrlkey parse the line they run once") {
+    Host h;
+    net::GameConnectionTestAccess::world(*h.world.conn).spawns[11].name = "x${Me.PctHPs}";
+    // As the client registers them (ClientApp::run_with_keys): the rest of the line goes back through the filters.
+    const auto owner = h.hooks.new_owner("keys");
+    for (const char* word : {"/nomodkey", "/shiftkey", "/ctrlkey"})
+        h.hooks.add_command(owner, word, [&](std::string_view args) { h.run(std::string(args)); });
+    h.run("/nomodkey /tell Groupie ${Spawn[id 11].CleanName} ${Me.PctHPs}");
+    CHECK(h.sent.back() == "/tell Groupie x${Me.PctHPs} 75");
+    h.run("/shiftkey /ctrlkey /tell Groupie ${Spawn[id 11].CleanName}");
+    CHECK(h.sent.back() == "/tell Groupie x${Me.PctHPs}");
 }
 
 TEST_CASE("MQ commands: /timed runs its line that many tenths of a second later, expanded then, as its sender") {
@@ -2055,7 +2327,9 @@ print('more', pcall(mq.event, 'z', 'q', fn))
 print('again', pcall(mq.event, 'e1', 'the same name', fn))
 )");
     REQUIRE(h.scripts->run("ev", {}));
-    h.pulses(1);
+    // The scripts pause after kSliceMs of real time, and 255 events can take longer in a sanitizer build: pulse until
+    // the script's last line, not once.
+    for (int i = 0; i < 500 && !printed_with(h, "again ", ""); ++i) h.pulses(1);
     CHECK(printed_with(h, "long false", "a pattern is at most 1024 bytes"));
     CHECK(printed_with(h, "name false", "a name is at most 256 bytes"));
     CHECK(h.printed_line("max true"));
@@ -2070,7 +2344,7 @@ print('total', pcall(mq.event, 'b33', 'x', function() end))
 print('smaller', pcall(mq.event, 'b1', 'x', function() end))
 )");
     REQUIRE(t.scripts->run("ev", {}));
-    t.pulses(1);
+    for (int i = 0; i < 500 && !printed_with(t, "smaller ", ""); ++i) t.pulses(1);
     CHECK(printed_with(t, "total false", "a script's patterns hold at most 32768 bytes"));
     CHECK(t.printed_line("smaller true"));
 }

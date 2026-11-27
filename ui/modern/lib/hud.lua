@@ -724,6 +724,7 @@ end
 -- has a roll-up button beside it (and a double click on its title bar): rolled up, only the title bar is drawn
 -- (hud.rolled.<window>, kept until it is unrolled, closing and opening it again included).
 --   body(x, y, w, h, s)          draws the contents at that screen rectangle
+local dialogLayoutGeneration = {}
 function hud.Dialog(screen, title, opts, body)
   local key = opts.key or screen
   local shown, sx, sy = gameShown(screen)
@@ -731,6 +732,9 @@ function hud.Dialog(screen, title, opts, body)
   if not shown then return end
   if sx == nil then sx, sy = select(2, API.windows.Replace(screen)) end -- (where the stock window sits)
   local k = keysOf(key)
+  local generation = API.layoutProfiles and API.layoutProfiles.Generation and API.layoutProfiles.Generation() or 0
+  local restored = generation ~= (dialogLayoutGeneration[key] or 0)
+  dialogLayoutGeneration[key] = generation
   local io = ui.GetIO()
   local ownScale = num(k.scale, 1.0)
   local s = (io.uiScale or 1) * ownScale
@@ -770,7 +774,7 @@ function hud.Dialog(screen, title, opts, body)
   -- last place, so the snapping does not hold it back.
   local snapped = false
   local g = snap.Grid()
-  if g and not reset and not testPos then
+  if g and not reset and not restored and not testPos then
     snapped = true
     local rx, ry, rw, rh = ui.FindWindowRect(k.id)
     if rx and (math.abs(rx - x) >= 1 or math.abs(ry - y) >= 1) then
@@ -782,7 +786,7 @@ function hud.Dialog(screen, title, opts, body)
     end
   end
   ui.SetNextWindowPos(math.floor(x), math.floor(y),
-    (reset or testPos or snapped) and ui.Cond.Always or ui.Cond.Appearing)
+    (reset or restored or testPos or snapped) and ui.Cond.Always or ui.Cond.Appearing)
   local savedW, savedH
   if opts.resizable then
     local sz = Setting(k.size) or ""
@@ -831,7 +835,7 @@ function hud.Dialog(screen, title, opts, body)
     local ww, wh = ui.GetWindowSize()
     noteRect(key, wx, wy, ww, wh)
   end
-  if math.abs(wx - x) >= 1 or math.abs(wy - y) >= 1 then
+  if not restored and (math.abs(wx - x) >= 1 or math.abs(wy - y) >= 1) then
     ui.SetSetting(k.pos, string.format("%d,%d", math.floor(wx), math.floor(wy)))
   end
   if visible then

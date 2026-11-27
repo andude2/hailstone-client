@@ -15,11 +15,13 @@
 // one at a time as the player puts each one down.
 
 #include <algorithm>
+#include <array>
 #include <format>
 #include <glm/geometric.hpp>
 
 #include "core/log.h"
 #include "core/saturate.h"
+#include "game/item_links.h"
 #include "game/item_options.h"
 #include "game/merchant.h"
 #include "game/world_state.h"
@@ -446,38 +448,44 @@ void GameConnection::give_to(std::uint32_t spawn_id) {
     send_zone(encode_trade_request({spawn_id, world_.player_id}));
 }
 
-void GameConnection::trade_drop_cursor() {
+void GameConnection::trade_drop_cursor(std::optional<std::int16_t> clicked_slot) {
     if (relay_control_action(DriveAction{.kind = DriveActionKind::TradeDropCursor})) return;
-    // CTradeWnd::DropItemIntoTrade @0x77f6d0: 4 slots for an NPC, 8 for a
-    // player; a stack merges into a matching trade stack first.
     if (!trade_ || !trade_->open) return;
-    Item* held = inventory_.at(ItemSlot::possessions(kSlotCursor));
+    const auto cursor = ItemSlot::possessions(kSlotCursor);
+    Item* held = inventory_.at(cursor);
     if (!held) return;
     if (refuse_kept(held, trade_->with_npc ? "give" : "trade")) return; // Hailstone: game/kept_items.h
     if (!trade_->with_npc && !game::is_droppable(*held)) {
         chat(ChatEvent::Kind::System, strings_.format(12921, std::vector<std::string>{held->name}));
         return;
     }
-    for (std::int16_t n = 0; n < trade_->slots() && held->stackable(); ++n) {
+    // CInvSlot::HandleLButtonUp @0x6963d2 uses the clicked Give slot only if it is empty.
+    if (trade_->with_npc && clicked_slot) {
+        if (*clicked_slot < 0 || *clicked_slot >= trade_->slots()) return;
+        const auto to = trade_slot(*clicked_slot);
+        if (!inventory_.at(to)) move_item(cursor, to, 0);
+        return;
+    }
+    // CTradeWnd::DropItemIntoTrade @0x77f6d0 skips the stack merge for the four NPC slots.
+    for (std::int16_t n = 0; !trade_->with_npc && held->stackable() && n < trade_->slots(); ++n) {
         Item* there = inventory_.at(trade_slot(n));
         if (!there || !game::can_stack_with(*held, *there) || there->stack_count >= there->max_stack) continue;
         std::uint32_t moved = std::min(there->max_stack - there->stack_count, held->stack_count);
         there->stack_count += moved;
         held->stack_count -= moved;
         MoveItem m;
-        m.from = ItemSlot::possessions(kSlotCursor);
+        m.from = cursor;
         m.to = trade_slot(n);
         m.count = moved;
         send_zone(encode(m));
-        if (held->stack_count == 0) inventory_.take(ItemSlot::possessions(kSlotCursor));
+        if (held->stack_count == 0) inventory_.take(cursor);
         else inventory_.bump_revision();
         trade_->my_ready = trade_->their_ready = false;
         return;
     }
-    for (std::int16_t n = 0; n < static_cast<std::int16_t>(trade_->slots()); ++n) {
+    for (std::int16_t n = 0; n < trade_->slots(); ++n) {
         if (inventory_.at(trade_slot(n))) continue;
-        move_item(ItemSlot::possessions(kSlotCursor), trade_slot(n), 0);
-        trade_->my_ready = trade_->their_ready = false;
+        move_item(cursor, trade_slot(n), 0);
         return;
     }
     chat(ChatEvent::Kind::System, strings_.format(12319, std::vector<std::string>{})); // All your trade slots are full!
@@ -709,7 +717,8 @@ void GameConnection::commerce_item(std::uint32_t packet_type, Item item) {
     if (at != trade_->theirs.end() && at->second.id == item.id) {
         at->second.stack_count = item.stack_count;
     } else {
-        chat(ChatEvent::Kind::System, strings_.format(9028, std::vector<std::string>{trade_->partner_name, item.name}));
+        const std::array args{trade_->partner_name, game::make_item_link(item, server_ext().wide_item_links(*this))};
+        chat(ChatEvent::Kind::System, strings_.format(9028, args));
         trade_->theirs[item.slot.slot] = std::move(item);
     }
     trade_->my_ready = trade_->their_ready = false;

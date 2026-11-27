@@ -205,7 +205,11 @@ struct TloRef {
     enum class Kind : std::uint8_t { Tlo, Member, Value } kind = Kind::Tlo;
     std::string name;
     Value base;
+    // Keep the policy identity of a resolved member or indexed result across server rule changes.
+    std::string lookup_root;
 };
+
+std::string_view root_name(const TloRef& r) { return r.kind == TloRef::Kind::Tlo ? r.name : r.lookup_root; }
 
 constexpr const char* kTloMeta = "hailstone.mq.tlo";
 
@@ -225,7 +229,7 @@ void ref_fill(lua_State* L, void* mem, TloRef&& ref) {
 
 void push_ref(lua_State* L, TloRef::Kind kind, const char* name) {
     void* mem = ref_slot(L);
-    ref_fill(L, mem, TloRef{kind, name ? name : "", {}});
+    ref_fill(L, mem, TloRef{kind, name ? name : "", {}, {}});
 }
 
 TloRef& check_ref(lua_State* L, int i) { return *static_cast<TloRef*>(luaL_checkudata(L, i, kTloMeta)); }
@@ -233,6 +237,7 @@ TloRef& check_ref(lua_State* L, int i) { return *static_cast<TloRef*>(luaL_check
 Value resolve(lua_State* L, const TloRef& r, std::string_view index) {
     need(L, plugin::kCapRead, "mq.TLO");
     const Context& ctx = ctx_of(L);
+    if (!r.lookup_root.empty() && !reg_of(L).allow_tlo(ctx, r.lookup_root)) return Value::nil();
     switch (r.kind) {
     case TloRef::Kind::Tlo: return reg_of(L).tlo(ctx, r.name, index);
     case TloRef::Kind::Member: return reg_of(L).member(ctx, r.base, r.name, index);
@@ -298,16 +303,16 @@ int tlo_index(lua_State* L) {
     }
     void* mem = ref_slot(L);
     Value base = resolve(L, r, {});
-    ref_fill(L, mem, TloRef{TloRef::Kind::Member, lua_tostring(L, 2), std::move(base)});
+    ref_fill(L, mem, TloRef{TloRef::Kind::Member, lua_tostring(L, 2), std::move(base), std::string(root_name(r))});
     return 1;
 }
 
 int tlo_call(lua_State* L) {
-    check_ref(L, 1);
+    const TloRef& r = check_ref(L, 1);
     need(L, plugin::kCapRead, "mq.TLO");
     int top = lua_gettop(L);
     if (top < 2) {
-        const Plain p = plain_of(L, resolve(L, *static_cast<TloRef*>(lua_touserdata(L, 1)), {}));
+        const Plain p = plain_of(L, resolve(L, r, {}));
         push_plain(L, p);
         return 1;
     }
@@ -315,8 +320,8 @@ int tlo_call(lua_State* L) {
     std::size_t n = 0;
     const char* index = lua_tolstring(L, -1, &n);
     void* mem = ref_slot(L);
-    Value v = resolve(L, *static_cast<TloRef*>(lua_touserdata(L, 1)), std::string_view(index, n));
-    ref_fill(L, mem, TloRef{TloRef::Kind::Value, {}, std::move(v)});
+    Value v = resolve(L, r, std::string_view(index, n));
+    ref_fill(L, mem, TloRef{TloRef::Kind::Value, {}, std::move(v), std::string(root_name(r))});
     return 1;
 }
 
@@ -428,7 +433,7 @@ int l_cmd(lua_State* L) {
     }
     if (!s.host->env.run) return 0;
     plugin::cxx_guard(L, [&] {
-        plugin::CallerScope scope(s.caps, s.name);
+        plugin::CallerScope scope(s.caps, s.name, s.tlo_caller);
         s.host->env.run(std::string(given, len));
     });
     return 0;
@@ -569,9 +574,15 @@ void add_event(lua_State* L, Script& s, const char* name, std::string_view patte
             std::optional<std::string> stripped;
             // A |...| in a pattern is the script's ${...}, read with the script's own 'read' (MQ's LuaVarProcess);
             // without it, the text as written. Its value is put in the pattern as text, never parsed again.
-            EventPattern::Resolve resolve = [sp](std::string_view text) {
+            auto origin = plugin::caller_tlo_proof();
+            if (line.from_code && !origin) origin = plugin::WeakTloCaller{};
+            EventPattern::Resolve resolve = [sp, &origin](std::string_view text) {
                 if (!(sp->caps & plugin::kCapRead) || !sp->host) return std::string(text);
-                plugin::CallerScope scope(sp->caps & plugin::kCapRead, sp->name);
+                const auto starter = origin ? origin->lock() : plugin::TloCaller{};
+                const bool allow = !origin || (starter && sp->tlo_caller &&
+                                               starter->identity() == sp->tlo_caller->identity());
+                plugin::CallerScope scope(sp->caps & plugin::kCapRead, sp->name,
+                                          allow ? plugin::WeakTloCaller(sp->tlo_caller) : plugin::WeakTloCaller{});
                 return parse_macro_data(sp->host->env.context(), text);
             };
             // Each text folded once for all the script's patterns.
@@ -593,7 +604,8 @@ void add_event(lua_State* L, Script& s, const char* name, std::string_view patte
                 std::vector<std::string> args{*text};
                 for (auto& a : *m) args.push_back(std::move(a));
                 if (sp->queued.size() < kMaxQueuedEvents)
-                    sp->queued.push_back({ev.name, std::move(args), line.from_code ? line.origin_caps : plugin::kCapAll});
+                    sp->queued.push_back({ev.name, std::move(args), line.from_code ? line.origin_caps : plugin::kCapAll,
+                                          origin});
             }
             return plugin::Flow::Continue;
         });
@@ -625,7 +637,19 @@ int l_flushevents(lua_State* L) {
     return 0;
 }
 
-void start_thread(Script& s, int fn_ref, const std::vector<std::string>& args, std::uint32_t limit = plugin::kCapAll);
+void start_thread(Script& s, int fn_ref, const std::vector<std::string>& args, std::uint32_t limit = plugin::kCapAll,
+                  bool tlo_allowed = true);
+
+bool event_tlo_allowed(const Script& s, const std::optional<plugin::WeakTloCaller>& origin) {
+    if (!origin || !s.tlo_caller) return true;
+    const auto starter = origin->lock();
+    if (starter && starter->identity() == s.tlo_caller->identity()) return true;
+    const auto ctx = s.host->env.context();
+    if (!ctx.conn) return true;
+    const auto& rules = ctx.conn->server_rules();
+    // A handler can yield across provisional rules and resume after the actual server grants arrive.
+    return !rules || (!rules->provisional && !rules->tlos.addon_allow.contains(s.tlo_caller->identity()));
+}
 
 // fn, {args} = mq._next_event([name]): the oldest queued event (of that name); nil when there is none, false when it
 // ran one as a thread (below).
@@ -658,11 +682,12 @@ int l_next_event(lua_State* L) {
             s.queued.erase(it);
             continue;
         }
-        if ((s.caps & s.narrowed & ~it->origin) != 0) {
+        const bool tlo_allowed = event_tlo_allowed(s, it->tlo_origin);
+        if ((s.caps & s.narrowed & ~it->origin) != 0 || !tlo_allowed) {
             const std::uint32_t origin = it->origin;
             std::vector<std::string> args = std::move(it->args);
             s.queued.erase(it);
-            start_thread(s, fn, args, origin);
+            start_thread(s, fn, args, origin, tlo_allowed);
             lua_pushboolean(L, 0);
             return 1;
         }
@@ -685,7 +710,7 @@ int l_next_event(lua_State* L) {
 // It runs with the script's capabilities, its starter's (the code that ran the command: another script's, a plugin's,
 // the player's all) and `limit` together, at its first resume and every later one (Script::Thread::caps): a bind a
 // lesser script ran does not get the script's own once it waited.
-void start_thread(Script& s, int fn_ref, const std::vector<std::string>& args, std::uint32_t limit) {
+void start_thread(Script& s, int fn_ref, const std::vector<std::string>& args, std::uint32_t limit, bool tlo_allowed) {
     if (!s.L || s.stop_requested) return;
     if (s.busy >= kMaxNesting) {
         s.fail(std::format("its commands ran each other more than {} deep", kMaxNesting));
@@ -707,7 +732,9 @@ void start_thread(Script& s, int fn_ref, const std::vector<std::string>& args, s
     lua_rawgeti(t, LUA_REGISTRYINDEX, fn_ref);
     for (const auto& a : args) lua_pushlstring(t, a.data(), a.size());
     const std::uint32_t caps = s.caps & s.narrowed & plugin::caller_caps() & limit;
-    plugin::CallerScope scope(caps, s.name);
+    tlo_allowed = tlo_allowed && plugin::may_inherit_tlo_proof(s.tlo_caller);
+    plugin::CallerScope scope(caps, s.name,
+                              tlo_allowed ? plugin::WeakTloCaller(s.tlo_caller) : plugin::WeakTloCaller{});
     const std::uint32_t narrowed = std::exchange(s.narrowed, caps);
     // The thread gets a slice of its own; the code it ran from (doevents, an mq.cmd) goes on with what is left of
     // its own after: handlers started one after another cannot keep that code from ever pausing or being stopped.
@@ -723,7 +750,7 @@ void start_thread(Script& s, int fn_ref, const std::vector<std::string>& args, s
     s.narrowed = narrowed;
     if (st == LUA_YIELD) {
         lua_pop(t, nres);
-        s.threads.push_back({t, ref, caps});
+        s.threads.push_back({t, ref, caps, tlo_allowed});
     } else {
         if (st != LUA_OK && !(lua_touserdata(t, -1) == &kExitKey)) s.fail(lua_tostring(t, -1) ? lua_tostring(t, -1) : "error");
         else if (st != LUA_OK) s.stop_requested = true; // mq.exit
@@ -860,7 +887,7 @@ int l_get_all_spawns(lua_State* L) {
     lua_Integer n = 0;
     for (auto id : ids) {
         void* mem = ref_slot(L);
-        ref_fill(L, mem, TloRef{TloRef::Kind::Value, {}, Value::object(spawn, id)});
+        ref_fill(L, mem, TloRef{TloRef::Kind::Value, {}, Value::object(spawn, id), {}});
         lua_rawseti(L, -2, ++n);
     }
     return 1;
@@ -984,24 +1011,25 @@ std::optional<fs::path> config_path(lua_State* L, const char* given) {
     return p;
 }
 
-// What the config directory holds: its files and their bytes, `except` left out (the file a write replaces). Stops
-// counting a little past kMaxConfigFiles.
-struct ConfigUsage {
-    std::size_t files = 0;
-    std::uintmax_t bytes = 0;
-};
-ConfigUsage config_usage(const fs::path& dir, const fs::path& except) {
-    ConfigUsage u;
+// What the config directory holds: its files and their bytes. Stops counting a little past kMaxConfigFiles (past
+// it every write is refused anyway).
+ScriptHost::Impl::ConfigUsage count_config(const fs::path& dir) {
+    ScriptHost::Impl::ConfigUsage u;
     std::error_code ec;
     for (fs::recursive_directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end;
          !ec && it != end && u.files <= kMaxConfigFiles; it.increment(ec)) {
         std::error_code fec;
-        if (!it->is_regular_file(fec) || it->path() == except) continue;
+        if (!it->is_regular_file(fec)) continue;
         ++u.files;
         const auto size = it->file_size(fec);
         if (!fec) u.bytes += size;
     }
     return u;
+}
+
+bool path_within(const fs::path& dir, const fs::path& file) {
+    const fs::path rel = file.lexically_relative(dir);
+    return !rel.empty() && *rel.begin() != ".." && *rel.begin() != ".";
 }
 
 // mq._write_config(path, text): mq.pickle's file write, within kMaxConfigFileBytes for the file and kMaxConfigFiles
@@ -1025,15 +1053,43 @@ int l_write_config(lua_State* L) {
             return;
         }
         std::error_code ec;
-        const ConfigUsage used = config_usage(fs::weakly_canonical(script_config_dir(s), ec), *p);
-        if (used.files + 1 > kMaxConfigFiles || used.bytes + n > kMaxConfigBytes) {
+        const fs::path dir = fs::weakly_canonical(script_config_dir(s), ec);
+        auto& counts = s.host->config_usage;
+        auto it = counts.find(dir);
+        if (it == counts.end()) it = counts.emplace(dir, count_config(dir)).first;
+        // The file a write replaces is left out, as before it is written: one stat, never another walk.
+        std::error_code fec;
+        const bool replaces = fs::is_regular_file(*p, fec);
+        std::uintmax_t old_size = 0;
+        if (replaces) {
+            const auto size = fs::file_size(*p, fec);
+            if (!fec) old_size = size;
+        }
+        const auto& used = it->second;
+        const std::size_t other_files = used.files - std::min<std::size_t>(used.files, replaces ? 1 : 0);
+        const std::uintmax_t other_bytes = used.bytes - std::min(used.bytes, old_size);
+        if (other_files + 1 > kMaxConfigFiles || other_bytes + n > kMaxConfigBytes) {
             problem = 4;
             return;
         }
         fs::create_directories(p->parent_path(), ec);
         std::ofstream f(*p, std::ios::binary | std::ios::trunc);
         if (f) f.write(text, static_cast<std::streamsize>(n));
-        else problem = 2;
+        if (f) f.close();
+        // Every counted directory the file is in (the shared one holds each script's own folder) gets the write; one
+        // whose count is no longer known (a write that failed part way) is counted again at its next write.
+        for (auto c = counts.begin(); c != counts.end();) {
+            if (!path_within(c->first, *p)) {
+                ++c;
+            } else if (!f) {
+                c = counts.erase(c);
+            } else {
+                if (!replaces) ++c->second.files;
+                c->second.bytes = c->second.bytes - std::min(c->second.bytes, old_size) + n;
+                ++c;
+            }
+        }
+        if (!f) problem = 2;
     });
     if (problem == 1) return luaL_error(L, "mq.pickle: '%s' is outside the config directory", given);
     if (problem == 2) return luaL_error(L, "mq.pickle: cannot write '%s'", given);
@@ -1154,6 +1210,21 @@ void search_module(Script& s, std::string_view given, ModuleFile& out) {
                 }
                 if (std::none_of(s.modules.begin(), s.modules.end(), [&](const auto& m) { return m.second == h && m.first == owner; }))
                     s.modules.emplace_back(owner, h);
+                if (s.tlo_caller) {
+                    // The module can leave functions behind in this state. A different or unverified package
+                    // revokes its TLO exception before the first instruction of the module runs.
+                    if (s.tlo_caller->identity().empty() ||
+                        s.host->env.policy->verified_tlo_identity(plugin::FileKind::Script, h, cand, false) !=
+                        s.tlo_caller->identity()) {
+                        s.tlo_caller->revoke();
+                        s.tlo_caller.reset();
+                        s.tlo_modules.clear();
+                    } else {
+                        const auto module = std::pair(cand, h);
+                        if (std::find(s.tlo_modules.begin(), s.tlo_modules.end(), module) == s.tlo_modules.end())
+                            s.tlo_modules.push_back(module);
+                    }
+                }
                 out.found = true;
                 out.text = std::move(*text);
                 out.chunk = "@" + cand.string();
@@ -1416,6 +1487,8 @@ void Script::close() {
     if (closing) return; // closed already (reap() during a walk), or closing now: once only
     closing = true;
     stop_requested = true;
+    if (tlo_caller) tlo_caller->revoke();
+    tlo_caller.reset();
     release_plugin(*this);
     if (host->env.hooks && owner) host->env.hooks->remove(owner);
     if (L) lua_close(L);
@@ -1443,6 +1516,7 @@ ScriptHost::~ScriptHost() {
 }
 
 bool ScriptHost::Impl::open_state(Script& sc, std::string& why) {
+    config_usage.clear();
     sc.L = lua_newstate(limited_alloc, &sc, luaL_makeseed(nullptr));
     if (!sc.L) {
         why = "out of memory";
@@ -1594,6 +1668,11 @@ bool ScriptHost::Impl::open_state(Script& sc, std::string& why) {
 }
 
 bool ScriptHost::run(const std::string& name, const std::vector<std::string>& args, std::string* why) {
+    return run_file(name, args, why, false);
+}
+
+bool ScriptHost::run_file(const std::string& name, const std::vector<std::string>& args, std::string* why,
+                          bool zone_policy) {
     Impl& m = *impl_;
     auto refuse = [&](std::string text) {
         if (why) *why = text;
@@ -1643,6 +1722,8 @@ bool ScriptHost::run(const std::string& name, const std::vector<std::string>& ar
     sc.entry = *entry;
     sc.root = entry->parent_path();
     sc.hash = hash;
+    sc.tlo_caller = m.env.policy->verified_tlo_caller(plugin::FileKind::Script, hash, *entry);
+    if (!plugin::may_inherit_tlo_proof(sc.tlo_caller)) sc.tlo_caller.reset();
     sc.managed = managed != nullptr;
     if (managed) sc.managed_revision = managed->revision;
     sc.caps = caps;
@@ -1662,7 +1743,7 @@ bool ScriptHost::run(const std::string& name, const std::vector<std::string>& ar
     lua_xmove(L, sc.co, 1); // the chunk onto the coroutine
     sc.co_ref = luaL_ref(L, LUA_REGISTRYINDEX);
     watch(sc.co);
-    m.say(std::format("[Lua] running {} ({})", key, plugin::caps_text(caps)));
+    m.say(std::format("[Lua] running {} ({})", key, plugin::caps_text(caps)), zone_policy, "lua:" + key);
     log::info("lua: running {} from {}, sha256 {}, caps {}", key, entry->string(), to_hex(hash), plugin::caps_text(caps));
     m.scripts.push_back(std::move(s));
     return true;
@@ -1674,10 +1755,11 @@ bool ScriptHost::Impl::kept(const Script& s) const {
             env.policy->required_file(plugin::FileKind::Script, s.hash));
 }
 
-void ScriptHost::Impl::end(Script& s, const std::string& why) {
+void ScriptHost::Impl::end(Script& s, const std::string& why, bool zone_policy) {
     s.stop_requested = true;
+    if (s.tlo_caller) s.tlo_caller->revoke();
     if (s.status == Script::Status::Running || s.status == Script::Status::Paused) s.status = Script::Status::Exited;
-    say("[Lua] " + s.name + " " + why);
+    say("[Lua] " + s.name + " " + why, zone_policy, "lua:" + lower(s.name), true);
 }
 
 bool ScriptHost::Impl::may_control(const Script& s) const { return (s.caps & ~plugin::caller_caps()) == 0; }
@@ -1806,13 +1888,13 @@ void ScriptHost::pulse() {
         if (s.stop_requested || s.status != Script::Status::Running || !s.co) continue;
         if (s.main_done) { // a plugin whose main chunk returned: only its binds' threads
             ++s.busy;
-            plugin::CallerScope scope(s.caps, s.name);
+            plugin::CallerScope scope(s.caps, s.name, s.tlo_caller);
             m.resume_threads(s);
             --s.busy;
             continue;
         }
         ++s.busy;
-        plugin::CallerScope scope(s.caps, s.name);
+        plugin::CallerScope scope(s.caps, s.name, s.tlo_caller);
         s.new_slice();
         int nargs = 0;
         if (!s.started) {
@@ -1868,12 +1950,13 @@ void ScriptHost::pulse() {
 // The binds (and a Lua social's presses) still running.
 void ScriptHost::Impl::resume_threads(Script& s) {
     for (std::size_t t = 0; t < s.threads.size() && !s.stop_requested;) {
-        const auto [thread, ref, caps] = s.threads[t];
+        const auto [thread, ref, caps, tlo_allowed] = s.threads[t];
         s.new_slice();
         int tn = 0;
         int ts = 0;
         {
-            plugin::CallerScope scope(caps, s.name); // the capabilities it started with, not the script's own
+            plugin::CallerScope scope(caps, s.name,
+                                      tlo_allowed ? plugin::WeakTloCaller(s.tlo_caller) : plugin::WeakTloCaller{});
             const std::uint32_t narrowed = std::exchange(s.narrowed, caps);
             ScriptRun run(s, thread);
             ts = lua_resume(thread, nullptr, 0, &tn);
@@ -1910,7 +1993,7 @@ void ScriptHost::imgui() {
 void ScriptHost::Impl::draw_windows(Script& s) {
     if (s.stop_requested || s.windows.empty() || (s.caps & plugin::kCapUi) == 0) return;
     ++s.busy;
-    plugin::CallerScope scope(s.caps, s.name);
+    plugin::CallerScope scope(s.caps, s.name, s.tlo_caller);
     // A draw function may destroy or make windows (its own too): this frame draws the ones there were, those still
     // there. The main state's preempt_hook (open_state) stops one that runs kRunawayMs. (The copy goes into the same
     // vector each frame: its strings keep their buffers, so a frame allocates nothing.)
@@ -1945,7 +2028,7 @@ void ScriptHost::Impl::draw_windows(Script& s) {
     --s.busy;
 }
 
-void ScriptHost::policy_changed(const std::vector<std::string>& autoload) {
+void ScriptHost::policy_changed(const std::vector<std::string>& autoload, bool zone_policy) {
     Impl& m = *impl_;
     for (auto& sp : m.scripts) {
         Script& s = *sp;
@@ -1958,8 +2041,24 @@ void ScriptHost::policy_changed(const std::vector<std::string>& autoload) {
                 const auto allowed = m.env.policy->caps(plugin::FileKind::Script, module.second, module.first);
                 if ((allowed & caps) != caps) { caps = 0; break; }
             }
+        if (s.tlo_caller && s.tlo_caller->identity().empty()) {
+            auto current = m.env.policy->verified_tlo_caller(plugin::FileKind::Script, s.hash, s.entry);
+            if (!current || !s.tlo_caller->same_addon(*current) ||
+                std::any_of(s.tlo_modules.begin(), s.tlo_modules.end(), [&](const auto& module) {
+                    return m.env.policy->verified_tlo_identity(plugin::FileKind::Script, module.second, module.first,
+                                                               false) != current->identity();
+                }))
+                current.reset();
+            // The same proof, renewed: the /timed lines and events the script queued under the old policy hold it.
+            if (current) {
+                s.tlo_caller->renew(*current);
+            } else {
+                s.tlo_caller->revoke();
+                s.tlo_caller.reset();
+            }
+        }
         if (caps == 0) {
-            m.end(s, "stopped: it may not run here");
+            m.end(s, "stopped: it may not run here", zone_policy);
         } else if (caps != s.caps) {
             s.caps = caps;
             constexpr std::uint32_t needed = plugin::kCapUi | plugin::kCapExtend;
@@ -1974,7 +2073,9 @@ void ScriptHost::policy_changed(const std::vector<std::string>& autoload) {
     for (auto& [social, sp] : m.buttons) {
         Script& s = *sp;
         if (r.mode != plugin::ButtonMode::Full) {
-            if (button_running(social)) m.say("[Lua] " + s.name + " stopped: this server does not let it run on");
+            if (button_running(social))
+                m.say("[Lua] " + s.name + " stopped: this server does not let it run on", zone_policy,
+                      "lua-button:" + lower(s.name), true);
             m.stop_threads(s);
         } else {
             if (s.caps != r.caps) invalidate_plugin_lifecycle(s);
@@ -1986,7 +2087,7 @@ void ScriptHost::policy_changed(const std::vector<std::string>& autoload) {
     // The server's scripts its hailstone.cfg starts ([scripts] run).
     if (m.env.policy && m.env.policy->current())
         for (const auto& name : m.env.policy->current()->run_scripts)
-            if (!running(name)) run(name, {});
+            if (!running(name)) run_file(name, {}, nullptr, zone_policy);
     // Required managed add-ons start independently of the player's autorun choices.
     m.required.clear();
     if (m.env.policy && m.env.policy->current() && !m.env.policy->current()->provisional) {
@@ -1998,13 +2099,13 @@ void ScriptHost::policy_changed(const std::vector<std::string>& autoload) {
             const auto text = file ? read_file(*file) : std::nullopt;
             if (text && sha256(*text) == entry.second &&
                 m.env.policy->caps(plugin::FileKind::Script, entry.second, entry.first) != 0)
-                run(entry.first, {});
+                run_file(entry.first, {}, nullptr, zone_policy);
         }
     }
     // The player's own the settings and the character's autorun list name.
-    m.start_allowed(autoload);
-    m.start_allowed(m.autorun);
-    m.start_managed();
+    m.start_allowed(autoload, zone_policy);
+    m.start_allowed(m.autorun, zone_policy);
+    m.start_managed(zone_policy);
 }
 
 std::size_t ScriptHost::retry_required_addons() {
@@ -2024,7 +2125,7 @@ std::size_t ScriptHost::retry_required_addons() {
     return started;
 }
 
-void ScriptHost::Impl::start_managed() {
+void ScriptHost::Impl::start_managed(bool zone_policy) {
     if (!env.policy || !env.policy->received()) return;
     for (const auto& addon : managed) {
         if (!addon.enabled || !addon.verified || self->running(addon.name)) continue;
@@ -2033,7 +2134,7 @@ void ScriptHost::Impl::start_managed() {
         if (!entry || !fs::equivalent(*entry, addon.entry, ec)) continue; // never start a shadowing server/manual file
         const auto hash = file_hash(*entry);
         if (!hash || *hash != addon.hash || env.policy->caps(plugin::FileKind::Script, *hash) == 0) continue;
-        self->run(addon.name, {});
+        self->run_file(addon.name, {}, nullptr, zone_policy);
     }
 }
 
@@ -2117,13 +2218,14 @@ bool ScriptHost::Impl::check_required_addons(std::string* problem) const {
     return true;
 }
 
-void ScriptHost::Impl::start_allowed(const std::vector<std::string>& names) {
+void ScriptHost::Impl::start_allowed(const std::vector<std::string>& names, bool zone_policy) {
     if (!env.policy || !env.policy->received()) return;
     for (const auto& name : names) {
         if (name.empty() || self->running(name)) continue;
         auto entry = resolve(lower(name));
         auto text = entry ? read_file(*entry) : std::nullopt;
-        if (text && env.policy->caps(plugin::FileKind::Script, sha256(*text), name) != 0) self->run(name, {});
+        if (text && env.policy->caps(plugin::FileKind::Script, sha256(*text), name) != 0)
+            self->run_file(name, {}, nullptr, zone_policy);
     }
 }
 
@@ -2190,7 +2292,7 @@ std::vector<ScriptHost::Found> ScriptHost::found() const {
 
 std::vector<fs::path> ScriptHost::folders() const { return impl_->dirs(); }
 
-void ScriptHost::set_autorun_file(const fs::path& file) {
+void ScriptHost::set_autorun_file(const fs::path& file, bool zone_policy) {
     Impl& m = *impl_;
     if (file == m.autorun_file) return;
     m.autorun_file = file;
@@ -2199,7 +2301,7 @@ void ScriptHost::set_autorun_file(const fs::path& file) {
     if (!file.empty() && ini.load(file))
         for (const auto& key : ini.keys("Autorun"))
             if (ini.get_int("Autorun", key, 0) != 0) m.autorun.push_back(lower(key));
-    m.start_allowed(m.autorun);
+    m.start_allowed(m.autorun, zone_policy);
 }
 
 bool ScriptHost::autorun(std::string_view name) const {

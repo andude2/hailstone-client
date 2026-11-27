@@ -8,10 +8,13 @@
 #include <utility>
 
 #include "game/coords.h"
+#include "game/doors.h"
 #include "game/world_state.h"
 #include "mq/nav_commands.h"
+#include "mq/map_filter.h"
 #include "mq/parse.h"
 #include "mq/spawn_search.h"
+#include "mq/typed_escapes.h"
 #include "net/game_connection.h"
 #include "plugin/policy.h"
 
@@ -113,6 +116,10 @@ bool movement_key(std::string_view c) {
 }
 
 Commands::Commands(CommandEnv env) : env_(std::move(env)) {
+    if (!env_.map_filters) {
+        own_map_filters_ = std::make_unique<MapFilters>();
+        env_.map_filters = own_map_filters_.get();
+    }
     plugin::Hooks& h = *env_.hooks;
     owner_ = h.new_owner("mq");
     h.on_command_line(owner_, [this](std::string& line) {
@@ -123,13 +130,21 @@ Commands::Commands(CommandEnv env) : env_(std::move(env)) {
     // /squelch: the chat lines its command prints are dropped.
     h.on_chat(owner_, [this](plugin::ChatLine&) { return squelch_ ? plugin::Flow::Drop : plugin::Flow::Continue; });
 
-    h.add_command(owner_, "/echo", [this](std::string_view args) { say(std::string(args)); });
+    // /echo (MQ's Echo): the line with MQ's typed escapes as colour codes (mq/typed_escapes.h; a line no script sent
+    // loses the BEL a ${...} may have brought in first).
+    h.add_command(owner_, "/echo", [this](std::string_view args) {
+        say_coded(typed_line(args, !plugin::caller_name().empty()));
+    });
+    h.add_command(owner_, "/mapfilter", [this](std::string_view args) { map_filter(args); }, plugin::kCapCommands);
     h.add_command(owner_, "/noparse", [this](std::string_view args) {
         const bool before = std::exchange(noparse_, true);
         run_nested(args);
         noparse_ = before;
     });
     h.add_command(owner_, "/docommand", [this](std::string_view args) { run_nested(args); });
+    // /invoke ${Window[...].DoOpen} (MQ's InvokeCmd sets bRunNextCommand and nothing else): the line's ${...} were
+    // read before the command got it, and reading a window method is what acts (Window's LeftMouseUp, DoOpen ...).
+    h.add_command(owner_, "/invoke", [](std::string_view) {});
     // /timed <deciseconds> <command> (MQ's DoTimedCmd): the command runs that many tenths of a second later, as
     // whoever sent it (a script's line stays held to its permissions). As in MQ the line is not ${}-expanded when it
     // is sent (filter skips it) but when it runs, so its values are those of that moment. The delay is MQ's
@@ -151,9 +166,53 @@ Commands::Commands(CommandEnv env) : env_(std::move(env)) {
             return;
         }
         timed_.push_back({now_ms() + static_cast<std::int64_t>(d) * 100, std::string(rest), plugin::caller_caps(),
-                          std::string(plugin::caller_name())});
+                          std::string(plugin::caller_name()), plugin::caller_tlo_proof()});
     });
     h.on_pulse(owner_, [this] { run_timed(); });
+    // /doortarget [id <n> | <name>] | clear (MQ's DoorTarget): the door with that id, or the nearest (in 3D) whose name
+    // holds the text (any door with no text), becomes the switch target ${DoorTarget} reads. As in MQ the old one is
+    // dropped first, so a door not found leaves none. MQ's Z filter (gZFilter, off unless set) has no counterpart here.
+    h.add_command(owner_, "/doortarget", [this](std::string_view args) {
+        if (env_.set_door_target) env_.set_door_target(std::nullopt);
+        std::string_view rest = trim(args);
+        std::string word = first_word(rest);
+        if (iequals(word, "clear")) {
+            say("Switch target cleared.");
+            return;
+        }
+        const Context& ctx = env_.context();
+        const net::GameConnection* conn = ctx.conn;
+        const game::Spawn* me = conn ? conn->world().player() : nullptr;
+        if (!conn || !me) return;
+        const game::Door* found = nullptr;
+        if (iequals(word, "id")) {
+            rest = trim(rest.substr(word.size()));
+            std::int64_t id = 0;
+            if (rest.empty() || !parse_int(first_word(rest), id)) {
+                say("[MQ] DoorTarget: id specified but no number provided.");
+                return;
+            }
+            if (id >= 0 && id <= 255) found = conn->door(static_cast<std::uint8_t>(id));
+        } else {
+            const glm::vec3 at = spawn_position(*me);
+            float best = 0;
+            for (const game::Door& d : conn->doors()) {
+                if (!word.empty() && !icontains(d.name, word)) continue;
+                const glm::vec3 to = d.world_position() - at;
+                const float dist = to.x * to.x + to.y * to.y + to.z * to.z;
+                if (!found || dist < best) {
+                    found = &d;
+                    best = dist;
+                }
+            }
+        }
+        if (!found) {
+            say(std::format("[MQ] Couldn't find switch '{}' to target.", rest));
+            return;
+        }
+        if (env_.set_door_target) env_.set_door_target(found->id);
+        say(std::format("Switch {} '{}' targeted.", found->id, found->name));
+    }, plugin::kCapTarget);
     h.add_command(owner_, "/squelch", [this](std::string_view args) {
         ++squelch_;
         run_nested(args);
@@ -218,6 +277,7 @@ Commands::Commands(CommandEnv env) : env_(std::move(env)) {
             std::string search;
             std::optional<double> heading;
             std::optional<glm::vec3> loc;
+            bool bad_number = false; // a heading or loc that is not a finite number: no turn rather than the target
             std::string_view rest = trim(args);
             while (!rest.empty()) {
                 std::string w = first_word(rest);
@@ -228,20 +288,28 @@ Commands::Commands(CommandEnv env) : env_(std::move(env)) {
                 } else if (iequals(w, "heading")) {
                     std::string n = first_word(rest);
                     rest = trim(rest.substr(std::min(rest.size(), n.size())));
+                    // "nan", "inf" and 1e300 parse; only a finite heading counts, taken as one turn's degrees
                     double d = 0;
-                    if (parse_float(n, d)) heading = d;
+                    if (parse_float(n, d) && std::isfinite(d)) heading = std::fmod(std::fmod(d, 360.0) + 360.0, 360.0);
+                    else bad_number = true;
                 } else if (iequals(w, "loc")) {
                     // "loc y,x[,z]" in /loc order (the server's y first)
                     std::string n = first_word(rest);
                     rest = trim(rest.substr(std::min(rest.size(), n.size())));
                     auto parts = split_index(n);
                     double y = 0, x = 0;
-                    if (parts.size() >= 2 && parse_float(parts[0], y) && parse_float(parts[1], x))
-                        loc = game::server_to_world({static_cast<float>(x), static_cast<float>(y), 0.0f});
+                    std::optional<float> fy, fx; // (not NaN, an infinity or past float)
+                    if (parts.size() >= 2 && parse_float(parts[0], y) && parse_float(parts[1], x)) {
+                        fy = in_range<float>(y);
+                        fx = in_range<float>(x);
+                    }
+                    if (fy && fx) loc = game::server_to_world({*fx, *fy, 0.0f});
+                    else bad_number = true;
                 } else {
                     search += (search.empty() ? "" : " ") + w;
                 }
             }
+            if (bad_number) return;
             if (heading) {
                 env_.face(*heading, fast);
                 return;
@@ -320,13 +388,30 @@ void Commands::run_timed() {
     timed_.erase(keep, timed_.end());
     std::stable_sort(due.begin(), due.end(), [](const Timed& a, const Timed& b) { return a.due_ms < b.due_ms; });
     for (const Timed& t : due) {
-        plugin::CallerScope scope(t.caps, t.caller);
-        env_.run(t.line);
+        if (t.tlo_caller) {
+            plugin::CallerScope scope(t.caps, t.caller, *t.tlo_caller);
+            env_.run(t.line);
+        } else {
+            env_.run(t.line);
+        }
     }
+}
+
+void Commands::map_filter(std::string_view args) {
+    const Context& ctx = env_.context();
+    MapFilterCommandInput input;
+    input.guild = ctx.conn ? &ctx.conn->guild() : nullptr;
+    run_map_filter_command(*env_.map_filters, args, input, [this](std::string_view line) { say(std::string(line)); });
 }
 
 void Commands::say(const std::string& text) const {
     if (env_.echo && squelch_ == 0) env_.echo(text);
+}
+
+void Commands::say_coded(const std::string& text) const {
+    if (squelch_ != 0) return;
+    if (env_.echo_coded) env_.echo_coded(text);
+    else if (env_.echo) env_.echo(text);
 }
 
 Commands::~Commands() {
@@ -343,8 +428,11 @@ void Commands::filter(std::string& line, plugin::Flow& flow) {
     std::string word = first_word(line);
     // ${...} (a read: scripts and plugins need the read permission) unless /noparse is running the line or a window
     // sends it (LiteralLine).
-    // /timed's line is expanded when it runs, not now (MQ registers it unparsed).
-    if (!parsed && !noparse_ && g_literal_lines == 0 && !iequals(word, "/noparse") && !iequals(word, "/timed") &&
+    // /timed's line is expanded when it runs, not now, and /nomodkey, /shiftkey and /ctrlkey run theirs through the
+    // filters again, where it is expanded once (MQ registers all four unparsed).
+    const bool unparsed = iequals(word, "/timed") || iequals(word, "/nomodkey") || iequals(word, "/shiftkey") ||
+                          iequals(word, "/ctrlkey");
+    if (!parsed && !noparse_ && g_literal_lines == 0 && !iequals(word, "/noparse") && !unparsed &&
         line.find("${") != std::string::npos) {
         if ((plugin::caller_caps() & plugin::kCapRead) == 0) {
             if (env_.echo) env_.echo(std::format("[MQ] {}: ${{...}} needs the server's 'read' permission", plugin::caller_name()));

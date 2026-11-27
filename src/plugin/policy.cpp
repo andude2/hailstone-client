@@ -155,6 +155,7 @@ namespace {
 // The client's thread's: plugins and scripts run there (another thread sees none of it, on_main_thread).
 std::uint32_t g_caller_caps = kCapAll;
 std::string g_caller_name;
+const CallerScope* g_tlo_scope = nullptr;
 // Set during the program's static initialisation, which runs on the thread that starts it.
 const std::thread::id g_main_thread = std::this_thread::get_id();
 thread_local bool t_lent = false; // a ThreadLent is live on this thread
@@ -169,18 +170,44 @@ ThreadLent::~ThreadLent() { t_lent = prev_; }
 std::uint32_t caller_caps() { return on_main_thread() ? g_caller_caps : 0; }
 std::string_view caller_name() { return on_main_thread() ? std::string_view(g_caller_name) : "another thread"; }
 
-CallerScope::CallerScope(std::uint32_t caps, std::string_view name) : active_(on_main_thread()) {
+std::optional<WeakTloCaller> caller_tlo_proof() {
+    if (!on_main_thread()) return WeakTloCaller{};
+    if (!g_tlo_scope) return std::nullopt;
+    const auto proof = g_tlo_scope->tlo_.lock();
+    const std::string_view identity = proof ? proof->identity() : std::string_view{};
+    if (identity.empty()) return WeakTloCaller{};
+    for (const auto* parent = g_tlo_scope->prev_tlo_scope_; parent; parent = parent->prev_tlo_scope_) {
+        const auto caller = parent->tlo_.lock();
+        if (!caller || caller->identity() != identity) return WeakTloCaller{};
+    }
+    return g_tlo_scope->tlo_;
+}
+
+bool may_inherit_tlo_proof(const TloCaller& proof) {
+    if (!proof || proof->identity().empty()) return false;
+    const auto parent = caller_tlo_proof();
+    if (!parent) return true;
+    const auto caller = parent->lock();
+    return caller && caller->identity() == proof->identity();
+}
+
+CallerScope::CallerScope(std::uint32_t caps, std::string_view name, WeakTloCaller tlo)
+    : active_(on_main_thread()), tlo_(std::move(tlo)) {
     if (!active_) return;
+    std::string new_name(name);
     prev_caps_ = g_caller_caps;
     prev_name_ = std::move(g_caller_name);
     g_caller_caps = caps & prev_caps_; // a script a plugin runs gets no more than the plugin
-    g_caller_name = name;
+    g_caller_name = std::move(new_name);
+    prev_tlo_scope_ = g_tlo_scope;
+    g_tlo_scope = this;
 }
 
 CallerScope::~CallerScope() {
     if (!active_) return;
     g_caller_caps = prev_caps_;
     g_caller_name = std::move(prev_name_);
+    g_tlo_scope = prev_tlo_scope_;
 }
 
 HostCallerScope::HostCallerScope() : active_(on_main_thread()) {
@@ -219,6 +246,30 @@ std::string value_without_comment(std::string_view v) {
 
 // The same, lower-cased.
 std::string value_of(std::string_view v) { return lower(value_without_comment(v)); }
+
+bool valid_tlo_name(std::string_view name) {
+    auto identifier = [](char c) {
+        c = ascii_lower(c);
+        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
+    };
+    return !name.empty() && identifier(name.front()) &&
+           std::all_of(name.begin() + 1, name.end(), [&](char c) { return identifier(c) || c == '-'; });
+}
+
+std::optional<std::string_view> blocked_message_value(std::string_view value) {
+    value = trim(value);
+    if (!value.empty() && (value.front() == '"' || value.front() == '\'')) {
+        // A managed edit wraps the text so that a literal '#' or ';' stays in the displayed message.
+        auto close = value.rfind(value.front());
+        while (close > 0) {
+            const auto after = trim(value.substr(close + 1));
+            if (after.empty() || after.front() == '#' || after.front() == ';') return value.substr(1, close - 1);
+            close = value.rfind(value.front(), close - 1);
+        }
+        return std::nullopt;
+    }
+    return trim(value.substr(0, value.find_first_of(";#")));
+}
 
 std::optional<bool> on_off(std::string_view v) {
     if (v == "on" || v == "yes" || v == "true" || v == "1") return true;
@@ -304,7 +355,8 @@ Rules parse_server_cfg(std::string_view text, std::vector<std::string>* warnings
             continue;
         }
         static constexpr std::string_view kOwn[] = {"client", "scripts", "plugins", "assets", "socials",
-                                                    "abilities", "movement", "web", "addons"};
+                                                    "abilities", "map", "movement", "web", "addons", "commands",
+                                                    "management", "tlos"};
         if (std::find(std::begin(kOwn), std::end(kOwn), section) == std::end(kOwn)) {
             auto& kept = r.script_sections[section];
             for (const std::string& key_name : ini.keys(section_name))
@@ -315,6 +367,9 @@ Rules parse_server_cfg(std::string_view text, std::vector<std::string>* warnings
         for (const std::string& key_name : ini.keys(section_name)) {
             std::string key = lower(key_name);
             std::string v = value_of(ini.get_string(section_name, key_name));
+            // These sections were formerly script-defined. Preserve the existing reads through hailstone.server_rule.
+            const bool formerly_custom = section == "commands" || section == "management" || section == "tlos";
+            if (formerly_custom) r.script_sections[section][key] = v;
             std::string where = std::format("[{}] {}", section, key);
             auto flag = [&](bool& out) {
                 if (auto b = on_off(v)) out = *b;
@@ -327,6 +382,116 @@ Rules parse_server_cfg(std::string_view text, std::vector<std::string>* warnings
             if (section == "client" && key == "deny") {
                 flag(r.deny_client);
                 continue;
+            }
+            if (section == "management" && key == "min_status") {
+                int n = 0;
+                const auto [p, ec] = std::from_chars(v.data(), v.data() + v.size(), n);
+                if (ec == std::errc() && p == v.data() + v.size() && n >= 1 && n <= 32767) r.management_min_status = n;
+                else warn(where + ": expected a GM status from 1 through 32767");
+                continue;
+            }
+            if (section == "tlos") {
+                if (key == "default") {
+                    if (v == "allow" || v == "deny") r.tlos.default_allow = v == "allow";
+                    else warn(where + ": expected allow or deny");
+                    continue;
+                }
+                if (key == "allow" || key == "block" || key == "addon_allow") {
+                    auto& list = key == "allow" ? r.tlos.allow : r.tlos.block;
+                    const auto spelling = value_without_comment(ini.get_string(section_name, key_name));
+                    std::string_view rest = spelling;
+                    while (!rest.empty()) {
+                        const auto end = rest.find_first_of(", \t\r\n\v\f");
+                        const auto token = rest.substr(0, end);
+                        rest = end == std::string_view::npos ? std::string_view() : rest.substr(end + 1);
+                        if (token.empty()) continue;
+                        if (key == "addon_allow") {
+                            const auto colon = token.find(':');
+                            const auto repo = token.substr(0, colon);
+                            const auto identity = normalize_addon_identity(repo);
+                            if (colon != std::string_view::npos && identity && iequals(repo, *identity) &&
+                                valid_tlo_name(token.substr(colon + 1))) {
+                                r.tlos.addon_allow[*identity].emplace(token.substr(colon + 1));
+                            } else {
+                                warn(std::format("{}: expected owner/repo:TLO, got \"{}\"", where, token));
+                            }
+                        } else if (valid_tlo_name(token)) {
+                            list.emplace(token);
+                        } else {
+                            warn(std::format("{}: expected a TLO root name, got \"{}\"", where, token));
+                        }
+                    }
+                    continue;
+                }
+            }
+            if (section == "commands") {
+                auto& policy = r.commands;
+                if (key == "default") {
+                    policy.enabled = true;
+                    if (v == "allow" || v == "deny") policy.default_allow = v == "allow";
+                    else warn(where + ": expected allow or deny");
+                    continue;
+                }
+                if (key == "blocked_message") {
+                    policy.enabled = true;
+                    const auto raw = ini.get_string(section_name, key_name);
+                    const auto message = blocked_message_value(raw);
+                    if (message && message->size() <= kCommandBlockedMessageMaxBytes &&
+                        std::none_of(message->begin(), message->end(), [](unsigned char c) { return c < 0x20 || c == 0x7f; }))
+                        policy.blocked_message = *message;
+                    else warn(std::format("{}: expected one line of at most {} bytes", where, kCommandBlockedMessageMaxBytes));
+                    continue;
+                }
+                if (key == "gm") {
+                    policy.enabled = true;
+                    std::string_view rest = v;
+                    while (!rest.empty()) {
+                        const auto end = rest.find_first_of(", \t");
+                        const auto token = rest.substr(0, end);
+                        rest = end == std::string_view::npos ? std::string_view() : rest.substr(end + 1);
+                        if (token.empty()) continue;
+                        // Split at the last colon so the emote alias ':' can be written as '::200'.
+                        const auto colon = token == ":" ? std::string_view::npos : token.rfind(':');
+                        auto name = canonical_command_name(token.substr(0, colon));
+                        std::optional<int> minimum;
+                        if (colon != std::string_view::npos) {
+                            const auto status = token.substr(colon + 1);
+                            int n = 0;
+                            const auto [p, ec] = std::from_chars(status.data(), status.data() + status.size(), n);
+                            if (ec == std::errc() && p == status.data() + status.size() && n >= 1 && n <= 32767)
+                                minimum = n;
+                        }
+                        if (!minimum || name.empty())
+                            warn(std::format("{}: expected command:status from 1 through 32767, got \"{}\"", where, token));
+                        if (name.empty()) continue;
+                        const auto [position, inserted] = policy.gm.try_emplace(std::move(name), minimum);
+                        if (inserted) continue;
+                        auto& previous = position->second;
+                        if (!minimum) previous.reset();
+                        else if (previous) previous = std::max(*previous, *minimum);
+                    }
+                    continue;
+                }
+                const bool groups = key == "allow_groups" || key == "block_groups";
+                if (groups || key == "allow" || key == "block") {
+                    policy.enabled = true;
+                    auto& list = groups ? (key == "allow_groups" ? policy.allow_groups : policy.block_groups)
+                                        : (key == "allow" ? policy.allow : policy.block);
+                    std::string_view rest = v;
+                    while (!rest.empty()) {
+                        const std::size_t end = rest.find_first_of(", \t");
+                        const std::string_view token = rest.substr(0, end);
+                        rest = end == std::string_view::npos ? std::string_view() : rest.substr(end + 1);
+                        if (token.empty()) continue;
+                        auto name = groups ? std::string(token) : canonical_command_name(token);
+                        if (name.empty() || (groups && !known_command_group(name))) {
+                            warn(std::format("{}: unknown {} \"{}\"", where, groups ? "group" : "command", token));
+                        } else if (std::find(list.begin(), list.end(), name) == list.end()) {
+                            list.push_back(std::move(name));
+                        }
+                    }
+                    continue;
+                }
             }
             if (section == "scripts" || section == "plugins") {
                 bool scripts = section == "scripts";
@@ -385,6 +550,11 @@ Rules parse_server_cfg(std::string_view text, std::vector<std::string>* warnings
             } else if (section == "abilities") {
                 if (key == "autoskill") {
                     flag(r.autoskill);
+                    continue;
+                }
+            } else if (section == "map") {
+                if (key == "vanilla") {
+                    flag(r.map_vanilla);
                     continue;
                 }
             } else if (section == "movement") {
@@ -486,9 +656,29 @@ Rules parse_server_cfg(std::string_view text, std::vector<std::string>* warnings
                 invalid_addons(std::format("{}: not a setting Hailstone knows; ignored", where));
                 continue;
             }
-            warn(std::format("{}: not a setting Hailstone knows; ignored", where));
+            if (formerly_custom) {
+                warn(std::format("{}: not a setting Hailstone knows; kept for scripts", where));
+            } else {
+                warn(std::format("{}: not a setting Hailstone knows; ignored", where));
+            }
         }
     }
+    for (const auto& command : r.commands.block)
+        if (std::find(r.commands.allow.begin(), r.commands.allow.end(), command) != r.commands.allow.end())
+            warn(std::format("[commands] {} is both allowed and blocked; block wins", command));
+    for (const auto& entry : r.commands.gm) {
+        const auto& command = entry.first;
+        if (std::find(r.commands.block.begin(), r.commands.block.end(), command) != r.commands.block.end())
+            warn(std::format("[commands] {} has a GM rule and an explicit block; block wins", command));
+        else if (std::find(r.commands.allow.begin(), r.commands.allow.end(), command) != r.commands.allow.end())
+            warn(std::format("[commands] {} has a GM rule and an explicit allowance; the GM rule wins", command));
+    }
+    for (const auto& group : r.commands.block_groups)
+        if (std::find(r.commands.allow_groups.begin(), r.commands.allow_groups.end(), group) != r.commands.allow_groups.end())
+            warn(std::format("[commands] group {} is both allowed and blocked; block wins", group));
+    for (const auto& name : r.tlos.block)
+        if (r.tlos.allow.contains(name))
+            warn(std::format("[tlos] {} is both allowed and blocked; block wins", name));
     for (int scripts = 0; scripts < 2; ++scripts) {
         if (player_caps[scripts] && !player_on[scripts])
             warn(std::format("[{}] player_caps: has no effect without player = on", scripts ? "scripts" : "plugins"));
@@ -563,12 +753,14 @@ std::optional<std::uint32_t> Policy::ceiling(FileKind kind, const Sha256Digest& 
 }
 
 void Policy::set(Rules rules) {
+    tlo_generation_ = std::make_shared<const int>(0);
     rules_ = std::move(rules);
     ++serial_;
 }
 
 void Policy::clear() {
     if (!rules_) return;
+    tlo_generation_.reset();
     rules_.reset();
     ++serial_;
 }
@@ -581,9 +773,50 @@ bool Policy::server_file(FileKind kind, const Sha256Digest& hash) const {
 
 void Policy::set_ceilings(std::vector<Ceiling> ceilings) {
     // Sources in normalize_addon_identity's form once, so the checks each frame compare strings only.
-    for (auto& c : ceilings) c.addon_source = addon_identity(c.addon_source);
+    for (auto& c : ceilings) {
+        c.addon_source = addon_identity(c.addon_source);
+        if (c.installed_path.empty()) continue;
+        std::error_code error;
+        c.installed_path = std::filesystem::absolute(c.installed_path, error).lexically_normal();
+        if (error) c.installed_path.clear();
+    }
+    tlo_generation_ = std::make_shared<const int>(0);
     ceilings_ = std::move(ceilings);
     ++serial_;
+}
+
+std::string_view Policy::verified_tlo_identity(FileKind kind, const Sha256Digest& hash,
+                                               const std::filesystem::path& file, bool entry_point) const {
+    if (file.empty()) return {};
+    std::error_code error;
+    const auto path = std::filesystem::absolute(file, error).lexically_normal();
+    if (error) return {};
+    const auto same_path = [&](const std::filesystem::path& expected) {
+        if (expected == path) return true;
+        if (expected.empty()) return false;
+        // Lua resolves a typed add-on name without regard to case. Permit a case variant only when the
+        // filesystem confirms that it opens the same file. Links from a different path cannot lend identity.
+        const auto actual_name = path.generic_u8string();
+        const auto expected_name = expected.generic_u8string();
+        if (!iequals(std::string(actual_name.begin(), actual_name.end()),
+                     std::string(expected_name.begin(), expected_name.end()))) return false;
+        std::error_code comparison;
+        return std::filesystem::equivalent(expected, path, comparison);
+    };
+    std::string_view source;
+    for (const auto& record : ceilings_) {
+        if (!record.verified || record.kind != kind || record.sha256 != hash || record.addon_source.empty() ||
+            (entry_point && !record.entry_point) || !same_path(record.installed_path))
+            continue;
+        if (!source.empty() && source != record.addon_source) return {};
+        source = record.addon_source;
+    }
+    return source;
+}
+
+TloCaller Policy::verified_tlo_caller(FileKind kind, const Sha256Digest& hash, const std::filesystem::path& file) const {
+    auto identity = verified_tlo_identity(kind, hash, file, true);
+    return identity.empty() ? TloCaller{} : TloCaller(new VerifiedTloCaller(identity, tlo_generation_));
 }
 
 bool Policy::addon_file_allowed(FileKind kind, const Sha256Digest& hash, std::string_view name) const {

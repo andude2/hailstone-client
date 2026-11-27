@@ -9,7 +9,7 @@
 //   say TEXT            says TEXT (a GM command too: "say #level 100")
 //   wait SECONDS
 //   goto X Y Z          #goto, then waits for the move
-//   zone SHORTNAME      #zone, then waits for the new zone
+//   zone SHORTNAME      #zone, then waits for the new zone (passes at once when already there)
 //   near NAME           moves to the nearest living spawn whose name contains NAME (or one of a|b|c) and targets it
 //   hail NAME           near NAME, then hails it
 //   ask NAME TEXT       near NAME, then says TEXT to it
@@ -168,7 +168,12 @@ private:
                 pause(now, 1000);
             }
         } else if (cmd == "zone") {
-            if (phase_ == 0) {
+            if (phase_ == 0 && w.zone_short_name == rest) {
+                // #zone to the zone we are in moves us to its safe point without a zone-in, so there is nothing to
+                // wait for; a script starts from a known zone with it whatever zone it began in.
+                check(true, "already in " + rest);
+                next();
+            } else if (phase_ == 0) {
                 zoned_ = false;
                 conn.say("#zone " + rest);
                 phase_ = 1;
@@ -225,6 +230,18 @@ private:
                 }
                 phase_ = 3;
                 wait_until_ = now + std::chrono::milliseconds(700);
+            } else if (phase_ == 6) {
+                if (!moved_) return;
+                phase_ = 3;
+                wait_until_ = now + std::chrono::milliseconds(500);
+            } else if (phase_ == 3 && !reapproached_ && conn.world().spawns.count(target_) &&
+                       glm::distance(conn.world().spawns.at(target_).position, pos_) > 15.0f) {
+                // A patrolling NPC walks off while the item is picked up, and the client cancels a trade out of
+                // reach: go beside it again, once, before opening the trade.
+                reapproached_ = true;
+                moved_ = false;
+                conn.say(goto_text(conn.world().spawns.at(target_).position + glm::vec3(3.0f, 0.0f, 0.0f)));
+                phase_ = 6;
             } else if (phase_ == 3) {
                 conn.give_to(target_);
                 phase_ = 4;
@@ -583,6 +600,7 @@ private:
     void next() {
         if (index_ < lines_.size()) ++index_;
         phase_ = 0;
+        reapproached_ = false;
     }
 
     void finish_run() {
@@ -613,7 +631,7 @@ private:
     int phase_ = 0;
     int kills_ = 0;
     int passed_ = 0, failed_ = 0;
-    bool active_ = false, done_ = false, handler_set_ = false, moved_ = false, zoned_ = false;
+    bool active_ = false, done_ = false, handler_set_ = false, moved_ = false, zoned_ = false, reapproached_ = false;
     bool stop_on_fail_ = false, failed_last_ = false;
     std::uint32_t target_ = 0, corpse_ = 0, object_ = 0;
     glm::vec3 pos_{0.0f};

@@ -66,8 +66,8 @@ audio::SoundGroup footstep_group(const game::Spawn& s, bool local) {
 audio::SoundGroup wave_cue_group(const net::SoundCue& cue) {
     using Context = net::SoundCue::Context;
     switch (cue.context) {
-    case Context::BagOpen: return audio::SoundGroup::OpenBag;
-    case Context::BankBagOpen: return audio::SoundGroup::OpenBank;
+    case Context::Bag: return audio::SoundGroup::OpenBag;
+    case Context::BankBag: return audio::SoundGroup::OpenBank;
     case Context::ItemWorn: return audio::SoundGroup::Equip;
     case Context::None: break;
     }
@@ -86,6 +86,7 @@ std::int32_t test_wave(audio::SoundGroup group, std::uint32_t pick) {
     case audio::SoundGroup::Money: return game::kSoundCoin;
     case audio::SoundGroup::Thunder: return game::Weather::kThunder1;
     case audio::SoundGroup::Equip: return game::kSoundItemMoved;
+    case audio::SoundGroup::Beep: // no wave id: the chosen Beep sound (ClientApp::beep_command)
     case audio::SoundGroup::None:
     case audio::SoundGroup::Count: break;
     }
@@ -281,7 +282,7 @@ void SoundEvents::update_remote(const game::Spawn& s, const glm::vec3& listener,
 
 void SoundEvents::update_spawn(std::uint32_t id, const game::Spawn& s, bool local, const LocalMotion& me,
                                const glm::vec3& listener, std::uint32_t now_ms) {
-    SpawnState& st = spawns_[id];
+    SpawnState& st = spawns_.get(id, s.incarnation); // a new spawn under an old id starts afresh
     // A new-style code (a missile's launch on a new-style source) sounds as its old-style number, as
     // 0x4b15b0 remaps it before PlayAnimationSound.
     const std::uint8_t action = s.action >= kFirstNewStyleAction ? game::mechanics::new_to_old_anim(s.action) : s.action;
@@ -315,8 +316,7 @@ void SoundEvents::update(net::GameConnection& conn, const LocalMotion& me, std::
     for (const auto& [id, s] : world.spawns) update_spawn(id, s, id == my_id_, me, listener, now_ms);
     audio_.drop_spawn_loops_except(alive_);
     // Every spawn has its state (made above), so the two differ in size exactly when some have gone.
-    if (spawns_.size() != world.spawns.size())
-        std::erase_if(spawns_, [&](const auto& kv) { return !world.spawns.contains(kv.first); });
+    if (spawns_.size() != world.spawns.size()) spawns_.prune(world.spawns);
 }
 
 } // namespace hailstone::app

@@ -72,6 +72,11 @@ std::vector<std::uint32_t> loot_descendants(const Item& root, bool& complete) {
 constexpr int kMergeAll = 0, kMergeNothing = 2;
 
 bool is_worn(const ItemSlot& s) { return s.type == kInvPossessions && s.sub < 0 && s.slot >= 0 && s.slot < kEquipmentSlots; }
+// ItemGlobalIndex_IsWeaponSlot @0x694020: possessions slot 11 (range), 13 (primary) or 14 (secondary), not in a bag.
+bool is_weapon_slot(const ItemSlot& s) {
+    return s.type == kInvPossessions && s.sub < 0 &&
+           (s.slot == kSlotRange || s.slot == kSlotPrimary || s.slot == kSlotSecondary);
+}
 
 } // namespace
 
@@ -463,7 +468,7 @@ void GameConnection::handle_item(Op op, const AppPacket& p) {
 void GameConnection::refresh_worn_slot(int slot) {
     // PcClient_RefreshWornSlotVisual: our own model shows what we wear, its
     // ornament included (game::worn_look). The server sends OP_WearChange to
-    // everyone else, not to us.
+    // everyone else, not to us. The held models are DoItemSlot's (do_item_slot).
     int ms = game::material_slot(slot);
     if (ms < 0) return;
     auto it = world_.spawns.find(world_.player_id);
@@ -474,6 +479,28 @@ void GameConnection::refresh_worn_slot(int slot) {
     game::apply_wear_change(it->second.appearance, static_cast<std::uint8_t>(ms), look.material, look.hero_forge,
                             look.tint);
     refresh_instrument_state();
+}
+
+void GameConnection::do_item_slot(int slot) {
+    // PlayerClient::DoItemSlot @0x593680, which CInvSlot calls after a move through a weapon slot
+    // (ItemGlobalIndex_IsWeaponSlot @0x694020: possessions 11, 13 or 14). Each SetHeldModel tells the zone.
+    // - 13 or 14: both hands show the primary and the secondary ("0" for an empty one); with both empty, hand 8
+    //   then shows the range item.
+    // - 11: with a range item, hand 7 is "0" and hand 8 the range item; without one, the primary and secondary.
+    // It returns first for 13 or 14 while the player's Animation (+0x10c0) is 9, which is not modelled
+    // (docs/unknowns.md).
+    const auto holds = [this](std::int16_t s) { return inventory_.at(ItemSlot::possessions(s)) != nullptr; };
+    if (slot == kSlotRange) {
+        const bool range = holds(kSlotRange);
+        set_held_model(game::kSlotPrimary, range ? -1 : kSlotPrimary);
+        set_held_model(game::kSlotSecondary, range ? kSlotRange : kSlotSecondary);
+        return;
+    }
+    if (slot != kSlotPrimary && slot != kSlotSecondary) return;
+    set_held_model(game::kSlotPrimary, kSlotPrimary);
+    set_held_model(game::kSlotSecondary, kSlotSecondary);
+    if (!holds(kSlotPrimary) && !holds(kSlotSecondary) && holds(kSlotRange))
+        set_held_model(game::kSlotSecondary, kSlotRange);
 }
 
 void GameConnection::set_held_model(int held, int item_slot) {
@@ -539,9 +566,13 @@ bool GameConnection::move_item(const ItemSlot& from, const ItemSlot& to, std::ui
     m.from = from;
     m.to = to;
     m.count = count;
-    send_zone(encode(m));
+    const bool sent = send_zone(encode(m));
     if (is_worn(from)) refresh_worn_slot(from.slot);
     if (is_worn(to)) refresh_worn_slot(to.slot);
+    // CInvSlot calls DoItemSlot with the slot clicked (the one that is not the cursor) when it is a weapon slot. A
+    // move the zone was not told of is shown to no one else.
+    if (sent && is_weapon_slot(to)) do_item_slot(to.slot);
+    else if (sent && is_weapon_slot(from)) do_item_slot(from.slot);
     // CTradeWnd_OnTradeItemMoved (game/trade_rules.h): a move into or out of a trade slot clears both ready flags.
     if (trade_) {
         game::TradeFlags f{trade_->their_ready, trade_->my_ready};
@@ -577,11 +608,11 @@ void GameConnection::click_slot(const ItemSlot& slot, bool shift, bool ctrl) {
         return;
     }
     if (slot.type == kInvTrade) {
-        // A click on an own trade slot drops the cursor item there (items never leave the trade). A drop that moved
+        // A click on an own trade slot offers the cursor item (items never leave the trade). A drop that moved
         // something plays the item-moved wave (CInvSlot::HandleLButtonUp @0x69633a).
         if (const Item* held = inventory_.cursor()) {
             const std::uint32_t count = held->stack_count;
-            trade_drop_cursor();
+            trade_drop_cursor(slot.slot);
             const Item* after = inventory_.cursor();
             if (!after || after->stack_count != count) item_moved_sound();
         }
@@ -997,8 +1028,7 @@ void GameConnection::container_sound(std::uint32_t bag_type, bool open, bool in_
     SoundCue cue;
     cue.kind = SoundCue::Kind::Wave;
     cue.spell = static_cast<std::uint32_t>(game::container_sound(bag_type, open));
-    // Hailstone: only the opening has a volume of its own, in a bank slot a second one.
-    if (open) cue.context = in_bank ? SoundCue::Context::BankBagOpen : SoundCue::Context::BagOpen;
+    cue.context = in_bank ? SoundCue::Context::BankBag : SoundCue::Context::Bag;
     sound_cues_.push_back(cue);
 }
 

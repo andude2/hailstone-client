@@ -2,6 +2,7 @@
 // the server's rules allow it, its MQ callbacks on the hook bus, held to its capabilities.
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <deque>
@@ -56,6 +57,7 @@ struct Host {
     std::vector<std::pair<int, std::string>> used, checked; // use_ability, ability_state (kind and name)
     bool ability_ready = true;
     std::vector<plugin::AbilityBulkRow> ability_rows; // get_ability_data_bulk's rows
+    std::optional<plugin::WorldPlacementScene> placement_scene;
     std::vector<std::pair<plugin::Stream, net::AppPacket>> packets;
     std::unique_ptr<mq::Commands> commands;
     std::unique_ptr<plugin::NativePlugins> plugins;
@@ -97,6 +99,8 @@ struct Host {
         ne.web = web;
         ne.ui = ui;
         ne.connection = [this] { return world.conn.get(); };
+        ne.world_placement_scene = [this] { return placement_scene; };
+        ne.world_placement_input_allowed = [this] { return placement_scene.has_value(); };
         ne.extensions = extensions.get();
         ne.nameplates = &canvas;
         ne.use_ability = [this](mq::AbilityKind kind, std::string_view name) {
@@ -189,6 +193,55 @@ void nameplate_test_metrics(game::NameplateCanvasRegistry& canvas) {
 }
 
 } // namespace
+
+TEST_CASE("native plugins: placement is advertised without a render frame and remains owner scoped") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll);
+    REQUIRE(h.plugins->load("HostProbe"));
+
+    h.run("/probeworldplacement status");
+    // Only the placement bit: no geometry frame yet.
+    CHECK(h.printed_line("[Probe] placement: 32 0 0 0 0"));
+    h.placement_scene = plugin::WorldPlacementScene{1, 85, 2};
+    h.run("/probeworldplacement status");
+    CHECK(h.printed_line("[Probe] placement: 32 1 0 85 2"));
+    h.run("/probeworldplacement start");
+    CHECK(h.printed_line("[Probe] placement start: 1"));
+    REQUIRE(h.plugins->world_placement_aiming());
+    h.plugins->world_placement_update(plugin::WorldPlacementPoint{12, -7, 2}, true, true);
+    h.run("/probeworldplacement status");
+    CHECK(h.printed_line("[Probe] placement: 32 1 3 85 2"));
+
+    h.run("/probeworldplacement start");
+    REQUIRE(h.plugins->world_placement_aiming());
+    h.approve(plugin::kCapAll & ~plugin::kCapExtend);
+    h.plugins->policy_changed({});
+    CHECK_FALSE(h.plugins->world_placement_aiming());
+    h.run("/probeworldplacement status");
+    CHECK(h.printed_line("[Probe] placement: 0 0 0 0 0"));
+}
+
+TEST_CASE("native plugins: placement stays on the actual client thread during a lend") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapAll);
+    h.placement_scene = plugin::WorldPlacementScene{1, 85, 2};
+    REQUIRE(h.plugins->load("HostProbe"));
+
+    h.run("/probeworldplacement lent");
+    CHECK(h.printed_line("[Probe] placement lent: 1 0 0 99 1"));
+    CHECK_FALSE(h.plugins->world_placement_aiming());
+
+    h.run("/probeworldplacement start");
+    REQUIRE(h.plugins->world_placement_aiming());
+    h.printed.clear();
+    h.run("/probeworldplacement lent");
+    CHECK(h.printed_line("[Probe] placement lent: 1 0 0 99 1"));
+    CHECK(h.plugins->world_placement_aiming());
+    h.run("/probeworldplacement cancel");
+    CHECK_FALSE(h.plugins->world_placement_aiming());
+    h.run("/probeworldplacement status");
+    CHECK(h.printed_line("[Probe] placement: 32 1 4 85 2"));
+}
 
 TEST_CASE("native plugins: nameplate frame lease and canvas ownership") {
     Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
@@ -823,6 +876,12 @@ TEST_CASE("native plugins: MQ callbacks, commands and TLOs, then unloaded cleanl
     h.run("/hello there");
     CHECK(h.printed_line("[MQ2Example] Hello, there!"));
     CHECK(h.p("${Example}") == "Example");
+    {
+        const auto catalog = h.reg.tlo_catalog();
+        const auto row = std::find_if(catalog.begin(), catalog.end(), [](const auto& r) { return r.name == "Example"; });
+        REQUIRE(row != catalog.end());
+        CHECK(row->origin == mq::TloOrigin::Addon);
+    }
     h.hooks.pulse();
     h.hooks.pulse();
     CHECK(h.p("${Example.Pulses}") == "2");
@@ -862,6 +921,51 @@ TEST_CASE("native plugins: a TLO name already taken is refused, and stays after 
     h.plugins->unload("MQ2Example");
     CHECK(h.p("${Example}") == "client's");
     CHECK(h.reg.has_tlo("Me"));
+}
+
+TEST_CASE("native plugins: TLO policy gates registered roots and SDK macro parsing") {
+    Host h;
+    h.approve(plugin::kCapAll);
+    REQUIRE(h.plugins->load("MQ2Example"));
+    CHECK(h.p("${Example.MyHP}") == "75");
+    net::GameConnectionTestAccess::set_server_rules(
+        *h.world.conn, plugin::parse_server_cfg("[tlos]\nblock = Me\n"));
+    // Example.MyHP parses Me through the SDK. The example converts the resulting NULL with atoi.
+    CHECK(h.p("${Example.MyHP}") == "0");
+    net::GameConnectionTestAccess::set_server_rules(
+        *h.world.conn, plugin::parse_server_cfg("[tlos]\nblock = Example\n"));
+    CHECK(h.p("${example.MyHP} ${Me.Name}") == "NULL Tester");
+    CHECK(h.reg.has_tlo("Example"));
+}
+
+TEST_CASE("native plugins: managed TLO grants require verified bytes at the recorded path") {
+    Host h(true);
+    h.approve(plugin::kCapAll);
+    const plugin::Ceiling verified{
+        plugin::FileKind::Plugin, h.hash(), plugin::kCapAll, "MQ2Example", "owner/example", true, true, h.file,
+    };
+    h.policy.set_ceilings({verified});
+    net::GameConnectionTestAccess::set_server_rules(
+        *h.world.conn, plugin::parse_server_cfg("[tlos]\nblock = Me\naddon_allow = owner/example:Me\n"));
+    REQUIRE(h.plugins->load("MQ2Example"));
+    CHECK(h.p("${Me.Name} ${Example.MyHP}") == "NULL 75");
+    {
+        plugin::CallerScope unverified(plugin::kCapAll, "MQ2Example");
+        CHECK(h.p("${Example.MyHP}") == "0");
+    }
+    auto denied = plugin::parse_server_cfg("[tlos]\nblock = Me\naddon_allow = owner/example:Me\n"
+                                          "[addons]\nenforce = on\nblock = owner/example\n");
+    net::GameConnectionTestAccess::set_server_rules(*h.world.conn, denied);
+    CHECK(h.p("${Example.MyHP}") == "0");
+    denied.addons = {};
+    net::GameConnectionTestAccess::set_server_rules(*h.world.conn, denied);
+    CHECK(h.p("${Example.MyHP}") == "75");
+    auto different_path = verified;
+    different_path.installed_path = h.file.parent_path() / "unrelated.dll";
+    h.policy.set_ceilings({different_path});
+    h.plugins->policy_changed({});
+    CHECK(h.plugins->loaded("MQ2Example"));
+    CHECK(h.p("${Example.MyHP}") == "0");
 }
 
 TEST_CASE("native plugins: callbacks it may not use are left off; the policy can unload it") {
@@ -1490,6 +1594,21 @@ TEST_CASE("native plugins: web pages of the plugin's own (ABI 3), under 'web', c
     browser.shutdown();
 }
 #endif
+
+TEST_CASE("native plugins: write_chat_group writes bounded local chat without chat permission") {
+    Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);
+    h.approve(plugin::kCapCommands);
+    REQUIRE(h.plugins->load("HostProbe"));
+    h.run("/probechatgroup");
+    CHECK(h.printed_line("[Probe] chat group: accepted 1, count 0, title 0, empty 0, row 0, thread 0"));
+    auto event = h.world.conn->poll_chat();
+    REQUIRE(event);
+    CHECK(event->text == "Probe Status");
+    const std::vector<std::string> expected{"First probe row.", "Second probe row."};
+    CHECK(event->group == expected);
+    CHECK_FALSE(h.world.conn->poll_chat());
+    CHECK(h.packets.empty());
+}
 
 TEST_CASE("native plugins: host functions from another thread do nothing; the caller's capabilities are none there") {
     Host h(false, nullptr, HAILSTONE_PROBE_PLUGIN);

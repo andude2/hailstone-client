@@ -240,6 +240,29 @@ void write_pfs_fixture(const std::filesystem::path& path, const std::vector<std:
 }
 } // namespace
 
+TEST_CASE("read_file reads a regular file whole, and refuses a directory, a missing file and one past its cap") {
+    hailstone::test::ScratchDir dir("read_file");
+    const auto file = dir.path() / "five.bin";
+    {
+        std::ofstream out(file, std::ios::binary);
+        out << "12345";
+    }
+    auto bytes = hailstone::read_file(file);
+    REQUIRE(bytes);
+    CHECK(bytes->size() == 5);
+    CHECK(std::to_integer<char>((*bytes)[4]) == '5');
+    CHECK(hailstone::read_file(file, 5));
+    CHECK_FALSE(hailstone::read_file(file, 4));
+    CHECK_FALSE(hailstone::read_file(dir.path()));
+    CHECK_FALSE(hailstone::read_file(dir.path() / "missing.bin"));
+    std::filesystem::create_directory(dir.path() / "folder.s3d");
+    CHECK_THROWS_AS(PfsArchive::open(dir.path() / "folder.s3d", PfsArchive::Storage::Heap), std::runtime_error);
+    std::ofstream(dir.path() / "empty.bin", std::ios::binary).close();
+    auto empty = hailstone::read_file(dir.path() / "empty.bin");
+    REQUIRE(empty);
+    CHECK(empty->empty());
+}
+
 TEST_CASE("PfsArchive mapped snapshots match private parsing and retain their backing") {
     using namespace hailstone;
     using namespace hailstone::test::pfs_fixtures;

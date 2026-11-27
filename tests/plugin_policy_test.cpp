@@ -34,6 +34,105 @@ TEST_CASE("hailstone.cfg: shipped templates leave player code disabled and ident
     }
 }
 
+TEST_CASE("hailstone.cfg: TLO rules apply by case-insensitive root name") {
+    CHECK(plugin::Rules{}.tlos.allowed("Spawn"));
+    CHECK(plugin::parse_server_cfg("[tlos]\n").tlos.allowed("Unlisted"));
+    CHECK_FALSE(plugin::parse_server_cfg("[tlos]\nblock = sPawN\n").tlos.allowed("Spawn"));
+    CHECK(plugin::parse_server_cfg("[tlos]\nblock = Spawn\n").tlos.allowed("SpawnCount"));
+
+    std::vector<std::string> warnings;
+    const auto rules = plugin::parse_server_cfg(R"cfg(
+[Tlos]
+Default = Deny
+allow = Zone
+ALLOW = Me, Target, 2nd-AddOn	Some_Root, Me.Bank
+block = tARGet, target, [Bad]
+unrelated = data for scripts
+)cfg", &warnings);
+    CHECK_FALSE(rules.tlos.default_allow);
+    CHECK(rules.tlos.allowed("mE"));
+    CHECK(rules.tlos.allowed("2nd-addon"));
+    CHECK(rules.tlos.allowed("Some_Root"));
+    CHECK_FALSE(rules.tlos.allowed("TARGET"));
+    CHECK_FALSE(rules.tlos.allowed("Spawn"));
+    CHECK_FALSE(rules.tlos.allowed("Zone"));
+    CHECK_FALSE(rules.tlos.allowed("Me.Bank"));
+    CHECK(rules.tlos.block.size() == 1);
+    CHECK(rules.script_sections.at("tlos").at("unrelated") == "data for scripts");
+    CHECK(std::any_of(warnings.begin(), warnings.end(), [](const auto& warning) {
+        return warning.find("Me.Bank") != std::string::npos;
+    }));
+    CHECK(std::any_of(warnings.begin(), warnings.end(), [](const auto& warning) {
+        return warning.find("block wins") != std::string::npos;
+    }));
+    CHECK(plugin::parse_server_cfg("[tlos]\ndefault = invalid\n").tlos.allowed("Spawn"));
+}
+
+TEST_CASE("hailstone.cfg: verified add-on TLO grants are exact exceptions to global denial") {
+    const auto defaults = plugin::parse_server_cfg("[tlos]\n").tlos;
+    CHECK(defaults.allowed("Me"));
+    CHECK(defaults.allowed("Unlisted", "owner/repo"));
+    CHECK(defaults.addon_allow.empty());
+
+    std::vector<std::string> warnings;
+    const auto rules = plugin::parse_server_cfg(R"cfg(
+[tlos]
+default = deny
+allow = Target, Me
+block = Me
+addon_allow = Owner/Repo:Me, owner/repo:Spawn, other/addon:NearestSpawn, repo:Me, owner/repo:Me.Bank, owner/repo@v1:Me, owner/repo.git:Me, https://github.com/owner/repo:Me, owner/repo:*
+)cfg", &warnings);
+    CHECK_FALSE(rules.tlos.allowed("Me"));
+    CHECK_FALSE(rules.tlos.allowed("Me", "owner/other"));
+    CHECK_FALSE(rules.tlos.allowed("Me", "other/addon"));
+    CHECK(rules.tlos.allowed("mE", "oWnEr/rEpO"));
+    CHECK(rules.tlos.allowed("Spawn", "owner/repo"));
+    CHECK_FALSE(rules.tlos.allowed("SpawnCount", "owner/repo"));
+    CHECK_FALSE(rules.tlos.allowed("Me.Bank", "owner/repo"));
+    CHECK(rules.tlos.allowed("NearestSpawn", "other/addon"));
+    CHECK(rules.tlos.allowed("Target", "owner/other"));
+    REQUIRE(rules.tlos.addon_allow.size() == 2);
+    CHECK(rules.tlos.addon_allow.at("owner/repo").size() == 2);
+    CHECK(warnings.size() == 7);
+}
+
+TEST_CASE("policy: a renewed TLO proof keeps its object across a new generation; a revoked one stays revoked") {
+    plugin::Policy policy;
+    const auto file = std::filesystem::absolute("addon/init.lua").lexically_normal();
+    const Sha256Digest hash = sha256("print('hi')");
+    const plugin::Ceiling mine{plugin::FileKind::Script, hash, plugin::kCapAll, "Mine", "owner/mine", true, true, file};
+    policy.set_ceilings({mine});
+    policy.set(plugin::Rules{});
+    const auto proof = policy.verified_tlo_caller(plugin::FileKind::Script, hash, file);
+    REQUIRE(proof);
+    CHECK(proof->identity() == "owner/mine");
+    const plugin::WeakTloCaller deferred = proof; // what a /timed line holds
+
+    policy.set(plugin::Rules{});
+    CHECK(proof->identity().empty()); // a new generation, not yet re-verified
+    const auto current = policy.verified_tlo_caller(plugin::FileKind::Script, hash, file);
+    REQUIRE(current);
+    proof->renew(*current);
+    CHECK(deferred.lock() == proof);
+    CHECK(deferred.lock()->identity() == "owner/mine");
+
+    // Another add-on's proof lends nothing.
+    auto other = mine;
+    other.addon_source = "owner/other";
+    policy.set_ceilings({other});
+    const auto foreign = policy.verified_tlo_caller(plugin::FileKind::Script, hash, file);
+    REQUIRE(foreign);
+    proof->renew(*foreign);
+    CHECK(proof->identity().empty());
+
+    policy.set_ceilings({mine});
+    const auto again = policy.verified_tlo_caller(plugin::FileKind::Script, hash, file);
+    REQUIRE(again);
+    proof->revoke();
+    proof->renew(*again);
+    CHECK(proof->identity().empty());
+}
+
 TEST_CASE("hailstone.cfg: [client] deny is off by default and can deny Hailstone access") {
     CHECK_FALSE(plugin::Rules{}.deny_client);
     CHECK_FALSE(plugin::parse_server_cfg("").deny_client);
@@ -44,6 +143,212 @@ TEST_CASE("hailstone.cfg: [client] deny is off by default and can deny Hailstone
     CHECK_FALSE(plugin::parse_server_cfg("[client]\ndeny = maybe\n", &warnings).deny_client);
     REQUIRE(warnings.size() == 1);
     CHECK(warnings.front() == "[client] deny: \"maybe\" is not on or off");
+}
+
+TEST_CASE("hailstone.cfg: command permissions are opt-in and resolve aliases, groups and conflicts") {
+    CHECK(plugin::parse_server_cfg("[scripts]\nplayer = on\n").commands.allowed("/nav"));
+    CHECK_FALSE(plugin::parse_server_cfg("[commands]\n").commands.enabled);
+    std::vector<std::string> warnings;
+    const auto rules = plugin::parse_server_cfg(R"(
+[Commands]
+default = deny
+allow_groups = movement_automation, addon_commands
+block_groups = Non_ROF2, not_a_group
+allow = /advi, /time, /TGB
+block = /finditem, /exchange
+blocked_message = "Ask the GM in #Support; they said "please"." ; comment
+custom_key = keep
+[management]
+min_status = 150
+)", &warnings);
+    REQUIRE(rules.commands.enabled);
+    CHECK_FALSE(rules.commands.default_allow);
+    CHECK(rules.commands.denial_message() == "Ask the GM in #Support; they said \"please\".");
+    CHECK(rules.management_min_status == 150);
+    CHECK(rules.script_sections.at("commands").at("custom_key") == "keep");
+    CHECK(rules.script_sections.at("commands").at("default") == "deny");
+    CHECK(rules.script_sections.at("management").at("min_status") == "150");
+    CHECK_FALSE(rules.commands.allowed("/STICK")); // the broader block wins over another group
+    CHECK(rules.commands.decision("/stick").reason == "non_rof2");
+    CHECK(rules.commands.allowed("time"));
+    CHECK(rules.commands.allowed("/targetgroupbuff"));
+    CHECK_FALSE(rules.commands.allowed("/who"));
+    CHECK_FALSE(rules.commands.allowed("advi")); // the alias shares the canonical explicit block
+    CHECK(rules.commands.decision("/advi").reason == "Explicit block");
+    CHECK_FALSE(rules.commands.allowed("/exchange"));
+    CHECK(rules.commands.allowed("/addoncommand"));
+    CHECK(warnings.size() == 3); // unknown group, custom key, explicit alias conflict
+    CHECK_FALSE(plugin::parse_server_cfg("[commands]\nblock = /loc\n").commands.allowed("/LOCATION"));
+    CHECK_FALSE(plugin::parse_server_cfg("[commands]\nblock = /msg\n").commands.allowed("/send"));
+    CHECK(plugin::parse_server_cfg("[commands]\nblock = /face\n").commands.allowed("/facepick"));
+    CHECK_FALSE(plugin::parse_server_cfg("[commands]\nblock = /pause, /timer\n").commands.allowed("/timer"));
+}
+
+TEST_CASE("hailstone.cfg: GM command thresholds apply to aliases and registered add-ons") {
+    std::vector<std::string> warnings;
+    const auto cfg = plugin::parse_server_cfg(R"(
+[commands]
+default = deny
+block_groups = movement_automation
+allow = /Nav, /time
+block = /stick
+gm = /NAV:150 /advi:199, /FINDITEM:230, /stick:1, /exchange:200, ::125, /loc:99, /testcap:32767
+)", &warnings);
+    const auto& rules = cfg.commands;
+    REQUIRE(rules.enabled);
+    CHECK(warnings.size() == 2); // the named GM rules take precedence over Allow, and Block takes precedence over GM
+    CHECK_FALSE(rules.allowed("/nav"));
+    CHECK_FALSE(rules.allowed("/nav", 149));
+    CHECK(rules.allowed("/nav", 150));
+    CHECK(rules.decision("/nav", 151).minimum_status == 150);
+    CHECK_FALSE(rules.allowed("/stick", 32767));
+    CHECK_FALSE(rules.decision("/stick", 32767).minimum_status);
+    CHECK(rules.allowed("/time"));
+    CHECK_FALSE(rules.allowed("/who", 32767));
+
+    CHECK(rules.decision("/advi").minimum_status == 230);
+    CHECK_FALSE(rules.allowed("/finditem", 229));
+    CHECK(rules.allowed("/advi", 230));
+    CHECK_FALSE(rules.allowed("/exchange", 199));
+    CHECK(rules.allowed("/EXCHANGE", 200));
+    CHECK_FALSE(rules.allowed("/emote", 124));
+    CHECK(rules.allowed(":", 125));
+    CHECK(rules.allowed("/location", 99));
+    CHECK_FALSE(rules.allowed("/testcap", 32766));
+    CHECK(rules.allowed("/testcap", 32767));
+}
+
+TEST_CASE("hailstone.cfg: malformed GM command thresholds deny any command they can identify") {
+    std::vector<std::string> warnings;
+    const auto cfg = plugin::parse_server_cfg(R"(
+[commands]
+gm = /nav:0, /stick:32768 /exchange:+200, /who:200extra, /finditem:1, /advi:, /target, :, /:200
+)", &warnings);
+    const auto& rules = cfg.commands;
+    REQUIRE(rules.enabled);
+    CHECK(warnings.size() == 8);
+    for (std::string_view name : {"/nav", "/stick", "/exchange", "/who", "/advi", "/target", "/emote"}) {
+        CAPTURE(name);
+        CHECK_FALSE(rules.allowed(name, 32767));
+        CHECK_FALSE(rules.allowed(name));
+        CHECK(rules.decision(name).reason == "Invalid GM status rule");
+    }
+    CHECK(rules.allowed("/time"));
+    CHECK(rules.allowed("/knownaddon"));
+}
+
+TEST_CASE("hailstone.cfg: blocked command notices keep literal text and bound its size") {
+    CHECK(plugin::parse_server_cfg("[commands]\nblocked_message = \"\"\n").commands.denial_message() ==
+          plugin::kDefaultCommandBlockedMessage);
+    CHECK(plugin::parse_server_cfg("[commands]\nblocked_message = Please Ask a GM. ; old note\n").commands.denial_message() ==
+          "Please Ask a GM.");
+    CHECK(plugin::parse_server_cfg("[commands]\nblocked_message = \"#; \\\"\"\n").commands.denial_message() == "#; \\\"");
+    const std::string longest(plugin::kCommandBlockedMessageMaxBytes, 'm');
+    CHECK(plugin::parse_server_cfg("[commands]\nblocked_message = " + longest).commands.denial_message() == longest);
+    std::vector<std::string> warnings;
+    CHECK(plugin::parse_server_cfg("[commands]\nblocked_message = " + longest + "m\n", &warnings).commands.denial_message() ==
+          plugin::kDefaultCommandBlockedMessage);
+    CHECK(plugin::parse_server_cfg("[commands]\nblocked_message = one\ttwo\n", &warnings).commands.denial_message() ==
+          plugin::kDefaultCommandBlockedMessage);
+    CHECK(plugin::parse_server_cfg("[commands]\nblocked_message = \"unterminated\n", &warnings).commands.denial_message() ==
+          plugin::kDefaultCommandBlockedMessage);
+    CHECK(warnings.size() == 3);
+    CHECK(plugin::parse_server_cfg("[management]\nmin_status = 0\n", &warnings).management_min_status == 200);
+    CHECK(plugin::parse_server_cfg("[management]\nmin_status = 32768\n", &warnings).management_min_status == 200);
+    CHECK(warnings.size() == 5);
+}
+
+TEST_CASE("hailstone.cfg: repeated command keys use the last assignment") {
+    const auto rules = plugin::parse_server_cfg(R"(
+[commands]
+default = deny
+allow = /follow
+block = /target
+gm = /map:250, /camp:250
+allow_groups = movement_automation
+block_groups = command_helpers
+
+[COMMANDS]
+Allow = /TARG
+Block = /NAV
+GM = /Map:180, /MAP:190
+Allow_Groups = command_helpers
+Block_Groups = addon_commands
+)").commands;
+    CHECK(rules.allow == std::vector<std::string>{"/target"});
+    CHECK(rules.block == std::vector<std::string>{"/nav"});
+    REQUIRE(rules.gm.size() == 1);
+    CHECK(rules.gm.at("/map") == 190);
+    CHECK(rules.allow_groups == std::vector<std::string>{"command_helpers"});
+    CHECK(rules.block_groups == std::vector<std::string>{"addon_commands"});
+    CHECK(rules.allowed("/target"));
+    CHECK_FALSE(rules.allowed("/follow"));
+}
+
+TEST_CASE("command catalog: stock aliases, extended commands, and live add-on registrations") {
+    const std::vector<std::string> registered{"/nav", "/target", "/raidnotes"};
+    const auto rows = plugin::command_catalog(registered);
+    auto find = [&](std::string_view name) {
+        return std::find_if(rows.begin(), rows.end(), [&](const auto& row) { return row.name == name; });
+    };
+    auto finditem = find("/finditem");
+    REQUIRE(finditem != rows.end());
+    CHECK(finditem->origin == plugin::CommandOrigin::Extended);
+    CHECK(finditem->aliases == std::vector<std::string>{"/advi"});
+    CHECK(find("/advi") == rows.end());
+    for (const auto* name : {"/afollow", "/exchange", "/timed", "/unequip"}) {
+        const auto extended = find(name);
+        REQUIRE(extended != rows.end());
+        CHECK(extended->origin == plugin::CommandOrigin::Extended);
+        CHECK(plugin::known_extended_command(name));
+    }
+    const auto groups = plugin::parse_server_cfg("[commands]\nblock_groups = movement_automation, command_helpers\n").commands;
+    CHECK_FALSE(groups.allowed("/afollow", 250));
+    CHECK_FALSE(groups.allowed("/timed", 250));
+    CHECK(groups.allowed("/exchange", 250));
+    CHECK(groups.allowed("/unequip", 250));
+    const auto mapfilter = find("/mapfilter");
+    REQUIRE(mapfilter != rows.end());
+    CHECK(mapfilter->origin == plugin::CommandOrigin::Extended);
+    CHECK(mapfilter->groups == std::vector<std::string>{"non_rof2"});
+    // A built-in command: blocking add-on commands leaves it alone, blocking non_rof2 does not.
+    CHECK(plugin::parse_server_cfg("[commands]\nblock_groups = addon_commands\n").commands.allowed("/mapfilter"));
+    CHECK(plugin::parse_server_cfg("[commands]\nblock_groups = non_rof2\n").commands.decision("/MapFilter").reason ==
+          "non_rof2");
+    // PR 210's commands are built in too; /click and /memspell are their own, not RoF2's /clickthrough and
+    // /memspellset taken by prefix, and the modifier-key commands are helpers like /docommand.
+    for (const char* name : {"/click", "/ctrlkey", "/doortarget", "/itemnotify", "/makemevisible", "/memspell",
+                             "/nomodkey", "/removeaura", "/removelev", "/shiftkey"}) {
+        CAPTURE(name);
+        const auto row = find(name);
+        REQUIRE(row != rows.end());
+        CHECK(row->origin == plugin::CommandOrigin::Extended);
+        CHECK(plugin::canonical_command_name(name) == name);
+    }
+    CHECK(plugin::canonical_command_name("/clickthrough") == "/clickthrough");
+    CHECK(find("/nomodkey")->groups == std::vector<std::string>{"non_rof2", "command_helpers"});
+    CHECK(plugin::parse_server_cfg("[commands]\nblock_groups = addon_commands\n").commands.allowed("/itemnotify"));
+    // PR 228's: /notify and the buff commands are built in, not RoF2's /note or /removeaura taken by prefix.
+    for (const char* name : {"/notify", "/removebuff", "/removepetbuff"}) {
+        CAPTURE(name);
+        const auto row = find(name);
+        REQUIRE(row != rows.end());
+        CHECK(row->origin == plugin::CommandOrigin::Extended);
+        CHECK(plugin::known_extended_command(name));
+        CHECK(plugin::canonical_command_name(name) == name);
+        CHECK(row->groups == std::vector<std::string>{"non_rof2"});
+        CHECK(plugin::parse_server_cfg("[commands]\nblock_groups = addon_commands\n").commands.allowed(name));
+    }
+    auto target = find("/target");
+    REQUIRE(target != rows.end());
+    CHECK(target->origin == plugin::CommandOrigin::Stock);
+    auto dynamic = find("/raidnotes");
+    REQUIRE(dynamic != rows.end());
+    CHECK(dynamic->origin == plugin::CommandOrigin::Addon);
+    CHECK(dynamic->groups == std::vector<std::string>{"addon_commands"});
+    CHECK(find("/pause") != rows.end());
+    CHECK(find("/timer") != rows.end());
+    CHECK(find("/servermanagement") != rows.end());
 }
 
 TEST_CASE("hailstone.cfg: every setting, defaults for the rest, warnings for what it does not know") {
@@ -67,6 +372,12 @@ caps = read,target,actions,move
 press_commands = 3
 faces = no
 
+[abilities]
+autoskill = on
+
+[map]
+vanilla = on
+
 [web]
 allow = Example.org, wiki.example.net
 )",
@@ -81,6 +392,7 @@ allow = Example.org, wiki.example.net
     CHECK(r.social_caps == (plugin::kCapRead | plugin::kCapTarget | plugin::kCapActions | plugin::kCapMove));
     CHECK(r.social_press_commands == 3);
     CHECK_FALSE(r.social_faces);
+    CHECK(r.map_vanilla);
     CHECK(r.web_allow == std::vector<std::string>{"example.org", "wiki.example.net"});
 
     auto d = plugin::parse_server_cfg("");
@@ -89,6 +401,7 @@ allow = Example.org, wiki.example.net
     CHECK(d.player_plugin_caps == 0);
     CHECK(d.player_assets);
     CHECK(d.social_mode == plugin::ButtonMode::Press);
+    CHECK_FALSE(d.map_vanilla);
     CHECK(d.web_allow.empty());
 
     // "player = on" alone: every capability.
@@ -107,6 +420,18 @@ allow = Example.org, wiki.example.net
     CHECK(a.script_sections["autocombat"]["hunter"] == "off");
     CHECK(a.script_sections["autocombat"]["assist"] == "on");
     CHECK(r.script_sections.empty());
+}
+
+TEST_CASE("hailstone.cfg: [map] vanilla defaults off and warns on an invalid value") {
+    CHECK_FALSE(plugin::Rules{}.map_vanilla);
+    CHECK_FALSE(plugin::parse_server_cfg("").map_vanilla);
+    CHECK_FALSE(plugin::parse_server_cfg("[map]\nvanilla = off\n").map_vanilla);
+    std::vector<std::string> warnings;
+    CHECK(plugin::parse_server_cfg("[Map]\nVanilla = ON\n", &warnings).map_vanilla);
+    CHECK(warnings.empty());
+    CHECK_FALSE(plugin::parse_server_cfg("[map]\nvanilla = maybe\n", &warnings).map_vanilla);
+    REQUIRE(warnings.size() == 1);
+    CHECK(warnings.front() == "[map] vanilla: \"maybe\" is not on or off");
 }
 
 TEST_CASE("server_rules: none without hailstone.cfg; its own scripts and plugins listed; a changed cfg gives defaults") {
@@ -279,13 +604,13 @@ TEST_CASE("settings packets: request layout, answer round trip, later fields ign
     CHECK(req.data[4] == std::byte{1});
 
     net::HailstoneSettings v;
-    v.flags = 0x5; // no flag is defined now; any value goes through
+    v.flags = 0x9; // retired and unrecognized flags are preserved
     auto p = net::encode(v);
     CHECK(p.opcode == 0x1433);
     REQUIRE(p.data.size() == 10);
     auto d = net::decode_hailstone_settings(p);
     REQUIRE(d);
-    CHECK(d->flags == 0x5u);
+    CHECK(d->flags == 0x9u);
 
     auto longer = p;
     longer.data.push_back(std::byte{7}); // a later version's field

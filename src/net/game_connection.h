@@ -14,6 +14,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <deque>
 #include <filesystem>
@@ -77,6 +78,7 @@
 #include "game/reward_selection.h"
 #include "game/achievements.h"
 #include "game/task_window.h"
+#include "net/remove_buff.h"
 #include "game/text_overlay.h"
 #include "game/camera_shake.h"
 #include "game/tracking.h"
@@ -92,6 +94,7 @@
 #include "net/aggro_packets.h"
 #include "net/door_packets.h"
 #include "net/dz_packets.h"
+#include "net/group_packets.h"
 #include "net/guild_bank_packets.h"
 #include "net/fellowship_packets.h"
 #include "net/guild_banner_packets.h"
@@ -101,6 +104,7 @@
 #include "net/commerce.h"
 #include "net/market_packets.h"
 #include "net/settings_packets.h"
+#include "net/server_management_packets.h"
 #include "net/zone_link_packets.h"
 #include "plugin/policy.h"
 #include "net/server_files.h"
@@ -243,6 +247,10 @@ enum class ConnectionState : std::uint8_t {
 
 const char* to_string(ConnectionState state);
 
+inline constexpr std::size_t kChatGroupMaxTitleBytes = 80;
+inline constexpr std::size_t kChatGroupMaxRows = 32;
+inline constexpr std::size_t kChatGroupMaxRowBytes = 1024;
+
 struct ChatEvent {
     enum class Kind : std::uint8_t { System, Say, Tell, Group, Guild, Raid, Shout, Auction, OOC, Emote, Combat, Spell, Other };
     Kind kind = Kind::System;
@@ -253,6 +261,7 @@ struct ChatEvent {
     std::uint32_t color = 0;
     std::string peer; // the player the line is from: a tell's other player (the sender, or whom we told), a channel's
                       // speaker (Hailstone: the modern chat's name links)
+    std::vector<std::string> group; // the group's plain text rows. When nonempty, text is its title.
 };
 
 // Something the client plays a sound for (audio/; the wave each gets is
@@ -279,9 +288,9 @@ struct SoundCue {
     // bag wave opening and closing); the app picks the Individual Sounds volume from it.
     enum class Context : std::uint8_t {
         None,
-        BagOpen,     // a bag in a carried slot opening
-        BankBagOpen, // a bag in a bank or shared bank slot opening
-        ItemWorn,    // an item put into or taken out of a worn slot
+        Bag,      // a bag in a carried slot opening or closing
+        BankBag,  // a bag in a bank or shared bank slot opening or closing
+        ItemWorn, // an item put into or taken out of a worn slot
     };
     Context context = Context::None;
 };
@@ -357,7 +366,7 @@ struct ConnectionOptions {
     // The saved server's folder (servers/<id>/): at the first zone-in the zone-in waits while the server's client
     // files are brought into it (net/server_files.h).
     std::filesystem::path server_files_dir;
-    // Transient logins cache only hailstone.cfg here, to check server access without enabling the full download.
+    // Transient logins cache only hailstone.cfg here, for access and command policy without the full download.
     std::filesystem::path server_access_dir;
     // How much those files may come to (hailstone.ini's assets.server_files_max_*_mb).
     ServerFileSync::Limits server_files_limits;
@@ -377,10 +386,20 @@ public:
     GameConnection(const GameDir& game, ConnectionOptions options = {});
     ~GameConnection();
     // Tests: a zone packet handled as if it had arrived (no session needed).
-    void receive_zone_packet_for_test(const AppPacket& p) { handle_zone(p); }
-    void receive_world_packet_for_test(const AppPacket& p) { handle_world(p); }
-    game::WorldState& world_for_test() { return world_; }
-    void set_spell_table_for_test(std::shared_ptr<const game::SpellTable> t) { spell_table_ = std::move(t); }
+    void receive_zone_packet_for_test(const AppPacket& p) { invalidate_character(); handle_zone(p); invalidate_character(); }
+    void receive_world_packet_for_test(const AppPacket& p) { invalidate_character(); handle_world(p); invalidate_character(); }
+    game::WorldState& world_for_test() { invalidate_character(); return world_; }
+    void set_spell_table_for_test(std::shared_ptr<const game::SpellTable> t) {
+        invalidate_character();
+        spell_table_ = std::move(t);
+    }
+    // The MQ TLOs' shared character (with_cached_character) is built again on its next read: the state it was built
+    // from changed outside update() without a packet sent.
+    void invalidate_character() const { ++character_serial_; }
+    // Tests: how many sheets the TLOs' shared character has been built from.
+    std::uint32_t character_builds_for_test() const { return character_builds_; }
+    std::size_t cast_stages_shown_for_test() const { return cast_stage_shown_.size(); }
+    static constexpr std::size_t cast_stages_kept_for_test() { return kCastStagesKept; }
     void expire_poison_timer_for_test() { if (poison_started_ms_) poison_started_ms_ = 1; } // as if 10 s had passed
 
     // Connects to the world server named in the ticket.
@@ -549,7 +568,30 @@ public:
     void ui_tell_message(std::string text, std::uint32_t rgb = 0, std::uint32_t color = 0) {
         chat(ChatEvent::Kind::Tell, std::move(text), rgb, color);
     }
-    // The sound events since the last call (doors included).
+    // A line the client writes itself with MQ's colour codes in it (a MacroQuest command's reply: /popupecho's
+    // "Popup::", a usage line): its codes are kept though no script or plugin wrote it, where ui_message takes the
+    // BEL out of such a line. Text in it from elsewhere (the player's command line, which a ${...} may have filled
+    // with a server's names) must have its BEL taken out by the caller (game::kMqColorCode).
+    void client_message(std::string text, std::uint32_t rgb = 0) {
+        chat(ChatEvent::Kind::System, std::move(text), rgb, 0, {}, std::nullopt, true, true);
+    }
+    // Display the surviving lines of a local group as one collapsible entry. Only the individual rows go through
+    // the chat hooks and log. Returns false for invalid input, with no rows submitted.
+    bool write_chat_group(std::string title, std::vector<std::string> messages);
+    // A routine add-on policy notice goes through the normal hooks and log. During a zone transfer, the UI
+    // can present these notices together. The first zone-in has no transfer. `subject` names the script or plugin
+    // the notice is about; `stop` marks a notice that stops it.
+    void zone_client_message(std::string text, std::string subject = {}, bool stop = false);
+    // The transfer's notices, in order. A subject's stop notices with no start after them are `lasting`: the
+    // script or plugin stays stopped, so the UI shows them on their own, outside the collapsed group.
+    struct ZoneClientMessage {
+        std::string text;
+        bool lasting = false;
+        bool operator==(const ZoneClientMessage&) const = default;
+    };
+    std::vector<ZoneClientMessage> take_zone_client_messages();
+    // The spell effect stages queued since the last call, in order (cast stages from OP_BeginCast and procs, impact
+    // stages from OP_Action 231); a zone change drops those not yet taken.
     std::vector<SpellEffectCue> take_spell_effect_cues() { return std::exchange(effect_cues_, {}); }
     // The effect packets since the last call, in order (app/spell_particles.h plays them).
     std::vector<EffectPacketCue> take_effect_packets() { return std::exchange(effect_packets_, {}); }
@@ -558,6 +600,7 @@ public:
     std::vector<game::MissilePacket> take_missiles() { return std::exchange(missiles_, {}); }
     // Spell 859 local presentation; no packet is encoded or sent.
     void spell_missile_hit(const game::Missile& missile);
+    // The sound events since the last call (doors included).
     std::vector<SoundCue> take_sound_cues();
     // CContainerMgr::OpenContainer / CloseContainer's sound for a bag of `bag_type`: a 2D wave cue
     // (game/sound_rules.h container_sound). The windows and the bag keys call it; nothing is sent.
@@ -581,6 +624,8 @@ public:
     }
     // What set_player_motion last gave: whether the player is moving, and the heading (0..512).
     bool player_moving() const { return moving_; }
+    // ... and the velocity, world units per tick (the movement's 50 ms step; MQ2Nav's SpeedX/Y/Z).
+    const glm::vec3& player_velocity() const { return velocity_; }
     bool player_stationary() const { return !moving_ && velocity_ == glm::vec3(0.0f) && speed_run_ == 0.0f; }
     float player_heading() const { return heading_; }
     // Zone points of the current zone (OP_SendZonepoints): targets by zone_points.number.
@@ -591,6 +636,18 @@ public:
     void request_zone_links();
     const std::optional<ZoneLinks>& zone_links() const { return zone_links_; }
     std::uint32_t zone_links_serial() const { return zone_links_serial_; }
+    bool server_management_available() const;
+    bool open_server_management();
+    bool save_server_management(std::uint32_t revision, std::span<const ServerManagementEdit> edits);
+    void close_server_management();
+    const std::optional<ServerManagementReply>& server_management_snapshot() const { return server_management_snapshot_; }
+    std::uint32_t server_management_serial() const { return server_management_serial_; }
+    bool server_management_saving() const;
+    bool server_management_paused() const;
+    bool server_management_reloading() const;
+    bool server_management_reload_required() const { return server_management_reload_required_; }
+    bool server_management_reloaded() const { return server_management_reloaded_; }
+    const std::string& server_management_message() const { return server_management_message_; }
     // The current zone's id and instance (from OP_NewZone; 0 before it arrives).
     std::uint16_t zone_id() const { return new_zone_ ? new_zone_->zone_id : 0; }
     // The spawns ProcessSwitches checks for a moving floor switch's riders (the app's player); null: none.
@@ -647,6 +704,7 @@ public:
     // the corresponding roster slot (CTargetWnd::OnProcessFrame), -1 none.
     void target_group_member(std::int32_t n, GroupTargetMode mode = GroupTargetMode::CyclePet);
     const game::Spawn* group_member_pet(const game::GroupMember& member) const;
+    const game::Spawn* group_member_pet(std::uint32_t owner_id) const;
     std::int32_t group_member_targeted() const { return group_member_targeted_; }
     // The target's target (OP_TargetHoTT; PlayerZoneClient::TargetOfTarget), 0 none.
     std::uint32_t target_of_target() const { return target_of_target_; }
@@ -755,6 +813,7 @@ public:
     void set_spell_hit_modes(const game::SpellHitModes& modes) { spell_hit_modes_ = modes; }
     // OP_Consider for the current target; the answer prints the con line.
     void consider();
+    void consider(std::uint32_t spawn_id);
     // unk_SetStandState @0x5a0bc0 (PlayerZoneClient::ChangePosition)
     // for the player: 100 stand, 105
     // kneel (looting, bind wound), 110 sit, 111 crouch, 115 lie down (feign
@@ -809,6 +868,17 @@ public:
         return std::max<std::int64_t>(0, static_cast<std::int64_t>(respawn_->time_remaining_ms) - respawn_age_ms());
     }
     void choose_respawn(std::uint32_t option_id);
+    // CRespawnWnd's selected option: the one picked in its list (set_respawn_choice, until one is sent), else the
+    // server's default. Kept here, not in the window, so a script's Select (/notify RespawnWnd SelectButton) chooses
+    // what the window shows, or the default with no UI. 0 without a window.
+    std::uint32_t respawn_selected_option() const { return respawn_ ? respawn_choice_.value_or(respawn_->selected) : 0; }
+    void set_respawn_choice(std::uint32_t option_id) {
+        if (respawn_ && !respawn_chosen_) respawn_choice_ = option_id;
+    }
+    // Select: choose_respawn(respawn_selected_option()) (it checks the delay and the option's availability).
+    void choose_selected_respawn() {
+        if (respawn_) choose_respawn(respawn_selected_option());
+    }
     // Same-zone hover completion publishes a new living spawn. The app must place its physics body there before
     // the next movement step; a full zone change uses the ordinary zone-in placement instead.
     struct RespawnPlacement {
@@ -901,9 +971,21 @@ public:
     std::optional<ActorRef> captureActorRef(std::uint32_t id) const;
     bool matches(const ActorRef& actor) const;
     void find_target(const std::string& name = {});
-    // The path to a spawn by id, the player facing it when it comes (PlayerPath_FindSpawnByID(id, 1)); for the Find
-    // window (app/lua_ui_find.cpp). False when there is no such spawn.
-    bool find_spawn(std::uint32_t spawn_id);
+    // The path to a spawn by id. `options.face` turns the player toward it when the reply comes; `options.silent`
+    // keeps a background path (the map filter) from playing path sounds or chat. False when there is no such spawn.
+    struct FindPathOptions {
+        bool face;
+        bool silent;
+        constexpr FindPathOptions() : face(true), silent(false) {}
+        constexpr FindPathOptions(bool face_value, bool silent_value = false)
+            : face(face_value), silent(silent_value) {}
+    };
+    bool find_spawn(std::uint32_t spawn_id, FindPathOptions options = {});
+    // True while a shown Find is active or its request is still waiting for a reply. A finished/failed path is not
+    // current, so a background map filter may ask again after the player changes target.
+    bool has_find_path() const;
+    // Changes whenever a shown Find is started, replaced or stopped; lets a background owner yield to the player.
+    std::uint64_t find_path_generation() const { return shown_find_generation_; }
     bool npc_find_enabled() const;
     bool npc_find_allowed(std::uint32_t spawn_id) const;
     // Per-row visibility after the caller has read the map policy for the whole Find list.
@@ -913,8 +995,9 @@ public:
     void find_map_location(const glm::vec3& at);
     // PlayerPath_FindRealEstatePlot (the plot search window's Go with mode 0): the path to a plot.
     void find_real_estate_plot(std::uint32_t plot);
-    // PlayerPath_Stop (the find key / End Find while a path is shown): the path ends with its abort sound.
-    void stop_find_path();
+    // PlayerPath_Stop (the find key / End Find while a path is shown): the path ends with its abort sound unless it
+    // is a silent background path or the caller asks for silence.
+    void stop_find_path(bool audible = true);
     // The navigation's server path (app/navigator.h, a Hailstone addition): the same OP_FindPersonRequest as a find
     // to a spawn, but its reply goes to take_quiet_path() alone: no path drawn, no sound, no chat line, and a shown
     // find path is left as it is.
@@ -1163,7 +1246,10 @@ public:
     bool re_can_sell(bool verbose);
     void re_sell();
     bool re_can_transfer(bool verbose);
-    void re_transfer();
+    // The plot to the player the confirmation named: `target` and its `name` as they were when it was asked. Hailstone:
+    // refused (nothing sent) when the target has changed since, where RealEstate_SendTransferPlot reads the target
+    // as it is at the Yes.
+    void re_transfer(std::uint32_t target, const std::string& name);
     void re_opt_out(bool opt_out);
     void re_escrow(ReEscrowAction action, std::vector<ReEscrow::Entry> entries = {});
     void re_save_access(std::uint32_t re, const ReAccess& access);
@@ -1307,6 +1393,23 @@ public:
     const std::map<std::uint32_t, AltCurrency>& alt_currencies() const { return alt_currencies_; }
     // Reclaim: the cursor's currency item into the count (put_in), or `count` of it out onto the cursor.
     void alt_currency_reclaim(std::uint32_t currency, std::uint32_t count, bool put_in);
+    // The inventory's Alt. Currency page: the currency picked in its list (0 none) and Display Missing (the ones at
+    // 0 listed too). Kept here, not in the window, so a script's /notify picks and uses the same with or without a UI.
+    std::uint32_t alt_currency_selected() const { return alt_currency_selected_; }
+    void select_alt_currency(std::uint32_t currency) { alt_currency_selected_ = currency; }
+    bool alt_currency_show_missing() const { return alt_currency_show_missing_; }
+    void set_alt_currency_show_missing(bool show) { alt_currency_show_missing_ = show; }
+    // The page's list in its order (std::map's: by currency id), and the picked one's entry (none when not held).
+    std::vector<std::uint32_t> alt_currency_list() const {
+        std::vector<std::uint32_t> v;
+        for (const auto& [cid, a] : alt_currencies_)
+            if (alt_currency_show_missing_ || (a.amount > 0 && a.entry.shown)) v.push_back(cid);
+        return v;
+    }
+    const AltCurrency* selected_alt_currency() const {
+        auto it = alt_currencies_.find(alt_currency_selected_);
+        return it == alt_currencies_.end() ? nullptr : &it->second;
+    }
     struct PointMerchant {
         std::uint32_t npc = 0;           // the merchant while its window is open
         PointMerchantList list;          // the server's answer
@@ -1657,7 +1760,7 @@ public:
     // from CBazaarWnd::WndNotification @0x63a31b and CBarterWnd::WndNotification @0x631fc3).
     void offlinemode_command();
     // What the rider-mount link asks of the client (the app's models and collision; game/mounts.h). Null: the
-    // defaults (Luclin models loaded, every mount has its rider dag, no room test).
+    // defaults (every mount has its rider dag, no room test).
     void set_mount_queries(game::MountQueries* q) { mount_queries_ = q; }
     // The spawn the local player moves (pinstControlledPlayer): its mount while it rides one, else 0.
     std::uint32_t controlled_id() const { return world_.controlled_id; }
@@ -1684,6 +1787,18 @@ public:
         return profile_->disciplines[static_cast<std::size_t>(n)];
     }
     bool knows_discipline(std::uint32_t id) const;
+    // For the MQ TLOs (mq/tlo_game.cpp), with the stats port of with_character:
+    // a spell's duration in ticks at the player's level (SpellDuration; the record's cap without a profile);
+    std::int32_t spell_duration_ticks(const game::SpellData& s) const;
+    // the range focus on a spell (GetFocusRangeModifier), added to its range for Spell.MyRange;
+    std::int32_t spell_range_focus(const game::SpellData& s) const;
+    // FindAffectSlot's slot for the spell on the player (game::buff_landing_slot): over the player's buffs, or with
+    // `existing` over buffs holding only that spell (MQ's WillStackWith); -1 when it would not land.
+    int spell_landing_slot(std::uint32_t spell, std::optional<std::uint32_t> existing = std::nullopt) const;
+    // the items' spell shielding, without RoF2's cap of 35 (a server may allow more), and spell damage
+    // (CharacterZoneClient's SpellShieldBonus and SpellDamageBonus).
+    std::int32_t spell_shield_bonus() const;
+    std::int32_t spell_damage_bonus() const;
     // PlayerBase::CanSee's zone test (the app's collision): true when nothing blocks the segment (world coordinates).
     void set_line_of_sight(std::function<bool(const glm::vec3&, const glm::vec3&)> los) { line_of_sight_ = std::move(los); }
     // True once the app has given this connection its hooks (line of sight, teleport, app commands): the app installs
@@ -1774,6 +1889,17 @@ public:
     bool memorizing_set() const { return set_mem_.mode == 2; }
     // Clicks off one of the player's buffs (OP_BuffRemoveRequest).
     void remove_buff(int slot);
+    // MacroQuest's commands on these (registered by the app, so they come before the game's abbreviations):
+    // /removelev clicks off every buff with levitation (SPA 57), saying each; /removeaura <name> removes each aura
+    // whose name holds the text; /memspell <gem> "<spell>" memorizes a spell of the book (by exact name, any case, or
+    // id) into gem 1..12 through MemorizeSet with only that gem, when the player's level allows it;
+    // /removebuff [-pet|-both] <name> clicks off the first buff of the player's or the focused pet's whose name
+    // matches, /removepetbuff <name> the pet's (net/remove_buff.h).
+    void removelev_command();
+    void removeaura_command(std::string_view args);
+    void removebuff_command(std::string_view args);
+    void removepetbuff_command(std::string_view args);
+    void memspell_command(std::string_view args);
     // Clicks off a removable beneficial buff in the focused pet's server slot.
     bool remove_pet_buff(std::uint32_t slot);
     // RemovePCAffectex(affect, 0) / NotifyPCAffectChange: the client drops a buff
@@ -1965,6 +2091,20 @@ public:
     // 20 units): OP_ShopRequest. The server's answer opens the window and
     // sends the stock as item packets of type 0x64.
     void open_merchant(std::uint32_t npc_id);
+    // The merchant list's selection (MerchantSession::considered): consider the merchant slot's item (an inventory
+    // item picked for selling is let go, as the list's click does), or drop it.
+    void merchant_consider(std::uint32_t merchant_slot) {
+        if (!merchant_ || !merchant_->open || !merchant_->items.count(merchant_slot)) return;
+        merchant_->considered = merchant_slot;
+        merchant_unselect();
+    }
+    void merchant_drop_considered() {
+        if (merchant_) merchant_->considered.reset();
+    }
+    // PurchasePageHandler +0x60, "show every item" (MW_UsableButton unchecked): the list starts filtered to what the
+    // player can use; kept for the session, as the original's window keeps it.
+    bool merchant_show_all() const { return merchant_show_all_; }
+    void set_merchant_show_all(bool all) { merchant_show_all_ = all; }
     // CMerchantWnd RequestGetItem: buy `quantity` of the merchant slot's item.
     void merchant_buy(std::uint32_t merchant_slot, std::uint32_t quantity);
     // RequestPutItem: sell `quantity` of the inventory item at `slot`.
@@ -2001,8 +2141,11 @@ public:
     // (CEverQuest::DropItemOrMoneyOnPlayer): starts a trade or give, or drops
     // the cursor item into the open one.
     void give_to(std::uint32_t spawn_id);
-    // CTradeWnd::DropItemIntoTrade: the cursor item into the first free trade slot.
-    void trade_drop_cursor();
+    // The cursor item into the trade. With an NPC, `clicked_slot` (a Give slot clicked, CInvSlot::HandleLButtonUp
+    // @0x6963d2) takes the whole item only when that slot is empty; without one (a click on the NPC,
+    // CTradeWnd::DropItemIntoTrade @0x77f6d0) it goes to the first free slot. A player trade ignores
+    // `clicked_slot`: a stack merges into a matching trade stack, else the first free slot (docs/todo.md).
+    void trade_drop_cursor(std::optional<std::int16_t> clicked_slot = std::nullopt);
     void trade_drop_cursor_coin();
     // Puts coin of one type (0 copper .. 3 platinum) into the trade (through the cursor, as the original).
     void trade_coin(int type, std::uint32_t amount);
@@ -2066,6 +2209,9 @@ public:
     // ---- groups and pets (game/group.h; net/game_connection_group.cpp) ----
     const game::GroupState& group() const { return group_; }
     const game::PetState& pets() const { return pets_; }
+    // The exact readings from the optional server encounter expire between refreshes.
+    const GroupVital* group_vital(std::uint32_t spawn_id) const;
+    void request_group_vitals();
     // Hailstone's support for several pets: the server's list of the player's pets, from its extension (NMS:
     // OP_PetList). The focused pet stays when it is still listed, else the first one becomes it.
     void set_pet_list(std::vector<game::PetInfo> list);
@@ -2122,6 +2268,10 @@ public:
     // The zone's switches (OP_SpawnDoor), animated by update() as the
     // original's CDisplay_ProcessSwitches does every frame.
     const std::vector<game::Door>& doors() const { return doors_; }
+    // MQ's switch target (/doortarget, the DoorTarget TLO): a door of this zone, or none. The zone's doors going
+    // (OP_RemoveAllDoors, a zone change) clear it.
+    std::optional<std::uint8_t> door_target() const { return door_target_; }
+    void set_door_target(std::optional<std::uint8_t> id) { door_target_ = id; }
     const game::Door* door(std::uint8_t id) const;
     const std::vector<game::GroundObject>& ground_objects() const { return ground_objects_; }
     // CEverQuest::ClickedSwitch -> EQSwitch::UseSwitch: refuses unusable or
@@ -2422,6 +2572,17 @@ public:
     // OP_SharedTaskAcceptNew for a shared task selection); Decline sends task id 0.
     void accept_task(std::uint32_t task_id);
     void decline_tasks();
+    // The task select window's selection (TaskOffers::selected): a row of the offers, and Accept on it (nothing
+    // when no row is selected), so a script's Accept takes what the window shows, or the first offer with no UI.
+    static const game::TaskOffer* selected_task_offer(const game::TaskOffers& o) {
+        return o.selected >= 0 && o.selected < static_cast<int>(o.offers.size()) ? &o.offers[static_cast<std::size_t>(o.selected)] : nullptr;
+    }
+    void select_task_offer(int row) {
+        if (tasks_.offers && row >= 0 && row < static_cast<int>(tasks_.offers->offers.size())) tasks_.offers->selected = row;
+    }
+    void accept_selected_task() {
+        if (const auto* t = tasks_.offers ? selected_task_offer(*tasks_.offers) : nullptr) accept_task(t->task_id);
+    }
     // Abandons a task (OP_CancelTask).
     void cancel_task(std::uint32_t type, std::uint32_t sequence);
     // The task window's Remove (TASK_AbandonButton): the question (game::task_abandon_eqstr, 10 s, the task id) for
@@ -2494,6 +2655,11 @@ public:
     // table order); ';' and '[' lines go to the chat server; anything else is
     // said on the default channel.
     void send_command(const std::string& line);
+    // Also used for stock social directives, which have their own interpreter.
+    bool allow_server_command(std::string_view name);
+    // The same decision without the denial notice, for a feature that keeps running after its command (/mapfilter's
+    // saved options).
+    bool server_command_allowed(std::string_view name) const;
     // A client message by eqstr id (the system colour), as the key commands print them.
     void system_message(std::uint32_t eqstr, std::uint32_t color = 0) { system(eqstr, {}, color); }
     const game::SocialState& social() const { return social_; }
@@ -2628,6 +2794,9 @@ public:
     // The Options window's chat filters: the setting changed, kept in eqclient.ini [Options] and sent to the zone
     // (OP_SetServerFilter: EQEmu leaves out what the filters hide, Client::ServerFilter).
     void change_chat_filter(int filter, std::int32_t value);
+    // Named layout profiles capture the active filters and effective user colours from the character's chat settings.
+    IniFile capture_layout_chat() const;
+    bool apply_layout_chat(const IniFile& chat);
     // The Options window's game options (game/client_options.h): the character's options.ini over eqclient.ini's.
     const game::ClientOptions& client_options() const { return client_options_; }
     bool client_option(game::ClientOption id) const { return client_options_.on(id); }
@@ -2881,9 +3050,16 @@ public:
     // (CollsnCallbackForFloor), or none. The trader stall check (0x4431a0) reads it.
     void set_touching_switch(std::optional<std::uint8_t> door) { touching_switch_ = door; }
     std::optional<std::uint8_t> touching_switch() const { return touching_switch_; }
-    void set_profile_for_test(const PlayerProfile& p) { profile_ = p; }
+    void set_profile_for_test(const PlayerProfile& p) {
+        invalidate_character();
+        profile_ = p;
+    }
     // Tests: DoPassageOfTime's timed blocks as if a frame ran at `now` (now_ms()'s clock).
-    void passage_of_time_for_test(std::int64_t now) { passage_of_time(now); }
+    void passage_of_time_for_test(std::int64_t now) {
+        invalidate_character();
+        passage_of_time(now);
+        invalidate_character();
+    }
     // ---- the barter hall (game/barter.h; net/game_connection_market.cpp) ----
     // CBarterMerchantWnd: a right click on a buyer sends OP_Barter 11 (RightClickedOnPlayer); the window opens on the
     // server's answer. A line is picked, Sell asks for the quantity (sell_start: the dialog's limit, or nothing when
@@ -3014,8 +3190,13 @@ private:
     void connect_world(bool zoning);
     // The real UDP session, or ConnectionOptions::session_factory's (tests, the drive spike).
     std::unique_ptr<Session> create_session();
+    // `client_codes`: the client's own line keeps the MQ colour codes it wrote (client_message).
     void chat(ChatEvent::Kind kind, std::string text, std::uint32_t rgb = 0, std::uint32_t color = 0,
-              std::string peer = {}, std::optional<std::string> display_text = std::nullopt);
+              std::string peer = {}, std::optional<std::string> display_text = std::nullopt, bool filter = true,
+              bool client_codes = false);
+    bool prepare_chat(ChatEvent& event, std::optional<std::string> display_text, bool filter,
+                      bool group_member = false, bool client_codes = false);
+    void enqueue_chat(ChatEvent event);
     // ReportSuccessfulHit's melee line for an attack by `source`, through the chat filters (`report`: its argument).
     void report_hit(const game::HitLine& line, std::uint32_t source, bool report = true);
     void handle_combat(Op op, const AppPacket& p);
@@ -3144,12 +3325,15 @@ private:
     bool is_raid_delegate(const std::array<std::uint32_t, 3>& ids) const; // 0x57f760 / 790 / 7c0
     void set_target_of_target_window(bool show);            // CTargetOfTargetWnd's Show, through the app
     void find_path_to_player(const std::string& name);
-    void send_find_path(const game::Spawn& to, bool face = false); // PlayerPath_FindSpawnByID / FindGroupMember
+    void send_find_path(const game::Spawn& to, FindPathOptions options = {false});
     void mark_npc_command(const std::string& args, int ability, std::uint32_t usage);
     std::uint32_t group_member_roles(int slot) const; // the role bits (1 tank, 2 assist, 4 puller)
     void grouproles_command(const std::string& args);
     void groupleader_command();
     void reset_group_for_zone();
+    void handle_group_vitals(const AppPacket& p);
+    void clear_group_vitals();
+    void forget_group_vital(std::uint32_t spawn_id);
     void note_pet_spawn(const game::Spawn& s);
     void forget_pet_spawn(std::uint32_t spawn_id);
     // False when the inventory refused the swap (nothing moved, nothing sent).
@@ -3159,6 +3343,9 @@ private:
     void item_moved_sound(SoundCue::Context context = SoundCue::Context::None);
     SoundCue::Context worn_context(const ItemSlot& from, const ItemSlot& to) const;
     void refresh_worn_slot(int slot);
+    // PlayerClient::DoItemSlot @0x593680 after a move through weapon slot `slot` (11, 13 or 14): the held models
+    // (set_held_model) the hands show now, sent to the zone.
+    void do_item_slot(int slot);
     // PcClient_RefreshWornSlotVisual's instrument bit (0x5923f0): the local player's PlayerState bit 0x10, set when
     // the primary or secondary hand holds an instrument (item types 23..26).
     void refresh_instrument_state();
@@ -3171,12 +3358,34 @@ private:
     void memorize_tick(std::int64_t now);
     std::optional<std::vector<std::int64_t>> game_steps_; // set_game_steps
     void update_usable_gems();
+    // /removebuff's and /removepetbuff's click-off of the first buff `r` names.
+    void remove_named_buff(const RemoveBuff& r);
     // The stats port over the current profile, inventory, buffs and AAs (CharacterZoneClient's effect totals).
     void with_character(const std::function<void(game::mechanics::Character&)>& fn) const;
     // with_character's sheet, rebuilt in place on each call (build_sheet_into: no allocation for an unchanged
     // inventory); a nested call builds its own.
     mutable std::unique_ptr<game::mechanics::CharacterSheet> character_sheet_;
     mutable bool character_sheet_busy_ = false;
+    // build_sheet_into over the connection's state now.
+    void build_character_sheet(game::mechanics::CharacterSheet& sheet) const;
+    // The MQ TLOs' reads (spell_landing_slot, spell_duration_ticks, spell_range_focus and the spell bonuses): a
+    // script asks many in one frame (E3's StacksWith over each of a target's buffs), so they share one sheet and one
+    // Character, built on the first read and kept until character_serial_ moves: each update() (the packets, the
+    // clock), each packet the client sends (an action that may have changed its state at once, an item move), and
+    // each local change made without one (clear_buff_locally, the tests' setters). Inside update() and in a nested
+    // call they build their own, as with_character does. `stats`: the same sheet's Character after
+    // ProcessAllStats, run once per build and kept apart, so the effect-only one does not change with it (its
+    // haste would take in the items' then).
+    void with_cached_character(bool stats, const std::function<void(game::mechanics::Character&)>& fn) const;
+    // Defined, and deleted, in game_connection_spells.cpp: the header need not know Character's type.
+    struct CharacterCache;
+    struct CharacterCacheDelete {
+        void operator()(CharacterCache* c) const;
+    };
+    mutable std::unique_ptr<CharacterCache, CharacterCacheDelete> character_cache_;
+    mutable std::uint32_t character_builds_ = 0; // the shared character's sheets built (tests)
+    mutable std::uint64_t character_serial_ = 1;
+    bool in_update_ = false;
     void update_merchant();
     void update_npc_interactions();
     void update_barter();
@@ -3294,7 +3503,11 @@ private:
     std::filesystem::path chat_log_path_;
     // The open log and the path it was opened for: one open per file, not per line (a raid's hundreds of lines a
     // second). Reopened when /log names another file; closed when /log goes off.
-    std::unique_ptr<std::ofstream> chat_log_;
+    // A C file (platform::open_c_file): not passed on to the browser helper, which would hold it open.
+    struct CloseChatLog {
+        void operator()(std::FILE* f) const noexcept;
+    };
+    std::unique_ptr<std::FILE, CloseChatLog> chat_log_;
     std::filesystem::path chat_log_open_path_;
     bool seconds_log_ = false;
     float distance_to(std::uint32_t spawn_id) const;
@@ -3402,6 +3615,12 @@ private:
     std::optional<plugin::Rules> server_rules_;
     // Returns false when this login received a policy that denies Hailstone access.
     bool update_server_rules();
+    void request_hailstone_settings();
+    void update_command_account_status();
+    void update_server_management();
+    void pause_server_management_for_zone();
+    void handle_server_management(const AppPacket& p);
+    bool send_server_management(const AppPacket& p, std::uint32_t id, ServerManagementAction action);
     bool guild_world_invites_ = false; // OP_HailstoneGuildReply's hello this zone-in (server/'s script)
     std::uint32_t server_rules_serial_ = 0;
     int hook_game_state_ = 0;              // the game state last raised (plugin::kGameState*; 0 none yet)
@@ -3468,6 +3687,11 @@ private:
     bool server_files_changed_ = false;
     void finish_server_files();
     std::deque<ChatEvent> chat_;
+    struct ZoneClientNotice {
+        std::string text, subject;
+        bool stop = false;
+    };
+    std::optional<std::vector<ZoneClientNotice>> zone_client_messages_;
     std::vector<ZonePoint> zone_points_;
     bool zone_change_pending_ = false;
     ZoneChange zone_change_request_; // the pending request, for "not ready" retries
@@ -3495,6 +3719,7 @@ private:
 
     // Combat.
     PlayerStatus pstatus_;
+    std::optional<std::int32_t> reported_max_mana_; // own OP_ManaUpdate, separate from add-ons' PlayerStatus writes
     std::uint32_t consciousness_changes_ = 0;
     OwnHp own_hp_items_; // what own_hp() adds to pstatus_ (set_own_hp_items)
     void set_own_spawn_hp(); // the player's spawn's HP percent from own_hp() (SetSpawnHP)
@@ -3645,11 +3870,13 @@ private:
 
     // Doors and ground objects.
     std::vector<game::Door> doors_;
+    std::optional<std::uint8_t> door_target_; // door_target
     // OP_FindPersonRequest reservations and transmitted requests. Unsent reservations cannot own a reply or a
     // timeout; transmitted requests take the replies in the order sent (see path_reply). A discarded one (its owner
     // stopped or replaced it) still takes its reply, so the later ones keep theirs.
     struct PendingFindRequest {
         bool quiet = false;
+        bool silent = false; // a shown background path: no path sounds or chat
         std::int64_t sent_at = 0;
         bool npc_origin = false;
         bool discard = false;
@@ -3664,13 +3891,14 @@ private:
     std::deque<PendingFindRequest> find_requests_;
     void expire_find_requests(std::int64_t now);
     game::ServerPathLease queue_find_request(bool quiet, bool npc_origin, game::ServerPathOrigin origin,
-                                            std::optional<ActorRef> actor);
+                                            std::optional<ActorRef> actor, bool silent = false);
     bool path_request_current(const PendingFindRequest& request) const;
     void commit_find_request(const game::ServerPathLease& lease);
     void rollback_find_request(const game::ServerPathLease& lease);
     struct QuietPath { PendingFindRequest request; std::vector<glm::vec3> points; };
     std::optional<QuietPath> quiet_path_;
     game::ServerPathLease shown_find_lease_;
+    bool shown_find_silent_ = false;
     std::uint64_t shown_find_owner_ = 0, shown_find_generation_ = 0;
     mutable std::uint64_t interaction_context_ = 0, interaction_player_ = 0;
     mutable const void* interaction_session_ = nullptr;
@@ -3688,6 +3916,9 @@ private:
     std::vector<std::uint32_t> blood_spurts_; // local player landed sharp-weapon hit target IDs
     // Per caster, the spell whose cast stage has played (its OP_BeginCast, or the one added for a proc) and until when
     // (now_ms) an OP_Action of it counts as that cast's landing rather than a proc.
+    // Pruned once past its window, with the spawn (apply_spawn, OP_DeleteSpawn) and at the zone change; at most
+    // kCastStagesKept casters (a cast time near 2^32 ms would otherwise keep an unknown caster's entry for weeks).
+    static constexpr std::size_t kCastStagesKept = 4096;
     std::unordered_map<std::uint32_t, std::pair<std::uint32_t, std::int64_t>> cast_stage_shown_;
     std::vector<game::MissilePacket> missiles_;
     LandingEffects landing_;
@@ -4022,14 +4253,32 @@ private:
     std::unordered_map<std::string, std::uint8_t> quest_npcs_;
     bool quest_npcs_asked_ = false;
     bool hailstone_script_ = false;   // a zone answered OP_HailstoneSettingsRequest
+    std::optional<int> command_account_status_;
+    std::chrono::steady_clock::time_point settings_requested_at_{};
+    std::chrono::steady_clock::time_point command_account_status_received_at_{};
+    bool server_management_offered_ = false;
+    struct PendingManagement {
+        std::uint32_t id;
+        ServerManagementAction action;
+        std::chrono::steady_clock::time_point deadline;
+    };
+    std::optional<PendingManagement> server_management_pending_;
+    std::optional<ServerManagementReply> server_management_snapshot_;
+    bool server_management_reload_required_ = false;
+    bool server_management_reloaded_ = false;
+    bool server_management_waiting_for_zone_ = false;
+    std::string server_management_message_;
+    std::uint32_t server_management_request_id_ = 0;
+    std::uint32_t server_management_serial_ = 0;
     bool zone_links_asked_ = false;
     std::optional<ZoneLinks> zone_links_;
     std::uint32_t zone_links_serial_ = 0;
     std::optional<glm::vec3> path_finish_;
     bool path_settings_loaded_ = false;
     game::PathSettings path_settings_;
-    // Send_OP_FindPersonRequest; `found`: a new find (the stop sound, then PlayerPath_LoadSettings).
-    void send_find(const game::FindRequest& r, bool found = true);
+    // Send_OP_FindPersonRequest; `found`: a new find (the stop sound, then PlayerPath_LoadSettings), `silent`: a
+    // background shown path with no sound or chat.
+    void send_find(const game::FindRequest& r, bool found = true, bool silent = false);
     void path_reply(const AppPacket& p);        // PlayerPath_HandleFindPersonReply
     void path_tick();                           // PlayerPath_Update
     bool find_path_allowed() const;             // retire only a currently restricted NPC Find path
@@ -4134,6 +4383,10 @@ private:
 
     // Groups and pets.
     game::GroupState group_;
+    GroupVitals group_vitals_;
+    bool group_vitals_offered_ = false;
+    bool group_vitals_waiting_ = false;
+    std::optional<std::int64_t> group_vitals_requested_ms_, group_vitals_received_ms_;
     // The local player's id and the group then raid member names Appearance::new_armor_bits were last made with.
     std::uint32_t new_armor_player_ = 0;
     std::vector<std::string> new_armor_members_;
@@ -4154,6 +4407,10 @@ private:
     bool waiting_for_port_ = false; // PlayerZoneClient +0x1f05
     std::int64_t respawn_shown_ms_ = 0;
     bool respawn_chosen_ = false;
+    bool merchant_show_all_ = false; // merchant_show_all()
+    std::uint32_t alt_currency_selected_ = 0;   // alt_currency_selected()
+    bool alt_currency_show_missing_ = false;    // alt_currency_show_missing()
+    std::optional<std::uint32_t> respawn_choice_; // the list's pick this window (respawn_selected_option)
     bool respawn_selection_sending_ = false; // outgoing hooks cannot recursively commit another choice
     std::uint32_t respawn_session_ = 0;
 };

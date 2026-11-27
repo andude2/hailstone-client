@@ -6,6 +6,13 @@ project(hailstone VERSION 0.7.3 LANGUAGES C CXX)
 # The release's pre-release label (SemVer: "0.1.0-alpha"); empty for a final release. With the version it is what the
 # updater compares against a release's manifest (core/version.h, docs/updater.md), so change both with each release.
 set(HAILSTONE_VERSION_LABEL "beta")
+# A nightly build's label in place of the release's ("nightly.20261126", tools/nightly.sh). SemVer ranks it above a
+# "beta" label of the same version, so the updater offers a nightly the next release, not this one. Release builds reset
+# it (tools/docker/release_options.sh).
+set(HAILSTONE_NIGHTLY_LABEL "" CACHE STRING "A nightly build's version label, in place of the release's")
+if(NOT HAILSTONE_NIGHTLY_LABEL STREQUAL "")
+  set(HAILSTONE_VERSION_LABEL "${HAILSTONE_NIGHTLY_LABEL}")
+endif()
 if(HAILSTONE_VERSION_LABEL STREQUAL "")
   set(HAILSTONE_RELEASE_VERSION ${PROJECT_VERSION})
 else()
@@ -129,7 +136,9 @@ add_library(hailstone_engine STATIC
   src/plugin/hooks.cpp
   src/plugin/consent.cpp
   src/plugin/policy.cpp
+  src/plugin/command_policy.cpp
   src/net/settings_packets.cpp
+  src/net/server_management_packets.cpp
   src/net/quest_npc_packets.cpp
   src/net/zone_link_packets.cpp
   src/net/server_files_packets.cpp
@@ -138,6 +147,7 @@ add_library(hailstone_engine STATIC
   src/mq/tlo.cpp
   src/mq/tlo_game.cpp
   src/mq/spawn_search.cpp
+  src/mq/map_filter.cpp
   src/mq/parse.cpp
   src/mq/commands.cpp
   src/mq/nav_commands.cpp
@@ -179,6 +189,7 @@ add_library(hailstone_engine STATIC
   src/net/login.cpp
   src/net/game_connection.cpp
   src/net/drive_snapshot.cpp
+  src/net/game_connection_server_management.cpp
   src/net/game_connection_spells.cpp
   src/net/game_connection_ticks.cpp
   src/net/game_connection_spell_sets.cpp
@@ -461,7 +472,6 @@ add_library(hailstone_engine STATIC
   src/game/zone_lines.cpp
   src/game/zone_exits.cpp
   src/game/world_state.cpp
-  src/game/window_notify.cpp
   src/game/useful_npcs.cpp
   src/game/path_trail.cpp
   src/game/boats.cpp
@@ -578,6 +588,7 @@ add_library(hailstone_engine STATIC
   src/ui/ui_textures.cpp
   src/ui/ui_packs.cpp
   src/ui/ui_ini.cpp
+  src/ui/layout_profile.cpp
   src/app/lua_ui.cpp
   src/app/automation.cpp
   src/app/drive_client.cpp
@@ -587,6 +598,7 @@ add_library(hailstone_engine STATIC
   src/app/navigator.cpp
   src/app/guide_path.cpp
   src/app/lua_ui_values.cpp
+  src/app/lua_ui_server_management.cpp
   src/app/lua_ui_hud.cpp
   src/app/lua_ui_hotbar.cpp
   src/app/lua_ui_caps.cpp
@@ -602,6 +614,7 @@ add_library(hailstone_engine STATIC
   src/app/lua_ui_customization.cpp
   src/app/lua_ui_dialogs.cpp
   src/app/lua_ui_menu.cpp
+  src/app/spawn_interaction.cpp
   src/app/lua_ui_social.cpp
   src/app/lua_ui_realestate.cpp
   src/app/lua_ui_progress.cpp
@@ -612,6 +625,7 @@ add_library(hailstone_engine STATIC
   src/app/lua_ui_map.cpp
   src/app/lua_ui_map_overlay.cpp
   src/app/lua_ui_player.cpp
+  src/app/window_notify_run.cpp
   src/app/lua_ui_market.cpp
   src/app/lua_ui_mail.cpp
   src/app/lua_ui_merc.cpp
@@ -770,6 +784,13 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/update-key.pub)
   file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/update-key.pub HAILSTONE_UPDATE_KEY_DEFAULT REGEX "^[0-9a-fA-F]+$" LIMIT_COUNT 1)
 endif()
 set(HAILSTONE_UPDATE_KEY "${HAILSTONE_UPDATE_KEY_DEFAULT}" CACHE STRING "The release key's public half (hex); empty: no updates")
+# The cache keeps the key of the build folder's first configure (or a -D given since): said at every configure, so a
+# folder that holds another key than update-key.pub's is noticed. Release builds name it each time
+# (tools/docker/release_options.sh), and tools/make_update.py refuses a binary without update-key.pub's.
+if(NOT HAILSTONE_UPDATE_KEY STREQUAL HAILSTONE_UPDATE_KEY_DEFAULT)
+  message(WARNING "HAILSTONE_UPDATE_KEY is not update-key.pub's key: this build takes no update signed with the "
+                  "release key (configure with -DHAILSTONE_UPDATE_KEY=<update-key.pub's line> to change it)")
+endif()
 set_property(SOURCE src/app/updater.cpp APPEND PROPERTY COMPILE_DEFINITIONS
              HAILSTONE_UPDATE_FEED="${HAILSTONE_UPDATE_FEED}" HAILSTONE_UPDATE_KEY="${HAILSTONE_UPDATE_KEY}"
              HAILSTONE_ADDON_INDEX="${HAILSTONE_ADDON_INDEX}" HAILSTONE_PROJECT_PAGE="${HAILSTONE_PROJECT_PAGE}")
@@ -1200,6 +1221,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/caster_bounds_test.cpp
     tests/descriptor_limits_test.cpp
     tests/swapchain_size_test.cpp
+    tests/descriptor_pool_book_test.cpp
     tests/input_script_test.cpp
     tests/texture_claims_test.cpp
     tests/zone_settle_test.cpp
@@ -1255,6 +1277,9 @@ if(HAILSTONE_BUILD_TESTS)
     tests/merchant_usable_test.cpp
     tests/ascii_case_test.cpp
     tests/ui_pack_windows_test.cpp
+    tests/ui_pack_windows2_test.cpp
+    tests/ui_pack_windows3_test.cpp
+    tests/ui_pack_windows4_test.cpp
     tests/aa_columns_ui_test.cpp
     tests/ui_pack_stale_state_test.cpp
     tests/net_session_test.cpp
@@ -1272,6 +1297,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/ui_rules_vectors_test.cpp
     tests/net_login_test.cpp
     tests/net_packets_test.cpp
+    tests/server_management_packets_test.cpp
     tests/shroud_packets_test.cpp
     tests/pfs_test.cpp
     tests/pfs_mapped_test.cpp
@@ -1295,10 +1321,10 @@ if(HAILSTONE_BUILD_TESTS)
     tests/collision_test.cpp
     tests/nav_test.cpp
     tests/map_data_test.cpp
+    tests/map_filter_test.cpp
     tests/map_files_test.cpp
     tests/player_path_test.cpp
     tests/atlas_test.cpp
-    tests/window_notify_test.cpp
     tests/zone_routes_test.cpp
     tests/zone_atlas_api_test.cpp
     tests/zone_exits_test.cpp
@@ -1423,11 +1449,23 @@ if(HAILSTONE_BUILD_TESTS)
     tests/lua_folders_test.cpp
     tests/lua_keep_test.cpp
     tests/lua_character_settings_test.cpp
+    tests/layout_profile_test.cpp
     tests/lua_plugin_test.cpp
     tests/spell_projectiles_test.cpp
     tests/commerce_test.cpp
     tests/bandolier_swap_test.cpp
     tests/exchange_test.cpp
+    tests/player_commands_test.cpp
+    tests/item_notify_test.cpp
+    tests/remove_buff_test.cpp
+    tests/window_notify_test.cpp
+    tests/window_child_test.cpp
+    tests/imgui_frame_test.cpp
+    tests/popup_test.cpp
+    tests/typed_escapes_test.cpp
+    tests/notify_state_test.cpp
+    tests/notify_quantity_test.cpp
+    tests/notify_confirm_guard_test.cpp
     tests/bank_test.cpp
     tests/bank_snapshot_test.cpp
     tests/real_estate_test.cpp
@@ -1576,6 +1614,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/drive_client_test.cpp
     tests/drive_control_test.cpp
     tests/local_pipe_test.cpp
+    tests/server_keyed_caps_test.cpp
     tests/item_use_test.cpp
     tests/game_connection_cast_test.cpp
     tests/game_connection_buff_test.cpp

@@ -1,10 +1,12 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <vector>
 
 #include "app/lua_ui.h"
+#include "game/item_links.h"
 #include "mock_server/harness.h"
 #include "mq_test_world.h"
 #include "net/packet_io.h"
@@ -45,6 +47,17 @@ void check_now(net::GameConnection& c) {
 
 void put_mock_cursor_coins_away(net::GameConnection& c) {
     for (std::size_t type = 0; type < c.cursor_coins().size(); ++type) c.drop_on_doll();
+}
+
+std::vector<net::MoveItem> trade_item_moves(const test::Rig& rig) {
+    std::vector<net::MoveItem> moves;
+    for (const auto& packet : rig.server.zone_log) {
+        if (!net::is_op(packet, net::Op::MoveItem)) continue;
+        const auto move = net::decode_move_item(packet);
+        REQUIRE(move);
+        if (move->to.type == net::kInvTrade) moves.push_back(*move);
+    }
+    return moves;
 }
 } // namespace
 
@@ -122,6 +135,183 @@ TEST_CASE("player trade distance: a request waiting for its answer is not checke
     REQUIRE(c.trade());
     CHECK(c.trade()->requested);
     CHECK_FALSE(c.trade()->open);
+}
+
+TEST_CASE("player trade: incoming offer chat links to the offered item") {
+    test::Rig rig;
+    REQUIRE(rig.to_zone());
+    auto& c = rig.conn;
+    open_trade(c, true);
+    rig.chat();
+
+    net::Item offered;
+    offered.slot = {net::kInvTrade, 0};
+    offered.id = 13073;
+    offered.name = "Trade test blade";
+    offered.ornament_icon = 533;
+    net::Item augment;
+    augment.id = 40042;
+    augment.name = "Trade test augment";
+    offered.contents.push_back({2, augment});
+    rig.server.item_packet(net::kItemPacketTradeView, offered);
+    REQUIRE(rig.until([&] { return c.trade() && c.trade()->theirs.contains(offered.slot.slot); }));
+
+    const auto lines = rig.chat();
+    const auto announcement = std::find_if(lines.begin(), lines.end(), [&](const net::ChatEvent& event) {
+        return game::strip_links(event.text) == "[9028] Partner " + offered.name;
+    });
+    REQUIRE(announcement != lines.end());
+    CHECK(announcement->kind == net::ChatEvent::Kind::System);
+    const auto parts = game::split_links(announcement->text);
+    REQUIRE(parts.size() == 2);
+    REQUIRE(parts[1].link);
+    CHECK(parts[1].text == offered.name);
+    CHECK(parts[1].link->item_id == offered.id);
+    CHECK(parts[1].link->augments[2] == augment.id);
+    CHECK(parts[1].link->ornament_icon == offered.ornament_icon);
+
+    c.request_item(*parts[1].link);
+    REQUIRE(rig.until([&] { return test::MockEqServer::count(rig.server.zone_log, net::Op::ItemLinkClick) == 1; }));
+    const auto request = std::find_if(rig.server.zone_log.begin(), rig.server.zone_log.end(),
+                                      [](const net::AppPacket& p) { return net::is_op(p, net::Op::ItemLinkClick); });
+    REQUIRE(request != rig.server.zone_log.end());
+    const auto click = net::decode_item_link_click(*request);
+    REQUIRE(click);
+    CHECK(click->item_id == offered.id);
+    CHECK(click->augments[2] == augment.id);
+    CHECK(click->ornament_icon == offered.ornament_icon);
+}
+
+TEST_CASE("player trade: updating an incoming stack does not repeat the offer chat") {
+    test::Rig rig;
+    REQUIRE(rig.to_zone());
+    auto& c = rig.conn;
+    open_trade(c, true);
+
+    net::Item offered;
+    offered.slot = {net::kInvTrade, 0};
+    offered.id = 13074;
+    offered.name = "Trade test stack";
+    offered.max_stack = 20;
+    rig.server.item_packet(net::kItemPacketTradeView, offered);
+    REQUIRE(rig.until([&] { return c.trade() && c.trade()->theirs.contains(offered.slot.slot); }));
+    rig.chat();
+
+    offered.stack_count = 2;
+    rig.server.item_packet(net::kItemPacketTradeView, offered);
+    REQUIRE(rig.until([&] {
+        return c.trade() && c.trade()->theirs.contains(offered.slot.slot) &&
+               c.trade()->theirs.at(offered.slot.slot).stack_count == offered.stack_count;
+    }));
+    CHECK(rig.chat().empty());
+}
+
+TEST_CASE("NPC hand-in: successive offers keep identical gems in separate slots") {
+    test::Rig rig;
+    REQUIRE(rig.to_zone());
+    auto& c = rig.conn;
+    add_partner(c);
+    auto& npc = c.world_for_test().spawns[kPartner];
+    npc.is_npc = true;
+    npc.class_id = 1;
+
+    const auto cursor = net::ItemSlot::possessions(net::kSlotCursor);
+    net::Item gems;
+    gems.id = 13074;
+    gems.name = "Quest gem";
+    gems.slot = net::ItemSlot::possessions(net::kSlotGeneral10);
+    gems.max_stack = 20;
+    gems.stack_count = 6;
+    rig.server.item_packet(net::kItemPacketCharInventory, gems);
+    REQUIRE(rig.until([&] {
+        const auto* item = c.inventory().at(gems.slot);
+        return item && item->id == gems.id;
+    }));
+
+    c.click_slot(gems.slot, false, true);
+    c.give_to(kPartner);
+    REQUIRE(rig.until([&] { return test::MockEqServer::count(rig.server.zone_log, net::Op::TradeRequest) == 1; }));
+    rig.server.zone.send_reliable(net::encode_trade_request_ack({c.world().player_id, kPartner}));
+    REQUIRE(rig.until([&] { return c.trade() && c.trade()->with_npc && c.trade()->open; }));
+    REQUIRE_FALSE(c.inventory().cursor());
+
+    c.click_slot(gems.slot, false, true);
+    c.give_to(kPartner);
+    REQUIRE_FALSE(c.inventory().cursor());
+    REQUIRE(c.inventory().at({net::kInvTrade, 1}));
+
+    // A clicked occupied slot leaves the stack on the cursor. A clicked empty slot takes it whole.
+    c.click_slot(gems.slot, false, false);
+    c.finish_quantity(2);
+    c.click_slot({net::kInvTrade, 1}, false, false);
+    REQUIRE(c.inventory().cursor());
+    CHECK(c.inventory().cursor()->stack_count == 2);
+    c.click_slot({net::kInvTrade, 3}, false, false);
+    REQUIRE_FALSE(c.inventory().cursor());
+    REQUIRE(c.inventory().at({net::kInvTrade, 3}));
+    CHECK_FALSE(c.inventory().at({net::kInvTrade, 2}));
+
+    c.click_slot(gems.slot, false, true);
+    c.give_to(kPartner);
+    REQUIRE_FALSE(c.inventory().cursor());
+
+    // All four slots are full. Another matching gem stays on the cursor.
+    c.click_slot(gems.slot, false, true);
+    c.give_to(kPartner);
+    REQUIRE(c.inventory().cursor());
+    CHECK(c.inventory().cursor()->id == gems.id);
+    CHECK(c.inventory().cursor()->stack_count == 1);
+    for (std::int16_t i = 0; i < 4; ++i) {
+        const auto* offered = c.inventory().at({net::kInvTrade, i});
+        REQUIRE(offered);
+        CHECK(offered->id == gems.id);
+        CHECK(offered->stack_count == (i == 3 ? 2 : 1));
+    }
+
+    // The later reliable accept packet bounds the packets sent for this offer.
+    c.trade_accept();
+    REQUIRE(rig.until([&] { return test::MockEqServer::count(rig.server.zone_log, net::Op::TradeAcceptClick) == 1; }));
+    const auto moves = trade_item_moves(rig);
+    constexpr std::array<std::int16_t, 4> destinations{0, 1, 3, 2};
+    REQUIRE(moves.size() == destinations.size());
+    for (std::size_t i = 0; i < destinations.size(); ++i) {
+        CHECK(moves[i].from.same(cursor));
+        CHECK(moves[i].to.same({net::kInvTrade, destinations[i]}));
+        CHECK(moves[i].count == 0);
+    }
+}
+
+TEST_CASE("player trade: successive offers can merge identical items") {
+    test::Rig rig;
+    REQUIRE(rig.to_zone());
+    auto& c = rig.conn;
+    open_trade(c);
+    const auto cursor = net::ItemSlot::possessions(net::kSlotCursor);
+    const net::ItemSlot first_slot{net::kInvTrade, 0};
+    net::Item item;
+    item.id = 13074;
+    item.name = "Trade gem";
+    item.no_drop = 255;
+    item.max_stack = 20;
+    for (int i = 0; i < 2; ++i) {
+        net::GameConnectionTestAccess::inventory(c).put(cursor, item);
+        c.give_to(kPartner);
+        REQUIRE_FALSE(c.inventory().cursor());
+    }
+
+    const auto* offered = c.inventory().at(first_slot);
+    REQUIRE(offered);
+    CHECK(offered->stack_count == 2);
+    CHECK_FALSE(c.inventory().at({net::kInvTrade, 1}));
+    REQUIRE(rig.until([&] { return test::MockEqServer::count(rig.server.zone_log, net::Op::MoveItem) == 2; }));
+    const auto moves = trade_item_moves(rig);
+    REQUIRE(moves.size() == 2);
+    for (const auto& move : moves) {
+        CHECK(move.from.same(cursor));
+        CHECK(move.to.same(first_slot));
+    }
+    CHECK(moves[0].count == 0);
+    CHECK(moves[1].count == 1);
 }
 
 TEST_CASE("player trade: cursor coin opens a coin-only offer after acknowledgement") {

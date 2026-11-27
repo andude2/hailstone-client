@@ -236,8 +236,8 @@ int run_model_viewer(const ModelViewerOptions& opts) {
                 groups.push_back(m.eqg ? game::new_style_bone_group(name) : game::classic_bone_group(name));
             a.bone_groups = &groups;
         }
-        if (rider) { // the seated rider's animation (ActorRenderer::prepare_spawns: P09, else standing)
-            a.clip = m.clip("P09") ? m.clip("P09") : m.clip("P01") ? m.clip("P01") : m.clip("");
+        if (rider) {
+            a.clip = &m.riding_clip(false);
             // Unseated (a mount without the dag), it stands where its spawn is: on the mount's spot.
             a.position.x = draws.back().position.x;
             a.position.y = draws.back().position.y;
@@ -296,9 +296,14 @@ int run_model_viewer(const ModelViewerOptions& opts) {
         const auto& fx = effects[static_cast<std::size_t>(opts.spell_effect)];
         log::info("spell effect {} '{}', stage {}", opts.spell_effect, fx.name, opts.spell_stage);
         for (const auto& slot : fx.stages[static_cast<std::size_t>(std::clamp(opts.spell_stage, 0, 2))].slots)
-            if (slot.emitter > 0)
+            if (slot.emitter > 0) {
+                // (a spellsnew.eff slot may name an emitter past spellsnew.edd's end)
+                const auto i = static_cast<std::size_t>(slot.emitter);
+                const auto& defs = particles.definitions();
                 log::info("  emitter {} '{}' location {} attach {}", slot.emitter,
-                          particles.definitions()[static_cast<std::size_t>(slot.emitter)].name, slot.location, slot.attach);
+                          i < defs.size() ? defs[i].name : std::string("(not in spellsnew.edd)"), slot.location,
+                          slot.attach);
+            }
     }
     double next_effect = 0.0;
     // The models' and held items' own emitters (app/actor_emitters.h).

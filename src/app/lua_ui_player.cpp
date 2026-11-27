@@ -16,15 +16,18 @@
 #include <vector>
 
 #include <imgui.h>
+#include <imgui_internal.h>
 
 #include "app/actions_ui.h"
 #include "app/lua_ui_windows.h"
+#include "app/ui_input.h"
 #include "game/combat.h"
 #include "game/xtarget.h"
 #include "game/hot_button_state.h"
 #include "game/interact.h"
 #include "game/mechanics/character.h"
 #include "core/game_dir.h"
+#include "core/log.h"
 #include "ui/ui_ini.h"
 #include "net/game_connection.h"
 
@@ -59,7 +62,7 @@ std::string eqstr(UiHost& host, std::uint32_t id, std::vector<std::string> args 
 
 // Centred on the screen by the window's XML size (CPopupWndManager's dialogs, CQuantityWnd without a point).
 std::array<int, 2> centred(UiHost& host, const char* screen) {
-    ImVec2 ds = ImGui::GetIO().DisplaySize;
+    const ImVec2 ds = ui_display_size(); // no screen without ImGui (app/ui_input.h)
     auto r = host.textures ? host.textures->screen_rect(screen) : std::nullopt;
     int w = r ? r->w : 300, h = r ? r->h : 200;
     return {(static_cast<int>(ds.x) - w) / 2, (static_cast<int>(ds.y) - h) / 2};
@@ -156,6 +159,40 @@ private:
 
 // ---------------------------------------------------------------- ConfirmationDialogBox (CConfirmationDialogBoxWnd)
 
+} // namespace
+
+int confirmation_question(UiHost& host) {
+    if (!host.conn) return 0;
+    if (host.drop_confirm && *host.drop_confirm) {
+        if (host.conn->inventory().cursor()) return 1;
+        *host.drop_confirm = false; // the item left the cursor
+    }
+    if (host.conn->confirmation()) return 2;
+    if (host.confirm) return 3;
+    return host.conn->guild().inviter.empty() ? 0 : 4;
+}
+
+bool answer_confirmation_question(UiHost& host, bool yes) {
+    const int q = confirmation_question(host);
+    if (!q) return false;
+    ++host.confirm_answers; // the next question (a queued one may follow at once) starts its own time limit
+    if (q == 1) {
+        *host.drop_confirm = false;
+        if (yes) host.conn->drop_cursor_on_ground();
+    } else if (q == 2) {
+        host.conn->answer_confirmation(yes);
+    } else if (q == 3) {
+        auto done = std::move(host.confirm->done);
+        host.confirm.reset();
+        if (done) done(yes);
+    } else {
+        host.conn->answer_guild_invite(yes);
+    }
+    return true;
+}
+
+namespace {
+
 // CConfirmationDialogBoxWnd @0x71d8f0: TextOutput (STML), and the buttons its flags show (sub_0071db50: bit 0 OK,
 // bit 1 Cancel, bit 2 Yes, bit 3 No); a button closes it and answers its owner (Yes 4, No 8, OK 1, Cancel 2), a
 // timeout (OnProcessFrame) answers 2. Two questions use it here: the ground drop (CEverQuest::LMouseUp:
@@ -169,6 +206,7 @@ public:
 
     bool shown(UiHost& host) override {
         int q = question(host);
+        if (answers_ != host.confirm_answers) answers_ = host.confirm_answers, showing_ = 0;
         if (q != showing_) {
             showing_ = q;
             int timeout = q == 1   ? 20000
@@ -231,34 +269,10 @@ public:
 
 private:
     // 1 the drop question, 2 the connection's, 3 a window's own (UiHost::confirm), 0 none.
-    static int question(UiHost& host) {
-        if (!host.conn) return 0;
-        if (host.drop_confirm && *host.drop_confirm) {
-            if (host.conn->inventory().cursor()) return 1;
-            *host.drop_confirm = false; // the item left the cursor
-        }
-        if (host.conn->confirmation()) return 2;
-        if (host.confirm) return 3;
-        return host.conn->guild().inviter.empty() ? 0 : 4;
-    }
+    static int question(UiHost& host) { return confirmation_question(host); }
     // A connection question with flags 1 (an OK button alone).
     static bool ok_only(UiHost& host) { return question(host) == 2 && host.conn->confirmation()->ok_only; }
-    void answer(UiHost& host, bool yes) {
-        int q = question(host);
-        showing_ = 0; // the next question (a queued one may follow at once) starts its own time limit
-        if (q == 1) {
-            *host.drop_confirm = false;
-            if (yes) host.conn->drop_cursor_on_ground();
-        } else if (q == 2) {
-            host.conn->answer_confirmation(yes);
-        } else if (q == 3) {
-            auto done = std::move(host.confirm->done);
-            host.confirm.reset();
-            if (done) done(yes);
-        } else if (q == 4) {
-            host.conn->answer_guild_invite(yes);
-        }
-    }
+    void answer(UiHost& host, bool yes) { answer_confirmation_question(host, yes); }
 
     // Handle_OP_GuildInvite @0x4b9410: "%1 is interested in having you join %2." (eqstr 534), asked with
     // ConfirmationDialog(100, flags 0xc, 10000 ms).
@@ -268,6 +282,7 @@ private:
     }
 
     int showing_ = 0;
+    std::uint32_t answers_ = 0; // host.confirm_answers when the time limit started
     std::optional<std::chrono::steady_clock::time_point> deadline_;
     std::optional<std::array<int, 2>> move_;
 };
@@ -560,7 +575,7 @@ public:
     bool click_rightheld(UiHost& host, std::string_view id) {
         int n = index_after(id, "DisplayButton");
         if (!host.conn || n < 0 || n > 3 || selected_ < 0) return false;
-        host.conn->bandolier_hold(selected_, n, ImGui::GetIO().KeyShift);
+        host.conn->bandolier_hold(selected_, n, ui_keys().shift);
         return true;
     }
     void ini_loaded(UiHost&, ui::UiIni& ini, const std::filesystem::path&) override {
@@ -808,7 +823,7 @@ public:
         if (id.rfind("ETW_Role", 0) == 0) {
             if (button == "rightup" || button == "rightupheld") {
                 host.conn->select_xtarget(slot_of(id)); // notification 3: this slot for the menu, then the menu
-                ImVec2 mp = ImGui::GetMousePos();
+                ImVec2 mp = ui_mouse_pos();
                 context_menu(host, mp.x, mp.y);
             } else if (button == "left") {
                 target_row(host, slot_of(id));
@@ -1174,14 +1189,14 @@ public:
     bool click(UiHost& host, std::string_view id, std::string_view button, bool outside) override {
         int n = slot_of(id, "PotionSlot");
         if (!host.conn || n < 0) return false;
-        const ImGuiIO& io = ImGui::GetIO();
+        const UiKeys keys = ui_keys();
         if (button == "left") {
-            if (!host.conn->inventory().cursor() || io.KeyCtrl || io.KeyAlt || n >= max_slots(host)) return true;
+            if (!host.conn->inventory().cursor() || keys.ctrl || keys.alt || n >= max_slots(host)) return true;
             if (host.conn->potion_belt_set(n)) host.conn->auto_inventory();
         } else if ((button == "right" || button == "rightup") && !outside) {
             if (n < max_slots(host)) host.conn->potion_belt_use(n);
         } else if (button == "rightheld") {
-            host.conn->potion_belt_hold(n, io.KeyShift);
+            host.conn->potion_belt_hold(n, keys.shift);
         }
         return true;
     }
@@ -1454,6 +1469,59 @@ private:
 };
 
 } // namespace
+
+void ask_client_confirm(UiHost& host, UiHost::Confirm c) { host.client_confirm = std::move(c); }
+
+// The order ConfirmationWindow::question takes: the ground drop's question shows before the connection's.
+bool destructive_confirmation_up(const UiHost& host) {
+    if (!host.conn) return false;
+    if (host.drop_confirm && *host.drop_confirm && host.conn->inventory().cursor()) return false;
+    const auto& c = host.conn->confirmation();
+    return c && !c->ok_only && (c->id == net::kConfirmDestroy || c->id == net::kConfirmGuildDelete);
+}
+
+bool refuse_code_destroy_yes(const UiHost& host, bool by_code) {
+    if (!by_code || !destructive_confirmation_up(host)) return false;
+    log::warn("A script pressed Yes on the destroy question (ConfirmationDialogBox); refused: only the player answers it");
+    return true;
+}
+
+bool confirm_open(const UiHost& host) { return host.confirm || host.client_confirm; }
+
+void answer_client_confirm(UiHost& host, bool yes) {
+    if (!host.client_confirm) return;
+    auto done = std::move(host.client_confirm->done);
+    host.client_confirm.reset();
+    if (done) done(yes);
+}
+
+// Centred, raised above the interface's windows each frame (it is drawn after them), and its own ImGui window: Lua
+// can neither find it among the stock windows nor click it. The close box answers No.
+void draw_client_confirm(UiHost& host) {
+    if (!host.client_confirm) return;
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + vp->WorkSize.y * 0.5f),
+                            ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowBgAlpha(0.95f);
+    constexpr const char* kName = "Confirm###hailstone_client_confirm";
+    if (const ImGuiWindow* w = ImGui::FindWindowByName(kName); !w || !w->WasActive) ImGui::SetNextWindowFocus();
+    bool open = true;
+    std::optional<bool> answer;
+    if (ImGui::Begin(kName, &open,
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
+        ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
+        const float em = ImGui::GetFontSize();
+        ImGui::PushTextWrapPos(em * 26.0f);
+        ImGui::TextUnformatted(host.client_confirm->text.c_str());
+        ImGui::PopTextWrapPos();
+        if (ImGui::Button("Yes", ImVec2(em * 6.0f, 0.0f))) answer = true;
+        ImGui::SameLine();
+        if (ImGui::Button("No", ImVec2(em * 6.0f, 0.0f))) answer = false;
+    }
+    ImGui::End();
+    if (!open) answer = false;
+    if (answer) answer_client_confirm(host, *answer);
+}
 
 // Hailstone's player menu (a deliberate difference; game::opens_player_menu). The rows' words are this client's own:
 // the original has no such menu to take them from.

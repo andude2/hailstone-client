@@ -36,7 +36,7 @@ local GENERAL_FIRST = 23
 
 local SLOT, GAP = 46, 6
 local LEFT_W = 5 * SLOT + 4 * GAP
-local STATS_W = 220
+local STATS_W = 260
 local W = LEFT_W + 18 + STATS_W
 local HEADER_H, TABS_H = 46, 28
 local DOLL_SLOT, DOLL_GAP = 46, 5
@@ -47,10 +47,9 @@ local DOLL_H = #DOLL_ROWS * DOLL_STEP - DOLL_GAP
 local BODY_H = DOLL_H + 14
 local FOOT_H = SLOT + 12 + 34 + 2 * 32 + 2
 local H = HEADER_H + TABS_H + BODY_H + FOOT_H
--- hud.Dialog pads a window's contents by 10 by 8 design pixels on each side; W and H are the contents' size, so the
--- resizable window starts and stops at exactly the layout it has always had.
-local PAD_W, PAD_H = 20, 16
-local DIALOG_W, DIALOG_H = W + PAD_W, H + PAD_H
+-- The window is resizable, no smaller than W x its height (OPTS.size): the pages get the width and the extra height
+-- (bodyW, bodyH: design pixels, set each frame by body).
+local bodyW, bodyH = W, BODY_H
 
 local page = "character" -- character, stats, bandolier, currency
 -- the game's tab box pages (it fills some only while shown); the Bandolier page is Hailstone's, the game's Character
@@ -353,7 +352,9 @@ local function kv(x, y, w, rows, s)
   local _, th = T.TextSize("Ag", T.font.small)
   for i, r in ipairs(rows) do
     if i % 2 == 0 then ui.DrawRectFilled(x - 4 * s, y - 1 * s, x + w + 4 * s, y + th + 2 * s, C.ink[1], C.ink[2], C.ink[3], 0.025, 3 * s) end
-    T.Text(x, y, r[1], C.muted, T.font.small)
+    -- a name that would run into its value is shortened (a narrow column, a long value)
+    local vw = T.TextSize(r[2] or "", T.font.small)
+    T.Text(x, y, T.Fit(r[1], math.max(w - vw - 6 * s, 0), T.font.small), C.muted, T.font.small)
     T.Text(x + w, y, r[2] or "", r[3] or C.text, T.font.small, "right")
     if r[4] then
       kvHits = kvHits + 1
@@ -394,7 +395,9 @@ local function statsPage(x, y, s, w, h)
   ui.BeginChild("##stats", w, h, false)
   local cx, cy = ui.GetCursorScreenPos()
   local cw = ui.GetContentRegionAvail()
-  local colW = (cw - 24 * s) / 2
+  -- the right column (attributes, resists and the item bonuses' two columns of "current / cap") gets the larger share
+  local colW = math.floor((cw - 24 * s) * 0.4)
+  local colR = (cw - 24 * s) - colW
   local lx, rx = cx + 4 * s, cx + colW + 20 * s
   local st = API.character.Stats() or {}
   kvHits = 0
@@ -458,16 +461,20 @@ local function statsPage(x, y, s, w, h)
   if title ~= "" then table.insert(progress, 2, { "Title", title }) end
   yl = kv(lx, yl, colW, progress, s)
   -- right: attributes, resists, item bonuses
-  local yr = section(rx, cy, colW, "Attributes", s)
-  yr = statTable(rx, yr, colW, STATS, s) + 6 * s
-  yr = section(rx, yr, colW, "Resists", s)
-  yr = statTable(rx, yr, colW, RESISTS, s) + 6 * s
-  yr = section(rx, yr, colW, "Item bonuses", s)
-  local half = (colW - 16 * s) / 2
+  local yr = section(rx, cy, colR, "Attributes", s)
+  yr = statTable(rx, yr, colR, STATS, s) + 6 * s
+  yr = section(rx, yr, colR, "Resists", s)
+  yr = statTable(rx, yr, colR, RESISTS, s) + 6 * s
+  yr = section(rx, yr, colR, "Item bonuses", s)
+  local half = (colR - 16 * s) / 2
   local b1, b2 = {}, {}
+  local caps = st.bonusCaps or {}
   for i, b in ipairs(BONUSES) do
     local v, c = label(b[2])
-    local row = { b[1], v, (v ~= "0" and v ~= "") and (c or C.text) or C.faint }
+    local shown = v ~= nil and v ~= "0" and v ~= ""
+    -- RoF2's "current / cap" for the capped ones; the sum may be past the cap where the server allows it.
+    if caps[b[2]] and v and v ~= "" then v = v .. " / " .. caps[b[2]] end
+    local row = { b[1], v, shown and (c or C.text) or C.faint }
     if i <= math.ceil(#BONUSES / 2) then b1[#b1 + 1] = row else b2[#b2 + 1] = row end
   end
   local y1 = kv(rx, yr, half, b1, s)
@@ -517,18 +524,30 @@ local function vitality(x, y, w, s, gauge, name, color)
   if ui.IsItemHovered() then ui.SetTooltip(name .. ": " .. amount) end
 end
 
+-- The foot's height past FOOT_H: the vitality bars and the Shroud Progress button, when they are there.
+local function footExtra()
+  local extra = API.windows.ChildShown(WINDOW, "ShroudProgressButton") == true and 32 or 0
+  return extra + (hasVitality() and 40 or 0)
+end
+
+-- A resizable dialog's size is the window's (hud.Dialog): the contents' W x H, plus its padding (10 a side) and title
+-- bar (hud.Dialog's own allowance, 40, and a little to spare: extra height goes to the pages).
+local FRAME_W, FRAME_H = 20, 44
 local OPTS = {
-  size = function()
-    local extra = API.windows.ChildShown(WINDOW, "ShroudProgressButton") == true and 32 or 0
-    return DIALOG_W, DIALOG_H + (hasVitality() and 40 or 0) + extra
-  end,
+  size = function() return W + FRAME_W, H + FRAME_H + footExtra() end,
+  resizable = { W + FRAME_W, H + FRAME_H }, -- set each frame to the size above: never smaller than the contents
   place = function(sw, sh, w, h, s, x, y) return sw - w - 60 * s, sh / 2 - h / 2 end,
   keepTitle = true,
-  resizable = { W, H },
 }
 local function body(x, y, w, h, s)
   local vitalityShown = hasVitality()
   local shroudShown = API.windows.ChildShown(WINDOW, "ShroudProgressButton") == true
+  -- the size the player gave the window (its contents' area, not hud.Dialog's w, h, which are raised to the window's
+  -- smallest size): the pages get the width and the extra height
+  local aw, ah = ui.GetContentRegionAvail()
+  bodyW = math.max(W, aw / s)
+  bodyH = math.max(BODY_H, ah / s - HEADER_H - TABS_H - FOOT_H - footExtra())
+  w = bodyW * s
   -- header: name, level, class, deity
   local name = label(1)
   local last = label(73)
@@ -574,10 +593,8 @@ local function body(x, y, w, h, s)
   local by = ty + TABS_H * s + 4 * s
   tools.ModeBanner("##inv", math.max(tx, x + 260 * s), x + w, ty, s) -- after the tabs
   -- The footer stays at the bottom of the window and the page takes the room above it, so a resized window grows the
-  -- page (the Compare table's item column, the Stats columns and the Bandolier and currency lists with it). The
-  -- vitality bars and the shroud button below the six buttons are part of the footer's height here.
-  local footerH = FOOT_H + (vitalityShown and 40 or 0) + (shroudShown and 32 or 0)
-  local fy = y + h - footerH * s
+  -- page (the Compare table's item column, the Stats columns and the Bandolier and currency lists with it).
+  local fy = y + (HEADER_H + TABS_H + bodyH) * s
   local pageH = fy - 8 * s - by
   if page == "stats" then statsPage(x, by, s, w, pageH)
   elseif page == "bandolier" then bandolierPage(x, by, s, w, pageH)
@@ -587,14 +604,16 @@ local function body(x, y, w, h, s)
   -- the carried slots
   ui.DrawLine(x, fy - 8 * s, x + w, fy - 8 * s, C.ink[1], C.ink[2], C.ink[3], 0.06, 1)
   local sz = SLOT * s
-  local gap = (w - 10 * sz) / 9
+  -- the spacing they have at the window's own width, from the left: a wider window does not spread them
+  local gap = (W * s - 10 * sz) / 9
   for i = 0, 9 do
     items.InvSlot(GENERAL_FIRST + i, nil, x + i * (sz + gap), fy, sz, s, SLOT_NUMBERS[i])
   end
   local free, total = API.inventory.InventorySpace()
   local low = free <= 5
   local note = tools.Note() -- (a refusal of Sort / Stack started from a bag's window or the Advanced Inventory)
-  T.Text(x + w, fy + sz + 1 * s, note or string.format("%d / %d free", free, total),
+  -- under the slots' right end, not the window's
+  T.Text(x + 10 * sz + 9 * gap, fy + sz + 1 * s, note or string.format("%d / %d free", free, total),
     (note or low) and C.danger or C.faint, T.font.tiny, "right")
   -- coins, then the buttons
   local cy = fy + sz + 12 * s
@@ -669,5 +688,6 @@ end
 
 ui.window("Inventory", function()
   if not API.session.InGame() then return end
+  OPTS.resizable[1], OPTS.resizable[2] = OPTS.size()
   hud.Dialog(WINDOW, "Inventory", OPTS, body)
 end)

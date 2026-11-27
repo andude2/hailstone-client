@@ -117,6 +117,7 @@ public:
     // PathFollower::ahead), so the swim keeps to the path's height (diving, or rising to it); `aim` without it.
     // The follower's unsticking strafe, or 0 when a drop is beside the walk.
     int safe_strafe(const Frame& f, const nav::SteerOutput& out) const;
+    static bool swim_needs_air(const Frame& f);
     std::optional<float> swim_pitch(const Frame& f, const glm::vec3& aim,
                                     std::optional<glm::vec3> along = std::nullopt) const;
     FollowAssist assist_follow(const glm::vec3& feet, const glm::vec3& target_feet, bool clear_line, double now);

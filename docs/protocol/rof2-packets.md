@@ -21,7 +21,7 @@ What `src/net/world_packets.*` and `src/net/zone_packets.*` encode and decode, a
 3. C→W `OP_World_Client_CRC1/2/3` after each character list, and CRC1 again before every `OP_EnterWorld`.
 4. C→W `OP_WorldClientReady` (empty) once the character select screen is up, after the first list's checksums. EQEmu's world eats it.
 5. Character creation (section 3).
-6. C→W `OP_EnterWorld` (72 B). W→C `OP_MOTD`, `OP_SetChatServer`, `OP_SetChatServer2`, (an `OP_GroupUpdate` for grouped characters), then `OP_ZoneServerInfo` or `OP_ZoneUnavail`.
+6. C→W `OP_EnterWorld` (72 B). W→C `OP_MOTD`, `OP_SetChatServer`, `OP_SetChatServer2`, (an `OP_GroupUpdate` for grouped characters), then `OP_ZoneServerInfo` or `OP_ZoneUnavail`. An `OP_ZoneServerInfo` at any other time (before `OP_EnterWorld`, or a second one) is logged and ignored.
 7. C→W `OP_WorldComplete` (empty). World closes the connection (EQEmu: `eqs->Close()`). The client connects to the zone only after world has dropped the link, and gives up after 30 s ("World did not drop the connection"). Without it, EQEmu drops the idle world client about 3 s later.
 
 While zoning (`LoginInfo::zoning = true`), world skips the guild list and character list. The client re-sends CRC1 and `OP_EnterWorld` with the name world sent in its `OP_EnterWorld`.
@@ -291,6 +291,15 @@ From EQEmu's source; tests: `tests/hover_respawn_test.cpp`.
 #### Combat: resurrection while hovering
 
 A resurrection uses the ordinary `OP_RezzRequest` / `OP_RezzAnswer` confirmation, even when no refreshed respawn window arrives.
+The question follows Handle_OP_RezzRequest @0x4bead0. An offer whose name at +0x18 is not the local character's
+(compared without case; EQEmu puts the corpse owner's name there) is ignored. Otherwise the spell at +0x9c picks the
+text, each with the caster's trimmed name (+0x5c): eqstr 9046 for an invalid spell or one missing from the spell
+table; eqstr 3563 for a spell with SPA 332 (summon to corpse); else eqstr 9047 with the spell's name and its first
+base value as a plain integer (no range check, and no need for the resurrection SPA; it is the field EQEmu's
+Client::OPRezzAnswer takes as the XP percentage). eqstr 4632 then goes to chat in colour 0x108, and the question is a
+Yes / No ConfirmationDialog (0x67, flags 0xc) with a 300 s limit, answered No when it runs out. When the game folder
+lacks one of these strings the client shows the original's English text for it. The amount of XP on the corpse stays
+server-side.
 
 - **Yes, same zone.** While hovering, Yes to an offer whose zone dword (+4, zone and instance) is the current zone records consent locally and enables the reserved final resurrection option. It sends nothing and does not restart the countdown. Checked: ConfirmationDialog_HandleResponse @0x52d540 case 0x67.
 - **Yes, another zone or instance:** echoed in `OP_RezzAnswer` at once.
@@ -389,7 +398,7 @@ Only OP_ShopPlayerBuy/Sell (field copies) and OP_CancelTrade have a RoF2 transla
 1. ShopRequest stock: item packets type 0x64 (header slot type 9, slot = instance id = merchant slot, price = per-unit copper, merchant_slot = stock, -1 unlimited).
 2. ShopPlayerBuy reply: the item arrives first as an item packet type 0x67. There is **no** OP_MoneyUpdate: the client takes the price itself (smallest coins first; the split may differ from the server's, the total agrees) and prints 1437 "You give%1 to %2." in the Merchants colour 0x114. Wave 0x8a (the cash register) plays only when the purse could pay; otherwise the coin is zeroed silently (FinishBuyingItem @0x6ef220, also a trader purchase, TraderShop 10 method 0).
 3. TradeRequest C→Z is sent on a left click on a spawn while holding an item or coin (within AvatarHeight + 20, 12294). Banker-type classes 40/63/64/66/74 refuse (8505). Z→C (a player asks): the client opens its trade window and replies with the Ack if it can trade.
-4. TradeRequestAck: for an NPC the server answers itself ({me, NPC}). After the Ack for a pending request, the client opens the window and moves the held item (OP_MoveItem cursor → {3, slot}, count 0; a stack merges first) or coin (OP_MoveCoin cursor → trade) into the offer. NPCs get four slots and players get eight.
+4. TradeRequestAck: for an NPC the server answers itself ({me, NPC}). After the Ack for a pending request, the client opens the window and moves the held item (OP_MoveItem cursor → {3, slot}) or coin (OP_MoveCoin cursor → trade) into the offer. Clicking an NPC with a held item puts it in the first free Give slot. Clicking an empty Give slot uses that slot. Both moves send count 0 to offer the whole cursor item. NPCs get four slots. Player trades have eight slots and merge matching stacks first, sending the quantity moved when merging. A click on an empty player trade slot also goes through that first-free/merge path in Hailstone, unlike the original, whose CInvSlot::HandleLButtonUp @0x695670 (trade branch at @0x6963d2) moves the cursor item into the clicked empty slot for player trades too (docs/todo.md).
 5. CancelTrade: the client prints 1448/1450 and sends its own cancel back while a partner is set. Refunds come as item packets and OP_MoneyUpdate, then OP_FinishWindow/2 (empty).
 6. Say links: EQEmu say links are item links to item 0xF423F with the phrase id in augment 1 (augment 2 for silent links).
 
@@ -532,6 +541,7 @@ Server side: zone `Handle_OP_Group*` (client_packet.cpp), `Group::*` (groups.cpp
 | GroupMentor | C→Z | 0x3342 | 68 B: i32 percent, `char[64]` name ("" clears) |
 | GroupRoles | both | 0x70e2 | 148 B: `char[64]` member, `char[64]` leader, 3 × u32, i32 role at +0x8c (1 Main Tank, 2 Main Assist, 3 Puller), u8 on at +0x90 (0 clear, 1 assign), 3 B padding (note 6) |
 | MobManaUpdate / MobEnduranceUpdate | Z→C | 0x2404 / 0x1c81 | 3 B: u16 spawn, u8 percent; group members' mana and endurance |
+| HsGroupVitalsRequest / HsGroupVitals (Hailstone) | C→Z / Z→C | 0x143c / 0x143d | Request: u32 magic `HSPV`, u16 version 1. Reply: same header, u16 count (0–12), then count × {u32 spawn id, i64 current HP, i64 max HP, i64 current mana, i64 max mana, i64 current endurance, i64 max endurance}. A zero maximum means the resource is unavailable. Settings reply bit 3 enables requests. |
 | MobHealth | Z→C | 0x37b1 | 3 B (above); group members' HP percentages come this way too |
 
 1. GroupFollow: the client copies the u32 at +148 of the invitation (past EQEmu's 148 bytes; sent as 0). Accept with GroupFollow when the invitation came as 0x6110, else GroupFollow2. EQEmu echoes it to the inviter.
@@ -715,12 +725,12 @@ OP_TradeSkillCombine (above) goes out; the server's empty OP_TradeSkillCombine e
 | TaskDescription | Z→C | 0x3714 | u32 slot, u32 task id, u8 open journal, u32 type (0 task, 1 shared, 2 quest), u32 reward type; title; u32 duration, u32 duration code, u32 elapsed seconds (the RoF2 translator turns the start time into elapsed time); description; u8 has rewards, u32 coin, u32 xp, u32 faction; reward text; reward item link; u32 points; u8 reward selection |
 | TaskActivity | Z→C | 0x08d3 | u32 slot, u32 type, u32 task id, u32 element, u32 step; short form (25 B, a hidden element): u32 0xffffffff, u8 optional; else i32 element type, u8 optional, i32 0, target name, counted item list, i32 goal, counted skill list ("-1"), counted spell list ("0"), zones, i32 dz switch, description override, i32 done, u8 1, zones again |
 | CompletedTasks | Z→C | 0x4eba | u32 count, {u32 task id, title, u32 completed time} (the 50 most recent) |
-| TaskSelectWindow / SharedTaskSelectWindow | Z→C | 0x705b / 0x48a2 | u32 count, u32 type, u32 giver spawn; per task: u32 id, f32 reward multiplier, u32 duration, u32 duration code, title, description, u8 reward preview, u32 elements, per element: i32 index, i32 type, i32 0, target, counted items, i32 goal, counted skills, counted spells, zones, description, zones (up to 40 tasks) |
+| TaskSelectWindow / SharedTaskSelectWindow | Z→C | 0x705b / 0x48a2 | u32 count, u32 type, u32 giver spawn; per task: u32 id, f32 reward multiplier, u32 duration, u32 duration code, title, description, u8 reward preview, u32 elements, per element: i32 index, i32 type, i32 0, target, counted items, i32 goal, counted skills, counted spells, zones, description, zones (up to 40 tasks; more than 256 elements in a task refuses the packet, Hailstone's limit) |
 | AcceptNewTask | C→Z | 0x0a23 | 12 B: u32 the selection's type, u32 task id (0 declines), u32 giver |
 | SharedTaskAcceptNew | C→Z | 0x6646 | 20 B: 0, 0, u32 giver, u32 task id, f32 reward multiplier |
 | CancelTask | both | 0x39f0 | 8 B: u32 slot, u32 type. C→Z abandons; Z→C removes the task |
 | TaskHistoryRequest | C→Z | 0x5f1c | 4 B: the completed list index |
-| TaskHistoryReply | Z→C | 0x3d05 | u32 index, u32 count; per completed element: u32 type, target, counted items, u32 goal, counted "-1", counted "-1", zones, u32 0, description, u8 '1', zones |
+| TaskHistoryReply | Z→C | 0x3d05 | u32 index (50 or more is ignored), i32 count (the first 20 are read, as in the original); per completed element: u32 type, target, counted items, u32 goal, counted "-1", counted "-1", zones, u32 0, description, u8 '1', zones |
 | TaskActivityComplete | Z→C | 0x5e19 | 24 B: index, type, task id, element, completed (0 failed), stage completed. The client shows 6005 "Task Stage Completed", or 6003 / 6004 with the title, as large on-screen text |
 | TaskRequestTimer | Z→C | 0x7a48 | 4 B: milliseconds before another shared task request |
 | TaskTimers | C→Z | 0x2b0f | empty (/tasktimers) |
@@ -929,6 +939,15 @@ The language part is 1411 " in <language>," (language names from the client's ta
 | LFPGetMatchesResponse | Z→C | 0x22c6 | u32 (skipped), then {comments, i16 from, i16 to, u32 classes, i16 count, count × {name, i16 class, level, zone, guild}} |
 | Consent / ConsentDeny | C→Z | 0x1fd1 / 0x7a45 | the name, NUL-terminated |
 | SpawnAppearance 21 / 24 | C→Z | 0x0971 | anonymous flags (1 anonymous, 2 roleplaying) / AFK; other spawns' 18 linkdead, 20 GM, 22 guild id, 23 guild rank, 52 guild show, 53 offline mode update `game::Spawn` (the guild lines: Guilds below) |
+
+#### Chat: /who race labels
+
+The stock chat lines and the `raceName` field returned by `hs.WhoResults()` use the race id sent in
+`WhoAllResponse`, which may be the player's current illusion. As `HandleWhoAllResponse` (`0x4bc010`) does, a
+playable race takes the client's own name (`CharacterZoneClient_GetRaceDescription`) and any other race the name
+in `dbstr_us.txt` type 11 (`GetRaceDesc` at `0x515ce0`). Where RoF2 would print a missing, empty or `UNKNOWN RACE`
+entry as it stands, Hailstone deliberately uses its built-in race label instead: `Tree` for the Illusion Tree model
+(143), or `Race <id>` for an otherwise unknown id. A zero race id has an empty label.
 
 #### Chat: /who friends
 
@@ -1159,7 +1178,7 @@ Tried live against EQEmu with two clients (playprobe `--duel`, `--duel-wait`, `-
     - Z→C: 0 a slot's update (230 B: slot, area, shown, item id, icon, quantity, permission, merge, usable, `char[64]` name, donator, who for); 9 acknowledgement (12 B); 4 deposit acknowledgement (16 B, failed at +12). Z→C 2 and 4 carry a u16 slot, u16 area at +12 the window selects (EQEmu: its failed flag); on 4 the held item goes.
     - C→Z, each {u32 action, u32 the banker's spawn id, u32}: 2 promote; 3 view (value 1 unless Shift); 6 withdraw, 7 split, 8 merge (24 B: u16 slot, u16 area, u32 item id, u32 value); 4 deposit the cursor item (16 B); 5 permissions (88 B: slot, area, item id, permission, `char[64]` member).
 
-Duel state (`game::DuelState`) is the player we challenged or accepted, the challenger, and an on flag. The profile's bandolier sets and potion belt are decoded (`PlayerProfile::bandoliers`, `potion_belt`).
+Duel state (`game::DuelState`) is the player we challenged or accepted, the challenger, and an on flag. While the duel is on, the opponent may be attacked (melee, abilities, detrimental spells) whatever the PvP flags and guilds, and a beneficial spell on a player outside the duel is refused (AllowedToAttack reads the on flag and the opponent). Hailstone ends a duel, running or offered, with a zone change: the original keeps its duel state across a zone, but EQEmu ends the duel when the client leaves (Client::~Client), and the old opponent's id names someone else in the new zone. The profile's bandolier sets and potion belt are decoded (`PlayerProfile::bandoliers`, `potion_belt`).
 
 #### Adventures: requests and leaderboard
 
@@ -1329,6 +1348,7 @@ Mail commands go on the chat session as OP_Mail with the mail command text, the 
 | MailNew | UCS→C | 0x10 | strings: mailbox, id, time, status, from, subject → 4547 (another mailbox: 4533) |
 | MailDeliveryStatus | UCS→C | 0x12 | strings: sequence, recipient (failure), subject, "1" sent / "0" failed → 4530 / 4531 |
 
+- A mail packet with more than 64 strings is dropped (Hailstone's limit; the longest stock layout, MailHeader, has 8), so a packet of NULs cannot become one string per byte.
 - Delete in the inbox sends TRASH, in the trash DELETED. Purge sends DELETED for the trash.
 - The composition window's From is the current mailbox's address as MailLogin listed it.
 - The composition window opens and sends only with the membership feature 6.
@@ -1341,7 +1361,7 @@ The in-game store (CMarketplaceWnd). Unit-tested and mock-server tested; not tri
 - Layouts are the original's readers and senders (NMS-Release-Extras' `offsets/Market.h` section 44, HandleWorldMessage's cases).
 - The funding pages (Add Funds, credit cards) used the publisher's web service and are not offered.
 
-The feeds are read as the original's `CUnSerializeBuffer` does, each field bounds-checked on its own, so a short packet leaves the missing fields at their defaults. Catalog strings are NUL-terminated and cut to the node's buffer (name 127, the 64-byte one 63, the rest 1023 characters) while the cursor skips the whole string. The state feed's string is a u32 length and the bytes.
+A catalog counting more than 10,000 entries is refused (Hailstone's limit; docs/unknowns.md). The feeds are read as the original's `CUnSerializeBuffer` does, each field bounds-checked on its own, so a short packet leaves the missing fields at their defaults. Catalog strings are NUL-terminated and cut to the node's buffer (name 127, the 64-byte one 63, the rest 1023 characters) while the cursor skips the whole string. The state feed's string is a u32 length and the bytes.
 
 | Packet | Dir | Opcode | Layout |
 |---|---|---|---|

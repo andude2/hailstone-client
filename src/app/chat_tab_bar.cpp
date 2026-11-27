@@ -5,6 +5,7 @@
 #include <charconv>
 #include <cmath>
 #include <format>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,7 @@
 #include "app/chat_tabs.h"
 #include "app/lua_ui.h"
 #include "ui/lua/lua_host.h"
+#include "ui/imgui_frame.h"
 
 namespace hailstone::app {
 
@@ -257,7 +259,7 @@ int ScrollChatTab(lua_State* L) {
 
     struct Viewport {
         std::uint32_t serial = 0;
-        int frame = -1;
+        std::optional<std::uint64_t> frame; // the frame it was last drawn (ui::imgui_frame)
         int group = 0;
         float y = 0;
         bool follow = true;
@@ -265,15 +267,16 @@ int ScrollChatTab(lua_State* L) {
     static std::array<Viewport, tabs::kMaxSlots> viewports;
     auto& view = viewports[static_cast<std::size_t>(tab_slot - 1)];
     if (view.serial != tab.serial) view = Viewport{tab.serial};
-    const int frame = ImGui::GetFrameCount();
-    const bool returning = view.group != slot || view.frame + 1 != frame;
+    const std::uint64_t frame = ui::imgui_frame();
+    const bool returning = view.group != slot || !view.frame || *view.frame + 1 != frame;
     const float y = ImGui::GetScrollY();
     const bool at_bottom = y >= ImGui::GetScrollMaxY() - 2;
     const bool follow = lua_toboolean(L, 5);
+    const bool keep_scroll = lua_toboolean(L, 6);
     if (lua_isnumber(L, 3)) {
         const float delta = static_cast<float>(lua_tonumber(L, 3) * luaL_checknumber(L, 4));
         if (std::isfinite(delta)) ImGui::SetScrollY(std::max(0.0f, (returning ? view.y : y) + delta));
-    } else if (follow || (returning ? view.follow : at_bottom)) {
+    } else if (!keep_scroll && (follow || (returning ? view.follow : at_bottom))) {
         ImGui::SetScrollHereY(1.0f);
     } else if (returning) {
         ImGui::SetScrollY(view.y);

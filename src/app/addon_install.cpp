@@ -23,6 +23,7 @@
 #include "core/zip_read.h"
 #include "net/server_files.h"
 #include "platform/durable_file.h"
+#include "platform/shared_file.h"
 #include "plugin/native_plugins.h"
 #include "plugin/policy.h"
 
@@ -254,6 +255,54 @@ std::string extension_of(std::string_view path) {
 fs::path addons_dir(const fs::path& data_dir) { return data_dir / "addons"; }
 
 namespace {
+// The file locks this process holds, by addons/ folder, and how many holds each has.
+struct HeldAddonsLock {
+    platform::ScopedFileLock file;
+    int holders = 0;
+};
+std::mutex& held_addons_mutex() {
+    static std::mutex m;
+    return m;
+}
+std::map<fs::path, HeldAddonsLock>& held_addons_locks() {
+    static std::map<fs::path, HeldAddonsLock> held;
+    return held;
+}
+
+constexpr std::string_view kAddonsBusy =
+    "another Hailstone is installing or removing add-ons in this folder: try again in a moment";
+} // namespace
+
+AddonsLock::AddonsLock(AddonsLock&& other) noexcept : key_(std::exchange(other.key_, {})) {}
+
+AddonsLock::~AddonsLock() {
+    if (key_.empty()) return;
+    std::lock_guard guard(held_addons_mutex());
+    auto& held = held_addons_locks();
+    auto it = held.find(key_);
+    if (it != held.end() && --it->second.holders <= 0) held.erase(it);
+}
+
+std::optional<AddonsLock> lock_addons(const fs::path& data_dir) {
+    const fs::path dir = addons_dir(data_dir);
+    std::error_code ec;
+    fs::path key = fs::absolute(dir, ec);
+    key = ec ? dir.lexically_normal() : key.lexically_normal();
+    std::lock_guard guard(held_addons_mutex());
+    auto& held = held_addons_locks();
+    auto it = held.find(key);
+    if (it == held.end()) {
+        fs::create_directories(dir, ec);
+        auto file = platform::ScopedFileLock::try_acquire(dir / "install.lock", platform::FileLockMode::Exclusive,
+                                                         platform::LockFolder::Ordinary);
+        if (!file) return std::nullopt;
+        it = held.emplace(key, HeldAddonsLock{std::move(*file), 0}).first;
+    }
+    ++it->second.holders;
+    return AddonsLock(key);
+}
+
+namespace {
 std::string_view kind_folder(AddonKind kind) {
     return kind == AddonKind::Script     ? "scripts"
            : kind == AddonKind::Plugin   ? "plugins"
@@ -376,6 +425,8 @@ ParsedRegistry parse_registry(const fs::path& file) {
         else if (what == "author") a.author = std::string(rest);
         else if (what == "description") a.description = std::string(rest);
         else if (what == "notes") a.notes = std::string(rest);
+        else if (what == "required_tlos") a.required_tlos = parse_addon_tlo_list(rest);
+        else if (what == "suggested_tlos") a.suggested_tlos = parse_addon_tlo_list(rest);
         else if (what == "file") {
             auto [hash, rest2] = split(rest);
             auto [size, path] = split(rest2);
@@ -392,6 +443,9 @@ ParsedRegistry parse_registry(const fs::path& file) {
         }
     }
     close();
+    for (auto& a : r.good) {
+        if (a.required_tlos && a.suggested_tlos) remove_required_tlos(*a.required_tlos, *a.suggested_tlos);
+    }
     return r;
 }
 
@@ -470,6 +524,11 @@ std::vector<mq::ManagedScript> managed_addon_scripts(const fs::path& data_dir) {
 }
 
 bool set_addon_enabled(const fs::path& data_dir, std::string_view name, bool enabled) {
+    const auto lock = lock_addons(data_dir);
+    if (!lock) {
+        log::warn("Add-ons: {} is not switched: {}", name, kAddonsBusy);
+        return false;
+    }
     auto registry = read_addon_registry(data_dir);
     if (!registry.writable()) return false;
     for (auto& addon : registry.addons) {
@@ -485,6 +544,17 @@ std::string registry_text(const std::vector<InstalledAddon>& addons) {
     std::string text = "# The add-ons Hailstone installed (docs/addons.md). Written by the client.\n";
     text += kRegistryHeader;
     text += "\n";
+    const auto append_roots = [&](std::string_view name, const std::optional<std::vector<std::string>>& roots) {
+        if (!roots) return;
+        text += name;
+        text += ' ';
+        if (roots->empty()) text += "none";
+        for (std::size_t i = 0; i < roots->size(); ++i) {
+            if (i) text += ',';
+            text += (*roots)[i];
+        }
+        text += '\n';
+    };
     for (const auto& a : addons) {
         text += "\naddon " + a.name + " " + std::string(addon_kind_word(a.kind)) + "\n";
         text += "source " + a.source + "\n";
@@ -497,6 +567,8 @@ std::string registry_text(const std::vector<InstalledAddon>& addons) {
         if (!a.author.empty()) text += "author " + a.author + "\n";
         if (!a.description.empty()) text += "description " + a.description + "\n";
         if (!a.notes.empty()) text += "notes " + a.notes + "\n";
+        append_roots("required_tlos", a.required_tlos);
+        append_roots("suggested_tlos", a.suggested_tlos);
         for (const auto& f : a.files) text += "file " + to_hex(f.sha256) + " " + std::to_string(f.size) + " " + f.path + "\n";
     }
     return text;
@@ -511,6 +583,11 @@ std::string registry_locked(const AddonRegistry& reg) {
 } // namespace
 
 bool write_installed_addons(const fs::path& data_dir, const std::vector<InstalledAddon>& addons) {
+    const auto lock = lock_addons(data_dir);
+    if (!lock) {
+        log::warn("Add-ons: addons/installed.txt is not written: {}", kAddonsBusy);
+        return false;
+    }
     if (std::string why = registry_locked(read_addon_registry(data_dir)); !why.empty()) {
         log::warn("Add-ons: {}", why);
         return false;
@@ -521,6 +598,23 @@ bool write_installed_addons(const fs::path& data_dir, const std::vector<Installe
     if (!write_file_atomic(addons_dir(data_dir) / kRegistryBackup, text))
         log::warn("Add-ons: cannot write addons/{}", kRegistryBackup);
     return true;
+}
+
+bool set_addon_auto_update(const fs::path& data_dir, std::string_view name, bool on) {
+    const auto lock = lock_addons(data_dir);
+    if (!lock) {
+        log::warn("Add-ons: {}'s auto-update switch is not saved: {}", name, kAddonsBusy);
+        return false;
+    }
+    auto registry = read_addon_registry(data_dir);
+    if (!registry.writable()) return false;
+    bool found = false;
+    for (auto& a : registry.addons)
+        if (iequal(a.name, name)) {
+            a.auto_update = on;
+            found = true;
+        }
+    return found && write_installed_addons(data_dir, registry.addons);
 }
 
 const InstalledAddon* find_addon(const std::vector<InstalledAddon>& addons, std::string_view name) {
@@ -967,6 +1061,9 @@ std::optional<std::vector<AddonFile>> unpack_addon(const fs::path& data_dir, con
         if (error) *error = std::move(why);
         return std::nullopt;
     };
+    // new/<name>/ is emptied and written: not while another process installs from there.
+    const auto lock = lock_addons(data_dir);
+    if (!lock) return fail(std::string(kAddonsBusy));
     ZipReader zip;
     if (!zip.open(zip_path)) return fail("the package is not a zip this reads: " + zip.error());
     if (m.kind == AddonKind::Tool) return unpack_tool(data_dir, m, zip, platform, error);
@@ -1040,6 +1137,11 @@ bool apply_addon(const fs::path& data_dir, const InstalledAddon& addon, std::str
     const fs::path src = dir / "new" / rel(addon.name);
     const fs::path prev = dir / "previous" / rel(addon.name);
     const fs::path target = addon_folder(data_dir, addon.kind, addon.name);
+    const auto lock = lock_addons(data_dir);
+    if (!lock) {
+        if (error) *error = std::string(kAddonsBusy);
+        return false;
+    }
     const AddonRegistry reg = read_addon_registry(data_dir);
     if (std::string why = registry_locked(reg); !why.empty()) {
         if (error) *error = why;
@@ -1130,6 +1232,11 @@ bool apply_addon(const fs::path& data_dir, const InstalledAddon& addon, std::str
 
 bool remove_addon(const fs::path& data_dir, std::string_view name, std::string* error) {
     const fs::path dir = addons_dir(data_dir);
+    const auto lock = lock_addons(data_dir);
+    if (!lock) {
+        if (error) *error = std::string(kAddonsBusy);
+        return false;
+    }
     const AddonRegistry reg = read_addon_registry(data_dir);
     if (std::string why = registry_locked(reg); !why.empty()) {
         if (error) *error = why;
@@ -1189,7 +1296,7 @@ bool library_file(std::string_view path) {
 
 std::vector<plugin::Ceiling> addon_ceilings(const fs::path& data_dir, bool scan_for_enforcement) {
     const AddonRegistry reg = read_addon_registry(data_dir);
-    std::vector<plugin::Ceiling> out = addon_ceilings(reg.addons);
+    std::vector<plugin::Ceiling> out = addon_ceilings(reg.addons, data_dir);
     // Changed or extra code in a managed folder still belongs to that source for explicit blocks. Its bytes are
     // not manifest-verified, so it cannot satisfy a closed allowlist or a requirement. With enforcement off it
     // keeps the existing behavior of a player-edited file, rather than gaining the original manifest's ceiling.
@@ -1256,17 +1363,19 @@ std::vector<plugin::Ceiling> addon_ceilings(const fs::path& data_dir, bool scan_
     return out;
 }
 
-std::vector<plugin::Ceiling> addon_ceilings(const std::vector<InstalledAddon>& addons) {
+std::vector<plugin::Ceiling> addon_ceilings(const std::vector<InstalledAddon>& addons, const fs::path& data_dir) {
     std::vector<plugin::Ceiling> out;
     for (const auto& a : addons)
         for (const auto& f : a.files) {
             const std::string ext = extension_of(f.path);
+            const fs::path file = data_dir.empty() ? fs::path{} : addon_folder(data_dir, a.kind, a.name) / rel(f.path);
             if (a.kind == AddonKind::Script && ext == ".lua")
-                out.push_back({plugin::FileKind::Script, f.sha256, a.caps, a.name, a.source, true, iequal(f.path, "init.lua")});
+                out.push_back({plugin::FileKind::Script, f.sha256, a.caps, a.name, a.source, true,
+                               iequal(f.path, "init.lua"), file});
             else if (a.kind == AddonKind::Plugin && (ext == ".so" || ext == ".dll" || ext == ".dylib") &&
                      f.path.find('/') == std::string::npos &&
                      iequal(plugin::plugin_name(rel(f.path)), a.name))
-                out.push_back({plugin::FileKind::Plugin, f.sha256, a.caps, a.name, a.source});
+                out.push_back({plugin::FileKind::Plugin, f.sha256, a.caps, a.name, a.source, true, true, file});
         }
     return out;
 }
@@ -1275,6 +1384,14 @@ void addons_at_start(const fs::path& data_dir) {
     const fs::path dir = addons_dir(data_dir);
     std::error_code ec;
     if (!fs::exists(dir, ec)) return;
+    // Another Hailstone holding it is installing or removing now: its journal is under way, not cut off, and new/
+    // holds what it is about to move in.
+    const auto lock = lock_addons(data_dir);
+    if (!lock) {
+        log::warn("Add-ons: another Hailstone is installing or removing add-ons in this folder; what a cut-off "
+                  "install left is looked at another start");
+        return;
+    }
     bool keep_previous = false;
     if (fs::exists(dir / "journal.txt", ec)) {
         if (!journal_done(data_dir)) {

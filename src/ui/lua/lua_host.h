@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <string_view>
@@ -83,8 +84,8 @@ int load_base_file(lua_State* L);
 int load_data_file(lua_State* L);
 // How many ui.CodeEditor states (lua_code_editor.cpp) are kept now; for the tests.
 std::size_t code_editors_kept();
-// The frame the longest-kept of them was first drawn in (-1 with none); for the tests.
-int code_editors_oldest();
+// The frame the longest-kept of them was first drawn in (ui::imgui_frame; -1 with none); for the tests.
+std::int64_t code_editors_oldest();
 // Where ui.CodeEditor draws each byte offset of `at` (x, y from the text's start), asked in that order of one placer;
 // for the tests (an ImGui frame must be current).
 std::vector<std::pair<float, float>> code_editor_places(const std::string& text, const std::vector<std::size_t>& at);
@@ -230,6 +231,8 @@ public:
     // The layout copy: the character's layout becomes the window keys of `from` (another character's file), or the
     // shared layout when `from` is empty; the character's other keys of its own (its item marks) stay. Saved at once.
     void copy_character_layout(const std::filesystem::path& from);
+    std::string capture_layout_profile_settings() const;
+    bool apply_layout_profile_settings(std::string_view snapshot);
     // Whether a settings key is the character's rather than shared (the palette, the spell book's sort and filters,
     // ...): its window layout (layout_setting), and the item marks ("items." keys: locks, junk, bag filters). The
     // character's file is per server, so a same-named character elsewhere has marks of its own.

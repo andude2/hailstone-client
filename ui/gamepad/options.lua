@@ -12,6 +12,7 @@ local pad = dofile("lib/pad.lua")
 local W = dofile("lib/window.lua")
 local interfaceStatus = dofile("lib/interface_status.lua")
 local V = dofile("lib/sound_volumes.lua")
+local vitals = dofile("lib/vitals.lua")
 local C = T.C
 
 local OW = "OptionsWindow"
@@ -317,7 +318,8 @@ local PAGES = {
         { "Target skips pets", "tab_skip_pets" }, { "Target through walls and doors", "tab_target_through_walls" },
         { "Target off-screen", "tab_target_offscreen" }, { "Gem replaces spell", "replace_gem_spell" }, { "Buff timers", "show_buff_timer" }, { "Song timers", "show_song_timer" },
         { "Compare items with what you wear", "item_compare" }, { "Upgrade / downgrade verdict", "item_compare_verdict" },
-        { "Context menus", "context_menus" }, { "Player right-click menu", "player_menu" }, { "More hot button states", "hotbutton_extras" },
+        { "Context menus", "context_menus" }, { "Player right-click menu", "player_menu" },
+        { "Right-click to consider", "right_click_consider" }, { "More hot button states", "hotbutton_extras" },
         { "Offer layouts to new characters", "offer_layout_copy" } }) do
       local x = optionRow(o[1], o[2], "bool")
       if x then rows[#rows + 1] = x end
@@ -346,6 +348,7 @@ local PAGES = {
     sizeNames[#sizeNames + 1] = "Off"; sizeValues[#sizeValues + 1] = 0
     local x = optionRow("Target ring max size", "target_ring_max_size", sizeNames, sizeValues)
     if x then rows[#rows + 1] = x end
+    vitals.addOptions(rows)
     local modes = API.chat.HitModes()
     local function addHitMode(h)
       rows[#rows + 1] = { "Hit mode: " .. h.name, h.modes[h.mode + 1] or "Mixed", function(dir)
@@ -458,6 +461,19 @@ local PAGES = {
         rows[#rows + 1] = { label, v .. SOUND_SUFFIX, function(dir) API.settings.SetOption(name, V.step(v, dir)) end,
           test = name }
       end
+    end
+    -- The Beep sound: left / right through the tone and the short list (a pad has no search: a sound picked from the
+    -- whole list in another interface shows by name, and left / right starts again from the tone), A plays it.
+    local beepV = API.settings.Option(V.BEEP_SOUND)
+    if beepV ~= nil then
+      local short = { "Tone" }
+      for _, name in ipairs(API.settings.OptionChoices(V.BEEP_SOUND_FEATURED) or {}) do short[#short + 1] = name end
+      local shown = short[beepV + 1]
+      if not shown then shown = (API.settings.OptionChoices(V.BEEP_SOUND) or {})[beepV + 1] or "(not in this game folder)" end
+      local cur = (beepV >= 0 and beepV < #short) and beepV or 0
+      rows[#rows + 1] = { V.BEEP_SOUND_LABEL, shown, function(dir)
+        API.settings.SetOption(V.BEEP_SOUND, (cur + dir) % #short)
+      end, test = "beep", option = V.BEEP_SOUND }
     end
     if #rows > 0 then
       rows[#rows + 1] = { "Reset all to " .. V.FULL .. SOUND_SUFFIX, "", nil,

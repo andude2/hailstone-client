@@ -4,8 +4,10 @@
 
 #include <cmath>
 
+#include <cstddef>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <numbers>
 #include <random>
 #include <thread>
@@ -13,6 +15,7 @@
 #include <vector>
 
 #include "app/zone_particles.h"
+#include "assets/character.h"
 #include "assets/model_points.h"
 #include "assets/pfs.h"
 #include "assets/spell_effects.h"
@@ -336,6 +339,45 @@ TEST_CASE("Model points: the WLD table and the point matrix") {
     p.rotation = {0, 128, 0};
     glm::vec3 xp = glm::vec3(assets::point_matrix(p) * glm::vec4(1, 0, 0, 0));
     CHECK(xp.z == doctest::Approx(1.0f));
+}
+
+TEST_CASE("SpellPoints: a model made where a freed one lived gets its own points, not the freed one's") {
+    assets::SpellPoints points;
+    auto eqg_model = [](std::vector<std::string> bones) {
+        assets::CharacterModel m;
+        m.eqg = true;
+        m.bone_names = std::move(bones);
+        assets::ModelPoint chest;
+        chest.name = "SPELLPOINT_CHEST";
+        chest.bone = "CHEST";
+        m.points.push_back(chest);
+        return m;
+    };
+    // Built in the same storage, so the second model has the first one's address.
+    alignas(assets::CharacterModel) std::byte storage[sizeof(assets::CharacterModel)];
+    auto* first = std::construct_at(reinterpret_cast<assets::CharacterModel*>(storage), eqg_model({"ROOT", "CHEST"}));
+    CHECK(points.of(*first).bone[1] == 1);
+    CHECK(points.of(*first).mask == 0x2);
+    std::destroy_at(first);
+    auto* second = std::construct_at(reinterpret_cast<assets::CharacterModel*>(storage),
+                                     eqg_model({"CHEST", "ROOT", "OTHER"}));
+    REQUIRE(static_cast<void*>(second) == static_cast<void*>(first));
+    CHECK(points.of(*second).bone[1] == 0);
+    // A copy is another model: its points are its own too.
+    assets::CharacterModel copy = *second;
+    copy.bone_names = {"ROOT"};
+    CHECK(points.of(copy).mask == 0);
+    CHECK(points.of(*second).bone[1] == 0);
+    std::destroy_at(second);
+
+    // The cache is bounded: models past its limit evict the old entries, which are rebuilt the same when asked again.
+    auto kept = eqg_model({"ROOT", "CHEST"});
+    for (int i = 0; i < 5000; ++i) {
+        auto m = eqg_model({"CHEST"});
+        CHECK(points.of(m).bone[1] == 0);
+        if (i % 1000 == 0) CHECK(points.of(kept).bone[1] == 1);
+    }
+    CHECK(points.of(kept).bone[1] == 1);
 }
 
 TEST_CASE("NMS model points: dkm.pts" * doctest::skip(!hailstone::test::game_dir())) {

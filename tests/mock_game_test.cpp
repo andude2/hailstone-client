@@ -7,8 +7,10 @@
 
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <thread>
 
 #include "app/actions_ui.h"
@@ -16,14 +18,18 @@
 #include "core/ini_file.h"
 #include "game/coords.h"
 #include "game/item_links.h"
+#include "game/mounts.h"
 #include "game/position_tracker.h"
+#include "game/spells.h"
 #include "game/zoning.h"
 #include "mock_server/harness.h"
+#include "mq_test_world.h"
 #include "net/chat_server.h"
 #include "net/door_packets.h"
 #include "net/group_packets.h"
 #include "net/packet_io.h"
 #include "net/player_packets.h"
+#include "net/spell_packets.h"
 #include "net/tribute_packets.h"
 #include "platform/udp_socket.h"
 #include "plugin/hooks.h"
@@ -252,6 +258,26 @@ TEST_CASE("mock server: extended spell capability is ready before ZoneEntry only
     CHECK(rig.conn.spell_id_limit() == game::kRof2StockMaxSpellId);
     CHECK_FALSE(rig.conn.spell_data_ready());
     CHECK(rig.conn.spell_table().get(70000));
+}
+
+TEST_CASE("mock server: a zone address outside EnterWorld is ignored; the next enter world still zones in") {
+    Rig rig;
+    REQUIRE(rig.to_character_select());
+    rig.chat();
+    rig.server.world.send_reliable(encode(ZoneServerInfo{"127.0.0.1", rig.server.zone.port()}));
+    ByteWriter marker; // reliable delivery is in order: once this line shows, the address has been handled
+    detail::write_cstring(marker, "marker");
+    rig.server.world.send_reliable(make_packet(Op::MOTD, std::move(marker)));
+    std::vector<ChatEvent> lines;
+    REQUIRE(rig.until([&] {
+        for (auto& l : rig.chat()) lines.push_back(std::move(l));
+        return has_line(lines, "marker");
+    }));
+    CHECK(rig.conn.state() == ConnectionState::CharacterSelect);
+    CHECK(MockEqServer::count(rig.server.world_log, Op::WorldComplete) == 0);
+    CHECK(rig.server.zone_log.empty());
+    rig.conn.enter_world("Gennro");
+    REQUIRE(rig.until_state(ConnectionState::InZone));
 }
 
 TEST_CASE("mock server: a session key too long for OP_SendLoginInfo fails the world login, nothing sent") {
@@ -642,12 +668,121 @@ TEST_CASE("mock server: a slow walk at a high frame rate still sends OP_ClientUp
     CHECK(updates.back().motion.y > -90.0f + 0.01f);
 }
 
+TEST_CASE("GameConnection: local chat groups validate together and filter their rows individually") {
+    plugin::Hooks hooks;
+    ConnectionOptions options;
+    options.hooks = &hooks;
+    mq_test::World world("hailstone_local_chat_group", options);
+    auto& conn = *world.conn;
+    using Access = GameConnectionTestAccess;
+    Access::ticket(conn).server_name = "Test Server";
+    Access::client_options(conn).set(game::ClientOption::Log, 1);
+    Access::open_chat_log(conn, "groups");
+    REQUIRE(conn.chat_logging());
+
+    std::vector<plugin::ChatLine> seen;
+    hooks.on_chat(plugin::Hooks::kClient, [&](plugin::ChatLine& line) {
+        seen.push_back(line);
+        if (line.text == "filtered row") return plugin::Flow::Drop;
+        if (line.text == "rewrite this") line.text = "rewritten row";
+        if (line.text == "colored row") line.color = 0x895fbc;
+        if (line.text == "unsafe rewrite") line.text = "unsafe\nrewrite";
+        return plugin::Flow::Continue;
+    });
+
+    CHECK_FALSE(conn.write_chat_group("", {"valid row"}));
+    CHECK_FALSE(conn.write_chat_group(std::string(kChatGroupMaxTitleBytes + 1, 't'), {"valid row"}));
+    CHECK_FALSE(conn.write_chat_group("title\r", {"valid row"}));
+    CHECK_FALSE(conn.write_chat_group("title", {}));
+    CHECK_FALSE(conn.write_chat_group("title", std::vector<std::string>(kChatGroupMaxRows + 1, "valid row")));
+    CHECK_FALSE(conn.write_chat_group("title", {"valid row", ""}));
+    CHECK_FALSE(conn.write_chat_group("title", {std::string(kChatGroupMaxRowBytes + 1, 'x')}));
+    CHECK_FALSE(conn.write_chat_group("title", {"valid row", std::string("bad\0row", 7)}));
+    CHECK_FALSE(conn.write_chat_group("title", {"valid row", "bad\x12row"}));
+    CHECK_FALSE(conn.write_chat_group("title", {"valid row", "bad\xc2\x85row"}));
+    CHECK(seen.empty());
+    CHECK_FALSE(conn.poll_chat());
+    CHECK_FALSE(std::filesystem::exists(conn.chat_log_path()));
+
+    ZoneChange answer;
+    answer.success = 1;
+    Access::handle_zone(conn, encode(answer));
+    const auto zoning = conn.poll_chat();
+    REQUIRE(zoning);
+    CHECK(zoning->text == "Zoning...");
+    conn.zone_client_message("transfer notice");
+    seen.clear();
+
+    const std::string title = "Title <literal>";
+    const std::string plain = "first\trow <literal>";
+    {
+        plugin::CallerScope caller(plugin::kCapRead, "fixture-addon");
+        REQUIRE(conn.write_chat_group(title, {plain, "filtered row", "rewrite this", "colored row", "unsafe rewrite"}));
+    }
+    const auto colored = conn.poll_chat();
+    REQUIRE(colored);
+    CHECK(colored->text == "colored row");
+    CHECK(colored->rgb == 0x895fbc);
+    CHECK(colored->group.empty());
+    auto event = conn.poll_chat();
+    REQUIRE(event);
+    CHECK(event->kind == ChatEvent::Kind::System);
+    CHECK(event->text == title);
+    const std::vector<std::string> expected{plain, "rewritten row"};
+    CHECK(event->group == expected);
+    CHECK_FALSE(conn.poll_chat());
+    CHECK(conn.take_zone_client_messages() == std::vector<net::GameConnection::ZoneClientMessage>{{"transfer notice"}});
+    REQUIRE(seen.size() == 5);
+    CHECK(seen[0].text == plain);
+    CHECK(seen[0].from_code);
+    CHECK(seen[0].origin_caps == plugin::kCapRead);
+    CHECK(seen[2].text == "rewrite this");
+
+    std::ifstream file(conn.chat_log_path(), std::ios::binary);
+    const std::string log{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    CHECK(log.find(plain) != std::string::npos);
+    CHECK(log.find("rewritten row") != std::string::npos);
+    CHECK(log.find("colored row") != std::string::npos);
+    CHECK(log.find(title) == std::string::npos);
+    CHECK(log.find("filtered row") == std::string::npos);
+    CHECK(log.find("unsafe") == std::string::npos);
+
+    CHECK(conn.write_chat_group("invisible", {"filtered row"}));
+    CHECK_FALSE(conn.poll_chat());
+}
+
 // ---------------------------------------------------------------- zoning
+
+TEST_CASE("mock server: zoning discards queued weather from the departing zone") {
+    Rig rig;
+    REQUIRE(rig.to_zone());
+    REQUIRE(rig.conn.take_weather().size() == 1);
+
+    // The old zone delivers snow before it answers the zone change, while no consumer is draining the queue.
+    rig.server.zone.send_reliable(encode(Weather{1, 7, 0}));
+    REQUIRE(rig.conn.request_zone_change(1, 0, glm::vec3(10.0f, 20.0f, 3.0f)));
+    REQUIRE(rig.until([&] { return rig.server.zone_entries == 2 && rig.conn.state() == ConnectionState::InZone; }));
+
+    // The destination's weather arrives before OP_NewZone and must survive the handoff.
+    const auto weather = rig.conn.take_weather();
+    REQUIRE(weather.size() == 1);
+    CHECK(weather.front().kind == 0xff);
+    CHECK(weather.front().intensity == 0);
+}
 
 TEST_CASE("mock server: zone lines and server-requested zoning go through world again") {
     // docs/protocol/rof2-packets.md, "Zoning, camp": C->Z OP_ClientUpdate and OP_ZoneChange (success 0); the zone
     // answers success 1; the client leaves, reconnects to world with LoginInfo::zoning and enters the new zone.
-    Rig rig;
+    plugin::Hooks hooks;
+    hooks.on_chat(plugin::Hooks::kClient, [](plugin::ChatLine& line) {
+        if (line.text == "notice to drop") return plugin::Flow::Drop;
+        if (line.text == "notice to recolor") line.color = 0x895fbc;
+        if (line.text == "notice to rewrite") line.text = "rewritten notice";
+        return plugin::Flow::Continue;
+    });
+    ConnectionOptions options = quick_options();
+    options.hooks = &hooks;
+    Rig rig(MockConfig::standard(), options);
     auto& conn = rig.conn;
     auto& server = rig.server;
     REQUIRE(rig.to_zone());
@@ -663,6 +798,9 @@ TEST_CASE("mock server: zone lines and server-requested zoning go through world 
     CHECK(has_line(rig.chat(), "You can't go there right now."));
     CHECK(conn.state() == ConnectionState::InZone);
     CHECK(MockEqServer::count(server.zone_log, Op::ZoneChange) == 1);
+    conn.zone_client_message("notice after refusal");
+    CHECK(has_line(rig.chat(), "notice after refusal"));
+    CHECK(conn.take_zone_client_messages().empty());
 
     // "Not ready" (-1) within 7 s: the same request again 500 ms later (RequestZoneChangeStatusBlocking); then yes.
     server.zone_change_answers = {-1, 1};
@@ -684,6 +822,10 @@ TEST_CASE("mock server: zone lines and server-requested zoning go through world 
         CHECK(r.z == 3.0f);
     }
     CHECK(in_order(server.zone_log, {Op::ClientUpdate, Op::ZoneChange}));
+    REQUIRE(rig.until([&] { return conn.state() == ConnectionState::Zoning; }));
+    conn.zone_client_message("notice to drop");
+    conn.zone_client_message("notice to recolor");
+    conn.zone_client_message("notice to rewrite");
 
     // The answer: world again, with zoning set, then the new zone's zone-in.
     REQUIRE(rig.until([&] { return server.zone_entries == 2 && conn.state() == ConnectionState::InZone; }));
@@ -697,7 +839,16 @@ TEST_CASE("mock server: zone lines and server-requested zoning go through world 
     REQUIRE(last_enter != server.world_log.rend());
     CHECK(decode_enter_world(*last_enter)->name == "Gennro"); // the name world sent while zoning
     CHECK_FALSE(conn.zone_change_pending());
-    CHECK(has_line(rig.chat(), "Zoning..."));
+    bool saw_zoning = false, saw_tinted_notice = false;
+    while (auto line = conn.poll_chat()) {
+        saw_zoning |= line->text == "Zoning...";
+        saw_tinted_notice |= line->text == "notice to recolor" && line->rgb == 0x895fbc;
+        CHECK(line->text != "notice to drop");
+        CHECK(line->text != "rewritten notice");
+    }
+    CHECK(saw_zoning);
+    CHECK(saw_tinted_notice);
+    CHECK(conn.take_zone_client_messages() == std::vector<net::GameConnection::ZoneClientMessage>{{"rewritten notice"}});
     // MoveToZone: on the success answer OP_DeleteSpawn with our own id (4 bytes); the zone drops the link, then world.
     auto own_delete = std::find_if(server.zone_log.begin(), server.zone_log.end(),
                                    [](const AppPacket& p) { return is_op(p, Op::DeleteSpawn); });
@@ -1146,6 +1297,86 @@ TEST_CASE("mock server: a zone change ends a camp, and the next zone starts with
     CHECK(conn.link_death()->camp_kind == 0);
 }
 
+TEST_CASE("mock server: a rider keeps its mount buff while the next zone builds its classic actor") {
+    constexpr std::uint32_t first_mount = 103;
+    constexpr std::uint32_t next_mount = 202;
+    constexpr std::uint32_t summon_spell = 1130;
+    constexpr std::uint32_t summon_slot = 2;
+    constexpr std::uint8_t level = 60;
+    constexpr std::uint16_t vah_shir = 130;
+    constexpr std::uint16_t horse = 216;
+    auto config = MockConfig::standard();
+    config.characters.front().race = vah_shir;
+    config.characters.front().class_ = 15; // Beastlord
+    config.characters.front().level = level;
+    const std::string mount_name = game::mount_name_for(config.characters.front().name);
+    config.zones.at(2).spawns.push_back(make_spawn(mount_name, first_mount, 1, horse, -285.0f, -148.0f, 3.5f));
+    config.zones.at(1).spawns.push_back(make_spawn(mount_name, next_mount, 1, horse, 40.0f, 30.0f, 3.0f));
+    Rig rig(std::move(config));
+    auto& conn = rig.conn;
+    auto& server = rig.server;
+    // Passage of Time needs a BaseData row for the player before it processes spell affects.
+    std::filesystem::create_directories(rig.dir.path() / "Resources");
+    std::ofstream(rig.dir.path() / "Resources" / "BaseData.txt") << "60^15^500^800^300^3^5^0.75^14^1.25\n";
+    rig.game.rescan();
+    auto spells = std::make_shared<game::SpellTable>();
+    REQUIRE(spells->parse(mq_test::spell_line({{0, std::to_string(summon_spell)}, {1, "Fixture Mount"},
+                                             {86, "113"}, {16, "1"}, {17, "10"}})) == 1);
+    conn.set_spell_table_for_test(spells);
+    conn.set_illusion_mounts(false);
+    REQUIRE(rig.to_zone());
+    const auto give_mount_buff = [&] {
+        BuffPacket buff;
+        buff.entity_id = conn.world().player_id;
+        buff.slot = summon_slot;
+        buff.buff.effect_type = 2;
+        buff.buff.spell_id = summon_spell;
+        buff.buff.level = level;
+        buff.buff.duration = 10;
+        server.zone.send_reliable(encode(buff));
+        REQUIRE(rig.until([&] { return conn.spell_state().buffs[summon_slot].spell == summon_spell; }));
+    };
+    give_mount_buff();
+    conn.smooth(0.0f, {}, [](const game::Spawn&) { return game::WorldState::ActorModel{true, false}; });
+    REQUIRE(conn.mount_id() == first_mount);
+
+    server.request_zone_change(1, 40.0f, 30.0f, 3.0f);
+    REQUIRE(rig.until([&] { return server.zone_entries == 2 && conn.state() == ConnectionState::InZone; }));
+    CHECK(conn.zone_id() == 1);
+    REQUIRE(conn.profile());
+    CHECK(conn.profile()->race == vah_shir);
+    REQUIRE(conn.world().player());
+    CHECK(conn.world().player()->race == vah_shir);
+    CHECK_FALSE(conn.world().spawns.contains(first_mount));
+    CHECK(conn.mount_id() == 0);
+    give_mount_buff();
+    rig.chat();
+
+    // The new zone's horse is ready first. The rider's classic actor has no tunic attachment point.
+    conn.smooth(0.0f, {}, [](const game::Spawn& spawn) -> std::optional<game::WorldState::ActorModel> {
+        if (spawn.race == vah_shir) return std::nullopt;
+        return game::WorldState::ActorModel{};
+    });
+    REQUIRE(conn.world().spawns.at(next_mount).actor_made);
+    REQUIRE_FALSE(conn.world().player()->actor_made);
+    conn.passage_of_time_for_test(conn.spell_state().last_buff_tick_ms + 6001);
+    CHECK(conn.spell_state().buffs[summon_slot].tics == 9);
+    CHECK(conn.mount_id() == 0);
+    CHECK(conn.world().spawns.at(next_mount).rider_id == 0);
+    CHECK_FALSE(has_line(rig.chat(), "[5524]"));
+
+    conn.smooth(0.0f, {}, [](const game::Spawn&) { return game::WorldState::ActorModel{}; });
+    CHECK(conn.mount_id() == next_mount);
+    CHECK(conn.controlled_id() == next_mount);
+    CHECK(conn.world().spawns.at(next_mount).rider_id == conn.world().player_id);
+    CHECK(conn.spell_state().buffs[summon_slot].spell == summon_spell);
+    CHECK_FALSE(has_line(rig.chat(), "[5524]"));
+    // A reliable marker ensures any earlier buff removal request has reached the mock server.
+    conn.say("Ready to ride");
+    REQUIRE(rig.until([&] { return MockEqServer::count(server.zone_log, Op::ChannelMessage) == 1; }));
+    CHECK(MockEqServer::count(server.zone_log, Op::BuffRemoveRequest) == 0);
+}
+
 TEST_CASE("mock server: fast camp sends OP_Logout right after OP_Camp and ends the camp") {
     // Hailstone's fast_camp option (not the original's): no 30 s wait. Off, the camp waits (the test above).
     Rig rig;
@@ -1388,8 +1619,9 @@ TEST_CASE("mock server: a wrong session key gets the world connection dropped") 
 TEST_CASE("mock server: a failure on the world link ends its queue; a packet behind it is not handled") {
     Rig rig;
     REQUIRE(rig.to_character_select());
-    // A short OP_ZoneServerInfo fails the connection; a good one in the same datagram behind it must not start a
-    // zone connection afterwards.
+    // Waiting for the address after OP_EnterWorld (the only state that takes it), a short OP_ZoneServerInfo fails
+    // the connection; a good one in the same datagram behind it must not start a zone connection afterwards.
+    GameConnectionTestAccess::state(rig.conn) = ConnectionState::EnteringWorld;
     AppPacket good = encode(ZoneServerInfo{"127.0.0.1", rig.server.zone.port()});
     AppPacket bad = good;
     bad.data.resize(4);

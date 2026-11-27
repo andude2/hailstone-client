@@ -1385,12 +1385,17 @@ int Navigator::safe_strafe(const Frame& f, const nav::SteerOutput& out) const {
     return out.strafe;
 }
 
+bool Navigator::swim_needs_air(const Frame& f) {
+    constexpr float kAirLow = 0.35f;
+    return f.head_under && f.air < kAirLow;
+}
+
 std::optional<float> Navigator::swim_pitch(const Frame& f, const glm::vec3& aim, std::optional<glm::vec3> along) const {
     if (!f.swimming) return std::nullopt;
     // Our own numbers (docs/navigation.md "Water"): when to head for air, how near a shore to climb, how steep.
-    constexpr float kAirLow = 0.35f, kClimbOut = 0.7f, kUp = 1.0f, kSteepest = 1.1f, kShoreReach = 12.0f,
+    constexpr float kClimbOut = 0.7f, kUp = 1.0f, kSteepest = 1.1f, kShoreReach = 12.0f,
                     kSteepVertical = 1.4f;
-    if (f.head_under && f.air < kAirLow) return kUp;
+    if (swim_needs_air(f)) return kUp;
     float d = glm::length(glm::vec2(aim - f.feet));
     float dz = aim.z - f.feet.z;
     // A corner is in the water when there is water over it (the bottom) or just under it (the surface).

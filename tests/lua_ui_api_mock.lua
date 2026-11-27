@@ -32,6 +32,7 @@ local descriptors = {
   {"ClassName", "character", "ClassName", "function", 0, false},
   {"ClassNamesRevision", "character", "ClassNamesRevision", "function", 0, false},
   {"Gauge", "character", "Gauge", "function", 0, true},
+  {"GaugeValues", "character", "GaugeValues", "function", 0, false},
   {"Label", "character", "Label", "function", 0, true},
   {"Money", "character", "Money", "function", 0, false},
   {"Name", "character", "Name", "function", 0, true},
@@ -183,6 +184,13 @@ local descriptors = {
   {"SortItems", "inventory", "SortItems", "function", 8, false},
   {"StopItemJob", "inventory", "StopItemJob", "function", 8, false},
   {"TakeItemSearch", "inventory", "TakeItemSearch", "function", 0, false},
+  {"LayoutProfilesApply", "layoutProfiles", "Apply", "function", 8, false},
+  {"LayoutProfilesCanUndo", "layoutProfiles", "CanUndo", "function", 0, false},
+  {"LayoutProfilesGeneration", "layoutProfiles", "Generation", "function", 0, false},
+  {"LayoutProfilesList", "layoutProfiles", "List", "function", 0, false},
+  {"LayoutProfilesPreview", "layoutProfiles", "Preview", "function", 0, false},
+  {"LayoutProfilesSave", "layoutProfiles", "Save", "function", 8, false},
+  {"LayoutProfilesUndo", "layoutProfiles", "Undo", "function", 8, false},
   {"LuaComplete", "luasocials", "Complete", "function", 0, false},
   {"LuaSocialDryRun", "luasocials", "DryRun", "function", 10, false},
   {"LuaSocialEditRequest", "luasocials", "EditRequest", "function", 0, false},
@@ -212,6 +220,7 @@ local descriptors = {
   {"MapRightClick", "map", "RightClick", "function", 2, false},
   {"ShowZoneMap", "map", "ShowZone", "function", 0, false},
   {"MapOverlayUnregister", "map", "UnregisterOverlay", "function", 0, false},
+  {"MapVanilla", "map", "Vanilla", "function", 0, false},
   {"ZoneExitWalk", "map", "ZoneExitWalk", "function", 16, false},
   {"ZoneExits", "map", "ZoneExits", "function", 0, false},
   {"ZoneLinks", "map", "ZoneLinks", "function", 0, false},
@@ -265,6 +274,13 @@ local descriptors = {
   {"ScriptRun", "scripts", "Run", "function", 0, false},
   {"SetScriptAutorun", "scripts", "SetAutorun", "function", 0, false},
   {"ScriptStop", "scripts", "Stop", "function", 0, false},
+  {"ServerManagementAddonTlos", "serverManagement", "AddonTlos", "function", 0, false},
+  {"ServerManagementAvailable", "serverManagement", "Available", "function", 0, false},
+  {"ServerManagementCanonicalCommandName", "serverManagement", "CanonicalCommandName", "function", 0, false},
+  {"ServerManagementClose", "serverManagement", "Close", "function", 0, false},
+  {"ServerManagementOpen", "serverManagement", "Open", "function", 0, false},
+  {"ServerManagementSave", "serverManagement", "Save", "function", 0, false},
+  {"ServerManagementView", "serverManagement", "View", "function", 0, false},
   {"GameState", "session", "GameState", "function", 0, false},
   {"GameTime", "session", "GameTime", "function", 0, false},
   {"InGame", "session", "InGame", "function", 0, false},
@@ -365,7 +381,7 @@ return function(root)
     end
     return value
   end
-  local API, modules = {version={major=1,minor=10}}, {}
+  local API, modules = {version={major=1,minor=12}}, {}
   for _, row in ipairs(descriptors) do
     local module = modules[row[2]]
     if not module then module={};modules[row[2]]=module end
@@ -406,7 +422,7 @@ return function(root)
       if member~=nil then local row=modules[module][member];return row and describeMember(row) or nil end
       return describeModule(module)
     end
-    local names,result={}, {version={major=1,minor=10},modules={}}
+    local names,result={}, {version={major=1,minor=12},modules={}}
     for name in pairs(modules) do names[#names+1]=name end
     table.sort(names)
     for _, name in ipairs(names) do result.modules[#result.modules+1]=describeModule(name) end

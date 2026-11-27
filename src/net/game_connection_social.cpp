@@ -14,6 +14,7 @@
 #include <limits>
 
 #include "core/log.h"
+#include "game/chat_windows.h"
 #include "game/coords.h"
 #include "game/eq_names.h"
 #include "game/item_options.h"
@@ -41,6 +42,24 @@ namespace {
 
 constexpr std::string_view kAutosplitSection = "Hailstone";
 constexpr std::string_view kAutosplitKey = "Autosplit";
+
+void copy_layout_chat_colors(const IniFile& source, IniFile& destination) {
+    constexpr std::string_view section = "TextColors";
+    for (int number = 1; number <= game::kChatUserColorCount; ++number) {
+        for (const char* component : {"Red", "Green", "Blue"}) {
+            const std::string key = std::format("User_{}_{}", number, component);
+            // The chat colour loader treats the missing-value marker as the built-in colour. Writing it also
+            // replaces a component from eqclient.ini that was absent when the profile was saved.
+            destination.set(section, key, source.get_string(section, key, "*NULL*"));
+        }
+    }
+}
+
+bool load_layout_chat_file(const std::filesystem::path& path, IniFile& ini) {
+    if (ini.load(path)) return true;
+    std::error_code ec;
+    return !std::filesystem::exists(path, ec) && !ec;
+}
 
 bool iequals(std::string_view a, std::string_view b) {
     return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
@@ -190,6 +209,7 @@ void GameConnection::notify_fallback(std::string_view args) {
         if (loot_) end_loot();
         break;
     case A::ConfirmYes:
+    case A::ConfirmOk:
         // Only the questions another player asks (an invite, a translocate), only the button
         // the window shows, and only from the expected requester when one is named: a Yes to
         // anything else (a deletion, a purchase) is the player's click to make in the window.
@@ -215,6 +235,9 @@ void GameConnection::notify_fallback(std::string_view args) {
     case A::LargeDialogNo:
         if (large_dialog_ && large_dialog_->buttons) answer_large_dialog(2);
         break;
+    case A::TaskAccept:
+        accept_selected_task();
+        break;
     case A::TaskDecline:
         if (tasks_.offers) decline_tasks();
         break;
@@ -230,7 +253,19 @@ void GameConnection::notify_fallback(std::string_view args) {
     case A::GuildTributeToggle:
         guild_tribute_toggle(!guild_tribute_.active.enabled);
         break;
-    case A::None:
+    case A::RespawnSelect:
+        choose_selected_respawn();
+        break;
+    case A::RaidLock:
+    case A::RaidUnlock: {
+        const bool lock = game::notify_action(n.window, n.child) == A::RaidLock;
+        if (raid_.active && raid_.leader == character_name() && raid_.locked != lock) raid_lock(lock);
+        break;
+    }
+    case A::MerchantDone:
+        if (merchant_ && merchant_->open) close_merchant();
+        break;
+    default:
         log::info("/notify: {} {}: needs the UI", n.window, n.child);
         break;
     }
@@ -238,10 +273,22 @@ void GameConnection::notify_fallback(std::string_view args) {
 
 void GameConnection::say(const std::string& text) { send_command(text); }
 
+bool GameConnection::server_command_allowed(std::string_view name) const {
+    return !server_rules_ || server_rules_->provisional || server_rules_->commands.allowed(name, command_account_status_);
+}
+
+bool GameConnection::allow_server_command(std::string_view name) {
+    if (server_command_allowed(name)) return true;
+    // Denials are local literal notices. They stay visible when a command wrapper filters its own chat output.
+    chat(ChatEvent::Kind::System, std::string(server_rules_->commands.denial_message()), 0, 15, {}, std::nullopt, false);
+    return false;
+}
+
 void GameConnection::send_command(const std::string& typed) {
     std::string line = typed;
     // Plugin commands and line filters first (plugin/hooks.h): they can take any line, the client's commands too.
-    if (options_.hooks && options_.hooks->command(line)) return;
+    if (options_.hooks && options_.hooks->command(line, [this](std::string_view name) { return allow_server_command(name); }))
+        return;
     // /crew is the graphical client's command (the crew window and the chat relay's /crew relay); a headless
     // connection has no such command, so a relay line meant for the GUI is not an unknown command here.
     // Match the command word only — /crewtrade is a built-in item command below.
@@ -271,6 +318,8 @@ void GameConnection::send_command(const std::string& typed) {
     // A command's Restriction asks for me->IsGm(): the player spawn's GM flag (PlayerBase +0x25c, vtable +0xdc),
     // which SpawnAppearance 20 changes mid-session (#gm on), not the profile's copy from the zone-in.
     game::CommandLine cl = game::parse_command_line(line, player_is_gm(), &strings_);
+    if (server_rules_ && server_rules_->commands.enabled && plugin::known_extended_command(cl.word) &&
+        !allow_server_command(cl.word)) return;
     switch (cl.kind) {
     case game::CommandLine::Kind::Empty:
         return;
@@ -302,6 +351,8 @@ void GameConnection::send_command(const std::string& typed) {
             return;
         if (word == "/import" && client_commands_ && client_commands_("Hailstone_import", std::string(rest)))
             return;
+        if (word == "/layoutprofiles" && client_commands_ && client_commands_("Hailstone_layoutprofiles", std::string(rest)))
+            return;
         if ((word == "/finditem" || word == "/advi") && client_commands_ &&
             client_commands_("Hailstone_finditem", std::string(rest)))
             return;
@@ -321,6 +372,7 @@ void GameConnection::send_command(const std::string& typed) {
         break;
     }
     const auto& cmd = game::slash_commands()[cl.index];
+    if (!allow_server_command(cmd.name)) return;
     // InterpretCmd @0x51fce0: most commands cannot be used while dead.
     if (pstatus_.dead && !(cmd.flags & 1)) {
         system(538); // You may not use that command while dead.
@@ -1252,6 +1304,56 @@ void GameConnection::load_chat_filters() {
     IniFile ini = load_chat_settings(game_, own_files().chat_ini());
     for (int f = 0; f < game::kChatFilterCount; ++f)
         set_chat_filter(f, ini.get_int("Options", game::ChatFilters::ini_key(f), -1));
+}
+
+IniFile GameConnection::capture_layout_chat() const {
+    IniFile chat;
+    for (int filter = 0; filter < game::kChatFilterCount; ++filter) {
+        chat.set_int("Options", game::ChatFilters::ini_key(filter),
+                     chat_filters_.settings[static_cast<std::size_t>(filter)]);
+    }
+    copy_layout_chat_colors(load_chat_settings(game_, own_files().chat_ini()), chat);
+    client_options_.store(game::ClientOption::UseTellWindows, chat);
+    return chat;
+}
+
+bool GameConnection::apply_layout_chat(const IniFile& chat) {
+    const CharacterFiles files = own_files();
+    const auto path = files.chat_ini();
+    if (path.empty()) return false;
+    IniFile settings;
+    if (!load_layout_chat_file(path, settings)) return false;
+    const game::ChatFilters defaults;
+    for (int filter = 0; filter < game::kChatFilterCount; ++filter) {
+        const char* key = game::ChatFilters::ini_key(filter);
+        settings.set_int("Options", key, chat.get_int("Options", key, defaults.settings[static_cast<std::size_t>(filter)]));
+    }
+    copy_layout_chat_colors(chat, settings);
+
+    constexpr auto option = game::ClientOption::UseTellWindows;
+    const auto& tell = game::client_option_info(option);
+    const int current_tells = client_options_.get(option);
+    const int next_tells = chat.get_int(tell.section, tell.key, current_tells);
+    if (next_tells < 0 || next_tells > 1) return false;
+    const bool changed_tells = next_tells != current_tells;
+    const auto options_path = files.options_ini();
+    IniFile previous_options;
+    if (changed_tells) {
+        // Use Tell Windows owns just one key in options.ini. Preserve all of its other settings.
+        if (!load_layout_chat_file(options_path, previous_options)) return false;
+        IniFile next_options = previous_options;
+        next_options.set_int(tell.section, tell.key, next_tells);
+        if (!next_options.save(options_path)) return false;
+    }
+    if (!settings.save(path)) {
+        if (changed_tells && !previous_options.save(options_path))
+            log::warn("could not restore Use Tell Windows after failing to save {}", path.string());
+        return false;
+    }
+    if (changed_tells) client_options_.set(option, next_tells);
+    load_chat_filters();
+    send_server_filter();
+    return true;
 }
 
 void GameConnection::load_client_options() {

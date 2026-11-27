@@ -243,7 +243,7 @@ The mesh has the water surfaces (above) as well as the bottoms, marked Water. Th
 crosses them with `/nav option water off`.
 
 Forward swims along the look pitch, so while swimming (BodyWet 5 and up) the walk sets the pitch each frame
-(`Navigator::swim_pitch`; /follow does the same):
+(`Navigator::swim_pitch`). The same rules apply to /follow on mesh detours, near the shore, or when surfacing for air:
 
 - The head under water and the air below 35% of the most: straight up, whatever the corner.
 - A corner out of the water within 12: up, so the original's swim jump (DoSwimJump) climbs out onto the shore.
@@ -268,7 +268,8 @@ followed spawn and runs straight at it, so a corner loses it, and it gives up pa
 - The follow keeps on to 400 away. The original's "too far" message still ends it past 400 or when the spawn dies.
 - The help's own strafes do not end the follow (the player's turn and strafe keys still do). If the help gets stuck
   it hands back to the original's step for 5 s, then tries again.
-- Off the mesh (levitating, swimming, a ledge it left out) the original's step steers alone.
+- Off the mesh (levitating, swimming, a ledge it left out), follow steers directly. A swimmer with a clear line to
+  the leader can match the leader's depth with or without mesh help.
 - `/nav ui` draws the follow's path in cyan.
 - A `/nav` walk and /follow do not run together: either one started ends the other.
 

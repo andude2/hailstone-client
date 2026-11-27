@@ -1,17 +1,35 @@
 # Continuous integration and local builds
 
 GitHub Actions runs checks only (`.github/workflows/ci.yml`), on every push to `main`, `cloud/**` or `claude/**` and
-on pull requests to `main`:
+on pull requests to `main`. Each job runs one group of `tools/checks.sh` (`tools/checks.sh <group>`; with no group,
+all of them), so the same checks run locally and in `tools/premerge.sh` ("Before a merge" below). A new check goes
+into `tools/checks.sh`, not into the workflow alone.
 
 - `core-names`: `tools/check_core_names.py` checks that the client's sources name no server outside comments. Lua
   long strings and C++ raw strings count as code, and Objective-C++ and the ini, JSON and text files under those
   folders are scanned too.
   - The old names pass only in their own spellings (`nmsc`, `nmsc_`, `nmsc::`, `NMSC_`, the SDK's `Nmsc<Word>`,
-    `nms-client`), so `NMSChat` or `kNmsCombatOp` fails (tests/server_tools_test.cpp).
+    `nms-client`), so `NMSChat`, `kNmsCombatOp`, `HSNMS_OP` or `kHSNMSFlag` fails (tests/server_tools_test.cpp).
+  - A digit separator (`1'000`) opens no character literal, so a comment after it is still one.
+  - The build files and `tools/` are not scanned: `CMakeLists.txt` names the NMS plugin's clone on purpose
+    (`plugins/nms`, `HAILSTONE_NMS_*`), to build and test it beside the client.
   - The one exception, let through by file and exact line shape: the updater's table of files old releases shipped
     under `plugins/nms/` (`retired_release_files()` in `src/app/update_install.cpp`).
-- `wiki`: `tools/sync_wiki.py --check`. Every document of `docs/`, `CONTRIBUTING.md` and `server/README.md` has a
-  wiki page, and no link points at a missing file (docs/wiki.md).
+- `layers`: two debts whose lists only shrink, and `tests/test_debt_checks.py`, the tests of both scripts.
+  - `tools/check_layers.py`: no source under `src/` includes a header from a higher row of the layers
+    (docs/plan.md "Architecture"). Comments do not count. The upward includes made before the check are listed in
+    `tools/data/layer_exceptions.txt`, `<file> <header>` per line. An include not listed fails, and so does a listed
+    one that is gone: a fix removes its line (`tools/check_layers.py --update` removes every such line and never adds
+    one). A new folder under `src/` fails until it is given a row.
+  - `tools/check_path_strings.py`: `path::string()` and `generic_string()` throw on Windows for a character the ANSI
+    code page lacks (`core/path_utf8.h`). The calls already there are counted per file in
+    `tools/data/path_string_counts.txt`. A file with more fails, and a file with fewer fails until its count is
+    lowered (`--update` lowers counts and never raises one).
+- `wiki`: the documents the wiki is built from.
+  - `tools/sync_wiki.py --check`. Every document of `docs/`, `CONTRIBUTING.md` and `server/README.md` has a wiki
+    page, and no link points at a missing file (docs/wiki.md).
+  - `tools/check_unknowns.py`: every entry of `docs/unknowns.md` has exactly one of the tags `player`, `server` or
+    `trace` right after its bold name (the file's header), and `tests/test_check_unknowns.py`, the script's tests.
 - `ui-api`: the shared UI contract's generated files are fresh.
   - `tools/migrate_ui_api.py --check` (the shipped packs call `hs.UI`) and its `--mock-adapter --check`
     (`tests/lua_ui_api_mock.lua`).
@@ -21,7 +39,7 @@ on pull requests to `main`:
     (`tests/test_migrate_ui_api.py`, `test_gen_ui_api_docs.py`, `test_make_addon_ui.py`,
     `test_make_addon_autoload.py`).
   - `tests/test_make_update.py`: `tools/make_update.py` keeps out of a package exactly the paths the client's
-    `is_player_path` refuses.
+    `is_player_path` refuses, and refuses a binary without the release key; `release_options.sh` names that key.
   - `tests/test_release_tools.py`: the release packers' versions, names and contents (`tools/make_addon.py` and
     `tools/make_update.py`).
 
@@ -29,7 +47,17 @@ One workflow builds: `.github/workflows/macos.yml` ("macOS arm64" below), for th
 started by hand or by a push to a `macos/**` branch.
 
 Everything else is built and tested on the developer's machine, to save Actions minutes (the old build legs are in
-the workflow's history). Before a merge to `main`:
+the workflow's history), or on a maintainer's machine registered as a runner ("Self-hosted build" below).
+
+## Before a merge
+
+Run `tools/premerge.sh` in the branch's worktree with its changes committed. It runs `tools/checks.sh`, configures
+the build directory if it is new (`--build-dir`, default `build`), builds with up to 20 jobs (`--jobs` or
+`HAILSTONE_JOBS`), runs `hailstone_tests` through `ctest`, and ends with `premerge: passed on <commit>`. With
+uncommitted changes it says so and exits 1, since the commit it names is not what was tested. It also says when
+`EQ_GAME_DIR` or `HAILSTONE_VECTORS_DIR` is unset, as those tests then check nothing.
+
+It covers the Linux row of the table below. The other rows, the sanitizer build and live sessions stay separate:
 
 | Platform | How | When |
 |---|---|---|
@@ -103,6 +131,7 @@ Each fix left behaviour unchanged; they explain rules in AGENTS.md.
 | MSVC under Wine | Recorded vectors CSpellBookWnd::GetSpellMemTicksLeft: `calc_dex() + calc_int()` called INT first | the calls as separate statements, in the original's order; the other query calls an operator or argument list ordered too |
 | MSVC under Wine | "http_get: cancelled ends a transfer stalled waiting for the answer" takes about 21 s (note 2) | not a client fault (note 2) |
 | MSVC under Wine | The build stops for good at `hailstone_engine.lib` (note 3) | `CMAKE_NINJA_FORCE_RESPONSE_FILE` when building for Windows on another host: the objects go in a response file |
+| MSVC under Wine (the release containers) | Now and then a large build stops with an internal compiler error (C1001, in `p0io.c`) and LNK1104 on an object, at a different file each time; the same build carried on passes | not a client fault; it came with 20 jobs, not with build.sh's default 8. `tools/nightly.sh` builds Windows with 8 and tries a failed package build once more |
 | MSVC under Wine | 33 shared-cache, mapped-archive and animation tests: the cache never mapped (note 4) | `platform/shared_file.cpp` accepts a LocalSystem entry beside the user's (note 4) |
 | Linux, Windows | CI set-up only (SDL3 dev packages; the glslang asset name and executable name) | see the workflow |
 
@@ -120,16 +149,147 @@ Notes:
    checks that a leaf granting Everyone is still refused. Wine also reports a DACL set on an existing folder from
    its Unix mode, so a test that needs one sets it when it creates the folder.
 
+## Self-hosted build
+
+`.github/workflows/build.yml` runs `tools/premerge.sh` on pushes to `main`, on pull requests to `main` and by hand,
+on a self-hosted runner labelled `hailstone` (with `self-hosted`, `linux`, `x64`). It stays off until the repository
+variable `HAILSTONE_SELF_HOSTED` is `true`, since a job with no runner waits in the queue for good.
+
+- The runner runs whatever code it is handed, so the workflow takes pull requests only from this repository's own
+  branches, which need write access. A fork's pull request skips the job, and nothing uses `pull_request_target`. Keep
+  the repository's Actions setting that asks for approval of outside contributors' workflows.
+- The build directory is `~/.cache/hailstone-ci/<runner name>/build`, outside the workspace that checkout cleans, so
+  builds are incremental. `HAILSTONE_JOBS` in the runner's environment (its `.env` file) sets the job count, 20 by
+  default.
+- `EQ_GAME_DIR` and `HAILSTONE_VECTORS_DIR` can be set in the runner's `.env` too; without them those tests check
+  nothing, as locally. The server plugins' clones (`plugins/nms`, `plugins/projecttriune`) are not checked out, so
+  their tests do not run there.
+- To set one up: in the repository's Settings, Actions, Runners, add a Linux x64 runner. Follow GitHub's commands as
+  an unprivileged user with the build tools installed (the "Linux" row of the table above), give it the `hailstone`
+  label, and run it as a service (`./svc.sh install`). Then set the variable under Settings, Secrets and variables,
+  Actions, Variables.
+
+## Live smoke tests
+
+`tools/live_smoke.sh HOST[:PORT] USER PASS CHARACTER [script ...]` plays each `tests/live/*.quest` with
+`playprobe --quest` (`tools/quest_probe.h`, which lists the steps) against a test server, and prints a PASS or FAIL
+line for each. It exits 1 when any fails. The scripts need a GM character (they use `#zone`, `#goto`, `#summonitem`
+and `#damage`) and a stock PEQ database. `EQ_GAME_DIR` must be set; `PLAYPROBE` picks the binary (default
+`build/playprobe`) and `LIVE_SMOKE_LOGS` the log folder (default `build/live-smoke/<time>`).
+
+- `zoning.quest`: after each zone-in the client's possessions match the server's; `#goto` moves within a zone.
+- `items.quest`: a summoned item reaches the inventory and stays after a zone-in.
+- `npc.quest`: hail an NPC, trade it an item it hands back, kill an NPC.
+
+`items.quest` and `npc.quest` end with `#nukeitem` on the item they summon, and check that the client saw it go, so
+nightly runs do not fill the character's bags.
+
+A script that ran no step never reached the world (the server refused the login, or answered "That zone is not
+available" while the last script's zone shut down): it is played once more after 30 seconds, and its line says so.
+A script starts with `zone <name>`, which passes at once when the character is already there, so it does not
+depend on where the last session ended. Scripts and the runner name no server, account or password: pass them on the
+command line. The nightly run plays them when a test server is set ("Nightly run" below); they are the scripted part
+of the 0.10 live checklist (docs/todo.md).
+A failure is a lead, not proof of a client bug: check the server's log and state too.
+
+## Nightly run
+
+`tools/nightly.sh` runs what a normal run leaves out, on `origin/main`, and is meant for a timer on a maintainer's
+machine:
+
+1. The sanitizer build (`HAILSTONE_SANITIZE`, docs/hardening.md) and every `hailstone_tests` case, with
+   `EQ_GAME_DIR` and `HAILSTONE_VECTORS_DIR` set, so the tests that otherwise pass without checking anything check
+   something.
+2. The libFuzzer targets (`HAILSTONE_LIBFUZZER`, Clang; docs/hardening.md), all at once, one core each, for
+   `--fuzz-seconds` (default 1800). Their corpora are kept between nights, and a crash's input is kept for the morning.
+3. With a test server set, the live smoke tests ("Live smoke tests" above), played by the sanitizer build's
+   `playprobe`. A sanitizer report in a script's log fails it too.
+4. With `--publish`, and only after a night with no failure, the nightly build ("Nightly builds" below).
+5. A summary: printed, kept in the night's log folder, and posted to Discord when a webhook is set. The posted text
+   names no local path; after a publish it ends with the release's link.
+
+It exits 1 when a step fails. Options: `--fuzz-seconds N`, `--jobs N` (default 20, also the package containers' CPU
+limit), `--no-fuzz`, `--no-live`, `--no-post`, `--package` (step 4 without the upload), `--publish`, `--ref REF`.
+
+- Settings go in `${XDG_CONFIG_HOME:-~/.config}/hailstone/nightly.env`, which it sources: `EQ_GAME_DIR`,
+  `HAILSTONE_VECTORS_DIR` and, optionally, `HAILSTONE_NIGHTLY_WEBHOOK` (a Discord webhook URL) and the live smoke
+  tests' server and GM character (`HAILSTONE_LIVE_SERVER=HOST[:PORT]`, `HAILSTONE_LIVE_USER`,
+  `HAILSTONE_LIVE_PASSWORD`, `HAILSTONE_LIVE_CHARACTER`). Never commit them. The summary names none of the server
+  settings.
+- Everything it writes is under `${XDG_CACHE_HOME:-~/.cache}/hailstone-nightly`: the checkout it tests (a detached
+  worktree of the repository, reset to the ref each night and cleaned of all but its build folders and the
+  containers' compiler caches in `.docker/`), the corpora (`corpus/<target>`), crash inputs (`crashes/<target>`)
+  and a log folder per night (`logs/<time>`, with `summary.txt`).
+- The server plugins' clones join the build when the main checkout has them. A lock keeps two runs apart.
+- A crash input replays with `build-fuzz/<target> <file>` in the checkout.
+
+### Nightly builds
+
+`--publish` builds the Linux x64 and Windows x64 packages as a release is built (docs/updater.md "Making a release":
+`tools/docker/build.sh <platform> --no-test` with `-DHAILSTONE_BROWSER=ON`, then `tools/make_update.py`) and uploads
+them to one rolling pre-release, tagged `nightly`, on GitHub.
+
+- The version is the release's number with the label `nightly.<date>` (`HAILSTONE_NIGHTLY_LABEL`, which
+  `release_options.sh` resets for a release). SemVer ranks `0.7.3-nightly.20261126` above `0.7.3-beta` and below
+  `0.7.4-beta`, so a nightly's updater offers the next release and never the beta it came after.
+- The updater reads `releases/latest`, which is never a pre-release, so no player is offered a nightly. The upload
+  has no `hailstone-update.txt` and nothing signs it: the downloads and a `SHA256SUMS` file only.
+- The containers do not run the tests (the Linux one cannot run the browser tests, Windows' Wine fails some): the
+  Linux package's `hailstone_tests` run on this machine before the upload, in 8 parts at once. They leave out the
+  cases that start the real CEF helper (`browser host: the CEF helper*`, `browser host: CEF's other processes*`),
+  which time out on some desktops with release builds too.
+- The Windows package is then started under Wine (a copy, with the night's log folder as its data folder): it logs
+  in to the live smoke tests' server with their character, enters the world and stops after 3600 frames at 60 per
+  second, with a screenshot (`windows.png`). Not reaching the world fails the night. It needs Wine, the desktop's
+  display (Vulkan presents to a window, which shows for that minute) and the `HAILSTONE_LIVE_*` settings; without
+  them the summary says it was not started. Its Wine prefix is kept in the cache folder.
+- The tests run without the desktop's display (`DISPLAY` and `WAYLAND_DISPLAY` unset), so the browser tests use
+  headless Chromium: CEF's helper can fail to draw on a busy desktop session's display.
+- Each night moves the `nightly` tag to the commit built (a forced update of that one tag, never of a branch),
+  uploads the new downloads, removes the previous night's and rewrites the notes. A plain `git fetch` leaves a clone's
+  old copy of the tag alone; `git fetch --tags` refuses to move it, which is harmless.
+- The Windows package builds with no more than 8 jobs, as a release does: at 20, MSVC under Wine failed most large
+  builds ("Problems the first runs showed" above). A failed package build is tried once more, and the summary says
+  so.
+- It needs `gh` signed in with write access, Docker, and the MSVC install `tools/docker/build.sh windows-x64` uses.
+- `--package` does all but the upload, leaving the zips in the checkout's `release-nightly/`.
+
+### The timer
+
+A user timer runs it nightly. Put both files in `~/.config/systemd/user/`, then run
+`systemctl --user enable --now hailstone-nightly.timer`. `Persistent=true` runs a night missed while logged out at the
+next login. `loginctl enable-linger` lets it run while logged out, but the upload then needs a `gh` login that does not
+live in the desktop keyring, which is locked until the user logs in (a `GH_TOKEN` in `nightly.env`, say).
+
+The service has a shell's environment only as set here: add the build settings the maintainer's shell gives, such as
+`Environment=CMAKE_CXX_COMPILER_LAUNCHER=ccache` and `Environment=CMAKE_C_COMPILER_LAUNCHER=ccache`.
+
+```ini
+# hailstone-nightly.service
+[Service]
+Type=oneshot
+ExecStart=/path/to/hailstone-client/tools/nightly.sh --publish
+Nice=10
+
+# hailstone-nightly.timer
+[Timer]
+OnCalendar=*-*-* 03:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
 ## Not covered
 
-- A change merged without the builds above is not built anywhere.
+- A change merged without the builds above is not built anywhere, unless the self-hosted build is switched on.
 - Linux arm64 is built only by hand, under QEMU on an x64 machine (`tools/docker/build.sh linux-arm64`, "Builds in
   containers" below), and only for a release. Its release has been run on one device only: a Qualcomm Snapdragon 8
   Elite (AYN Odin 3 Max, Kettle Linux, Mesa Turnip). Windows arm64 is not built. macOS arm64 is built only when its
   workflow is started.
 - No macOS build has been run on a Mac with a display; on the runner the window, MoltenVK and the rendering are
   compiled and linked only.
-- Nothing runs against a real game install or a server unless run by hand.
+- Nothing runs against a real game install or a server unless run by hand, or by the nightly run (game install only).
 
 ## Windows builds from Linux
 
@@ -170,7 +330,8 @@ git clone https://github.com/mstorsjo/msvc-wine ~/opt/msvc-wine-src
 mkdir -p ~/opt/msvc ~/opt/msvc-home
 # once, about 3.3 GB: MSVC 2022 and the Windows SDK, then msvc-wine's wrappers (bin/x64/cl ...)
 docker run --rm -v ~/opt:/opt/host hailstone-linux-build:24.04 bash -c "apt-get update -qq && apt-get install -y -qq msitools \
-    && cd /opt/host/msvc-wine-src && python3 vsdownload.py --major 17 --accept-license --architecture x64 \
+    && cd /opt/host/msvc-wine-src && git checkout -q 514f8ea34842cd6d831804d0e9658d3a32870ae1 \
+    && python3 vsdownload.py --major 17 --msvc-version 17.14 --sdk-version 10.0.26100 --accept-license --architecture x64 \
        --with-asan no --with-atl no --dest /opt/host/msvc && chown -R $(id -u):$(id -g) /opt/host/msvc"
 docker run --rm --user $(id -u):$(id -g) -e HOME=$HOME/opt/msvc-home -v $HOME/opt:$HOME/opt hailstone-msvc-build:24.04 \
     $HOME/opt/msvc-wine-src/install.sh $HOME/opt/msvc
@@ -205,6 +366,11 @@ tools/docker/build.sh all            # the three; --no-test after the platform s
   every build running on the machine within its cores.
 - `CMAKE_ARGS` adds configure options, split at whitespace (an option cannot hold a space), also to an existing
   build folder.
+- Every run configures the build folder again with the release's settings first (`tools/docker/release_options.sh`):
+  Release, the key of `update-key.pub` as `HAILSTONE_UPDATE_KEY`, no sanitizer, `HAILSTONE_ALLOW_IN_EQ_FOLDER` off
+  and the default feed, index and page addresses. `CMAKE_ARGS` comes after them, so it can change any of them, but
+  an option it no longer names does not stay from an earlier run. The script stops when `update-key.pub` holds no
+  key.
 
 #### Images and containers
 
@@ -226,7 +392,8 @@ tools/docker/build.sh all            # the three; --no-test after the platform s
 - Windows uses an existing msvc-wine install, read-only: `MSVC_DIR`. By default that is `~/opt/msvc` when it has
   `bin/x64/cl` (the install above), else `.docker/msvc`.
   - With none there, `MSVC_ACCEPT_LICENSE=1` accepts Microsoft's license and downloads one into `MSVC_DIR`
-    (`tools/docker/msvc_setup.sh`, msvc-wine pinned to a commit). Without it the script stops.
+    (`tools/docker/msvc_setup.sh`: msvc-wine pinned to a commit, MSVC to 17.14 and the SDK to 10.0.26100, as the
+    release install has them). Without it the script stops.
   - Wine's home is `.docker/wine-home`, one per checkout.
 - The Windows tests run under Wine with Microsoft's runtime DLLs copied beside them. They leave out the cases that
   fail only under Wine:

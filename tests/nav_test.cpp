@@ -8,6 +8,7 @@
 #include <string>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <thread>
 
 #include "app/navigator.h"
@@ -307,6 +308,53 @@ TEST_CASE("nav: a stray vertex far out does not size the tile grid; geometry wid
     CHECK(none->triangle_count() == 0);
     CHECK(none->tiles_x() == 0);
     CHECK(none->tile_triangles(0, 0).empty());
+}
+
+TEST_CASE("nav: a cast off the grid or at a coordinate that is not a number finds nothing") {
+    Scene s;
+    s.floor(0, 0, 100, 100, 0);
+    auto geo = s.geometry();
+    const glm::vec3 lo = geo->bmin();
+    CHECK(geo->cast_down(lo.x + 1.0f, lo.z + 1.0f, 10.0f, -10.0f));
+    CHECK(geo->cast_up(lo.x + 1.0f, lo.z + 1.0f, -10.0f, 10.0f));
+    // (InputGeometry::triangles_at's tile, which these look up, was a float-to-int cast out of range: undefined.)
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    for (auto [x, z] : {std::pair{nan, lo.z + 1.0f}, {lo.x + 1.0f, nan}, {nan, nan}, {inf, lo.z}, {lo.x, -inf},
+                        {1e30f, lo.z}, {lo.x, -1e30f}, {lo.x - 1000.0f, lo.z}, {lo.x + 1e6f, lo.z}}) {
+        CHECK_FALSE(geo->cast_down(x, z, 10.0f, -10.0f));
+        CHECK_FALSE(geo->cast_up(x, z, -10.0f, 10.0f));
+    }
+    CHECK_FALSE(geo->blocked({nan, 0.0f, 0.0f}, {lo.x + 1.0f, 0.0f, lo.z + 1.0f}));
+}
+
+TEST_CASE("nav: a vertex that is not finite or is huge in the input geometry builds a defined grid") {
+    // The grid's tile indexes come from the vertices' bounds: a NaN, infinite or far-out vertex is left out with its
+    // triangle, and what remains is tiled with every index inside the grid.
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    Scene s;
+    s.floor(0, 0, 100, 100, 0);
+    const std::size_t floor_tris = s.verts.size() / 3;
+    s.verts.insert(s.verts.end(), {{nan, 10, 0}, {20, 10, 0}, {20, 20, 0}});
+    s.verts.insert(s.verts.end(), {{nan, nan, nan}, {nan, nan, nan}, {nan, nan, nan}});
+    s.verts.insert(s.verts.end(), {{10, 10, 0}, {inf, 10, 0}, {20, 20, 0}});
+    s.verts.insert(s.verts.end(), {{3e38f, 10, 0}, {20, 10, 0}, {20, 20, 0}});
+    s.verts.insert(s.verts.end(), {{10, -3e9f, 0}, {20, 10, 0}, {20, 20, 0}});
+    for (const auto& geo : {s.geometry(), nav::InputGeometry::from_collision(s.collision(), {})}) {
+        CHECK(geo->triangle_count() == floor_tris);
+        CHECK(std::isfinite(geo->bmin().x));
+        CHECK(std::isfinite(geo->bmax().z));
+        REQUIRE(geo->tiles_x() >= 1);
+        REQUIRE(geo->tiles_y() >= 1);
+        std::size_t tiled = 0;
+        for (int ty = 0; ty < geo->tiles_y(); ++ty)
+            for (int tx = 0; tx < geo->tiles_x(); ++tx)
+                for (std::uint32_t i : geo->tile_triangles(tx, ty)) {
+                    CHECK(i < floor_tris);
+                    ++tiled;
+                }
+        CHECK(tiled >= floor_tris);
+        CHECK(geo->cast_down(geo->bmin().x + 1.0f, geo->bmin().z + 1.0f, 10.0f, -10.0f));
+    }
 }
 
 TEST_CASE("nav: areas from the regions: water costs more and can be avoided, lava is never crossed") {
@@ -2842,7 +2890,7 @@ TEST_CASE("nav: a quiet path asked and not answered before a zone change does no
     REQUIRE(rig.to_zone());
     const auto lease = rig.conn.request_quiet_path(101); REQUIRE(lease);
     // The zone change comes before the reply (the old zone's link dropped with it unanswered).
-    rig.conn.receive_world_packet_for_test(net::encode(net::ZoneServerInfo{"127.0.0.1", 7001}));
+    net::GameConnectionTestAccess::zone_hand_off(rig.conn, 7001);
     const auto finds = rig.conn.find_replies();
     std::vector<glm::vec3> path{{0, 0, 0}, {10, 5, 0}};
     rig.conn.receive_zone_packet_for_test(net::encode_find_person_reply(path));
@@ -2879,4 +2927,12 @@ TEST_CASE("nav: a shown find and a quiet path in flight together each get their 
     rig.conn.receive_zone_packet_for_test(net::encode_find_person_reply(shown));
     CHECK(rig.conn.find_replies() == finds + 2);
     CHECK_FALSE(rig.conn.take_quiet_path(lease));
+}
+
+TEST_CASE("nav: Navigation.Velocity is the player's speed in units a second") {
+    MqHost h;
+    CHECK(h.p("${Navigation.Velocity}") == "0");
+    // the speed per 50 ms tick (3, 4: 5 a tick), 20 ticks a second
+    net::GameConnectionTestAccess::velocity(*h.world.conn) = glm::vec3(3.0f, 4.0f, 0.0f);
+    CHECK(h.p("${Navigation.Velocity}") == "100");
 }

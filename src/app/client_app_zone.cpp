@@ -229,7 +229,6 @@ void ClientApp::load_zone(const std::string& short_name) {
         load_precipitation();
         sky_state_.set_sky(z->zone_short_name2.empty() ? z->zone_short_name : z->zone_short_name2);
         player_light_.reset();
-        haze_blend_.reset();
         emitter_view_proj_.reset(); // the last zone's view: every actor counts as in view until a frame is drawn
         camera_region_ = 0;
         // The classic sky (sky.s3d). The time-of-day light follows the
@@ -386,6 +385,12 @@ void ClientApp::unload_zone() {
     pre_game_world_.reset();
     missiles_.clear(); // CEverQuest_ClearZoneWorldState -> EQMissile_UpdateAll
     missile_particle_cues_.clear();
+    weather_.reset();
+    weather_look_ = {};
+    haze_blend_.reset();
+    // CEverQuest_ClearZoneWorldState @0x4939b0: Weather_StopEffect, EmitterSetRaining(0), EmitterSetWind(0). The
+    // original's emitters fade out over their release time; set_zone("") cuts the loops at once during the load
+    // screen (a deliberate presentation choice, audio/audio_system.cpp).
     if (audio_) audio_->set_zone("");
     if (zone_renderer_ || world_geometry_renderer_) vk_.wait_idle();
     world_geometry_renderer_.reset();
@@ -410,12 +415,12 @@ void ClientApp::unload_zone() {
     }
     actor_library_.reset();
     if (nav_) nav_->zone_unloaded();
+    cancel_iso_clicks(); // the old zone's spawn, door or point must not be clicked in the next one
     collision_.reset();
     world_visual_collision_.reset();
     animated_objects_.reset();
     zone_ladders_.clear();
     zone_line_.set_buried({});
-    weather_.clear_particles(); // they land on the old zone's ground
     if (world_objects_) world_objects_->set_zone(nullptr, nullptr); // its models read the zone's archives
     zone_.reset();
 }
@@ -592,6 +597,7 @@ void ClientApp::enter_zone() {
     riding_id_ = 0;
     boat_hold_.reset();
     iso_camera_.placed = false;
+    cancel_iso_clicks();
     const game::Spawn* me = conn_->world().player();
     if (!me) return;
     // AvatarHeight (+0x138): EQPlayer::SetHeights' moddat.ini ROffset (3.125 for the player races, which have
@@ -643,7 +649,7 @@ void ClientApp::enter_zone() {
     use_character_settings(files.dir); // (taken over at the entry into the world: the same, unless the name differs)
     actions_ui_->enter_zone(files.hot_buttons());
     // The character's autorun scripts (the Scripts window; the same file at each zone-in starts nothing again).
-    if (automation_ && !parked_conn_) automation_->scripts().set_autorun_file(files.scripts_ini());
+    if (automation_ && !parked_conn_) automation_->set_zone_autorun_file(files.scripts_ini());
     // The UI's window layout is the character's (ui-<pack>.txt), its other settings shared.
     ui_character_dir_ = files.dir;
     if (lua_ui_) lua_ui_->set_character_settings(files.ui_settings(ui_name_));

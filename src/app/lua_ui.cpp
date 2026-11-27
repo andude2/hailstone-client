@@ -10,10 +10,12 @@
 #include <filesystem>
 #include <format>
 #include <iterator>
+#include <optional>
 #include <limits>
 #include <cfloat>
 #include <cmath>
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 #include <map>
 #include <set>
@@ -49,6 +51,7 @@
 #include "game/eq_names.h"
 #include "game/hot_button_state.h"
 #include "game/item_sort.h"
+#include "game/window_notify.h"
 #include "game/merchant.h"
 #include "game/option_commands.h"
 #include "game/mechanics/character.h"
@@ -57,6 +60,8 @@
 #include "game/spells.h"
 #include "game/world_state.h"
 #include "net/game_connection.h"
+#include "platform/paths.h"
+#include "ui/layout_profile.h"
 #include "ui/ui_ini.h"
 #include "ui/ui_textures.h"
 #include "ui/texture_ids.h"
@@ -65,7 +70,8 @@
 namespace hailstone::app {
 
 // app/lua_ui_chat.cpp: the chat windows' settings, and the user colours from the character's chat.ini in `user_dir`.
-void chat_layout_loaded(ui::UiIni& ini, UiHost& host, const std::filesystem::path& user_dir);
+void chat_layout_loaded(ui::UiIni& ini, UiHost& host, const std::filesystem::path& user_dir, bool profile_change);
+void capture_chat_layout(const ui::UiIni& active, ui::UiIni& snapshot);
 void chat_host_gone(const UiHost& host, const ui::UiIni& ini);
 
 namespace {
@@ -96,13 +102,29 @@ struct UiApi::Impl {
     // whenever the vector has grown since (the views point into each window's own name, which never changes).
     std::unordered_map<std::string_view, StockWindow*> windows_by_name;
     std::size_t windows_indexed = 0;
-    std::map<std::string, int, std::less<>> replaced_at; // screen -> frame of its last hs.ReplaceWindow
-    int frame = 0;
+    std::map<std::string, std::uint64_t, std::less<>> replaced_at; // screen -> frame of its last hs.ReplaceWindow
+    std::uint64_t frame = 0; // begin_frame's count (64-bit: it never wraps); replaced_at's entries are never after it
+    // hs.ReplaceWindow and hs.WindowShown take any name a script gives (the packs' own windows are not all stock
+    // ones): the names kept per window are bounded. Only the last few frames' replacements count (replaces()), so
+    // past kMaxNamed names the older ones are dropped; a name past it while all are recent is not kept.
+    static constexpr std::size_t kMaxNamed = 1024;
+    bool note_replaced(std::string_view name) {
+        if (auto it = replaced_at.find(name); it != replaced_at.end()) {
+            it->second = frame;
+            return true;
+        }
+        if (replaced_at.size() >= kMaxNamed)
+            std::erase_if(replaced_at, [this](const auto& e) { return frame - e.second > 2; });
+        if (replaced_at.size() >= kMaxNamed) return false;
+        replaced_at.emplace(name, frame);
+        return true;
+    }
     ScreenReplacements screens{&replaced_at, &frame}; // hs.LoginScreen .. (app/lua_ui_pregame.cpp)
     // The cursor's hotbutton: a left press made while it was held, and the frame such a press came up (a click
     // that put it nowhere: it is dropped the next frame, as a click on the world drops CCursorAttachment's button).
     bool pressed_holding = false;
-    int stray_release = -10, stray_serial = 0;
+    std::optional<std::uint64_t> stray_release; // the frame a left release put the cursor's hot button nowhere
+    int stray_serial = 0;
     bool cursor_spell_memorizing = false; // a memorize was under way last frame while a book spell was on the cursor
     std::map<std::string, bool, std::less<>> unknown_logged;
     // Window places (ui/ui_ini.h): the layout generation and screen serial each window was placed under, its place
@@ -123,6 +145,10 @@ struct UiApi::Impl {
     std::map<std::string, bool, std::less<>> last_shown;
     std::map<std::string, bool, std::less<>> tip_shown; // the OnShow context tips: each window's shown state last frame
     std::filesystem::path layout_defaults, layout_file, layout_seed; // load_layout's files
+    std::optional<ui::LayoutProfile> layout_profile_preview;
+    std::optional<ui::LayoutProfile> layout_profile_undo;
+    int layout_profile_generation = 0;
+    bool layout_profile_reloading = false;
     // Where each Lua window was last frame (screen pixels): the EQ menu opens beside the EQ window.
     std::map<std::string, std::array<int, 4>, std::less<>> screen_rects;
     CascadeMenu cascade; // the EQ button's menu (app/lua_ui_menu.h)
@@ -314,6 +340,53 @@ struct UiApi::Impl {
     }
     bool reload_layout = false; // a layout was copied: the windows are placed again before the next frame
 
+    bool layout_profiles_ready() const {
+        return host.in_game && host.conn && layout.loaded() && !layout_file.empty() &&
+               host.layout_profile_pack && host.layout_profile_pack().first;
+    }
+
+    std::filesystem::path layout_profile_directory() const {
+        const auto pack = host.layout_profile_pack().second;
+        return platform::data_dir() / "layout-profiles" / platform::ui_settings_file(pack).stem();
+    }
+
+    ui::LayoutProfile capture_layout_profile(std::string_view name) {
+        // Project pending frame state without writing to the live character layout.
+        auto snapshot = layout;
+        store_visibility(&snapshot);
+        const auto display = ImGui::GetCurrentContext() ? ImGui::GetIO().DisplaySize : screen;
+        if (display.x >= 64 && display.y >= 64)
+            for (const auto& [window_name, place] : last_place)
+                snapshot.store(ini_info(window_name), place.first, number_to_int(display.x), number_to_int(display.y),
+                               place.second);
+        capture_chat_layout(layout, snapshot);
+        ui::LayoutProfile profile;
+        profile.name = name;
+        profile.width = number_to_int(display.x);
+        profile.height = number_to_int(display.y);
+        if (!name.empty()) profile.rects = ui::lua::snapshot_pack_window_rects(profile.width, profile.height);
+        profile.windows = ui::capture_layout_windows(snapshot.file());
+        profile.chat = host.conn->capture_layout_chat();
+        profile.pack_settings = host.layout_profile_pack().first->capture_layout_profile_settings();
+        return profile;
+    }
+
+    const char* apply_layout_profile(const ui::LayoutProfile& next, const ui::LayoutProfile& previous) {
+        auto* pack = host.layout_profile_pack().first;
+        auto next_windows = ui::replace_layout_windows(layout.file(), next.windows);
+        if (!pack->apply_layout_profile_settings(next.pack_settings)) return "Could not save interface settings.";
+        const bool chat = host.conn->apply_layout_chat(next.chat);
+        if (!chat || !layout.replace_file(std::move(next_windows))) {
+            bool restored = pack->apply_layout_profile_settings(previous.pack_settings);
+            if (chat && !host.conn->apply_layout_chat(previous.chat)) restored = false;
+            return restored ? "Could not apply the profile. Your previous settings were restored."
+                            : "Could not apply the profile or fully restore your previous settings.";
+        }
+        last_place.clear();
+        reload_layout = layout_profile_reloading = true;
+        return nullptr;
+    }
+
     // CTipWnd::Activate on the context tip window; its OnShow deactivates the tip of the day window.
     bool activate_context_tip(int tip, bool force) {
         StockWindow* w = window("TipWindow");
@@ -333,7 +406,8 @@ struct UiApi::Impl {
         };
         std::function<bool(int)> offered;
         if (!host.keep_cpp_windows) offered = [&](int command) { return menu_command_offered(command, replaces); };
-        cascade.load(*host.game, expansions, host.conn ? host.conn->pvp_rules() : 0, offered);
+        const bool profiles = layout_profiles_ready() && replaces("LayoutProfilesWindow");
+        cascade.load(*host.game, expansions, host.conn ? host.conn->pvp_rules() : 0, offered, profiles);
     }
 
     explicit Impl(UiHost& h) : host(h) {
@@ -369,7 +443,7 @@ struct UiApi::Impl {
                     return true;
                 }
                 if (id != "EQButton" || button != "left") return false;
-                m.load_cascade();
+                if (!m.cascade.open()) m.load_cascade();
                 auto it = m.screen_rects.find("EQMainWnd");
                 std::array<int, 4> r = it != m.screen_rects.end() ? it->second : std::array<int, 4>{0, 0, 53, 53};
                 ImVec2 ds = ImGui::GetIO().DisplaySize;
@@ -452,11 +526,15 @@ struct UiApi::Impl {
     // ui::window_ini_info(name), worked out once per name: it depends on the name alone.
     const ui::WindowIniInfo& ini_info(std::string_view name) {
         auto it = ini_infos.find(name);
-        if (it == ini_infos.end()) it = ini_infos.emplace(std::string(name), ui::window_ini_info(name)).first;
+        if (it == ini_infos.end()) {
+            if (ini_infos.size() >= kMaxNamed) return uncached_ini_info = ui::window_ini_info(name); // (bounded)
+            it = ini_infos.emplace(std::string(name), ui::window_ini_info(name)).first;
+        }
         return it->second;
     }
+    ui::WindowIniInfo uncached_ini_info; // ini_info's answer for a name past kMaxNamed (until its next call)
 
-    void store_visibility() {
+    void store_visibility(ui::UiIni* snapshot = nullptr) {
         // A new connection at character select has no in-game window state to save for the last character.
         if (!host.in_game || !layout.loaded()) return;
         for (auto& w : windows) {
@@ -465,6 +543,11 @@ struct UiApi::Impl {
             const ui::WindowIniInfo& info = ini_info(name);
             if (!(info.flags & 0x100)) continue;
             bool shown = w->shown(host);
+            if (snapshot) {
+                if (auto it = last_shown.find(name); it != last_shown.end() && it->second != shown)
+                    snapshot->store_shown(info, shown);
+                continue;
+            }
             auto [it, inserted] = last_shown.try_emplace(name, shown);
             if (!inserted && it->second != shown) {
                 layout.store_shown(info, shown);
@@ -485,9 +568,9 @@ struct UiApi::Impl {
         const ListData* data;
     };
     std::vector<ListMemo> lists;
-    int lists_frame = -1;
+    std::optional<std::uint64_t> lists_frame;
     const ListData* list(StockWindow& w, std::string_view id) {
-        if (lists_frame != frame) {
+        if (lists_frame != frame) { // (none yet: not this frame)
             lists.clear();
             lists_frame = frame;
         }
@@ -698,6 +781,21 @@ int Gauge(lua_State* L) {
     return 6;
 }
 
+// current, maximum, percent = hs.GaugeValues(eqType [, petIndex [, requestExact]])
+// Group HP (11–15), pet HP (16–21), group mana (31–35) and endurance (36–40). Missing readings return nil.
+// For type 16, petIndex 1 (the default) selects the focused pet and 2/3 select the extra Pet window rows.
+// Percent is 0–100. Pass false for requestExact to read available readings without polling for exact points.
+int GaugeValues(lua_State* L) {
+    const int type = held_int(luaL_checkinteger(L, 1));
+    const int pet_index = held_int(luaL_optinteger(L, 2, 1));
+    const bool request_exact = lua_isnoneornil(L, 3) || lua_toboolean(L, 3);
+    const auto values = ui_group_gauge_vitals(Impl::of(L).host, type, pet_index, request_exact);
+    if (values.current) lua_pushinteger(L, *values.current); else lua_pushnil(L);
+    if (values.maximum) lua_pushinteger(L, *values.maximum); else lua_pushnil(L);
+    if (values.percent) lua_pushinteger(L, *values.percent); else lua_pushnil(L);
+    return 3;
+}
+
 // ok = hs.ClickSlot(slot, bagSlot|nil, "left"|"leftheld"|"right"|right-button phase [, outside])
 // The game's slot logic: a left click picks up, drops, swaps or splits (Shift whole stack, Ctrl one; the original
 // on the button's release, HandleLButtonUp); "leftheld", the left button held on the slot, puts a hotbutton for it
@@ -869,14 +967,14 @@ int UiAnimation(lua_State* L) {
 // confirmation, among them a destroy's; a trade, a give, a quantity, a bazaar purchase's, a group invitation, a
 // respawn choice, a large dialog, a task offer) give way only to the pack's own windows: a plugin's code could
 // otherwise put the client's away and draw a question of its own in its place.
-// The consent question and the Server add-ons warning are the client's own interfaces' alone (UiHost::trusted_ui):
+// Consent, add-on policy warnings and Server Management are reserved to the client's own interfaces (UiHost::trusted_ui):
 // under an add-on or hand-placed interface the client draws them, as that interface cannot act on them
 // (hs.AnswerPluginConsent, hs.AddonPolicyAction).
 bool may_replace(std::string_view name, const UiHost& host) {
     static constexpr std::string_view kPackOnly[] = {
-        "PluginConsent", "AddonPolicy", "ConfirmationDialogBox", "TradeWnd",    "GiveWnd",          "QuantityWnd",
-        "BazaarConfirmationWnd", "GroupInvite", "RespawnWnd", "LargeDialogWindow", "TaskSelectWnd"};
-    if (!host.trusted_ui && (name == "PluginConsent" || name == "AddonPolicy")) return false;
+        "PluginConsent", "AddonPolicy", "ServerManagement", "ConfirmationDialogBox", "TradeWnd", "GiveWnd", "QuantityWnd",
+        "BazaarConfirmationWnd", "GroupInvite", "RespawnWnd", "LargeDialogWindow", "TaskSelectWnd", "LayoutProfilesWindow"};
+    if (!host.trusted_ui && (name == "PluginConsent" || name == "AddonPolicy" || name == "ServerManagement")) return false;
     if (ui::lua::LuaUi::caller_tag().empty()) return true;
     return std::find(std::begin(kPackOnly), std::end(kPackOnly), name) == std::end(kPackOnly);
 }
@@ -884,7 +982,7 @@ bool may_replace(std::string_view name, const UiHost& host) {
 int ReplaceWindow(lua_State* L) {
     auto& m = Impl::of(L);
     std::string name = luaL_checkstring(L, 1);
-    if (may_replace(name, m.host)) m.replaced_at[name] = m.frame;
+    if (may_replace(name, m.host)) m.note_replaced(name);
     StockWindow* w = m.window(name);
     bool shown = w && (m.host.ui_ready || w->pre_game()) && w->shown(m.host);
     lua_pushboolean(L, shown);
@@ -922,7 +1020,11 @@ int ReplaceWindow(lua_State* L) {
                                           static_cast<int>(ds.y), lua_toboolean(L, 2) != 0);
         sized = p.w != place.w || p.h != place.h;
         place = p;
-        Impl::Placed& placed = m.placed[name];
+        // (bounded as replaced_at: a name past Impl::kMaxNamed is placed each time but not remembered)
+        auto it = m.placed.find(name);
+        if (it == m.placed.end() && m.placed.size() < Impl::kMaxNamed) it = m.placed.emplace(name, Impl::Placed{}).first;
+        Impl::Placed none;
+        Impl::Placed& placed = it == m.placed.end() ? none : it->second;
         int& gen = placed.generation;
         int& scr = placed.screen;
         reset = gen != m.layout.generation() || scr != m.screen_serial;
@@ -955,10 +1057,7 @@ int ReplaceWindow(lua_State* L) {
 int WindowShown(lua_State* L) {
     auto& m = Impl::of(L);
     const char* name = luaL_checkstring(L, 1);
-    if (may_replace(name, m.host)) {
-        if (auto it = m.replaced_at.find(std::string_view(name)); it != m.replaced_at.end()) it->second = m.frame;
-        else m.replaced_at.emplace(name, m.frame);
-    }
+    if (may_replace(name, m.host)) m.note_replaced(name);
     StockWindow* w = m.window(name);
     lua_pushboolean(L, w && (m.host.ui_ready || w->pre_game()) && w->shown(m.host));
     return 1;
@@ -975,16 +1074,28 @@ int WindowPlaced(lua_State* L) {
                                  number_to_int(luaL_checknumber(L, 4)), number_to_int(luaL_checknumber(L, 5))};
     const bool sizable = lua_toboolean(L, 6) != 0;
     std::string name = name_arg;
-    m.screen_rects[name] = now;
+    if (auto at = m.screen_rects.find(name); at != m.screen_rects.end()) at->second = now;
+    else if (m.screen_rects.size() < Impl::kMaxNamed) m.screen_rects.emplace(name, now); // (bounded: Impl::kMaxNamed)
     if (!m.layout.loaded()) return 0;
-    const Impl::Placed& placed = m.placed[name];
-    if (placed.generation != m.layout.generation()) return 0;
+    // (only a window hs.ReplaceWindow placed under this layout: one it never placed is not made an entry here)
+    auto pl = m.placed.find(name);
+    if (pl == m.placed.end() || pl->second.generation != m.layout.generation()) return 0;
+    const Impl::Placed& placed = pl->second;
     ui::WindowRect r{now[0], now[1], now[2], now[3]};
     auto it = m.seen.find(name);
     bool moved = it != m.seen.end() && it->second != now && placed.screen == m.screen_serial;
     m.seen[name] = now;
     if (moved) m.last_place[name] = {r, sizable};
     return 0;
+}
+
+// A click on ConfirmationDialogBox's Yes from code other than the pack's own (a script, a plugin window, another Lua
+// state with the hs API) while that box asks a destroy's question (destructive_confirmation_up): refused, and logged.
+// The pack draws the box and its own code passes the player's click on; a script pressing it would destroy an item or
+// disband a guild without the player's word. Any other question, and No, stay open to scripts (an accepted rez, a
+// trade's question). A Hailstone guard of its own.
+bool script_destroy_yes(lua_State* L, const UiHost& host, std::string_view window, std::string_view child) {
+    return window == "ConfirmationDialogBox" && child == "Yes_Button" && refuse_code_destroy_yes(host, !ui::lua::pack_code(L));
 }
 
 // hs.ShowWindow(name, show)   -- shows or hides the game window (and with it the replacement)
@@ -998,9 +1109,12 @@ int ShowWindow(lua_State* L) {
 // default; 3 is a buff button's right click, which removes the buff)
 int WindowButton(lua_State* L) {
     auto& m = Impl::of(L);
-    StockWindow* w = m.window(luaL_checkstring(L, 1));
+    const char* name = luaL_checkstring(L, 1);
+    StockWindow* w = m.window(name);
     int message = held_int(luaL_optinteger(L, 3, 1));
-    bool ok = w && w->click(m.host, luaL_checkstring(L, 2), message == 3 ? "remove" : "left", false);
+    const char* child = luaL_checkstring(L, 2);
+    bool ok = w && !script_destroy_yes(L, m.host, name, child) &&
+              w->click(m.host, child, message == 3 ? "remove" : "left", false);
     lua_pushboolean(L, ok);
     return 1;
 }
@@ -1010,8 +1124,13 @@ int WindowButton(lua_State* L) {
 int ClickChild(lua_State* L) {
     auto& m = Impl::of(L);
     note_click_rect(m.host);
-    StockWindow* w = m.window(luaL_checkstring(L, 1));
+    const char* name = luaL_checkstring(L, 1);
+    StockWindow* w = m.window(name);
     const char* child_arg = luaL_checkstring(L, 2);
+    if (script_destroy_yes(L, m.host, name, child_arg)) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
     std::string button = lua_isstring(L, 3) ? lua_tostring(L, 3) : "left";
     std::string child = child_arg;
     bool outside = lua_toboolean(L, 4) != 0;
@@ -1048,10 +1167,11 @@ int StmlLink(lua_State* L) {
 // ok = hs.ClickChildAt(name, child, clientX, clientY [, button])   -- as ClickChild (no original to place)
 int ClickChildAt(lua_State* L) {
     auto& m = Impl::of(L);
-    StockWindow* w = m.window(luaL_checkstring(L, 1));
+    const char* name = luaL_checkstring(L, 1);
+    StockWindow* w = m.window(name);
     const char* child = w ? luaL_checkstring(L, 2) : nullptr;
     std::string button = lua_isstring(L, 5) ? lua_tostring(L, 5) : "left";
-    lua_pushboolean(L, w && w->click(m.host, child, button, false));
+    lua_pushboolean(L, w && !script_destroy_yes(L, m.host, name, child) && w->click(m.host, child, button, false));
     return 1;
 }
 
@@ -2322,16 +2442,25 @@ int Option(lua_State* L) {
 // value = hs.UiIni(section, key)   -- a value of the character's UI ini (over defaults.ini), nil when neither has it
 int UiIniGet(lua_State* L) {
     auto& m = Impl::of(L);
-    if (auto v = m.layout.get(luaL_checkstring(L, 1), luaL_checkstring(L, 2))) lua_pushstring(L, v->c_str());
+    const char* section = luaL_checkstring(L, 1);
+    const char* key = luaL_checkstring(L, 2);
+    auto& v = plugin::lua_keep<std::optional<std::string>>(L); // (across the push: lua_keep.h)
+    plugin::cxx_guard(L, [&] { v = m.layout.get(section, key); });
+    if (v) lua_pushlstring(L, v->data(), v->size());
     else lua_pushnil(L);
     return 1;
 }
 
-// hs.SetUiIni(section, key, value)   -- writes a value to the character's UI ini (UIIni_WriteString) and saves it
+// hs.SetUiIni(section, key, value)   -- writes a value to the character's UI ini (UIIni_WriteString). The file is
+// written with the window places (UiIni::save_if_due, at most every 2 s) and at once on a quit, a camp, a return to
+// the login screen or another character's layout (UiApi::save_layout, load_layout), not on each call: a slider
+// dragged calls it every frame.
 int UiIniSet(lua_State* L) {
     auto& m = Impl::of(L);
-    m.layout.put(luaL_checkstring(L, 1), luaL_checkstring(L, 2), luaL_checkstring(L, 3));
-    m.layout.save();
+    const char* section = luaL_checkstring(L, 1);
+    const char* key = luaL_checkstring(L, 2);
+    const char* value = luaL_checkstring(L, 3);
+    plugin::cxx_guard(L, [&] { m.layout.put(section, key, value); });
     return 0;
 }
 
@@ -2680,6 +2809,9 @@ int CascadeClick(lua_State* L) {
         if (StockWindow* w = m.window("ScriptsWnd")) w->set_shown(m.host, true);
     } else if (cmd && *cmd == kMenuWebBrowser) {
         if (StockWindow* w = m.window("BrowserWnd")) w->set_shown(m.host, true);
+    } else if (cmd && *cmd == kMenuLayoutProfiles) {
+        if (m.layout_profiles_ready())
+            if (StockWindow* w = m.window("LayoutProfilesWindow")) w->set_shown(m.host, true);
     } else if (cmd && *cmd >= kMenuPluginFirst) { // a plugin's entry: its command line, as the plugin
         run_plugin_menu(m.host, static_cast<std::size_t>(*cmd - kMenuPluginFirst));
     } else if (cmd && m.host.run_command) m.host.run_command(*cmd);
@@ -2863,6 +2995,168 @@ int ReturnFalse(lua_State* L) {
     lua_pushboolean(L, false);
     return 1;
 }
+bool layout_profiles_allowed() { return ui::lua::LuaUi::caller_tag().empty(); }
+
+int layout_profile_result(lua_State* L, const char* error, const char* code = nullptr) {
+    lua_pushboolean(L, error == nullptr);
+    if (!error) return 1;
+    lua_pushstring(L, error);
+    if (!code) return 2;
+    lua_pushstring(L, code);
+    return 3;
+}
+
+int LayoutProfilesList(lua_State* L) {
+    auto& m = Impl::of(L);
+    std::vector<std::string> names;
+    if (layout_profiles_allowed() && m.layout_profiles_ready())
+        plugin::cxx_guard(L, [&] { names = ui::list_layout_profiles(m.layout_profile_directory()); });
+    lua_createtable(L, static_cast<int>(names.size()), 0);
+    int row = 0;
+    for (const auto& name : names) {
+        lua_pushlstring(L, name.data(), name.size());
+        lua_rawseti(L, -2, ++row);
+    }
+    return 1;
+}
+
+int LayoutProfilesSave(lua_State* L) {
+    std::size_t length = 0;
+    const char* name = luaL_checklstring(L, 1, &length);
+    auto& m = Impl::of(L);
+    if (!layout_profiles_allowed() || !m.layout_profiles_ready())
+        return layout_profile_result(L, "Layout profiles are unavailable.");
+    if (!ui::valid_layout_profile_name({name, length}))
+        return layout_profile_result(L, "Use up to 48 letters, numbers, spaces, hyphens or underscores.");
+    if (m.reload_layout) return layout_profile_result(L, "Wait for the layout change to finish.");
+    const bool overwrite = lua_toboolean(L, 2) != 0;
+    ui::LayoutProfileSave result = ui::LayoutProfileSave::Failed;
+    plugin::cxx_guard(L, [&] {
+        result = ui::save_layout_profile(m.layout_profile_directory(), m.capture_layout_profile({name, length}), overwrite);
+    });
+    if (result == ui::LayoutProfileSave::Exists)
+        return layout_profile_result(L, "A profile with that name already exists.", "exists");
+    if (result == ui::LayoutProfileSave::Failed) return layout_profile_result(L, "Could not save the layout profile.");
+    return layout_profile_result(L, nullptr);
+}
+
+int LayoutProfilesPreview(lua_State* L) {
+    std::size_t length = 0;
+    const char* name = luaL_checklstring(L, 1, &length);
+    auto& m = Impl::of(L);
+    if (!layout_profiles_allowed() || !m.layout_profiles_ready()) {
+        lua_pushnil(L);
+        lua_pushliteral(L, "Layout profiles are unavailable.");
+        return 2;
+    }
+    auto& profile = m.layout_profile_preview;
+    plugin::cxx_guard(L, [&] { profile = ui::read_layout_profile(m.layout_profile_directory(), {name, length}); });
+    if (!profile) {
+        lua_pushnil(L);
+        lua_pushliteral(L, "Layout profile is unavailable.");
+        return 2;
+    }
+    std::set<std::string> windows;
+    std::size_t chat = 0;
+    plugin::cxx_guard(L, [&] {
+        for (const auto& section : profile->windows.sections())
+            if (!game::same_no_case(section, "ChatManager")) windows.insert(section);
+        std::string_view settings = profile->pack_settings;
+        while (!settings.empty()) {
+            const auto end = settings.find('\n');
+            const auto line = settings.substr(0, end);
+            const auto key = line.substr(0, line.find('='));
+            if (key.starts_with("hud.pos.")) windows.emplace(key.substr(8));
+            if (key.starts_with("hud.size.")) windows.emplace(key.substr(9));
+            settings.remove_prefix(end == std::string_view::npos ? settings.size() : end + 1);
+        }
+        chat = profile->windows.keys("ChatManager").size();
+        for (const auto& section : profile->chat.sections()) chat += profile->chat.keys(section).size();
+    });
+    const auto& rects = profile->rects;
+    lua_createtable(L, 0, 6);
+    lua_pushlstring(L, profile->name.data(), profile->name.size());
+    lua_setfield(L, -2, "name");
+    auto number = [L](const char* key, lua_Integer value) {
+        lua_pushinteger(L, value);
+        lua_setfield(L, -2, key);
+    };
+    number("width", profile->width);
+    number("height", profile->height);
+    number("windows", static_cast<lua_Integer>(windows.size()));
+    number("chat", static_cast<lua_Integer>(chat));
+    lua_createtable(L, static_cast<int>(rects.size()), 0);
+    for (std::size_t i = 0; i < rects.size(); ++i) {
+        const auto& rect = rects[i];
+        lua_createtable(L, 0, 5);
+        lua_pushlstring(L, rect.name.data(), rect.name.size());
+        lua_setfield(L, -2, "name");
+        number("x", rect.x);
+        number("y", rect.y);
+        number("w", rect.w);
+        number("h", rect.h);
+        lua_rawseti(L, -2, static_cast<lua_Integer>(i + 1));
+    }
+    lua_setfield(L, -2, "rects");
+    return 1;
+}
+
+int LayoutProfilesApply(lua_State* L) {
+    std::size_t length = 0;
+    const char* name = luaL_checklstring(L, 1, &length);
+    auto& m = Impl::of(L);
+    if (!layout_profiles_allowed() || !m.layout_profiles_ready())
+        return layout_profile_result(L, "Layout profiles are unavailable.");
+    if (m.reload_layout) return layout_profile_result(L, "Wait for the layout change to finish.");
+    const auto& preview = m.layout_profile_preview;
+    if (!preview || !game::same_no_case(preview->name, std::string_view(name, length)))
+        return layout_profile_result(L, "Select a saved profile to preview it first.");
+    const bool discard_unsaved = lua_toboolean(L, 2) != 0;
+    const char* error = nullptr;
+    bool unsaved = false;
+    std::optional<ui::LayoutProfile> profile;
+    // Read the file again: another client may have overwritten the profile since it was previewed.
+    plugin::cxx_guard(L, [&] { profile = ui::read_layout_profile(m.layout_profile_directory(), {name, length}); });
+    if (!profile) return layout_profile_result(L, "Layout profile is unavailable.");
+    plugin::cxx_guard(L, [&] {
+        auto previous = m.capture_layout_profile({});
+        if (!discard_unsaved && !ui::has_saved_layout_profile(m.layout_profile_directory(), previous)) {
+            unsaved = true;
+            return;
+        }
+        error = m.apply_layout_profile(*profile, previous);
+        if (!error) m.layout_profile_undo = std::move(previous);
+    });
+    if (unsaved) return layout_profile_result(L, "Save your current layout before applying?", "unsaved");
+    return layout_profile_result(L, error);
+}
+
+int LayoutProfilesCanUndo(lua_State* L) {
+    auto& m = Impl::of(L);
+    lua_pushboolean(L, layout_profiles_allowed() && m.layout_profiles_ready() && !m.reload_layout &&
+                           m.layout_profile_undo.has_value());
+    return 1;
+}
+
+int LayoutProfilesUndo(lua_State* L) {
+    auto& m = Impl::of(L);
+    if (!layout_profiles_allowed() || !m.layout_profiles_ready() || !m.layout_profile_undo)
+        return layout_profile_result(L, "There is no layout change to undo.");
+    if (m.reload_layout) return layout_profile_result(L, "Wait for the layout change to finish.");
+    const char* error = nullptr;
+    plugin::cxx_guard(L, [&] {
+        auto previous = m.capture_layout_profile({});
+        error = m.apply_layout_profile(*m.layout_profile_undo, previous);
+        if (!error) m.layout_profile_undo.reset();
+    });
+    return layout_profile_result(L, error);
+}
+
+int LayoutProfilesGeneration(lua_State* L) {
+    lua_pushinteger(L, Impl::of(L).layout_profile_generation);
+    return 1;
+}
+
 int ReturnEmptyTable(lua_State* L) {
     lua_newtable(L);
     return 1;
@@ -2912,13 +3206,14 @@ void UiApi::begin_frame() {
     if (m.reload_layout) { // a copied layout (__CopyLayout's unk_ApplyWindowPositions)
         m.reload_layout = false;
         load_layout(m.layout_defaults, m.layout_file, m.layout_seed);
+        if (std::exchange(m.layout_profile_reloading, false)) ++m.layout_profile_generation;
     }
     for (auto& w : m.windows) w->frame(m.host);
     if (m.host.in_game) m.context_tips_on_show();
     if (!m.host.in_game) m.host.cursor_button.reset();
     if (m.host.cursor_button) {
         // Gone with a right click or Escape, or a left click that put it nowhere (last frame's release).
-        if ((m.stray_release == m.frame - 1 && m.stray_serial == m.host.cursor_serial) || ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
+        if ((m.stray_release && *m.stray_release + 1 == m.frame && m.stray_serial == m.host.cursor_serial) || ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
             ImGui::IsKeyPressed(ImGuiKey_Escape, false))
             m.host.cursor_button.reset();
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) m.pressed_holding = true;
@@ -2975,13 +3270,21 @@ void UiApi::load_layout(const std::filesystem::path& defaults, const std::filesy
         m.last_shown.emplace(name, w->shown(m.host));
     }
     for (auto& w : m.windows) w->ini_loaded(m.host, m.layout, file.parent_path());
-    chat_layout_loaded(m.layout, m.host, file.parent_path());
+    chat_layout_loaded(m.layout, m.host, file.parent_path(), m.layout_profile_reloading);
     log::info("ui: window places from {} (defaults {})", file.string(), defaults.string());
 }
 
 void UiApi::save_layout() {
     impl_->store_visibility();
     impl_->layout.save();
+}
+
+void UiApi::clear_layout_profile_undo() {
+    auto& m = *impl_;
+    m.layout_profile_preview.reset();
+    m.layout_profile_undo.reset();
+    if (std::exchange(m.layout_profile_reloading, false)) m.reload_layout = false;
+    show("LayoutProfilesWindow", false);
 }
 
 const std::filesystem::path& UiApi::layout_file() const { return impl_->layout_file; }
@@ -3067,6 +3370,43 @@ std::optional<bool> UiApi::child_checked(std::string_view screen, std::string_vi
     Child c;
     w->child(impl_->host, child, c);
     return c.checked;
+}
+
+std::optional<mq::WindowChild> UiApi::window_child(std::string_view window, std::string_view child, bool rows) {
+    StockWindow* w = impl_->window(game::canonical_window(window));
+    if (!w) return std::nullopt;
+    auto read = [&](std::string_view id) {
+        mq::WindowChild out;
+        Child c;
+        w->child(impl_->host, id, c);
+        out.text = c.text;
+        out.enabled = c.enabled;
+        out.shown = c.shown;
+        if (c.has_gauge || c.gauge >= 0) out.gauge = std::max(c.gauge, 0); // -1: the gauge hidden
+        if (rows) {
+            if (const ListData* d = w->list(impl_->host, id)) {
+                out.is_list = true;
+                out.columns = d->columns;
+                for (const auto& r : d->rows) out.rows.push_back(r.texts);
+            }
+        }
+        return out;
+    };
+    const std::string canonical = game::canonical_child(child);
+    mq::WindowChild out = read(canonical);
+    // A window that keys the child by the name as sent (the bank's BIGB_ buttons, which /notify's table shortens).
+    const bool nothing = !out.text && !out.enabled && !out.shown && !out.gauge && !out.is_list;
+    if (nothing && canonical != child) out = read(child);
+    return out;
+}
+
+bool UiApi::window_shown(std::string_view window) const { return shown(game::canonical_window(window)); }
+
+bool UiApi::show_window(std::string_view window, bool show) {
+    const std::string screen = game::canonical_window(window);
+    if (!impl_->window(screen)) return false;
+    this->show(screen, show);
+    return true;
 }
 
 std::optional<bool> UiApi::child_state(std::string_view screen, std::string_view child) {
@@ -3198,6 +3538,9 @@ void UiApi::actions_key(int page) {
 }
 
 void UiApi::right_click_item(const net::ItemSlot& slot) { item_right_click(impl_->host, slot); }
+void UiApi::right_click_item(const net::ItemSlot& slot, net::SlotClickKeys keys) {
+    item_right_click(impl_->host, slot, keys);
+}
 bool UiApi::open_player_menu(std::uint32_t spawn_id, float x, float y) {
     return app::open_player_menu(impl_->host, spawn_id, x, y);
 }
@@ -3224,6 +3567,7 @@ void register_luasocial_api(lua_State* L, UiHost& host);  // app/lua_ui_luasocia
 void register_hotbar_api(lua_State* L, UiHost& host);     // app/lua_ui_hotbar.cpp
 void register_web_api(lua_State* L, UiHost& host);        // app/lua_ui_web.cpp
 void register_find_api(lua_State* L, UiHost& host);       // app/lua_ui_find.cpp
+void register_server_management_api(lua_State* L, UiHost& host); // app/lua_ui_server_management.cpp
 void register_compare_api(lua_State* L, UiHost& host, std::function<StockWindow*(std::string_view)> find_window); // app/lua_ui_compare.cpp
 void register_task_api(lua_State* L, UiHost& host, std::vector<std::unique_ptr<StockWindow>>& windows); // app/lua_ui_progress.cpp
 int CompassStrips(lua_State* L);                     // app/lua_ui_misc.cpp
@@ -3302,6 +3646,7 @@ void UiApi::register_functions(lua_State* L) {
     register_hotbar_api(L, impl_->host);
     register_web_api(L, impl_->host);
     register_find_api(L, impl_->host);
+    register_server_management_api(L, impl_->host);
     register_compare_api(L, impl_->host, [impl = impl_.get()](std::string_view name) { return impl->window(name); });
     register_task_api(L, impl_->host, impl_->windows);
     // Opening a tracker entry changes TaskWnd's selected objective list in this frame. Its next ListInfo/ListRow
@@ -3332,6 +3677,7 @@ void UiApi::register_functions(lua_State* L) {
         {"InGame", InGame}, {"UiReady", UiReady}, {"GameState", GameState}, {"Name", Name}, {"SlotName", SlotName},
         {"ClassName", ClassName}, {"ClassNamesRevision", ClassNamesRevision},
         {"Item", Item}, {"ItemIcon", ItemIcon}, {"Money", Money}, {"Label", Label}, {"Gauge", Gauge},
+        {"GaugeValues", GaugeValues},
         {"ClickSlot", ClickSlot}, {"HasSlot", HasSlot}, {"InspectItem", InspectItem}, {"AltCurrencies", AltCurrencies}, {"UiTexture", UiTexture}, {"UiImage", UiImage}, {"UiAnimation", UiAnimation},
         {"ReplaceWindow", ReplaceWindow}, {"WindowPlaced", WindowPlaced}, {"ShowWindow", ShowWindow}, {"WindowButton", WindowButton},
         {"WindowText", WindowText}, {"ChildShown", ChildShown}, {"WindowList", WindowList}, {"ChildArt", ChildArtFn},
@@ -3359,13 +3705,17 @@ void UiApi::register_functions(lua_State* L) {
         {"WindowContextMenu", WindowContextMenu}, {"TakeWindowMenu", TakeWindowMenu},
         {"TakeCloseTopWindow", TakeCloseTopWindow}, {"ContextMenus", ContextMenus},
         {"WindowShown", WindowShown},
+        {"LayoutProfilesApply", LayoutProfilesApply}, {"LayoutProfilesCanUndo", LayoutProfilesCanUndo},
+        {"LayoutProfilesGeneration", LayoutProfilesGeneration}, {"LayoutProfilesList", LayoutProfilesList},
+        {"LayoutProfilesPreview", LayoutProfilesPreview}, {"LayoutProfilesSave", LayoutProfilesSave},
+        {"LayoutProfilesUndo", LayoutProfilesUndo},
         {nullptr, nullptr}};
     lua_pushlightuserdata(L, impl_.get());
     luaL_setfuncs(L, fns, 1); // every function gets Impl as its upvalue
     // The functions that only read: the rest may change what a window's lists hold, so each drops the lists read
     // this frame (Impl::list) before it runs. A function missing here costs only a list built again.
     static constexpr std::string_view kReads[] = {
-        "InGame", "UiReady", "GameState", "Name", "SlotName", "Item", "ItemIcon", "Money", "Label", "Gauge", "HasSlot",
+        "InGame", "UiReady", "GameState", "Name", "SlotName", "Item", "ItemIcon", "Money", "Label", "Gauge", "GaugeValues", "HasSlot",
         "AltCurrencies", "UiTexture", "UiImage", "UiAnimation", "ReplaceWindow", "WindowShown", "WindowPlaced", "WindowText", "ChildShown",
         "WindowList", "ChildArt", "GemTint", "GemOverlay", "ButtonCoolDown", "CoolDownColor", "ItemPreviewImage",
         "BuffSlot", "BuffOverlay", "HotButton", "HotButtonFace", "HotButtonChecked", "HotButtonState", "HotButtonInfo",
@@ -3373,7 +3723,8 @@ void UiApi::register_functions(lua_State* L) {
         "ChildColor", "TabPage", "ItemPreview",
         "ChildTooltip", "DebugScreens", "ChildUnder", "VoiceChat", "ChildRect", "WindowClient", "CursorAttachment",
         "DebugTree", "ComboInfo", "Option", "UiIni", "OptionChoices", "PlaySoundTest", "BagInfo", "Parcels", "FindItems",
-        "InventorySpace", "BagSlotItem", "CascadeMenus", "GameMenus", "ContextMenus", "ItemJob", "InterfaceList", "InterfaceLoadBase", "InterfaceLoadData", "InterfaceStatus"};
+        "InventorySpace", "BagSlotItem", "CascadeMenus", "GameMenus", "ContextMenus", "ItemJob", "InterfaceList", "InterfaceLoadBase", "InterfaceLoadData", "InterfaceStatus",
+        "LayoutProfilesCanUndo", "LayoutProfilesGeneration", "LayoutProfilesList", "LayoutProfilesPreview"};
     auto changes_lists = [](lua_State* L2) -> int {
         Impl::of(L2).lists_changed();
         return fns[static_cast<std::size_t>(lua_tointeger(L2, lua_upvalueindex(2)))].func(L2);

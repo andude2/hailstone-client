@@ -2,6 +2,7 @@
 // where a plugin should not, to check that the client holds.
 //   /probethread   calls host functions from a std::thread, then reports what they answered (ability_state too,
 //   when the host table has it)
+//   /probechatgroup   writes a valid group and tries invalid and off-thread local chat submissions
 //   /probethrow    lets an exception out (not a std::exception); so do ${Probe.Throw} and OnUpdateImGui
 //   /probestate n  web_state(tab 1) with a struct whose size says n bytes, as a plugin built with a shorter one
 //   /probemessage n  web_message(tab 1) into a buffer of n bytes (0: no buffer)
@@ -64,28 +65,58 @@ static_assert(offsetof(PluginHostApi, select_raid_member) == offsetof(PluginHost
 static_assert(offsetof(PluginHostApi, set_class_name) == offsetof(PluginHostApi, get_map_policy) + sizeof(PluginHostApi::caps));
 static_assert(offsetof(PluginHostApi, get_spells_data_bulk) ==
               offsetof(PluginHostApi, nameplate_spell_icon) + sizeof(PluginHostApi::caps));
-// ABI 4 is upstream's: the UI contribution pair where upstream put it, then the later ABI 4 calls through
-// get_scripts_config_dir. ABI 5 appends this branch's loot, inventory and task block after them, at fixed offsets.
-static_assert(offsetof(PluginHostApi, set_ui_contribution) == offsetof(PluginHostApi, caps) + 111 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, remove_ui_contribution) == offsetof(PluginHostApi, caps) + 112 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, get_spells_by_name_data_bulk) == offsetof(PluginHostApi, caps) + 113 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, acquire_bulk_buffer) == offsetof(PluginHostApi, caps) + 114 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, release_bulk_buffer) == offsetof(PluginHostApi, caps) + 115 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, spell_id_limit) == offsetof(PluginHostApi, caps) + 116 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, spell_data_ready) == offsetof(PluginHostApi, caps) + 117 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, command_exists) == offsetof(PluginHostApi, caps) + 118 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, lend_thread) == offsetof(PluginHostApi, caps) + 119 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, get_scripts_config_dir) == offsetof(PluginHostApi, caps) + 120 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, get_loot_data_bulk) == offsetof(PluginHostApi, caps) + 121 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, answer_confirmation) == offsetof(PluginHostApi, caps) + 126 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, free_inventory_slots) == offsetof(PluginHostApi, caps) + 127 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, can_loot_corpse) == offsetof(PluginHostApi, caps) + 128 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, loot_item_modifiers) == offsetof(PluginHostApi, caps) + 129 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, zone_long_name) == offsetof(PluginHostApi, caps) + 130 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, answer_loot_confirmation) == offsetof(PluginHostApi, caps) + 131 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, inventory_rows) == offsetof(PluginHostApi, caps) + 132 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, inventory_rows_v2) == offsetof(PluginHostApi, caps) + 133 * sizeof(PluginHostApi::caps));
-static_assert(offsetof(PluginHostApi, task_rows) == offsetof(PluginHostApi, caps) + 134 * sizeof(PluginHostApi::caps));
+// ABI 4 is upstream's: the UI contribution pair through write_chat_group.
+// ABI 5 appends this branch's loot, inventory, task and icon block after them.
+static_assert(offsetof(PluginHostApi, set_ui_contribution) ==
+              offsetof(PluginHostApi, get_spells_data_bulk) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, remove_ui_contribution) ==
+              offsetof(PluginHostApi, set_ui_contribution) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, get_spells_by_name_data_bulk) ==
+              offsetof(PluginHostApi, remove_ui_contribution) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, acquire_bulk_buffer) ==
+              offsetof(PluginHostApi, get_spells_by_name_data_bulk) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, release_bulk_buffer) ==
+              offsetof(PluginHostApi, acquire_bulk_buffer) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, spell_id_limit) ==
+              offsetof(PluginHostApi, release_bulk_buffer) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, spell_data_ready) ==
+              offsetof(PluginHostApi, spell_id_limit) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, command_exists) ==
+              offsetof(PluginHostApi, spell_data_ready) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, lend_thread) ==
+              offsetof(PluginHostApi, command_exists) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, get_scripts_config_dir) ==
+              offsetof(PluginHostApi, lend_thread) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, world_placement_start) ==
+              offsetof(PluginHostApi, get_scripts_config_dir) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, world_placement_get) ==
+              offsetof(PluginHostApi, world_placement_start) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, world_placement_cancel) ==
+              offsetof(PluginHostApi, world_placement_get) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, write_chat_group) ==
+              offsetof(PluginHostApi, world_placement_cancel) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, get_loot_data_bulk) ==
+              offsetof(PluginHostApi, write_chat_group) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, answer_confirmation) ==
+              offsetof(PluginHostApi, get_loot_data_bulk) + 5 * sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, free_inventory_slots) ==
+              offsetof(PluginHostApi, answer_confirmation) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, can_loot_corpse) ==
+              offsetof(PluginHostApi, free_inventory_slots) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, loot_item_modifiers) ==
+              offsetof(PluginHostApi, can_loot_corpse) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, zone_long_name) ==
+              offsetof(PluginHostApi, loot_item_modifiers) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, answer_loot_confirmation) ==
+              offsetof(PluginHostApi, zone_long_name) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, inventory_rows) ==
+              offsetof(PluginHostApi, answer_loot_confirmation) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, inventory_rows_v2) ==
+              offsetof(PluginHostApi, inventory_rows) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, task_rows) ==
+              offsetof(PluginHostApi, inventory_rows_v2) + sizeof(PluginHostApi::caps));
+static_assert(offsetof(PluginHostApi, spell_icon) ==
+              offsetof(PluginHostApi, task_rows) + sizeof(PluginHostApi::caps));
 static_assert(sizeof(HS_BulkLootHeader) == HS_BULK_LOOT_HEADER_SIZE);
 static_assert(sizeof(HS_BulkLootRecord) == HS_BULK_LOOT_RECORD_SIZE);
 
@@ -119,6 +150,22 @@ void probe_thread(void*, const char*) {
 }
 
 void probe_throw(void*, const char*) { throw 42; }
+
+void probe_chat_group(void*, const char*) {
+    if (!HAILSTONE_HOST_HAS(host, write_chat_group)) return;
+    const char* rows[] = {"First probe row.", "Second probe row."};
+    const int accepted = host->write_chat_group(host->host, "Probe Status", rows, 2);
+    const int too_many = host->write_chat_group(host->host, "Probe Status", rows, UINT32_MAX);
+    const int no_title = host->write_chat_group(host->host, nullptr, rows, 2);
+    const int empty = host->write_chat_group(host->host, "Probe Status", rows, 0);
+    const std::string long_row(2048, 'x');
+    const char* malformed[] = {"A valid prefix.", long_row.c_str()};
+    const int too_long = host->write_chat_group(host->host, "Probe Status", malformed, 2);
+    int off_thread = -1;
+    std::thread([&] { off_thread = host->write_chat_group(host->host, "Probe Status", rows, 2); }).join();
+    WriteChatf("[Probe] chat group: accepted %d, count %d, title %d, empty %d, row %d, thread %d",
+               accepted, too_many, no_title, empty, too_long, off_thread);
+}
 
 void probe_state(void*, const char* args) {
     HailstoneWebState st;
@@ -726,6 +773,38 @@ void probe_map_prefix(void*, const char* args) {
         canary?1:0,revision?1:0,context&&context!=UINT64_MAX?1:0,find_mode==HAILSTONE_NPC_FIND_SERVER_ONLY);
 }
 void probe_map_cycle(void*,const char*) { host->set_active(host->host,0);host->set_active(host->host,1); }
+void probe_world_placement(void*, const char* args) {
+    if (!HAILSTONE_HOST_HAS(host, world_capabilities) || !HAILSTONE_HOST_HAS(host, world_placement_start) ||
+        !HAILSTONE_HOST_HAS(host, world_placement_get) || !HAILSTONE_HOST_HAS(host, world_placement_cancel)) return;
+    const std::string_view command = args ? args : "";
+    if (command == "start") {
+        WriteChatf("[Probe] placement start: %d", host->world_placement_start(host->host));
+        return;
+    }
+    if (command == "cancel") {
+        host->world_placement_cancel(host->host);
+        return;
+    }
+    HailstoneWorldPlacement value{};
+    value.size = sizeof(value);
+    if (command == "lent" && HAILSTONE_HOST_HAS(host, lend_thread)) {
+        value.status = 99;
+        int started = -1, read = -1;
+        const int lent = host->lend_thread(host->host, 1);
+        std::thread([&] {
+            started = host->world_placement_start(host->host);
+            read = host->world_placement_get(host->host, &value);
+            host->world_placement_cancel(host->host);
+        }).join();
+        const int ended = host->lend_thread(host->host, 0);
+        WriteChatf("[Probe] placement lent: %d %d %d %u %d", lent, started, read, value.status, ended);
+        return;
+    }
+    const auto capabilities = host->world_capabilities(host->host);
+    const int result = host->world_placement_get(host->host, &value);
+    WriteChatf("[Probe] placement: %u %d %u %u %u", capabilities, result, value.status,
+               value.zone_id, value.instance_id);
+}
 void probe_map(void*, const char* args) {
     HailstoneMapPolicy policy;
     std::memset(&policy, 0x5a, sizeof(policy));
@@ -1242,6 +1321,7 @@ int probe_tlo(void*, const char*, const char* member, const char*, HailstoneValu
 HAILSTONE_API void InitializePlugin(void) {
     AddCommand("/probethread", probe_thread, nullptr);
     AddCommand("/probethrow", probe_throw, nullptr);
+    AddCommand("/probechatgroup", probe_chat_group, nullptr);
     AddCommand("/probestate", probe_state, nullptr);
     AddCommand("/probemessage", probe_message, nullptr);
     AddCommand("/probetcp", probe_tcp, nullptr);
@@ -1294,6 +1374,7 @@ HAILSTONE_API void InitializePlugin(void) {
     AddCommand("/probelootact", probe_loot_act, nullptr);
     AddCommand("/probebinary", probe_binary, nullptr);
     AddCommand("/probebinarythread", probe_binary_thread, nullptr);
+    AddCommand("/probeworldplacement", probe_world_placement, nullptr);
     AddCommand("/probedecode", probe_decode, nullptr);
     AddCommand("/probeservices", probe_services, nullptr);
     AddCommand("/probeselectraid", probe_select, nullptr);
@@ -1324,6 +1405,7 @@ HAILSTONE_API void InitializePlugin(void) {
 HAILSTONE_API void ShutdownPlugin(void) {
     RemoveCommand("/probethread");
     RemoveCommand("/probethrow");
+    RemoveCommand("/probechatgroup");
     RemoveCommand("/probestate");
     RemoveCommand("/probemessage");
     RemoveCommand("/probetcp");
@@ -1344,6 +1426,7 @@ HAILSTONE_API void ShutdownPlugin(void) {
     RemoveCommand("/probecanloot");
     RemoveCommand("/probebinary");
     RemoveCommand("/probebinarythread");
+    RemoveCommand("/probeworldplacement");
     RemoveCommand("/probedecode");
     RemoveCommand("/probeservices");
     RemoveCommand("/probeselectraid");
