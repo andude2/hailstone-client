@@ -179,6 +179,8 @@ Automation::Automation(AutomationEnv env) : impl_(std::make_unique<Impl>()) {
     m.ctx.ability = m.env.ability;
     m.ctx.can_see = m.env.can_see;
     m.ctx.line_of_sight = m.env.line_of_sight;
+    m.ctx.headless = m.env.headless;
+    m.ctx.viewer_connected = m.env.viewer_connected;
     m.ctx.config_path = path_utf8(m.env.data_dir / "scripts" / "config"); // the scripts' config_dir below
 
     mq::CommandEnv ce;
@@ -251,6 +253,7 @@ Automation::Automation(AutomationEnv env) : impl_(std::make_unique<Impl>()) {
         }
     };
     ne.imgui_context = [] { return static_cast<void*>(ImGui::GetCurrentContext()); };
+    ne.spell_icon = m.env.spell_icon;
     ne.extensions = m.extensions.get();
     ne.ui = &m.plugin_ui;
     ne.nameplates = &m.nameplates;

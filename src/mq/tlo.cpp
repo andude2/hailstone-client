@@ -361,7 +361,7 @@ std::vector<std::string> Registry::complete(const Context& ctx, std::string_view
     if (v.is_nil() && parts.size() == 2) {
         // The type a NULL TLO has when it is there.
         static constexpr std::pair<std::string_view, std::string_view> kTypes[] = {
-            {"Me", "character"}, {"Target", "spawn"}, {"Spawn", "spawn"}, {"NearestSpawn", "spawn"}, {"Pet", "spawn"},
+            {"Me", "character"}, {"Target", "spawn"}, {"Spawn", "spawn"}, {"NearestSpawn", "spawn"}, {"Pet", "pet"},
             {"Group", "group"}, {"Zone", "zone"}, {"Spell", "spell"}, {"Cursor", "item"}, {"FindItem", "item"}};
         for (auto [tlo_name, type_name] : kTypes)
             if (CaseLess{}(tlo_name, parts[0].name) == CaseLess{}(parts[0].name, tlo_name)) t = find_type(type_name);

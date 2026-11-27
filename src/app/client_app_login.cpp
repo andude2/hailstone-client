@@ -1,9 +1,12 @@
 // ClientApp: Login, server and character select, and the connection each frame.
 
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
 
 #include "app/client_app_internal.h"
 #include "app/connection_frontend.h"
+#include "app/headless_app.h"
 #include "app/lua_ui.h"
 #include "app/addon_install.h"
 #include "core/asset_folder.h"
@@ -176,6 +179,172 @@ void ClientApp::start_box_login() {
     start_login();
 }
 
+void ClientApp::refresh_headless_launcher() {
+    std::error_code ec;
+#if defined(_WIN32)
+    const std::filesystem::path exe = platform::install_dir() / "hailstone_headless.exe";
+#else
+    const std::filesystem::path exe = platform::install_dir() / "hailstone_headless";
+#endif
+    login_view_.headless_available = std::filesystem::is_regular_file(exe, ec);
+    login_view_.crew_ini.clear();
+    if (!login_view_.headless_available) return;
+    const std::filesystem::path data_crew = platform::data_dir() / "crew.ini";
+    if (std::filesystem::is_regular_file(data_crew, ec)) {
+        login_view_.crew_ini = data_crew;
+        return;
+    }
+    const std::filesystem::path install_crew = platform::install_dir() / "crew.ini";
+    if (std::filesystem::is_regular_file(install_crew, ec)) login_view_.crew_ini = install_crew;
+}
+
+bool ClientApp::launch_crew_file(const std::filesystem::path& crew_path) {
+    std::error_code ec;
+#if defined(_WIN32)
+    const std::filesystem::path exe = platform::install_dir() / "hailstone_headless.exe";
+#else
+    const std::filesystem::path exe = platform::install_dir() / "hailstone_headless";
+#endif
+    if (!std::filesystem::is_regular_file(exe, ec)) {
+        login_view_.status = {"hailstone_headless not found beside hailstone.", true};
+        return false;
+    }
+    std::ifstream in(crew_path);
+    if (!in) {
+        login_view_.status = {"Could not read " + crew_path.string() + ".", true};
+        return false;
+    }
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const CrewFile crew = parse_crew_file(text);
+    if (!crew.error.empty()) {
+        login_view_.status = {crew_path.filename().string() + ": " + crew.error, true};
+        return false;
+    }
+    const std::filesystem::path data_dir =
+        !crew.data_dir.empty() ? std::filesystem::path(crew.data_dir) : platform::data_dir();
+    clear_stale_drive_files(crew_drive_dir(crew, data_dir));
+    std::vector<std::string> args{exe.string(), "--quiet", "--crew", crew_path.string()};
+    std::string error;
+    if (!box_clients_.start(args, error)) {
+        login_view_.status = {"Could not start hailstone_headless: " + error, true};
+        return false;
+    }
+    log::info("crew: started headless supervisor for {} ({} members)", crew_path.string(), crew.members.size());
+    return true;
+}
+
+void ClientApp::start_box_login_headless() {
+    auto saved = ui::store_login_settings(login_view_, config_);
+    if (!saved) return;
+    config_.save(config_path_);
+    remember_profile_game_files(game_.root(), false);
+    std::vector<SavedAccount> set = ui::box_accounts(login_view_);
+    if (set.empty()) return;
+    // Keep the currently selected account in this GUI window when it is part of the box set; otherwise use the first.
+    if (!login_view_.username.empty()) {
+        for (std::size_t i = 1; i < set.size(); ++i) {
+            if (set[i].username == login_view_.username) {
+                std::rotate(set.begin(), set.begin() + static_cast<std::ptrdiff_t>(i),
+                            set.begin() + static_cast<std::ptrdiff_t>(i + 1));
+                break;
+            }
+        }
+    }
+    std::vector<std::string> passwords;
+    for (const auto& a : set) {
+        auto pw = login_view_.credentials ? login_view_.credentials->load(ui::credential_server(login_view_), a.username)
+                                          : std::nullopt;
+        if (!pw || pw->empty()) {
+            for (auto& loaded : passwords) core::wipe(loaded);
+            login_view_.status = {"No saved password for " + a.username + ": log in with it once with Save password "
+                                  "ticked.",
+                                  true};
+            return;
+        }
+        passwords.push_back(std::move(*pw));
+    }
+    if (set.size() > 1) {
+        CrewFile crew;
+        crew.data_dir = platform::data_dir().generic_string();
+        crew.game_dir = !opts_.game_dir.empty() ? opts_.game_dir : game_.root().generic_string();
+        crew.stagger = std::max(0, config_.get_int("headless.stagger", 3));
+        crew.autoload = config_.get_string("plugins.autoload", "*");
+        crew.chat_log = false;
+        crew.observe = true;
+        crew.interact = true;
+        crew.control = true;
+        crew.drive_dir = "run";
+        const std::string exec_cmd = config_.get_string("headless.exec", "");
+        for (std::size_t i = 1; i < set.size(); ++i) {
+            CrewMember m;
+            m.label = !set[i].character.empty() ? set[i].character : set[i].username;
+            m.server = saved->id;
+            m.account = set[i].username;
+            m.character = set[i].character;
+            m.world = set[i].world;
+            m.exec = exec_cmd;
+            crew.members.push_back(std::move(m));
+        }
+        const std::filesystem::path run_dir = platform::data_dir() / "run";
+        std::error_code ec;
+        std::filesystem::create_directories(run_dir, ec);
+        const std::filesystem::path crew_path = run_dir / "box-crew.ini";
+        std::ofstream out(crew_path, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            for (auto& pw : passwords) core::wipe(pw);
+            login_view_.status = {"Could not write " + crew_path.string() + ".", true};
+            return;
+        }
+        const std::string text = format_crew_file(crew);
+        out.write(text.data(), static_cast<std::streamsize>(text.size()));
+        out.close();
+        if (!out || !launch_crew_file(crew_path)) {
+            for (auto& pw : passwords) core::wipe(pw);
+            return;
+        }
+    }
+    login_view_.username = set.front().username;
+    login_view_.password = passwords.front();
+    for (auto& pw : passwords) core::wipe(pw);
+    login_view_.save_password = set.front().save_password;
+    box_play_ = true;
+    box_character_ = set.front().character;
+    box_world_ = set.front().world;
+    start_login();
+}
+
+void ClientApp::start_login_with_crew() {
+    if (login_view_.crew_ini.empty()) return;
+    // Enter the selected character directly (same as Play / box login) instead of stopping at server select.
+    std::string target_world;
+    std::string target_char;
+    const auto quick = ui::quick_characters(login_view_);
+    if (login_view_.quick_selected >= 0 && login_view_.quick_selected < static_cast<int>(quick.size())) {
+        const ui::QuickCharacter q = quick[static_cast<std::size_t>(login_view_.quick_selected)];
+        if (login_view_.username != q.username || login_view_.password.empty()) ui::pick_account(login_view_, q.username);
+        if (login_view_.password.empty()) {
+            login_view_.status = {"Type the password for " + q.username + ", then try again.", true};
+            return;
+        }
+        target_world = q.character.world;
+        target_char = q.character.name;
+    } else {
+        for (const auto& a : login_view_.accounts) {
+            if (a.username == login_view_.username) {
+                target_world = a.world;
+                target_char = a.character;
+                break;
+            }
+        }
+    }
+    if (login_view_.username.empty() || login_view_.password.empty() || login_view_.host.empty()) return;
+    if (!launch_crew_file(login_view_.crew_ini)) return;
+    box_play_ = true;
+    box_world_ = std::move(target_world);
+    box_character_ = std::move(target_char);
+    start_login();
+}
+
 void ClientApp::play_character() {
     auto quick = ui::quick_characters(login_view_);
     if (login_view_.quick_selected < 0 || login_view_.quick_selected >= static_cast<int>(quick.size())) return;
@@ -235,6 +404,17 @@ void ClientApp::login_action(ui::LoginAction action) {
         break;
     case ui::LoginAction::LoginBox:
         start_box_login();
+        break;
+    case ui::LoginAction::LoginBoxHeadless:
+        start_box_login_headless();
+        break;
+    case ui::LoginAction::LoginWithCrew:
+        start_login_with_crew();
+        break;
+    case ui::LoginAction::LaunchCrew:
+        if (!login_view_.crew_ini.empty() && launch_crew_file(login_view_.crew_ini))
+            login_view_.status = {"Launched headless crew from " + login_view_.crew_ini.filename().string() + ".",
+                                  false};
         break;
     case ui::LoginAction::PlayCharacter:
         play_character();
@@ -375,6 +555,7 @@ void ClientApp::refresh_ui_packs(bool force) {
     }
     ui_policy_serial_ = policy_serial;
     ui_registry_rescan_ = now + std::chrono::seconds(1);
+    if (screen_ == Screen::Login) refresh_headless_launcher();
     std::vector<std::string> installed;
     std::map<std::string, std::pair<std::string, std::string>, std::less<>> generations;
     const auto installed_addons = read_installed_addons(platform::data_dir());

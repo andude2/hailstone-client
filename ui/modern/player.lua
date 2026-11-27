@@ -1,9 +1,7 @@
 -- Player frame: replaces the game's PlayerWindow. A level badge, the name, and the health, mana and endurance bars
 -- (the game's own values: hs.Gauge / hs.Label by EQType), experience and alternate advancement experience (the
--- inventory's gauges 4 and 5) under them, the spell being cast, and while auto attack is on a pulsing red ring with a
--- halo, a red wash over the frame and a red level badge (the pet's health is the Pet window's). The cast bar replaces
--- the game's CastingWindow: the spell's name over a bar that fills as the cast completes (the casting gauge
--- counts the time left down from 1). The frame menu can keep the empty bar visible between casts.
+-- inventory's gauges 4 and 5) under them, and while auto attack is on a pulsing red ring with a halo, a red wash over
+-- the frame and a red level badge (the pet's health is the Pet window's, and the cast bar is casting.lua).
 local API = hs.UI
 local hud = dofile("lib/hud.lua")
 local roles = dofile("lib/role_icons.lua")
@@ -11,8 +9,6 @@ local T = hud.T
 local C = T.color
 local WINDOW = "PlayerWindow"
 local ROLE_COLORS = { C.mana, C.accent, C.endurance }
-local CAST_H = 24 -- the cast bar's row (design pixels)
-local CAST_BAR_SETTING = "player.alwaysShowCastBar"
 local MANA_READOUT = "player.manaReadout"
 local ENDURANCE_READOUT = "player.enduranceReadout"
 local MANA_H, ENDURANCE_H, READOUT_H = 9, 6, 16
@@ -152,7 +148,7 @@ local function combatState(cx, cy, r, s)
 end
 
 -- What this frame's options and body read, set before hud.Window each frame (made once, not every frame).
-local frame = { caster = false, casting = false, showCastBar = false, manaFrac = nil, attack = nil }
+local frame = { caster = false, manaFrac = nil, attack = nil }
 local GLOW = { 0, 0, 0, 0 }
 local PANEL_OPTS = { glowWidth = 3 }
 local NO_TRAIL = { noTrail = true }
@@ -163,12 +159,10 @@ local NAME_COLOR = { 0, 0, 0, 1 }
 local OPTS = {
   size = function()
     local manaRow = frame.caster and frame.manaHeight + 3 or 0
-    return 300, 104 - ENDURANCE_H + frame.enduranceHeight + manaRow + (frame.showCastBar and CAST_H or 0)
+    return 300, 104 - ENDURANCE_H + frame.enduranceHeight + manaRow
   end,
   panelOpts = PANEL_OPTS,
   menu = function()
-    local always = T.Setting(CAST_BAR_SETTING) == "1"
-    if ui.MenuItem("Always show cast bar", always) then ui.SetSetting(CAST_BAR_SETTING, always and "0" or "1") end
     readoutMenu("Mana readout", MANA_READOUT, frame.manaReadout)
     readoutMenu("Endurance readout", ENDURANCE_READOUT, frame.enduranceReadout)
   end,
@@ -294,18 +288,6 @@ local function body(x, y, w, h, s)
       ui.EndTooltip()
     end
   end
-  if frame.showCastBar then
-    local x0, x1 = x + pad, x + w - pad
-    local cy = y + h - pad - (CAST_H - 2) * s
-    local _, th = T.TextSize("Ag", T.font.tiny)
-    local done
-    if frame.casting then
-      local left, _, raw = API.character.Gauge(7)
-      done = (left and raw ~= -1) and (1 - left) or 0
-      T.Text(x0, cy, T.Fit(API.character.Label(134) or "", x1 - x0, T.font.tiny), C.text, T.font.tiny)
-    end
-    T.Bar("player.cast", x0, cy + th + 2 * s, x1, cy + th + 9 * s, s, done, C.cast, NO_TRAIL)
-  end
 end
 
 ui.window("Player", function()
@@ -315,8 +297,6 @@ ui.window("Player", function()
   frame.manaReadout, frame.enduranceReadout = readoutMode(MANA_READOUT), readoutMode(ENDURANCE_READOUT)
   frame.manaHeight = READOUT_HEIGHT[frame.manaReadout] or MANA_H
   frame.enduranceHeight = READOUT_HEIGHT[frame.enduranceReadout] or ENDURANCE_H
-  frame.casting = API.windows.Shown("CastingWindow")
-  frame.showCastBar = frame.casting or T.Setting(CAST_BAR_SETTING) == "1"
   local attacking = API.windows.ChildShown(WINDOW, "A_AttackIndicatorAnimTop") == true
   local glow, attack = nil, nil
   if attacking then

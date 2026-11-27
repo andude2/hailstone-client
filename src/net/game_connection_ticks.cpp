@@ -204,6 +204,10 @@ void GameConnection::passage_of_time(std::int64_t now) {
     pools.mana = static_cast<std::int32_t>(pstatus_.mana);
     pools.endurance = static_cast<std::int32_t>(pstatus_.endurance);
     pools.dead = pstatus_.dead;
+    // EQEmu sends authoritative OP_HPUpdate on every real server DoT tick (with mitigation, runes and server
+    // scaling); locally subtracting raw spells_us DoT damage out-of-phase after a heal leaves pstatus_.hp stuck
+    // below max_hp once the server is already at 100% and stops sending OP_HPUpdate.
+    pools.skip_buff_hp_loss = true;
     // ProcessAllStats' first loop: the worn items' stats-disabled bytes before the sums read them.
     refresh_worn_stats_disabled();
     const game::mechanics::LiveState live = live_state();

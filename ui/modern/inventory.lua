@@ -39,7 +39,8 @@ local LEFT_W = 5 * SLOT + 4 * GAP
 local STATS_W = 220
 local W = LEFT_W + 18 + STATS_W
 local HEADER_H, TABS_H = 46, 28
-local DOLL_SLOT, DOLL_GAP = 36, 4
+local DOLL_SLOT, DOLL_GAP = 46, 5
+local DOLL_MAX_SLOT = 64
 local DOLL_STEP = DOLL_SLOT + DOLL_GAP
 local DOLL_W = #DOLL_ROWS[1] * DOLL_STEP - DOLL_GAP
 local DOLL_H = #DOLL_ROWS * DOLL_STEP - DOLL_GAP
@@ -93,12 +94,55 @@ local function compareRows(x, y, s, w, h)
   ui.SetCursorScreenPos(x, y)
   ui.BeginChild("##slot-comparison", w, h, false)
   ui.Text(API.inventory.SlotName(compareSlot) or "Equipment")
-  local function row(name, itemName, ready)
+  local _, lh = ui.CalcTextSize("Ag")
+  local iconSz = math.floor(lh + 2 * s)
+  local linkCol = C.chatLink or C.accent
+  local rowIdx = 0
+  local function row(name, item, ready, isSelf)
+    rowIdx = rowIdx + 1
     ui.TableNextRow()
     ui.TableNextColumn()
     ui.Text(name)
     ui.TableNextColumn()
-    ui.Text(itemName or (ready and "Empty slot" or "Inventory unavailable"))
+    local itemName = item and item.name
+    if not itemName or itemName == "" then
+      ui.TextColored(C.faint[1], C.faint[2], C.faint[3], 1, ready and "Empty slot" or "Inventory unavailable")
+      return
+    end
+    local icon = item.icon
+    if icon and icon > 0 then
+      local tex, u0, v0, u1, v1 = API.assets.ItemIcon(icon)
+      if tex then
+        local ix, iy = ui.GetCursorScreenPos()
+        T.Icon(ix, iy, iconSz, s, tex, u0, v0, u1, v1, nil, { radius = 3 })
+        ui.Dummy(iconSz, iconSz)
+        ui.SameLine(0, 5 * s)
+      end
+    end
+    local canOpen = isSelf or (item.id and item.id > 0 and API.inventory.InspectItem ~= nil)
+    if canOpen then
+      local lx, ly = ui.GetCursorScreenPos()
+      local tw, th = ui.CalcTextSize(itemName)
+      local avail = ui.GetContentRegionAvail()
+      local hitW = math.min(tw, math.max(20 * s, avail))
+      local clicked = ui.InvisibleButton("##cmpitem" .. rowIdx, hitW, th)
+      local hov = ui.IsItemHovered()
+      local col = hov and C.accent or linkCol
+      ui.SetCursorScreenPos(lx, ly)
+      ui.TextColored(col[1], col[2], col[3], 1, itemName)
+      if hov then
+        ui.DrawLine(lx, ly + th, lx + hitW, ly + th, col[1], col[2], col[3], 0.9, 1)
+        local tip = "Click to inspect"
+        if item.augs and item.augs ~= "" then tip = tip .. "\nAugments: " .. item.augs:gsub(";", ", ") end
+        ui.SetTooltip(tip)
+      end
+      if clicked then
+        if isSelf then API.inventory.ClickSlot(compareSlot, nil, "rightheld")
+        else API.inventory.InspectItem(item.id, itemName) end
+      end
+    else
+      ui.Text(itemName)
+    end
   end
   -- One row per character, as the equipped Visual tab's comparison table in EZInventory.
   local peers = crew.Peers()
@@ -107,12 +151,11 @@ local function compareRows(x, y, s, w, h)
     ui.TableSetupColumn("Item", ui.TableColumnFlags.WidthStretch)
     ui.TableHeadersRow()
     local item = API.inventory.Item(compareSlot)
-    if item then row("My Character", item.name, true)
-    else row("My Character", nil, true) end
+    row("My Character", item, true, true)
     for _, peer in ipairs(peers) do
       local worn = peer.snapshot and peer.snapshot.worn[compareSlot]
-      if worn then row(peer.name, worn.item and worn.item.name or worn[9], true)
-      else row(peer.name, nil, peer.snapshot ~= nil) end
+      local wornItem = worn and (worn.item or { id = worn[3], icon = worn[4], name = worn[9] }) or nil
+      row(peer.name, wornItem, peer.snapshot ~= nil, false)
     end
     ui.EndTable()
   end
@@ -121,12 +164,22 @@ local function compareRows(x, y, s, w, h)
 end
 
 local function characterPage(x, y, s, compare, w, h)
-  local dollX = x + (LEFT_W - DOLL_W) * s / 2
+  -- Scale paper-doll slots cleanly with resized window height/width while keeping STATS_W for the right pane.
+  local gap = DOLL_GAP * s
+  local maxLeftW = math.max(LEFT_W * s, math.min(w * 0.46, w - (STATS_W + 18) * s))
+  local fitH = (h - 10 * s - (#DOLL_ROWS - 1) * gap) / #DOLL_ROWS
+  local fitW = (maxLeftW - 8 * s - (#DOLL_ROWS[1] - 1) * gap) / #DOLL_ROWS[1]
+  local slotSz = math.max(DOLL_SLOT * s, math.min(fitH, fitW, DOLL_MAX_SLOT * s))
+  local step = slotSz + gap
+  local dollW = #DOLL_ROWS[1] * step - gap
+  local dollH = #DOLL_ROWS * step - gap
+  local leftW = math.max(LEFT_W * s, dollW + 8 * s)
+  local dollX = x + (leftW - dollW) / 2
   -- A drop between slots goes through IW_CharacterView, which equips or stows a held item
   -- or returns a held coin to the purse. Slots drawn after the drop area keep their own drops.
   if not compare and (API.inventory.Item(API.inventory.CursorSlot) or API.cursor.Coin()) then
     local x0, y0 = dollX - 2 * s, y - 2 * s
-    local x1, y1 = dollX + (DOLL_W + 2) * s, y + (DOLL_H + 2) * s
+    local x1, y1 = dollX + dollW + 2 * s, y + dollH + 2 * s
     if T.Hit("##doll", x0, y0, x1, y1) then
       API.windows.ClickChild(WINDOW, "IW_CharacterView", "left")
     end
@@ -137,23 +190,24 @@ local function characterPage(x, y, s, compare, w, h)
   for r, row in ipairs(DOLL_ROWS) do
     for c, slot in ipairs(row) do
       if slot then
-        local slotX = dollX + (c - 1) * DOLL_STEP * s
-        local slotY = y + (r - 1) * DOLL_STEP * s
+        local slotX = dollX + (c - 1) * step
+        local slotY = y + (r - 1) * step
         if compare then
-          items.Slot("##compare-slot" .. slot, slotX, slotY, DOLL_SLOT * s, s, API.inventory.Item(slot),
+          items.Slot("##compare-slot" .. slot, slotX, slotY, slotSz, s, API.inventory.Item(slot),
             SHORT[slot], API.inventory.SlotName(slot), function(button)
-              if button == "left" then compareSlot = slot end
+              if button == "left" then compareSlot = slot
+              elseif button == "rightheld" then API.inventory.ClickSlot(slot, nil, "rightheld") end
             end, { selected = compareSlot == slot })
         else
-          items.InvSlot(slot, nil, slotX, slotY, DOLL_SLOT * s, s, SHORT[slot])
+          items.InvSlot(slot, nil, slotX, slotY, slotSz, s, SHORT[slot])
         end
       end
     end
   end
 
   -- the numbers
-  local sx = x + (LEFT_W + 18) * s
-  local sw = math.max(STATS_W * s, w - (LEFT_W + 18) * s)
+  local sx = x + leftW + 18 * s
+  local sw = math.max(STATS_W * s, w - leftW - 18 * s)
   if compare then return compareRows(sx, y, s, sw, h) end
   ui.DrawRectFilled(sx - 9 * s, y - 2 * s, sx - 8 * s, y + h - 14 * s, C.ink[1], C.ink[2], C.ink[3], 0.06)
   local yy = y

@@ -43,6 +43,7 @@ struct GameConnectionTestAccess {
     static bool has_tracking_request(const GameConnection& c) { return c.tracking_request_.has_value(); }
     static void replace_spawn(GameConnection& c, const Spawn& spawn) { c.apply_spawn(spawn); }
     static game::WorldState& world(GameConnection& c) { return c.world_; }
+    static std::uint32_t& target_of_target(GameConnection& c) { return c.target_of_target_; }
     static glm::vec3& position(GameConnection& c) { return c.position_; } // the player's own (world coordinates)
     static PlayerStatus& status(GameConnection& c) { return c.pstatus_; }
     static game::SpellState& spells(GameConnection& c) { return c.spells_; }
@@ -50,6 +51,8 @@ struct GameConnectionTestAccess {
     static game::GroupState& group(GameConnection& c) { return c.group_; }
     static game::RaidState& raid(GameConnection& c) { return c.raid_; }
     static GameConnection::Leadership& leadership(GameConnection& c) { return c.leadership_; }
+    static game::PetState& pets(GameConnection& c) { return c.pets_; }
+    static game::PetToggleStates& pet_toggles(GameConnection& c) { return c.pet_toggles_; }
     static std::vector<std::pair<std::uint32_t, game::BuffSlot>>& pet_buffs(GameConnection& c) { return c.pet_buffs_; }
     static std::vector<game::BandolierSet>& bandolier(GameConnection& c) { return c.bandolier_; }
     static game::Inventory& inventory(GameConnection& c) { return c.inventory_; }
@@ -88,6 +91,7 @@ struct GameConnectionTestAccess {
         c.set_mem_frame();
     }
     static void memorize_tick(GameConnection& c, std::int64_t now) { c.memorize_tick(now); }
+    static void update_spells_at(GameConnection& c, std::int64_t now) { c.update_spells_at(now); }
     static void raise_hook_events(GameConnection& c) { c.raise_hook_events(); }
     static game::ClientOptions& client_options(GameConnection& c) { return c.client_options_; }
     static void open_chat_log(GameConnection& c, const std::string& name) { c.open_chat_log(name); }

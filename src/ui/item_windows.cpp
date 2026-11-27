@@ -418,7 +418,13 @@ ItemWindowsActions item_windows(ItemWindowsState& state, const ItemWindowsInput&
                 ItemSlot is = ItemSlot::possessions(static_cast<std::int16_t>(s));
                 const Item* item = inv->at(is);
                 bool right = false;
-                if (slot_button(std::format("hs{}", s).c_str(), item, short_slot(s), icons, &right)) act.click = is;
+                if (slot_button(std::format("hs{}", s).c_str(), item, short_slot(s), icons, &right)) {
+                    if (ImGui::GetIO().KeyAlt) {
+                        if (item) show_item_info(state, *item);
+                    } else {
+                        act.click = is;
+                    }
+                }
                 inspect_or_open(is, item, right);
             }
             ImGui::TextColored(kDim, "General (right click a bag to open it)");
@@ -427,7 +433,13 @@ ItemWindowsActions item_windows(ItemWindowsState& state, const ItemWindowsInput&
                 ItemSlot is = ItemSlot::possessions(static_cast<std::int16_t>(s));
                 const Item* item = inv->at(is);
                 bool right = false;
-                if (slot_button(std::format("gen{}", s).c_str(), item, nullptr, icons, &right)) act.click = is;
+                if (slot_button(std::format("gen{}", s).c_str(), item, nullptr, icons, &right)) {
+                    if (ImGui::GetIO().KeyAlt) {
+                        if (item) show_item_info(state, *item);
+                    } else {
+                        act.click = is;
+                    }
+                }
                 inspect_or_open(is, item, right);
             }
             ImGui::Text("%u pp  %u gp  %u sp  %u cp", in.coins.platinum, in.coins.gold, in.coins.silver, in.coins.copper);
@@ -475,7 +487,13 @@ ItemWindowsActions item_windows(ItemWindowsState& state, const ItemWindowsInput&
                     ItemSlot is = ItemSlot::possessions(s, static_cast<std::int16_t>(i));
                     const Item* item = inv->at(is);
                     bool right = false;
-                    if (slot_button(std::format("b{}", i).c_str(), item, nullptr, icons, &right)) act.click = is;
+                    if (slot_button(std::format("b{}", i).c_str(), item, nullptr, icons, &right)) {
+                        if (ImGui::GetIO().KeyAlt) {
+                            if (item) show_item_info(state, *item);
+                        } else {
+                            act.click = is;
+                        }
+                    }
                     inspect_or_open(is, item, right);
                 }
             }

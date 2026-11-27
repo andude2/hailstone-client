@@ -10,7 +10,7 @@ does not bypass a function's own caller, screen or server-state checks.
 `API.version`, `API.Supports(module[, member])` and `API.Describe([module[, member]])`
 provide contract version and structural discovery. They confer no permissions.
 
-Coverage: **347/347 method implementation links**, **225/347 adjacent binding comment excerpts**, and **6/6 constant implementation links**. Excerpts below are verbatim binding comments; they preserve any documented signatures and results, and do not invent omitted arguments or results. **See binding** marks an author documentation gap.
+Coverage: **348/348 method implementation links**, **226/348 adjacent binding comment excerpts**, and **6/6 constant implementation links**. Excerpts below are verbatim binding comments; they preserve any documented signatures and results, and do not invent omitted arguments or results. **See binding** marks an author documentation gap.
 
 Unresolved method implementations: none.
 Unresolved constant implementations: none.
@@ -275,6 +275,7 @@ Unresolved constant implementations: none.
 | `API.inventory.FirstBagSlot` | `= 23` | `hs.FirstBagSlot` · [source](../src/app/lua_ui.cpp) | none (outer gate) | closed |
 | `API.inventory.FirstWornSlot` | `= 0` | `hs.FirstWornSlot` · [source](../src/app/lua_ui.cpp) | none (outer gate) | closed |
 | `API.inventory.HasSlot` | `ok = hs.HasSlot(slot, bagSlot\|nil)   -- true when ClickSlot can act on that slot now: in game, a possessions`<br>`slot (worn 0..22, general 23..32, the cursor 33), and with bagSlot a place (0-based) inside the bag in that`<br>`general slot. An empty slot or bag place counts: ClickSlot drops the cursor's item there.` | `hs.HasSlot` · [source](../src/app/lua_ui.cpp) | none (outer gate) | closed |
+| `API.inventory.InspectItem` | `ok = hs.InspectItem(itemId [, name]) -- opens the item's display window via OP_ItemLinkClick (Shift: new window).` | `hs.InspectItem` · [source](../src/app/lua_ui.cpp) | actions | closed |
 | `API.inventory.InventorySpace` | `free, total = hs.InventorySpace()   -- the empty places in the general slots and their bags (a general slot with a`<br>`bag counts as the bag's slots)` | `hs.InventorySpace` · [source](../src/app/lua_ui.cpp) | none (outer gate) | closed |
 | `API.inventory.Item` | `hs.Item(slot [, bagSlot]) -> nil or { name, id, icon, count, charges, stackSize, stackable, bagSlots, weight,`<br>`magic, lore, type, size, ac, hp, mana, cooldown }; cooldown: the slot's recast cool-down fraction (CInvSlotWnd_Draw:`<br>`shaded from the slot's top + cooldown x its height to its bottom in hs.CoolDownColor()), absent while idle` | `hs.Item` · [source](../src/app/lua_ui.cpp) | none (outer gate) | closed |
 | `API.inventory.ItemJob` | `done, total, mode, where = hs.ItemJob()   -- the job running (mode: "sort", "stack", "tidy", "sell", "destroy",`<br>`"tribute", "withdraw"; where:`<br>`"inventory", "bank" or "bag"); nil when none is` | `hs.ItemJob` · [source](../src/app/lua_ui.cpp) | none (outer gate) | closed |

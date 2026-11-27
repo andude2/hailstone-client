@@ -4,6 +4,7 @@
 // fresh GameConnection needs to look like the character it is attached to. Encoded with core/byte_io.h, not a
 // memory image; the reader bounds every section.
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -54,6 +55,14 @@ enum class DriveActionKind : std::uint8_t {
     Hail = 32,
     OpenBank = 33,
     Loot = 34,
+    LootAll = 35,
+    AutoInventory = 36,
+    DropOnDoll = 37,
+    AutoBank = 38,
+    AATrain = 39,
+    AATrainButton = 40,
+    AAActivate = 41,
+    AASetPercent = 42,
 };
 
 struct DriveAction {
@@ -94,11 +103,23 @@ struct DriveQuestion {
     bool ok_only = false;
 };
 
+struct DriveTradeState {
+    std::uint32_t partner_id = 0;
+    std::string partner_name;
+    bool with_npc = false;
+    bool my_ready = false;
+    bool their_ready = false;
+    std::array<std::uint32_t, 4> my_coins{};
+    std::array<std::uint32_t, 4> their_coins{};
+};
+
 struct DriveUiState {
     std::uint32_t zone_generation = 0;
     std::uint64_t inventory_revision = 0;
     std::optional<DriveQuestion> question;
     std::optional<QuantityRequest> quantity;
+    std::uint32_t loot_corpse_id = 0;
+    std::optional<DriveTradeState> trade;
 };
 
 struct DriveXTargetSlot {

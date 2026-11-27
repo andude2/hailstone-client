@@ -214,9 +214,15 @@ int ClientApp::run() {
             if (auto remote_in = ui_.take_remote_input()) {
                 const bool discrete = !remote_in->mouse_buttons.empty() || !remote_in->keys.empty() ||
                                       !remote_in->chars.empty() || remote_in->wheel_x != 0.0f ||
-                                      remote_in->wheel_y != 0.0f;
+                                      remote_in->wheel_y != 0.0f ||
+                                      remote_in->focused != last_remote_imgui_focused_ ||
+                                      remote_in->mouse_valid != last_remote_imgui_mouse_valid_ ||
+                                      remote_in->mouse_down_mask != last_remote_imgui_mouse_down_mask_;
                 if (discrete || now - last_remote_imgui_send_ >= std::chrono::milliseconds(16)) {
                     last_remote_imgui_send_ = now;
+                    last_remote_imgui_focused_ = remote_in->focused;
+                    last_remote_imgui_mouse_valid_ = remote_in->mouse_valid;
+                    last_remote_imgui_mouse_down_mask_ = remote_in->mouse_down_mask;
                     drive_client_->send_imgui_input(*remote_in);
                 }
             }
@@ -1484,7 +1490,7 @@ void ClientApp::crew_command(std::string_view args) {
     for (std::size_t i = 0; i < crew_entries_.size(); ++i) {
         if (!same(crew_entries_[i].character, name)) continue;
         if (crew_entries_[i].control) switch_to_control(crew_entry_paths_[i]);
-        else switch_to_observe(crew_entry_paths_[i]);
+        else switch_to_observe(crew_entry_paths_[i], crew_entries_[i].interactive);
         return;
     }
     log::warn("crew: no headless character named {}", name);
@@ -1637,9 +1643,19 @@ bool ClientApp::switch_to_crew(const std::filesystem::path& file, bool interact,
     viewing_observe_ = true;
     viewing_control_ = control;
     interacting_observe_ = !control && interact;
+    plate_gesture_.clear();
+    mouse_look_.cancel();
+    left_click_pending_.reset();
+    left_click_.reset();
+    right_click_ = false;
+    window_.set_mouse_captured(false);
+    ui_.reset_interaction_on_next_frame();
     ui_.set_remote_enabled(false);
     ui_.set_remote_enabled(true);
     last_remote_imgui_send_ = {};
+    last_remote_imgui_focused_ = false;
+    last_remote_imgui_mouse_valid_ = false;
+    last_remote_imgui_mouse_down_mask_ = 0;
     if (control) {
         const auto* me = conn_->world().player();
         const glm::vec3 pos = me ? me->position : glm::vec3(0.0f);
@@ -1666,7 +1682,18 @@ void ClientApp::release_observe() {
     if (!reuse_scene) unload_zone();
     if (stats_ui_) stats_ui_->forget();
     if (ui_api_) ui_api_->reset_bags();
+    plate_gesture_.clear();
+    mouse_look_.cancel();
+    left_click_pending_.reset();
+    left_click_.reset();
+    right_click_ = false;
+    window_.set_mouse_captured(false);
+    ui_.reset_interaction_on_next_frame();
     ui_.set_remote_enabled(false);
+    last_remote_imgui_send_ = {};
+    last_remote_imgui_focused_ = false;
+    last_remote_imgui_mouse_valid_ = false;
+    last_remote_imgui_mouse_down_mask_ = 0;
     conn_.reset();
     drive_client_.reset();
     control_client_.reset();
@@ -1752,6 +1779,13 @@ void ClientApp::apply_drive_resnapshot(const net::DriveSnapshot& snapshot) {
     if (!next->world().player()) return;
     drive_human_until_ = {};
     drive_human_sent_active_ = false;
+    plate_gesture_.clear();
+    mouse_look_.cancel();
+    left_click_pending_.reset();
+    left_click_.reset();
+    right_click_ = false;
+    window_.set_mouse_captured(false);
+    ui_.reset_interaction_on_next_frame();
     unload_zone();
     if (stats_ui_) stats_ui_->forget();
     if (ui_api_) ui_api_->reset_bags();

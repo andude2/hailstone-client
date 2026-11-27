@@ -924,8 +924,8 @@ TEST_CASE("Modern Group: clicking the pet bar targets the pet and clicking the o
     CHECK(conn.world().target_id == member.spawn_id);
 }
 
-TEST_CASE("Modern Player: Always show cast bar keeps the cast row and frame height between casts") {
-    RolePackRig r("modern", {"player.lua"});
+TEST_CASE("Modern Casting: separate Cast Bar frame shows while casting and honors Always show cast bar") {
+    RolePackRig r("modern", {"player.lua", "casting.lua"});
     REQUIRE(r.run(R"lua(
       local load, menuItem, gauge, label = dofile, ui.MenuItem, hs.Gauge, hs.Label
       dofile = function(path)
@@ -933,7 +933,7 @@ TEST_CASE("Modern Player: Always show cast bar keeps the cast row and frame heig
         if path == 'lib/hud.lua' then
           local bar = module.T.Bar
           module.T.Bar = function(key, x0, y0, x1, y1, scale, fraction, ...)
-            if key == 'player.cast' then castTrackDrawn, castFraction = true, fraction end
+            if key == 'casting.bar' then castTrackDrawn, castFraction = true, fraction end
             return bar(key, x0, y0, x1, y1, scale, fraction, ...)
           end
         end
@@ -969,14 +969,21 @@ TEST_CASE("Modern Player: Always show cast bar keeps the cast row and frame heig
     r.t.conn.set_spell_table_for_test(table);
     auto& cast = net::GameConnectionTestAccess::spells(r.t.conn).casting;
 
-    const auto draw = [&](const char* expected) {
+    const auto draw = [&](const char* expected, bool expect_cast_window) {
         REQUIRE(r.run("castTrackDrawn, castFraction, castGaugeRead, castLabel = nil, nil, nil, nil; return true") == "true");
         r.frames(2);
         CHECK(r.run(expected) == "true");
-        const auto* frame = ImGui::FindWindowByName("###modern.PlayerWindow");
-        REQUIRE(frame);
-        REQUIRE(frame->Active);
-        return frame->Size.y;
+        const auto* player = ImGui::FindWindowByName("###modern.PlayerWindow");
+        REQUIRE(player);
+        REQUIRE(player->Active);
+        const auto* casting = ImGui::FindWindowByName("###modern.CastingWindow");
+        if (expect_cast_window) {
+            REQUIRE(casting);
+            CHECK(casting->Active);
+        } else if (casting) {
+            CHECK_FALSE(casting->Active);
+        }
+        return player->Size.y;
     };
     const auto start_cast = [&] {
         cast.spell = 717;
@@ -988,17 +995,15 @@ TEST_CASE("Modern Player: Always show cast bar keeps the cast row and frame heig
     constexpr auto active = "return castTrackDrawn and castFraction > 0 and castFraction < 1 "
                             "and castGaugeRead and castLabel == 'Fixture Song'";
 
-    const float idle_height = draw(hidden);
+    // PlayerWindow stays a constant height while CastingWindow appears and hides independently.
+    const float idle_player_height = draw(hidden, false);
     start_cast();
-    const float cast_height = draw(active);
-    CHECK(cast_height > idle_height);
-    cast = {};
-    CHECK(draw(hidden) == idle_height);
+    CHECK(draw(active, true) == idle_player_height);
 
     const auto click_menu = [&](bool checked) {
         REQUIRE(r.run("castMenuX, castMenuY, castMenuChecked = nil, nil, nil; return true") == "true");
         auto& io = ImGui::GetIO();
-        const auto* frame = ImGui::FindWindowByName("###modern.PlayerWindow");
+        const auto* frame = ImGui::FindWindowByName("###modern.CastingWindow");
         REQUIRE(frame);
         io.AddMousePosEvent(frame->Pos.x + 10, frame->Pos.y + 12);
         r.frames(2);
@@ -1021,21 +1026,22 @@ TEST_CASE("Modern Player: Always show cast bar keeps the cast row and frame heig
     };
 
     click_menu(false);
-    CHECK(r.lua->setting("player.alwaysShowCastBar") == "1");
+    CHECK(r.lua->setting("casting.alwaysShow") == "1");
     r.lua->set_character_settings(r.scratch.path() / "character.txt"); // flush the shared settings before reopening
     {
         ui::lua::LuaUi saved({}, r.scratch.path() / "pack.txt");
-        CHECK(saved.setting("player.alwaysShowCastBar") == "1");
+        CHECK(saved.setting("casting.alwaysShow") == "1");
     }
-    CHECK(draw(empty) == cast_height);
-    start_cast();
-    CHECK(draw(active) == cast_height);
     cast = {};
-    CHECK(draw(empty) == cast_height);
+    CHECK(draw(empty, true) == idle_player_height);
+    start_cast();
+    CHECK(draw(active, true) == idle_player_height);
+    cast = {};
+    CHECK(draw(empty, true) == idle_player_height);
 
     click_menu(true);
-    CHECK(r.lua->setting("player.alwaysShowCastBar") == "0");
-    CHECK(draw(hidden) == idle_height);
+    CHECK(r.lua->setting("casting.alwaysShow") == "0");
+    CHECK(draw(hidden, false) == idle_player_height);
 }
 
 TEST_CASE("Modern Player: mana and endurance readouts are independently configurable") {

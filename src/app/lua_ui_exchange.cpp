@@ -68,7 +68,12 @@ int BankSlotClick(lua_State* L) {
     std::string_view button = lua_isstring(L, 3) ? lua_tostring(L, 3) : "left";
     if (button == "left") {
         const ImGuiIO& io = ImGui::GetIO();
-        h.conn->click_slot(s, io.KeyShift, io.KeyCtrl);
+        if (io.KeyAlt) {
+            const net::Item* it = h.conn->inventory().at(s);
+            if (it && it->id != 0 && h.inspect_item) h.inspect_item(*it);
+        } else {
+            h.conn->click_slot(s, io.KeyShift, io.KeyCtrl);
+        }
     } else if (button == "right" || button == "rightup") {
         item_right_click(h, s);
     } else if (button == "rightheld") {

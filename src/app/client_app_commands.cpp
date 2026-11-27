@@ -19,6 +19,7 @@
 #include "game/hotbuttons.h"
 #include "game/option_commands.h"
 #include "game/slash_commands.h"
+#include "game/window_notify.h"
 #include "game/xtarget.h"
 
 namespace hailstone::app {
@@ -181,6 +182,30 @@ void ClientApp::xtarget_command(const std::string& args) {
     incorrect();
 }
 
+// /notify (game/window_notify.h), the UI's half: the stock window takes the notification as
+// the player's click would, its own checks and all. False (no UI, or no such child took it)
+// hands the line back to GameConnection, whose fallback does what a headless character can.
+bool ClientApp::notify_command(std::string_view args) {
+    if (!conn_ || !ui_api_) return false;
+    const game::WindowNotify n = game::parse_window_notify(args);
+    if (!n.error.empty()) {
+        conn_->ui_message(n.error);
+        return true; // the line was taken (and answered); the fallback would only repeat it
+    }
+    bool done = false;
+    if (game::same_no_case(n.notification, "listselect"))
+        done = ui_api_->select_list(n.window, n.child, n.value - 1, 0);
+    else if (game::same_no_case(n.notification, "tabselect")) {
+        // set_tab_page has no answer to give; the window showing is what "took it" can mean.
+        done = ui_api_->shown(n.window);
+        if (done) ui_api_->set_tab_page(n.window, n.child, n.value - 1);
+    } else
+        done = ui_api_->click_child(n.window, n.child,
+                                    game::same_no_case(n.notification, "rightmouseup") ? "rightup" : "left");
+    if (!done) log::info("/notify: {} {} {}: nothing took it", n.window, n.child, n.notification);
+    return done;
+}
+
 bool ClientApp::client_command(std::string_view h, const std::string& args) {
     if (!conn_) return false;
     net::GameConnection& c = *conn_;
@@ -189,6 +214,7 @@ bool ClientApp::client_command(std::string_view h, const std::string& args) {
     const std::string off = eqstr(12946), on = eqstr(12947);
 
     // ---- windows
+    if (h == "Hailstone_notify") return notify_command(args);
     if (h == "Hailstone_import") {
         if (args.empty()) open_character_import();
         else c.show_chat("Usage: /import", 15);

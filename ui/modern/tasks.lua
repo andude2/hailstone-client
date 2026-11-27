@@ -535,6 +535,7 @@ end
 -- owners' progress on an objective is in its Progress cell's tooltip instead.
 local function advDetail(entry, s, myName)
   if not entry then K.Empty("Select a task to view details."); return end
+  myName = (myName and myName ~= "") and myName or "Self"
   -- owners who have it: you first, then peers by name
   local owners = {}
   if entry.owners["@self"] then owners[#owners + 1] = { key = "@self", name = myName } end
@@ -719,6 +720,7 @@ local function advancedView(localTasks, s, width, height)
   ui.EndChild()
   ui.EndChild()
   ui.SameLine(0, 14 * s)
+  local myName = API.character and API.character.Label(1) or ""
   ui.BeginChild("##advDetail", 0, height, false)
   advDetail(selected, s, myName)
   ui.EndChild()

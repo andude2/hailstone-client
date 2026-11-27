@@ -737,12 +737,31 @@ int ClickSlot(lua_State* L) {
     }
     if (button == "left") {
         const ImGuiIO& io = ImGui::GetIO();
-        h.conn->click_slot(s, io.KeyShift, io.KeyCtrl);
+        if (io.KeyAlt) inspect_held(h, h.conn->inventory().at(s));
+        else h.conn->click_slot(s, io.KeyShift, io.KeyCtrl);
     } else if ((button == "right" || button == "rightup") && !outside) {
         item_right_click(h, s);
     } else if (button == "rightheld") {
         inspect_held(h, h.conn->inventory().at(s));
     }
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+// ok = hs.InspectItem(itemId [, name]) -- opens the item's display window via OP_ItemLinkClick (Shift: new window).
+int InspectItem(lua_State* L) {
+    auto& h = Impl::of(L).host;
+    if (!h.conn || !h.in_game) {
+        lua_pushboolean(L, false);
+        return 1;
+    }
+    const lua_Integer id = luaL_checkinteger(L, 1);
+    if (id <= 0 || id > 0xffffffffll) {
+        lua_pushboolean(L, false);
+        return 1;
+    }
+    const std::string name = lua_isstring(L, 2) ? lua_tostring(L, 2) : std::string();
+    h.conn->request_item_link(static_cast<std::uint32_t>(id), name, 0, ImGui::GetIO().KeyShift);
     lua_pushboolean(L, true);
     return 1;
 }
@@ -1000,7 +1019,7 @@ int ClickChild(lua_State* L) {
     // item; a quick right click the window does nothing with shows it too.
     const net::Item* item = w ? w->slot_item(m.host, child) : nullptr;
     bool ok = false;
-    if (item && button == "rightheld") {
+    if (item && (button == "rightheld" || (button == "left" && ImGui::GetIO().KeyAlt))) {
         inspect_held(m.host, item);
         ok = true;
     } else {
@@ -2147,7 +2166,7 @@ int BagSlotClick(lua_State* L) {
     StockWindow* w = m.window(luaL_checkstring(L, 1));
     int index = held_int(luaL_checkinteger(L, 2));
     std::string button = lua_isstring(L, 3) ? lua_tostring(L, 3) : "left";
-    if (button == "rightheld" && w && w->bag_item(m.host, index) && index >= 0) {
+    if ((button == "rightheld" || (button == "left" && ImGui::GetIO().KeyAlt)) && w && index >= 0) {
         inspect_held(m.host, w->bag_item(m.host, index));
         lua_pushboolean(L, 1);
         return 1;
@@ -3313,7 +3332,7 @@ void UiApi::register_functions(lua_State* L) {
         {"InGame", InGame}, {"UiReady", UiReady}, {"GameState", GameState}, {"Name", Name}, {"SlotName", SlotName},
         {"ClassName", ClassName}, {"ClassNamesRevision", ClassNamesRevision},
         {"Item", Item}, {"ItemIcon", ItemIcon}, {"Money", Money}, {"Label", Label}, {"Gauge", Gauge},
-        {"ClickSlot", ClickSlot}, {"HasSlot", HasSlot}, {"AltCurrencies", AltCurrencies}, {"UiTexture", UiTexture}, {"UiImage", UiImage}, {"UiAnimation", UiAnimation},
+        {"ClickSlot", ClickSlot}, {"HasSlot", HasSlot}, {"InspectItem", InspectItem}, {"AltCurrencies", AltCurrencies}, {"UiTexture", UiTexture}, {"UiImage", UiImage}, {"UiAnimation", UiAnimation},
         {"ReplaceWindow", ReplaceWindow}, {"WindowPlaced", WindowPlaced}, {"ShowWindow", ShowWindow}, {"WindowButton", WindowButton},
         {"WindowText", WindowText}, {"ChildShown", ChildShown}, {"WindowList", WindowList}, {"ChildArt", ChildArtFn},
         {"GemTint", GemTint}, {"GemOverlay", GemOverlay}, {"GemInfo", GemInfo}, {"ButtonCoolDown", ButtonCoolDown}, {"CoolDownColor", CoolDownColor}, {"ItemPreview", ItemPreview}, {"ItemPreviewImage", ItemPreviewImage}, {"ItemPreviewControl", ItemPreviewControl}, {"BuffSlot", BuffSlot}, {"BuffOverlay", BuffOverlay}, {"ClickChild", ClickChild}, {"ClickChildAt", ClickChildAt},

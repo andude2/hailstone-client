@@ -45,8 +45,8 @@ this page says so.
   exist are NULL. That is `nil` in Lua and the text `NULL` in `${...}`. It is never an error.
 - **Case.** TLO and member names are not case sensitive (`${me.pcthps}` works).
 - **Text form.** In `${...}`, `TRUE`/`FALSE` stand for booleans and floats get two decimals.
-- **Inheritance.** A member a type does not have is looked up on its parent: `character` → `spawn`, `buff` → `spell`,
-  `groupmember` → `spawn`. If no type in the chain has the member, it is looked up on the plain value, so
+- **Inheritance.** A member a type does not have is looked up on its parent: `character` → `spawn`, `pet` → `spawn`,
+  `buff` → `spell`, `groupmember` → `spawn`. If no type in the chain has the member, it is looked up on the plain value, so
   `Target.Name.Length` works.
 - **Coordinates.** `X`, `Y`, `Loc` and the `loc` search word use MQ's coordinates, which are the server's (`/loc`
   order: Y first). The `hailstone` module and the C structs use the zone's own coordinates (`game/coords.h`), with x
@@ -91,7 +91,7 @@ manifest's `caps` (docs/addons.md).
 | `Spawn` | id, or a [search](#spawn-searches) | `spawn` | the spawn with that id, or the nearest that matches |
 | `SpawnCount` | a search | int | how many spawns match (0 when not connected) |
 | `NearestSpawn` | `n`, `n,search` or `search` | `spawn` | the nth nearest that matches (1 the nearest) |
-| `Pet` | | `spawn` | the player's pet: the one the pet window shows, else the first pet the player owns |
+| `Pet` | | `pet` | the player's pet: the one the pet window shows, else the first pet the player owns |
 | `Debuff` | none, or `pet` | `debuff` | the disease, poison, curse and corruption counters on the player, or on the player's pet (NULL without one); below |
 | `Group` | | `group` | the player's group; NULL when not grouped |
 | `Zone` | | `zone` | the current zone |
@@ -102,6 +102,7 @@ manifest's `caps` (docs/addons.md).
 | `Window` | window name | `window` | a window, to ask whether it is open |
 | `Plugin` | plugin name | `plugin` | a compiled plugin, to ask whether it is loaded |
 | `EverQuest` | | `everquest` | the game state and server name |
+| `Hailstone` | | `hailstone` | client info (`Build`, `BuildDate`, `Version`, `Path[...]`, `Headless`, `ViewerConnected`, plus `everquest` members) |
 | `Time` | | `time` | the computer's local time |
 | `GameTime` | | `gametime` | Norrath's time of day; NULL before the server sent it |
 | `Heading` | degrees | `heading` | a heading made from a number (wrapped to 0..360) |
@@ -170,7 +171,7 @@ the clean name.
 | `LineOfSight` | bool | the player's eyes to it through the zone's collision, the check the client's own abilities make; NULL before collision is loaded |
 | `AFK`, `LFG`, `Linkdead`, `GM`, `Anonymous`, `Roleplaying`, `Trader`, `Buyer`, `Mercenary` | bool | |
 | `Master`, `Owner` | `spawn` | a pet's owner |
-| `Pet` | `spawn` | its pet (for the player, the pet the pet window shows) |
+| `Pet` | `spawn` / `pet` | its pet (for the player, the `pet` the pet window shows) |
 | `xtarget` | bool | on the player's extended target list |
 | `BuffsPopulated` | bool | its buffs are known: always for the player, and for the target once the server sent OP_TargetBuffs |
 | `BuffCount` | int | |
@@ -185,6 +186,22 @@ GMs, players with the Inspect Buffs AA or leadership, or when its `AlwaysSendTar
 `Feared` 23, `Rooted` 99, `Snared` SPA 3 with a negative value, `Slowed` SPA 11 below 100%, `Silenced` 96. `Poisoned`,
 `Diseased`, `Cursed` and `Corrupted` are a buff with poison (SPA 36), disease (35), curse (116) or corruption (369)
 counters.
+
+### pet
+
+The value of `Pet` and `Me.Pet`. It has every `spawn` member, plus the state the server sends for the player's focused
+pet (`OP_PetHoTT`, `OP_PetCommandState`, `OP_PetBuffWindow`). Its plain value is the clean name.
+
+| Member | Gives | What |
+|---|---|---|
+| `Target` | `spawn` | the pet's current target (`OP_PetHoTT`); NULL when none |
+| `Combat` | bool | TRUE while the pet has a live target |
+| `Stance` | string | `FOLLOW`, `GUARD` or `NONE` |
+| `Follow`, `Guard`, `Taunt`, `Hold`, `GHold`, `Focus`, `SpellHold`, `Stop`, `Regroup` | bool | the pet window's toggle states |
+| `BuffsPopulated` | bool | TRUE (the server sends the pet's buff window) |
+| `BuffCount` | int | number of active pet buffs |
+| `Buff[n\|name]` | `spell` / int | for 1-based slot `n`, the `spell` in that slot; for a name (exact first, else substring; `=name` exact only), its 1-based slot number; with no index, the count |
+| `BuffDuration[n\|name]` | `timestamp` | time left on that pet buff |
 
 ### character
 
@@ -225,7 +242,7 @@ character's name.
 | `XTarget[n]` | `spawn` | the spawn in extended target slot n; with no index, how many slots hold a spawn |
 | `Inventory[slot]` | `item` | the item in a slot, by [name or number](#inventory-slots) |
 | `FreeInventory` | int | empty general slots plus empty bag slots |
-| `Pet` | `spawn` | as the `Pet` TLO |
+| `Pet` | `pet` | as the `Pet` TLO |
 | `Bandolier[name\|n]` | `bandolier` | a bandolier set by its name (any case) or number (1..20, clamped); NULL for a name no set has |
 | `AbilityReady[name\|number]` | bool | a skill's reuse timer has run out |
 | `CombatAbilityReady[name]` | bool | the same for a combat ability (a discipline); the name works without its "Rk. II" |
@@ -331,6 +348,7 @@ name.
 | `timestamp` | milliseconds | `Raw` (ms), `TotalSeconds`, `TotalMinutes`, `Hours`, `Minutes` (0..59), `Seconds` (0..59), `Ticks` (6 s, rounded up), `TimeHMS` (`h:mm:ss`), `Time` (`m:ss`) |
 | `zone` | its long name | `ID`, `Name`, `ShortName` |
 | `everquest` | `EverQuest` | `GameState` (`INGAME`, `CHARSELECT` or `PRECHARSELECT`), `Server` (the server's name), `UIScale` (always 1.0) |
+| `hailstone` | `Hailstone` | `Build` (4), `BuildDate` (`yyyymmdd`), `Version`, `Path[...]`, `Headless` (bool, `TRUE` under `hailstone_headless`), `ViewerConnected` (bool, `TRUE` while a GUI viewer is attached to a headless client), and all `everquest` members |
 | `window` | `TRUE` or `FALSE` | `Open`, `Name` |
 | `plugin` | its name when loaded, else NULL | `IsLoaded`, `Name` |
 | `debuff` | `Count` | `Count` (all four), `Poisoned`, `Diseased`, `Cursed`, `Corrupted`: counters, summed over every buff; `Silenced`: bool, a buff silences (SPA 96) |
@@ -353,7 +371,12 @@ starting counters. `Silenced` is TRUE while any of the buffs has SPA 96 (as `Me.
 Only these members are here; MQ2Debuffs' others are missing.
 
 `Window[name]` asks the UI whether a window of that name is open. The names are the game's own window names, which
-the UI packs use too (`InventoryWindow`, `LootWnd`, `BankWnd`, `GroupWindow`, ...).
+the UI packs use too (`InventoryWindow`, `LootWnd`, `BankWnd`, `GroupWindow`, ...). The windows a headless
+`/notify` can act on (docs/headless.md) answer `.Open` from the connection instead, and two of them carry more of
+MQ's window for the scripts that read it before notifying: `TradeWnd` (`.Child[TRDW_HisName].Text`, the outgoing
+`.Child[TRDW_TradeSlot<n>].Tooltip` and `.Child[TRDW_MyMoney<n>].Text`, `.Child[TRDW_Trade_Button].Enabled`,
+`.HisTradeReady`, `.MyTradeReady`, `.Requester`) and `ConfirmationDialogBox` (`.Child[CD_TextOutput].Text`, the
+Yes/OK button's `.Enabled`, `.Requester`). Clicking is `/notify`'s (docs/commands.md).
 
 ### Pure types
 
@@ -1019,6 +1042,7 @@ send a request. `OpenTask` changes the journal selection and visibility, not tas
 | ItemIcon | (icon) → tex,u0,v0,u1,v1 \| nil | Item icon cell | — |
 | ClickSlot | (slot, bagSlot\|nil, "left"\|"leftheld"\|"right"\|phase [, outside]) → ok | Game slot logic: pick up, drop, swap, split, use | actions |
 | HasSlot | (slot, bagSlot\|nil) → bool | ClickSlot can act there now: in game, a possessions slot 0..33, and with bagSlot a place inside the bag that general slot holds (empty places count) | — |
+| InspectItem | (itemId [, name]) → bool | Open `ItemDisplayWnd` for an item ID via an item link request (Shift opens a fresh window) | actions |
 | SlotItem | (name, child) → item\|nil | Item in a window's item slot (loot, bank, trade…; `MerchantWnd` `ItemList:<row>` a merchant's row, `ItemDisplayWindow` `Hailstone_Item` the shown item) | — |
 | BagInfo | (bagWindow) → name, slots, combine, where, slot \| nil | "Bag1".."Bag36" or "WorldContainer". where: "inventory", "bank" or "other" | — |
 | BagSlotItem | (bagWindow, index) → item\|nil | Item in a bag slot (0-based) | — |

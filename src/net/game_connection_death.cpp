@@ -168,6 +168,7 @@ void GameConnection::handle_death(const Death& d) {
     if (r.trainer_window_closed) close_trainer();
     if (r.target_cleared) {
         world_.target_id = 0;
+        target_of_target_ = 0;
         auto_target_xtarget_due_ = true; // Hailstone (auto_target_xtarget): another attacker on the list, if any
     }
     forget_auto_target_attacker(d.spawn_id);

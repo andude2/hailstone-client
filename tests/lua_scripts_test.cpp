@@ -355,7 +355,7 @@ local SCENES = {
     PlayerWindow = { 300, 162 }, TargetWindow = { 300, 172 }, PetInfoWindow = { 240, 150 }, CompassWindow = { 300, 30 },
     Minimap = { 200, 248 }, EQMainWnd = { 44, 44 }, Chat1 = "fit", BuffWindow = { "tray", 30, 34 },
     ShortDurationBuffWindow = { "tray", 8, 26 }, GroupWindow = { 210, 358 }, ExtendedTargetWnd = { 210, 199 },
-    AuraWindow = { 190, 80 }, PotionBeltWnd = { 228, 52 }, BreathWindow = { 240, 38 },
+    AuraWindow = { 190, 80 }, PotionBeltWnd = { 228, 52 }, CastingWindow = { 240, 38 }, BreathWindow = { 240, 38 },
   },
 }
 local function frames(scene, s, room)

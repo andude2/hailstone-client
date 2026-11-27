@@ -235,6 +235,7 @@ These are not in the original client.
 |---|---|
 | `/abilitybook [auto [on\|off]]` | The Ability Book; `auto` turns autoskill on or off. |
 | `/finditem [text]`, `/advi [text]` | The Advanced Inventory, searching everything you have for the text. |
+| `/notify <window> <child> <leftmouseup\|rightmouseup\|listselect\|tabselect> [value] [expected]` | MacroQuest's window notification: click a window's child (or pick a 1-based list row or tab page) as if with the mouse, for scripts. Without a window (the headless client), the trade, loot, confirmation, large-dialog, task-decline, bank and tribute buttons still run while their window shows; accepting a trade needs the outgoing side empty, and a confirmation's Yes only answers another player's invite or translocate (from `expected`, when given) (docs/headless.md). |
 | `/destroy` | Destroy the item on your cursor (the inventory's Destroy button). |
 | `/foreground` | Raise this client’s window and request keyboard focus. On Windows, a maximized window keeps its size. |
 | `/destroycursor <id>` | Destroy the item on your cursor without asking, only if its item id is `<id>`; never coin or a bag. For plugins (docs/plugins.md). |

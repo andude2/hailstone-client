@@ -83,7 +83,11 @@ public:
         const std::u8string u8 = ini_file.u8string();
         ini_path_.assign(reinterpret_cast<const char*>(u8.data()), u8.size());
         io.IniFilename = ini_path_.empty() ? nullptr : ini_path_.c_str();
+        io.IniSavingRate = 1.0f;
         io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+        ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
+        pio.Renderer_TextureMaxWidth = 4096;
+        pio.Renderer_TextureMaxHeight = 4096;
         io.ConfigErrorRecovery = true;
         io.ConfigErrorRecoveryEnableAssert = false;
         io.ConfigErrorRecoveryEnableTooltip = true;
@@ -95,6 +99,7 @@ public:
     }
 
     ~HeadlessImGui() {
+        flush_ini();
         if (ctx_) {
             ImGui::DestroyContext(ctx_);
             ctx_ = nullptr;
@@ -103,6 +108,17 @@ public:
 
     HeadlessImGui(const HeadlessImGui&) = delete;
     HeadlessImGui& operator=(const HeadlessImGui&) = delete;
+
+    void flush_ini() {
+        if (!ctx_) return;
+        ImGui::SetCurrentContext(ctx_);
+        ImGuiIO& io = ImGui::GetIO();
+        if (GImGui && GImGui->SettingsLoaded && io.IniFilename && io.IniFilename[0] != '\0' &&
+            GImGui->SettingsDirtyTimer > 0.0f) {
+            ImGui::SaveIniSettingsToDisk(io.IniFilename);
+            GImGui->SettingsDirtyTimer = 0.0f;
+        }
+    }
 
     void reset_input() {
         if (!ctx_) return;
@@ -115,6 +131,8 @@ public:
         ImGui::ClearDragDrop();
         io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
         io.AddFocusEvent(false);
+        last_focused_ = false;
+        last_mods_ = 0;
     }
 
     void render_frame(Automation& automation, DriveObserveServer& observe,
@@ -127,6 +145,7 @@ public:
             if (input->display_w >= 64.0f && input->display_h >= 64.0f) {
                 display_w_ = input->display_w;
                 display_h_ = input->display_h;
+                has_display_size_ = true;
             }
             if (input->fb_scale_x > 0.0f && input->fb_scale_y > 0.0f) {
                 fb_scale_x_ = input->fb_scale_x;
@@ -139,15 +158,41 @@ public:
             }
             io.DeltaTime = std::clamp(input->dt, 1.0e-4f, 0.25f);
             if (interactive) {
-                io.AddFocusEvent(input->focused);
-                io.AddKeyEvent(ImGuiMod_Ctrl, (input->mods & 1u) != 0);
-                io.AddKeyEvent(ImGuiMod_Shift, (input->mods & 2u) != 0);
-                io.AddKeyEvent(ImGuiMod_Alt, (input->mods & 4u) != 0);
-                io.AddKeyEvent(ImGuiMod_Super, (input->mods & 8u) != 0);
+                if (input->focused != last_focused_) {
+                    io.AddFocusEvent(input->focused);
+                    last_focused_ = input->focused;
+                }
+                const std::uint8_t changed_mods = static_cast<std::uint8_t>(input->mods ^ last_mods_);
+                if (changed_mods & 1u) io.AddKeyEvent(ImGuiMod_Ctrl, (input->mods & 1u) != 0);
+                if (changed_mods & 2u) io.AddKeyEvent(ImGuiMod_Shift, (input->mods & 2u) != 0);
+                if (changed_mods & 4u) io.AddKeyEvent(ImGuiMod_Alt, (input->mods & 4u) != 0);
+                if (changed_mods & 8u) io.AddKeyEvent(ImGuiMod_Super, (input->mods & 8u) != 0);
+                last_mods_ = input->mods;
                 if (input->mouse_valid) io.AddMousePosEvent(input->mouse_x, input->mouse_y);
                 else io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+                std::array<bool, ImGuiMouseButton_COUNT> tracked_down{};
+                for (int b = 0; b < ImGuiMouseButton_COUNT; ++b)
+                    tracked_down[static_cast<std::size_t>(b)] = io.MouseDown[b];
+                for (int i = 0; i < GImGui->InputEventsQueue.Size; ++i) {
+                    const ImGuiInputEvent& e = GImGui->InputEventsQueue[i];
+                    if (e.Type == ImGuiInputEventType_MouseButton && e.MouseButton.Button >= 0 &&
+                        e.MouseButton.Button < ImGuiMouseButton_COUNT) {
+                        tracked_down[static_cast<std::size_t>(e.MouseButton.Button)] = e.MouseButton.Down;
+                    }
+                }
                 for (const auto& mb : input->mouse_buttons) {
-                    if (mb.button < ImGuiMouseButton_COUNT) io.AddMouseButtonEvent(mb.button, mb.down);
+                    if (mb.button < ImGuiMouseButton_COUNT) {
+                        io.AddMouseButtonEvent(mb.button, mb.down);
+                        tracked_down[mb.button] = mb.down;
+                    }
+                }
+                if (input->has_mouse_down_mask) {
+                    // Reconcile any missed mouse-up against the viewer's authoritative held-button mask so a
+                    // dragged remote window or widget can never stay stuck held.
+                    for (int b = 0; b < ImGuiMouseButton_COUNT; ++b) {
+                        const bool held = ((input->mouse_down_mask >> b) & 1u) != 0;
+                        if (!held && tracked_down[static_cast<std::size_t>(b)]) io.AddMouseButtonEvent(b, false);
+                    }
                 }
                 if (input->wheel_x != 0.0f || input->wheel_y != 0.0f)
                     io.AddMouseWheelEvent(input->wheel_x, input->wheel_y);
@@ -160,53 +205,64 @@ public:
         } else {
             io.DeltaTime = 1.0f / 30.0f;
         }
+        // Do not run the first ImGui::NewFrame() until the viewer has reported its real viewport size; otherwise Dear
+        // ImGui loads the saved .ini against the 1280x720 placeholder, clamps high-res window positions/sizes inward,
+        // and overwrites the saved layout.
+        if (!has_display_size_) return;
 
-        io.DisplaySize = ImVec2(display_w_, display_h_);
-        io.DisplayFramebufferScale = ImVec2(fb_scale_x_, fb_scale_y_);
-        const int kbd_req = GImGui->WantCaptureKeyboardNextFrame;
-        ui::keep_tab_from_windows();
-        ImGui::NewFrame();
-        automation.imgui(false);
-        ImGui::Render();
+        ImDrawData* dd = nullptr;
+        int kbd_req = -1;
+        // Dear ImGui trickles coalesced same-button down+up edges across frames. Pump remaining queued events
+        // immediately (bounded to 4 passes) so fast clicks complete on the same tick without backlogging.
+        for (int pass = 0; pass < 4; ++pass) {
+            if (pass > 0) io.DeltaTime = 1.0e-3f;
+            io.DisplaySize = ImVec2(display_w_, display_h_);
+            io.DisplayFramebufferScale = ImVec2(fb_scale_x_, fb_scale_y_);
+            kbd_req = GImGui->WantCaptureKeyboardNextFrame;
+            ui::keep_tab_from_windows();
+            ImGui::NewFrame();
+            automation.imgui(false);
+            ImGui::Render();
 
-        ImDrawData* dd = ImGui::GetDrawData();
-        if (!dd) return;
-
-        if (dd->Textures) {
-            for (ImTextureData* tex : *dd->Textures) {
-                if (!tex) continue;
-                const auto id = static_cast<std::uint32_t>(tex->UniqueID);
-                if (tex->Status == ImTextureStatus_WantCreate) {
-                    tex->SetTexID(static_cast<ImTextureID>(id));
-                    send_texture_rect(observe, tex, 0, 0, static_cast<std::uint16_t>(tex->Width),
-                                      static_cast<std::uint16_t>(tex->Height), true);
-                    tex->SetStatus(ImTextureStatus_OK);
-                } else if (tex->Status == ImTextureStatus_WantUpdates) {
-                    if (tex->TexID == ImTextureID_Invalid) tex->SetTexID(static_cast<ImTextureID>(id));
-                    if (send_full_atlas) {
+            dd = ImGui::GetDrawData();
+            if (dd && dd->Textures) {
+                for (ImTextureData* tex : *dd->Textures) {
+                    if (!tex) continue;
+                    const auto id = static_cast<std::uint32_t>(tex->UniqueID);
+                    if (tex->Status == ImTextureStatus_WantCreate) {
+                        tex->SetTexID(static_cast<ImTextureID>(id));
                         send_texture_rect(observe, tex, 0, 0, static_cast<std::uint16_t>(tex->Width),
                                           static_cast<std::uint16_t>(tex->Height), true);
-                    } else if (tex->UpdateRect.w > 0 && tex->UpdateRect.h > 0) {
-                        send_texture_rect(observe, tex, tex->UpdateRect.x, tex->UpdateRect.y, tex->UpdateRect.w,
-                                          tex->UpdateRect.h, false);
+                        tex->SetStatus(ImTextureStatus_OK);
+                    } else if (tex->Status == ImTextureStatus_WantUpdates) {
+                        if (tex->TexID == ImTextureID_Invalid) tex->SetTexID(static_cast<ImTextureID>(id));
+                        if (send_full_atlas) {
+                            send_texture_rect(observe, tex, 0, 0, static_cast<std::uint16_t>(tex->Width),
+                                              static_cast<std::uint16_t>(tex->Height), true);
+                        } else if (tex->UpdateRect.w > 0 && tex->UpdateRect.h > 0) {
+                            send_texture_rect(observe, tex, tex->UpdateRect.x, tex->UpdateRect.y, tex->UpdateRect.w,
+                                              tex->UpdateRect.h, false);
+                        }
+                        tex->SetStatus(ImTextureStatus_OK);
+                    } else if (tex->Status == ImTextureStatus_WantDestroy) {
+                        ui::RemoteImGuiTexture msg;
+                        msg.id = id;
+                        msg.destroy = true;
+                        observe.publish_imgui_texture(msg);
+                        tex->SetTexID(ImTextureID_Invalid);
+                        tex->SetStatus(ImTextureStatus_Destroyed);
+                    } else if (tex->Status == ImTextureStatus_OK && send_full_atlas && tex->Pixels && tex->Width > 0 &&
+                               tex->Height > 0) {
+                        if (tex->TexID == ImTextureID_Invalid) tex->SetTexID(static_cast<ImTextureID>(id));
+                        send_texture_rect(observe, tex, 0, 0, static_cast<std::uint16_t>(tex->Width),
+                                          static_cast<std::uint16_t>(tex->Height), true);
                     }
-                    tex->SetStatus(ImTextureStatus_OK);
-                } else if (tex->Status == ImTextureStatus_WantDestroy) {
-                    ui::RemoteImGuiTexture msg;
-                    msg.id = id;
-                    msg.destroy = true;
-                    observe.publish_imgui_texture(msg);
-                    tex->SetTexID(ImTextureID_Invalid);
-                    tex->SetStatus(ImTextureStatus_Destroyed);
-                } else if (tex->Status == ImTextureStatus_OK && send_full_atlas && tex->Pixels && tex->Width > 0 &&
-                           tex->Height > 0) {
-                    if (tex->TexID == ImTextureID_Invalid) tex->SetTexID(static_cast<ImTextureID>(id));
-                    send_texture_rect(observe, tex, 0, 0, static_cast<std::uint16_t>(tex->Width),
-                                      static_cast<std::uint16_t>(tex->Height), true);
                 }
             }
+            send_full_atlas = false;
+            if (GImGui->InputEventsQueue.empty()) break;
         }
-        send_full_atlas = false;
+        if (!dd) return;
 
         static_assert(sizeof(ImDrawIdx) == sizeof(std::uint16_t));
         ui::RemoteImGuiFrame frame;
@@ -295,12 +351,14 @@ private:
         const auto th = static_cast<std::uint16_t>(tex->Height);
         if (static_cast<std::uint32_t>(rx) + rw > tw || static_cast<std::uint32_t>(ry) + rh > th) return;
         // Split large uploads into <= 4 MiB horizontal bands so every pipe message stays well under kLocalPipeMaxMessage.
+        // Keep max_rows clamped to rh and iterate in size_t so narrow glyph rects (e.g. rw = 1, 2, 4, 8, 16) cannot
+        // truncate max_rows to 0 in uint16_t or wrap y_off back below rh.
         const std::size_t row_bytes = static_cast<std::size_t>(rw) * 4u;
-        const std::uint16_t max_rows =
-            static_cast<std::uint16_t>(std::max<std::size_t>(1u, (std::size_t{4} << 20) / std::max<std::size_t>(row_bytes, 1u)));
+        const std::size_t max_rows = ui::remote_texture_band_rows(rw, rh);
+        if (max_rows == 0) return;
         bool first_band = full;
-        for (std::uint16_t y_off = 0; y_off < rh; y_off = static_cast<std::uint16_t>(y_off + max_rows)) {
-            const std::uint16_t bh = static_cast<std::uint16_t>(std::min<std::uint32_t>(max_rows, rh - y_off));
+        for (std::size_t y_off = 0; y_off < rh; y_off += max_rows) {
+            const auto bh = static_cast<std::uint16_t>(std::min<std::size_t>(max_rows, rh - y_off));
             ui::RemoteImGuiTexture msg;
             msg.id = static_cast<std::uint32_t>(tex->UniqueID);
             msg.tex_w = tw;
@@ -342,8 +400,11 @@ private:
     float scale_ = 1.0f;
     float display_w_ = 1280.0f;
     float display_h_ = 720.0f;
+    bool has_display_size_ = false;
     float fb_scale_x_ = 1.0f;
     float fb_scale_y_ = 1.0f;
+    bool last_focused_ = false;
+    std::uint8_t last_mods_ = 0;
 };
 
 } // namespace
@@ -460,6 +521,85 @@ CrewFile parse_crew_file(std::string_view text) {
     }
     if (out.error.empty() && out.members.empty()) out.error = "no crew members (a section per character)";
     return out;
+}
+
+std::string format_crew_file(const CrewFile& crew) {
+    std::string out;
+    out += "[crew]\n";
+    if (!crew.data_dir.empty()) out += "data_dir=" + crew.data_dir + "\n";
+    if (!crew.game_dir.empty()) out += "game_dir=" + crew.game_dir + "\n";
+    out += "stagger=" + std::to_string(std::max(0, crew.stagger)) + "\n";
+    if (!crew.autoload.empty()) out += "autoload=" + crew.autoload + "\n";
+    out += std::string("chat_log=") + (crew.chat_log ? "1\n" : "0\n");
+    out += std::string("observe=") + (crew.observe ? "1\n" : "0\n");
+    out += std::string("interact=") + (crew.interact ? "1\n" : "0\n");
+    out += std::string("control=") + (crew.control ? "1\n" : "0\n");
+    if (!crew.drive_dir.empty()) out += "drive_dir=" + crew.drive_dir + "\n";
+    std::set<std::string> used;
+    for (const CrewMember& m : crew.members) {
+        std::string base = !m.label.empty() ? m.label : (!m.character.empty() ? m.character : m.account);
+        if (base.empty() || base == "crew") base = "member";
+        for (char& c : base)
+            if (c == '[' || c == ']' || c == '\r' || c == '\n') c = '_';
+        std::string label = base;
+        for (int n = 2; used.contains(label); ++n) label = base + "-" + std::to_string(n);
+        used.insert(label);
+        out += "\n[" + label + "]\n";
+        out += "server=" + m.server + "\n";
+        out += "account=" + m.account + "\n";
+        if (!m.character.empty()) out += "character=" + m.character + "\n";
+        if (!m.world.empty()) out += "world=" + m.world + "\n";
+        if (!m.exec.empty()) out += "exec=" + m.exec + "\n";
+        if (!m.exec_zone.empty()) out += "exec_zone=" + m.exec_zone + "\n";
+        if (!m.game_dir.empty()) out += "game_dir=" + m.game_dir + "\n";
+        if (!m.autoload.empty()) out += "autoload=" + m.autoload + "\n";
+        if (m.chat_log >= 0) out += "chat_log=" + std::to_string(m.chat_log ? 1 : 0) + "\n";
+        if (m.seconds > 0) out += "seconds=" + std::to_string(m.seconds) + "\n";
+        if (m.stagger >= 0) out += "stagger=" + std::to_string(m.stagger) + "\n";
+        if (m.interact >= 0) out += "interact=" + std::to_string(m.interact ? 1 : 0) + "\n";
+        if (m.observe >= 0) out += "observe=" + std::to_string(m.observe ? 1 : 0) + "\n";
+        if (m.control >= 0) out += "control=" + std::to_string(m.control ? 1 : 0) + "\n";
+    }
+    return out;
+}
+
+std::filesystem::path crew_drive_dir(const CrewFile& crew, const std::filesystem::path& data_dir) {
+    std::filesystem::path drive_dir =
+        crew.drive_dir.empty() ? data_dir / "run" : std::filesystem::path(crew.drive_dir);
+    if (drive_dir.is_relative()) drive_dir = data_dir / drive_dir;
+    return drive_dir;
+}
+
+void clear_stale_drive_files(const std::filesystem::path& drive_dir) {
+    std::error_code ec;
+    std::filesystem::create_directories(drive_dir, ec);
+    if (ec) return;
+    for (const auto& entry : std::filesystem::directory_iterator(drive_dir, ec)) {
+        if (ec || !entry.is_regular_file(ec)) continue;
+        const std::string name = entry.path().filename().string();
+        if (name.starts_with("drive-") && name.ends_with(".txt")) {
+            std::error_code rm_ec;
+            std::filesystem::remove(entry.path(), rm_ec);
+        }
+    }
+}
+
+void seed_headless_imgui_ini(const std::filesystem::path& ini, const std::filesystem::path& gui_ini,
+                             const std::filesystem::path& legacy_ini) {
+    if (ini.empty()) return;
+    std::error_code ec;
+    if (const auto parent = ini.parent_path(); !parent.empty()) std::filesystem::create_directories(parent, ec);
+    if (std::filesystem::exists(ini, ec)) return;
+    if (!legacy_ini.empty() && std::filesystem::is_regular_file(legacy_ini, ec)) {
+        std::filesystem::rename(legacy_ini, ini, ec);
+        if (!ec) return;
+        ec.clear();
+        std::filesystem::copy_file(legacy_ini, ini, std::filesystem::copy_options::skip_existing, ec);
+        if (!ec) std::filesystem::remove(legacy_ini, ec);
+        return;
+    }
+    if (!gui_ini.empty() && std::filesystem::is_regular_file(gui_ini, ec))
+        std::filesystem::copy_file(gui_ini, ini, std::filesystem::copy_options::skip_existing, ec);
 }
 
 std::vector<std::string> headless_zone_commands(const HeadlessOptions& options, bool first_zone) {
@@ -915,13 +1055,21 @@ int run_headless(HeadlessOptions options) {
     // Create the CPU-only ImGui context before Automation so plugins can cache its pointer at init.
     std::unique_ptr<HeadlessImGui> headless_imgui;
     if (options.drive_observe || options.drive_control) {
-        const auto ini =
+        const std::string profile = !saved_profile_id.empty() ? saved_profile_id : profile_id_for_world(server_label);
+        const auto char_files = character_files(profile, server_label, options.character);
+        const auto ini = !char_files.empty()
+                             ? char_files.headless_imgui_ini()
+                             : platform::cache_dir() / ("imgui-headless-" + sanitize_file_name(options.character) + ".ini");
+        const auto legacy_ini =
             platform::data_dir() / ("imgui-headless-" + sanitize_file_name(options.character) + ".ini");
+        seed_headless_imgui_ini(ini, platform::imgui_ini(), legacy_ini);
         headless_imgui = std::make_unique<HeadlessImGui>(ini);
     }
+    std::unique_ptr<DriveObserveServer> observe;
+    env.headless = true;
+    env.viewer_connected = [&observe] { return observe && observe->viewer_connected(); };
     Automation automation(env);
 
-    std::unique_ptr<DriveObserveServer> observe;
     if (options.drive_observe || options.drive_control) {
         try {
             observe = std::make_unique<DriveObserveServer>(
@@ -1079,6 +1227,7 @@ int run_headless(HeadlessOptions options) {
     Clock::time_point in_zone_at{}, last_status{}, last_observe_state{}, human_drive_until{}, last_remote_imgui{};
     bool drive_file_written = false, drive_file_failed = false;
     bool viewer_was_connected = false;
+    std::uint64_t last_viewer_gen = 0;
     bool send_full_imgui_atlas = false;
     std::uint64_t last_inventory_revision = ~std::uint64_t{0};
     std::uint64_t last_xtarget_hash = ~std::uint64_t{0};
@@ -1112,29 +1261,24 @@ int run_headless(HeadlessOptions options) {
         bool force_state_push = false;
         if (observe) {
             const bool connected = observe->viewer_connected();
-            if (connected != viewer_was_connected) {
+            const std::uint64_t viewer_gen = observe->viewer_generation();
+            if (connected != viewer_was_connected || (connected && viewer_gen != last_viewer_gen)) {
                 viewer_was_connected = connected;
+                if (connected) last_viewer_gen = viewer_gen;
                 human_drive_until = {};
                 last_inventory_revision = ~std::uint64_t{0};
                 last_xtarget_hash = ~std::uint64_t{0};
                 send_full_imgui_atlas = connected;
                 last_remote_imgui = {};
-                if (!connected && headless_imgui) headless_imgui->reset_input();
+                if (headless_imgui) {
+                    if (!connected) headless_imgui->flush_ini();
+                    headless_imgui->reset_input();
+                }
                 log::info("headless: drive viewer {}", connected ? "attached" : "detached");
             }
-            if (options.drive_interact || options.drive_control) {
-                for (const auto& action : observe->take_actions()) {
-                    const bool ok = conn->apply_drive_action(action, options.drive_control, nav_radius);
-                    force_state_push = true;
-                    if (!ok && !options.drive_control) break;
-                }
-            }
+            // Apply the latest human movement pose BEFORE semantic actions so reach checks (looting a corpse,
+            // opening a door/merchant/bank) see the player's current position right as they arrive.
             if (options.drive_control) {
-                for (const auto& fwd : observe->take_forwarded()) {
-                    if (!net::drive_forward_allowed(fwd.packet, fwd.world)) continue;
-                    if (fwd.world) conn->send_world_packet(fwd.packet);
-                    else conn->send_zone_packet(fwd.packet);
-                }
                 if (auto move = observe->take_move(); move && conn->in_zone() && movement_ready) {
                     const auto now_move = Clock::now();
                     if (move->active) {
@@ -1151,6 +1295,20 @@ int run_headless(HeadlessOptions options) {
                     conn->set_player_motion(move->position, move->heading, move->velocity, move->moving);
                     if (zone)
                         if (auto text = zone_line.update(feet, zone->regions)) region_teleport(*text);
+                }
+            }
+            if (options.drive_interact || options.drive_control) {
+                for (const auto& action : observe->take_actions()) {
+                    const bool ok = conn->apply_drive_action(action, options.drive_control, nav_radius);
+                    force_state_push = true;
+                    if (!ok && !options.drive_control) break;
+                }
+            }
+            if (options.drive_control) {
+                for (const auto& fwd : observe->take_forwarded()) {
+                    if (!net::drive_forward_allowed(fwd.packet, fwd.world)) continue;
+                    if (fwd.world) conn->send_world_packet(fwd.packet);
+                    else conn->send_zone_packet(fwd.packet);
                 }
             }
         }
@@ -1282,7 +1440,13 @@ int run_headless(HeadlessOptions options) {
             const std::int64_t items = character->stats().hp_bonus;
             conn->set_own_hp_items(sheet->vitals.cur_hp ? 0 : items, sheet->vitals.max_hp ? 0 : items);
         }
+        const auto frame_begin = Clock::now();
         automation.frame();
+        if (const auto frame_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - frame_begin).count();
+            frame_ms >= 1000) {
+            log::warn("headless: automation.frame() stalled for {} ms", frame_ms);
+        }
         if (observe && headless_imgui && observe->viewer_connected()) {
             const auto now_ui = Clock::now();
             auto imgui_in = observe->take_imgui_input();
@@ -1290,6 +1454,11 @@ int run_headless(HeadlessOptions options) {
                 last_remote_imgui = now_ui;
                 headless_imgui->render_frame(automation, *observe, imgui_in,
                                              options.drive_interact || options.drive_control, send_full_imgui_atlas);
+                if (const auto ui_ms =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - now_ui).count();
+                    ui_ms >= 1000) {
+                    log::warn("headless: remote ImGui render stalled for {} ms", ui_ms);
+                }
             }
         }
         // A lease's resume must keep the loop and the plugin frames coming; a line every 10 s says whether it does.
@@ -1486,6 +1655,7 @@ int run_headless(HeadlessOptions options) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     if (stop_requested) log::info("headless: stop requested; shutting down");
+    if (headless_imgui) headless_imgui->flush_ini();
     automation.shutdown();
     if (conn) conn->disconnect();
     return stop_requested ? 0 : result;

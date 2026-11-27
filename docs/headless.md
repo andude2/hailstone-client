@@ -119,6 +119,24 @@ Each child also runs `--quiet`: its whole log goes to its per-character
 log file and nothing to the supervisor's console, which shows only the
 supervisor's own started/ended/relaunch lines.
 
+### Launching from the login screen
+
+When `hailstone_headless` sits beside `hailstone`, the graphical login screen
+can launch headless crews directly without a separate script:
+
+- **Box set headless:** the Box Set card offers **Log in box set headless**,
+  which logs the selected (or first) ticked account into the graphical window
+  and starts `hailstone_headless --quiet --crew <data_dir>/run/box-crew.ini`
+  for the remaining ticked accounts (inheriting `plugins.autoload` with
+  `observe=1`, `interact=1`, `control=1`, `stagger=3`; `headless.stagger` and
+  `headless.exec` in `hailstone.ini` override the stagger and optional zone-in
+  command).
+- **`crew.ini` one-click launch:** when `crew.ini` exists in the data or
+  install folder, the Login card shows **Log in + crew.ini** (logs this window
+  in and launches the headless supervisor) and **Crew only** (launches the
+  headless supervisor alone). Stale `drive-*.txt` files in the crew's drive
+  folder are cleared before launch.
+
 A member names a saved `server` (its id or name) and `account`; its
 `character` and the account's saved `world` are the defaults from the
 profile, so most members need only those three lines plus their `exec`.
@@ -251,11 +269,30 @@ graphical client's `/crew` window offers two ways to drive a `control=1` file:
   `ChildProcesses`). This window's character is untouched and keeps playing; the drive window is a normal
   `ClientApp` on the lease and hands it back on `/quit`, a dropped link or close, so the headless resumes.
 
+Plugins and scripts can inspect `${Hailstone.Headless}` (`TRUE` under `hailstone_headless`, `FALSE` in the graphical
+client) and `${Hailstone.ViewerConnected}` (`TRUE` while a graphical viewer is attached to the headless client).
+
 ## Resurrection and item clicks
 
 Sentinel can use `${Me.RezPending}` to find an actionable resurrection
 offer after respawning at bind or while hovering. `/rez` accepts the offer
 or selects the available resurrection destination.
+
+`/notify <window> <child> <notification> [value]` is MacroQuest's window
+notification command, added by this client (`game/window_notify.h`). With
+a UI the stock window takes it as the player's click would — any child:
+`leftmouseup`/`rightmouseup`, `listselect <row>`, `tabselect <page>`
+(rows and pages 1-based). Without one, the buttons whose handler is a
+single connection call still work while their window shows: trade accept
+and cancel, loot all and done, a confirmation's Yes (only another
+player's invite or translocate, from the expected requester when one is
+named after the click, and with the outgoing trade side empty) and No,
+the large dialog's OK/Yes/No, task decline (accept needs the list's
+selection), bank auto and done, and the tribute activates. Those same
+windows answer `${Window[<name>].Open}` from the connection's state, so
+a script can check before it notifies. Everything else is refused as
+needing the UI; a window joins the list with a row in
+`game/window_notify.h`'s table and a case in the connection's fallback.
 
 Item click reads use the equipment's own click effect first, followed by
 the first clickable augment in socket order. Use the equipment's name or

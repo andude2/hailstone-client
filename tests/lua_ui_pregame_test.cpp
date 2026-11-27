@@ -219,6 +219,19 @@ TEST_CASE("hs.LoginSet and hs.LoginDo: the fields change, and the buttons ask th
     CHECK(ui.host.login_action == static_cast<int>(A::PlayCharacter));
     CHECK(ui("return hs.LoginDo('play', 9)") == "false");
 
+    // Crew launch actions: loginWithCrew works with a selected quick character (even without password in fields).
+    CHECK(ui("return hs.LoginDo('loginWithCrew')") == "false"); // headless unavailable and no crew.ini
+    v.headless_available = true;
+    v.crew_ini = dir.path() / "crew.ini";
+    v.password.clear();
+    ui.host.login_action.reset();
+    CHECK(ui("return hs.LoginDo('loginWithCrew', 1)") == "true");
+    CHECK(v.quick_selected == 0);
+    CHECK(ui.host.login_action == static_cast<int>(A::LoginWithCrew));
+    ui.host.login_action.reset();
+    CHECK(ui("return hs.LoginDo('launchCrew')") == "true");
+    CHECK(ui.host.login_action == static_cast<int>(A::LaunchCrew));
+
     // The game files: the one in use is not picked again.
     v.game_folders = {{"/games/rof2", false, true}, {"/games/live", true, true}, {"/games/gone", false, false}};
     CHECK(ui("return hs.LoginScreen().gameFolders[2].label") == "Live: live");

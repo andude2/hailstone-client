@@ -281,6 +281,28 @@ TEST_CASE("TLO: Target.Buff and the rest from OP_TargetBuffs, the states by spel
     CHECK(p("${Me.Poisoned}") == "NULL");
     CHECK(p("${Me.Silenced}") == "NULL");
     CHECK(p("${Me.MyBuff[Holy Armor]}") == "NULL"); // no caster recorded
+
+    // TargetOfTarget on Me, Target, and Spawn[id] from OP_TargetHoTT; switching target clears it.
+    CHECK(p("${Me.TargetOfTarget.ID}") == "NULL");
+    CHECK(p("${Target.TargetOfTarget.ID}") == "NULL");
+    net::GameConnectionTestAccess::target_of_target(*world.conn) = 1; // target a_rat01 (id 10) is targeting player (id 1)
+    CHECK(p("${Me.TargetOfTarget.ID}") == "1");
+    CHECK(p("${Target.TargetOfTarget.ID}") == "1");
+    CHECK(p("${Spawn[id 10].TargetOfTarget.ID}") == "1");
+    CHECK(p("${Spawn[id 11].TargetOfTarget.ID}") == "NULL");
+    world.conn->set_target(11);
+    CHECK(p("${Me.TargetOfTarget.ID}") == "NULL");
+    CHECK(p("${Target.TargetOfTarget.ID}") == "NULL");
+
+    CHECK(p("${Hailstone.Headless}") == "FALSE");
+    CHECK(p("${Hailstone.ViewerConnected}") == "FALSE");
+    ctx.headless = true;
+    bool viewer = false;
+    ctx.viewer_connected = [&viewer] { return viewer; };
+    CHECK(p("${Hailstone.Headless}") == "TRUE");
+    CHECK(p("${Hailstone.ViewerConnected}") == "FALSE");
+    viewer = true;
+    CHECK(p("${Hailstone.ViewerConnected}") == "TRUE");
 }
 
 TEST_CASE("TLO: Debuff and Debuff[pet] sum the counters on the player's and the pet's buffs") {
@@ -390,4 +412,105 @@ TEST_CASE("TLO: Spawn.LineOfSight and LineOfSight[y,x,z:y,x,z]") {
     CHECK(p("${LineOfSight[0,nan,0:0,0,0]}") == "NULL");
     CHECK(from == std::array<float, 3>{});
     CHECK(p("${LineOfSight[-99999,2,3:4,5,6]}") == "TRUE");
+}
+
+TEST_CASE("TLO: Pet and Me.Pet expose pet combat, target, toggles and buffs") {
+    mq_test::World world{"hailstone_mq_pet_tlo_test"};
+    mq::Registry reg;
+    mq::register_game_tlos(reg);
+    mq::Context ctx;
+    ctx.registry = &reg;
+    ctx.conn = world.conn.get();
+    auto p = [&](std::string_view text) { return mq::parse_macro_data(ctx, text); };
+    using A = net::GameConnectionTestAccess;
+
+    // No pet yet.
+    CHECK(p("${Me.Pet}") == "NULL");
+    CHECK(p("${Me.Pet.ID}") == "NULL");
+    CHECK(p("${Me.Pet.Combat}") == "NULL");
+    CHECK(p("${Pet.Target.ID}") == "NULL");
+
+    // Add the player's pet (id 20) and another spawn's pet (id 21 owned by group mate id 12).
+    world.add(20, "Tester_pet00", true, 45, {10, 0, 0});
+    A::world(*world.conn).spawns[20].pet_owner_id = 1;
+    A::pets(*world.conn).focused = 20;
+    world.add(21, "Other_pet00", true, 45, {15, 0, 0});
+    A::world(*world.conn).spawns[21].pet_owner_id = 12;
+
+    // Inherits spawn members.
+    CHECK(p("${Me.Pet.ID}") == "20");
+    CHECK(p("${Pet.ID}") == "20");
+    CHECK(p("${Me.Pet.CleanName}") == "Tester pet");
+    CHECK(p("${Spawn[id 1].Pet.ID}") == "20");
+
+    // Combat & Target from OP_PetHoTT.
+    CHECK(p("${Me.Pet.Combat}") == "FALSE");
+    CHECK(p("${Me.Pet.Target.ID}") == "NULL");
+    A::pets(*world.conn).pet_target = 10; // a_rat01
+    CHECK(p("${Me.Pet.Combat}") == "TRUE");
+    CHECK(p("${Pet.Combat}") == "TRUE");
+    CHECK(p("${Spawn[id 1].Pet.Combat}") == "TRUE");
+    CHECK(p("${Me.Pet.Target.ID}") == "10");
+    CHECK(p("${Pet.Target.Name}") == "a_rat01");
+    // Another spawn's pet is a plain spawn and does not report the player's pet target.
+    CHECK(p("${Spawn[id 12].Pet.ID}") == "21");
+    CHECK(p("${Spawn[id 12].Pet.Combat}") == "NULL");
+    CHECK(p("${Spawn[id 12].Pet.Target.ID}") == "NULL");
+
+    // Once the pet's target dies (becomes a corpse), Combat is FALSE immediately.
+    A::world(*world.conn).spawns[10].is_corpse = true;
+    CHECK(p("${Me.Pet.Combat}") == "FALSE");
+    A::world(*world.conn).spawns[10].is_corpse = false;
+    A::pets(*world.conn).pet_target = 0;
+    CHECK(p("${Me.Pet.Combat}") == "FALSE");
+    CHECK(p("${Me.Pet.Target.ID}") == "NULL");
+
+    // Pet toggle states (OP_PetCommandState: 1 stop, 2 regroup, 3 follow, 4 guard, 5 taunt, 6 hold, 7 ghold, 8 focus, 9 spellhold).
+    auto& toggles = A::pet_toggles(*world.conn);
+    toggles = {};
+    CHECK(p("${Me.Pet.Hold}") == "FALSE");
+    CHECK(p("${Me.Pet.Stance}") == "NONE");
+    toggles[3] = true; // follow
+    toggles[5] = true; // taunt
+    toggles[6] = true; // hold
+    toggles[7] = true; // ghold
+    toggles[9] = true; // spellhold
+    CHECK(p("${Me.Pet.Follow}") == "TRUE");
+    CHECK(p("${Me.Pet.Guard}") == "FALSE");
+    CHECK(p("${Me.Pet.Stance}") == "FOLLOW");
+    CHECK(p("${Me.Pet.Taunt}") == "TRUE");
+    CHECK(p("${Me.Pet.Hold}") == "TRUE");
+    CHECK(p("${Me.Pet.GHold}") == "TRUE");
+    CHECK(p("${Me.Pet.SpellHold}") == "TRUE");
+    CHECK(p("${Me.Pet.Focus}") == "FALSE");
+    toggles[3] = false;
+    toggles[4] = true; // guard
+    CHECK(p("${Me.Pet.Stance}") == "GUARD");
+
+    // Pet buffs (OP_PetBuffWindow): Buff[n] gives spell in 1-based slot n; Buff[name] gives 1-based slot int.
+    auto buff = [](std::uint32_t spell, std::int32_t tics) {
+        game::BuffSlot b;
+        b.spell = spell;
+        b.tics = tics;
+        b.received_ms = net::GameConnection::now_ms();
+        return b;
+    };
+    CHECK(p("${Me.Pet.BuffsPopulated}") == "TRUE");
+    CHECK(p("${Me.Pet.BuffCount}") == "0");
+    CHECK(p("${Me.Pet.Buff}") == "0");
+    A::pet_buffs(*world.conn) = {{0, buff(11, 5)}, {3, buff(3002, 10)}}; // Holy Armor in slot 0, Test Slow in slot 3
+    CHECK(p("${Me.Pet.BuffCount}") == "2");
+    CHECK(p("${Me.Pet.Buff}") == "2");
+    CHECK(p("${Me.Pet.Buff[1]}") == "Holy Armor");
+    CHECK(p("${Me.Pet.Buff[1].ID}") == "11");
+    CHECK(p("${Me.Pet.Buff[2]}") == "NULL");
+    CHECK(p("${Me.Pet.Buff[4]}") == "Test Slow");
+    CHECK(p("${Me.Pet.Buff[Holy Armor]}") == "1");
+    CHECK(p("${Me.Pet.Buff[Slow]}") == "4");
+    CHECK(p("${Me.Pet.Buff[=Slow]}") == "NULL");
+    CHECK(p("${Me.Pet.Buff[=Test Slow]}") == "4");
+    const auto dur_secs = std::stoi(p("${Me.Pet.BuffDuration[Holy Armor].TotalSeconds}"));
+    CHECK(dur_secs >= 29);
+    CHECK(dur_secs <= 30);
+    CHECK(p("${Me.Pet.BuffDuration[2]}") == "NULL");
 }

@@ -63,6 +63,8 @@ struct CharacterFiles {
     std::filesystem::path bank_snapshot() const { return file("bank.dat"); } // Hailstone: the bank as last seen
     // Hailstone: the character's client settings, over hailstone.ini (core/config.h Config::attach_character)
     std::filesystem::path settings() const { return file("hailstone.ini"); }
+    // Hailstone: Dear ImGui plugin window layout when this character runs headless (--drive-observe / --drive-control)
+    std::filesystem::path headless_imgui_ini() const { return file("imgui-headless.ini"); }
     // Hailstone: the UI pack's window layout for this character
     std::filesystem::path ui_settings(std::string_view pack) const {
         return dir.empty() ? std::filesystem::path() : dir / ("ui-" + std::string(pack) + ".txt");

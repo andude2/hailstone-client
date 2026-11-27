@@ -480,8 +480,10 @@ TEST_CASE("player trade: /crewtrade picks the stack up, offers it, accepts and r
           "too far from Partner to trade");
     c.world_for_test().spawns[kPartner].position = c.world().player()->position + glm::vec3{3, 0, 0};
 
-    // (/crewtrade parses to this call in GameConnection::item_command.)
-    CHECK(c.start_crew_trade(net::ItemSlot::possessions(23), "Partner").empty());
+    // Dispatch through send_command so the headless /crew prefix ignore cannot swallow /crewtrade.
+    c.send_command("/crew relay ignored");
+    CHECK_FALSE(c.trade());
+    c.send_command("/crewtrade 23 -1 Partner");
     REQUIRE(c.trade());
     CHECK(c.trade()->requested);
     REQUIRE(c.inventory().cursor()); // picked up, waiting for the trade to open

@@ -471,7 +471,12 @@ function hud.Window(screen, title, opts, body)
   opts.screen = screen
   local key = screen or title
   local shown
-  if screen then shown = gameShown(screen) else shown = (opts.shown == nil) or opts.shown() end
+  if screen then
+    shown = gameShown(screen)
+    if opts.shown then shown = opts.shown(shown) end
+  else
+    shown = (opts.shown == nil) or opts.shown()
+  end
   if shown and wasShown[key] == false then opened[key] = true end
   wasShown[key] = shown and true or false
   if not shown then

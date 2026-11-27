@@ -134,6 +134,8 @@ struct Context {
     // MacroQuest.Path[config] and Hailstone.Path[config]: the folder the scripts' settings go in (<data folder>/scripts/config, as UTF-8, with no
     // trailing separator, as MQ gives its paths); empty answers nil.
     std::string config_path;
+    bool headless = false; // Hailstone.Headless: true in hailstone_headless
+    std::function<bool()> viewer_connected; // Hailstone.ViewerConnected: true while a GUI drive viewer is attached
 };
 
 class Registry {

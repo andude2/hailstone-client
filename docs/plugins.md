@@ -306,7 +306,8 @@ clipboard may hold a password, and what a script puts there is pasted where the 
 ### TLOs
 
 `Me`, `Target`, `Spawn[...]`, `SpawnCount[...]`, `NearestSpawn[n, ...]`, `Group`, `Zone`, `Spell[id|name]`, `Cursor`,
-`FindItem[name|=exact]`, `FindItemCount[...]`, `Pet`, `Window[name]` (`.Open`), `Plugin[name]` (`.IsLoaded`), `Time`,
+`FindItem[name|=exact]`, `FindItemCount[...]`, `Pet`, `Window[name]` (`.Open`; the trade and confirmation windows
+carry the children and ready flags a `/notify` script reads, docs/scripting-reference.md), `Plugin[name]` (`.IsLoaded`), `Time`,
 `GameTime`, `EverQuest` (`.GameState`, `.Server`), `MacroQuest` (`.Path[config]`: `scripts/config/` in Hailstone's
 folder, without a trailing separator; MQ's other folder names are NULL. `.Build`: MQ's build target, 4 for Emu.
 `.BuildDate`: the day the client was built, as an int, yyyymmdd. `.Version`: Hailstone's release version. Other

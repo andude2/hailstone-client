@@ -470,6 +470,7 @@ void GameConnection::trade_drop_cursor() {
         m.count = moved;
         send_zone(encode(m));
         if (held->stack_count == 0) inventory_.take(ItemSlot::possessions(kSlotCursor));
+        else inventory_.bump_revision();
         trade_->my_ready = trade_->their_ready = false;
         return;
     }
@@ -492,11 +493,17 @@ void GameConnection::trade_coin(int type, std::uint32_t amount) {
     const auto offered = trade_->my_coins[static_cast<std::size_t>(type)];
     // Check room in the offer before picking up coin for the two-step move.
     if (static_cast<std::uint64_t>(offered) + amount > static_cast<std::uint32_t>(game::kCoinCap)) return;
-    if (move_coin(kCoinInventory, kCoinCursor, type, type, amount)) trade_drop_cursor_coin();
+    if (move_coin(kCoinInventory, kCoinCursor, type, type, amount)) {
+        if (drive_control_) move_coin(kCoinCursor, kCoinTrade, type, type, amount);
+        else trade_drop_cursor_coin();
+    }
 }
 
 void GameConnection::trade_accept() {
-    if (relay_control_action(DriveAction{.kind = DriveActionKind::TradeAccept})) return;
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::TradeAccept})) {
+        if (trade_ && trade_->open) trade_->my_ready = true;
+        return;
+    }
     // Send_OP_TradeAcceptClick @0x77f490 (the Trade button; CGiveWnd's Give
     // button sends the same after warning about augmented items).
     if (!trade_ || !trade_->open) return;
@@ -741,10 +748,17 @@ void GameConnection::handle_commerce(Op op, const AppPacket& p) {
     case Op::ShopRequest:
         // Handle_OP_ShopRequest @0x4b75f0: command 0 closes, else CMerchantWnd::Activate(rate, tabs).
         if (auto m = decode_merchant_click(p)) {
-            if (!merchant_ || merchant_->npc_id != m->npc_id) break;
             if (m->command == 0) {
-                merchant_.reset();
+                if (merchant_ && merchant_->npc_id == m->npc_id) merchant_.reset();
                 break;
+            }
+            if (!merchant_ || merchant_->npc_id != m->npc_id) {
+                if (!drive_control_) break;
+                merchant_ = MerchantSession{};
+                merchant_->serial = ++npc_session_serial_;
+                merchant_check_ms_ = 0;
+                merchant_->npc_id = m->npc_id;
+                merchant_->name = spawn_name(m->npc_id);
             }
             merchant_->open = true;
             merchant_->rate = m->rate;
@@ -847,7 +861,8 @@ void GameConnection::handle_commerce(Op op, const AppPacket& p) {
             game::TradeRequestResult res = game::handle_trade_request(in);
             if (res.refusal) {
                 log::info("trade: {}'s request refused (reason {})", name, res.refusal->reason);
-                send_zone(encode(TradeBusy{r->from_id, world_.player_id, res.refusal->reason, 0, 0, 0}));
+                if (!drive_control_)
+                    send_zone(encode(TradeBusy{r->from_id, world_.player_id, res.refusal->reason, 0, 0, 0}));
                 say_str(game::kStrTradeRefused, {name});
                 break;
             }
@@ -856,7 +871,7 @@ void GameConnection::handle_commerce(Op op, const AppPacket& p) {
             trade_->partner_id = r->from_id;
             trade_->partner_name = name;
             trade_->open = true;
-            send_zone(encode_trade_request_ack({r->from_id, world_.player_id}));
+            if (!drive_control_) send_zone(encode_trade_request_ack({r->from_id, world_.player_id}));
         }
         break;
     case Op::TradeRequestAck:
@@ -865,8 +880,23 @@ void GameConnection::handle_commerce(Op op, const AppPacket& p) {
         // player partner is told "<me> tells you, 'I'm busy right now.'" (1446 as a tell, language skill 100), 1447
         // "<partner> is interested in making a trade." is said (0x111), and OP_CancelTrade {partner, me} goes.
         if (auto r = decode_trade_request(p); r && r->to_id == world_.player_id) {
-            if (!trade_ || !trade_->requested || trade_->partner_id != r->from_id) break;
             auto it = world_.spawns.find(r->from_id);
+            if (drive_control_) {
+                // Headless initiated the request and owns the transact check and initial cursor drop; the control
+                // mirror only opens its local trade session so GiveWnd/TradeWnd pops up when the ack arrives.
+                if (!trade_ || trade_->partner_id != r->from_id) {
+                    trade_ = TradeSession{};
+                    trade_->partner_id = r->from_id;
+                    if (it != world_.spawns.end()) {
+                        trade_->partner_name = game::display_name(it->second.name);
+                        trade_->with_npc = it->second.is_npc;
+                    }
+                }
+                trade_->requested = false;
+                trade_->open = true;
+                break;
+            }
+            if (!trade_ || !trade_->requested || trade_->partner_id != r->from_id) break;
             // Only a missing spawn ends the handler; reach and death are CTradeWnd::OnProcessFrame's 500 ms check
             // once the window is open (update_npc_interactions), so the offer goes in first and the server returns it.
             if (it == world_.spawns.end()) break;
@@ -929,7 +959,8 @@ void GameConnection::handle_commerce(Op op, const AppPacket& p) {
             if (c->from_id == world_.player_id) say_str(1450);
             else if (std::string n = spawn_name(c->from_id); !n.empty()) say_str(1448, {n});
             else say_str(1449);
-            trade_cancel();
+            if (drive_control_) close_trade(false);
+            else trade_cancel();
         }
         break;
     case Op::FinishTrade:

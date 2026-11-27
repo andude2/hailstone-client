@@ -72,6 +72,7 @@
 #include "app/nameplate_layer.h"
 #include "app/nameplate_input.h"
 #include "app/spawn_pick.h"
+#include "ui/texture_ids.h"
 #include "game/nameplate_overlap.h"
 #include "game/sky_colours.h"
 #include "game/option_commands.h"
@@ -324,6 +325,7 @@ public:
         // A fresh install with no saved server starts on the one the asset folder's eqhost.txt names.
         const std::filesystem::path eqhost = game_.find_base("eqhost.txt").value_or(std::filesystem::path());
         if (ui::load_login_settings(login_view_, config_, platform::servers_dir(), eqhost)) config_.save(config_path_);
+        refresh_headless_launcher();
         bool named_server = !opts_.server.empty() && ui::select_profile_named(login_view_, opts_.server);
         if (!opts_.server.empty() && !named_server)
             log::warn("--server {}: no saved server has this id or name", opts_.server);
@@ -520,6 +522,17 @@ public:
             return collision_->line_of_sight(glm::vec3(a[0], a[1], a[2]), glm::vec3(b[0], b[1], b[2]));
         };
         aenv.raise_window = [this] { window_.raise(); };
+        aenv.spell_icon = [this](std::uint32_t icon, std::uint64_t& tex, float& u0, float& v0, float& u1, float& v1) {
+            if (!ui_textures_) return false;
+            const auto cell = ui_textures_->spell_icon(static_cast<std::int32_t>(icon));
+            if (!cell || !ui::texture_id_live(cell->id)) return false;
+            tex = reinterpret_cast<std::uintptr_t>(cell->id);
+            u0 = cell->u0;
+            v0 = cell->v0;
+            u1 = cell->u1;
+            v1 = cell->v1;
+            return true;
+        };
         automation_ = std::make_unique<Automation>(aenv);
         lua_ui_->add_ui_api([this](lua_State* L) { register_ui_api(L); });
         automation_->hooks().add_command(plugin::Hooks::kClient, "/lighting",
@@ -668,6 +681,10 @@ private:
     // The login screen's Log in box: saves the server, starts a Hailstone for each box account after the first
     // (--server --account --character) and logs this window in to the first (client_app_login.cpp).
     void start_box_login();
+    void start_box_login_headless();
+    void start_login_with_crew();
+    void refresh_headless_launcher();
+    bool launch_crew_file(const std::filesystem::path& crew_path);
     // --account: the saved account's keyring password, then start_login(); else the login screen says why.
     void start_account_login();
     // The login screen's Characters list: logs in to the picked character's account (its saved password, or the
@@ -789,6 +806,9 @@ private:
     CharacterImportUi::Result apply_character_import();
     CharacterImportUi::Result restore_character_import();
     void xtarget_command(const std::string& args); // /xtarget (client_app_commands.cpp)
+    // /notify with a UI (game/window_notify.h): clicks the stock window through UiApi and
+    // answers whether anything took it; false hands the line to the connection's fallback.
+    bool notify_command(std::string_view args);
     // /channel, /url, /www and /outputfile (app/client_app_info.cpp).
     bool client_info_command(std::string_view handler, const std::string& args);
     void outputfile_command(const std::string& args);
@@ -1340,6 +1360,9 @@ private:
     Clock::time_point drive_human_until_{};
     Clock::time_point last_drive_move_send_{};
     Clock::time_point last_remote_imgui_send_{};
+    bool last_remote_imgui_focused_ = false;
+    bool last_remote_imgui_mouse_valid_ = false;
+    std::uint8_t last_remote_imgui_mouse_down_mask_ = 0;
     bool drive_human_sent_active_ = false;
     void apply_drive_resnapshot(const net::DriveSnapshot& snapshot);
     bool crew_window_open_ = false;

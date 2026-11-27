@@ -450,6 +450,10 @@ std::vector<game::AAReadiness> GameConnection::aa_readiness_bulk(std::span<const
 
 bool GameConnection::aa_train(std::uint32_t rank_id, bool train_all) {
     if (state_ != ConnectionState::InZone) return false;
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::AATrain,
+                                         .argument = rank_id,
+                                         .socket = train_all ? 1 : 0}))
+        return true;
     if (!aa_can_train(rank_id)) {
         system(13277);
         return false;
@@ -486,6 +490,10 @@ void GameConnection::aa_train_button(std::uint32_t rank_id, bool train_all) {
         aa_train(rank_id, train_all);
         return;
     }
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::AATrainButton,
+                                         .argument = rank_id,
+                                         .socket = train_all ? 1 : 0}))
+        return;
     const game::AltAbility* a = alt_adv_.get(rank_id);
     if (!a) return;
     Confirmation c;
@@ -499,6 +507,7 @@ void GameConnection::aa_train_button(std::uint32_t rank_id, bool train_all) {
 
 bool GameConnection::aa_activate(std::uint32_t group) {
     if (state_ != ConnectionState::InZone) return false;
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::AAActivate, .argument = group})) return true;
     const game::AltAbility* a = alt_adv_.owned_rank(static_cast<std::int32_t>(group));
     if (!a) {
         system(6198);
@@ -516,6 +525,7 @@ bool GameConnection::aa_activate(std::uint32_t group) {
 void GameConnection::set_aa_percent(std::uint32_t percent) {
     if (state_ != ConnectionState::InZone) return;
     alt_adv_.percent = static_cast<std::uint8_t>(std::min<std::uint32_t>(percent, 100));
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::AASetPercent, .argument = alt_adv_.percent})) return;
     if (alt_adv_.percent == 0) send_zone(encode(AAAction{kAAExpOff, 0, 0, 0}));
     else send_zone(encode(AAAction{kAASetPercent, 0, 0, alt_adv_.percent}));
 }

@@ -3,6 +3,7 @@
 // Lightweight, backend-independent data structures for streaming Dear ImGui input and draw data
 // between a headless character process and an attached graphical client.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -31,6 +32,8 @@ struct RemoteImGuiInput {
     float wheel_x = 0.0f;
     float wheel_y = 0.0f;
     std::uint8_t mods = 0; // bit 0=Ctrl, 1=Shift, 2=Alt, 3=Super
+    std::uint8_t mouse_down_mask = 0; // bits 0..4: mouse buttons currently held for remote input
+    bool has_mouse_down_mask = false; // true when mouse_down_mask is authoritative (used to reconcile missed releases)
     bool mouse_valid = false;
     bool focused = true;
     std::vector<RemoteMouseButtonEvent> mouse_buttons;
@@ -87,5 +90,16 @@ struct RemoteImGuiTexture {
     bool destroy = false; // true: retire and free this texture id
     std::vector<std::byte> rgba; // w * h * 4 bytes (RGBA8), empty when destroy==true
 };
+
+// Maximum rows per horizontal upload band for a (width x height) RGBA8 rect so each pipe message stays within
+// max_band_bytes. Always returns a value in [1, height] when width > 0 and height > 0 (0 otherwise), avoiding
+// uint16_t truncation when narrow rects yield >= 65536 rows per band.
+inline std::uint16_t remote_texture_band_rows(std::uint16_t width, std::uint16_t height,
+                                              std::size_t max_band_bytes = std::size_t{4} << 20) {
+    if (width == 0 || height == 0) return 0;
+    const std::size_t row_bytes = static_cast<std::size_t>(width) * 4u;
+    const std::size_t rows = std::clamp<std::size_t>(max_band_bytes / row_bytes, 1u, height);
+    return static_cast<std::uint16_t>(rows);
+}
 
 } // namespace hailstone::ui

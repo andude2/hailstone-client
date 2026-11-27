@@ -1344,6 +1344,10 @@ typedef struct PluginHostApi {
     int (*task_rows)(void* host, HailstoneTaskRow* tasks, uint32_t tasks_capacity,
                      HailstoneTaskObjective* objectives, uint32_t objectives_capacity,
                      uint32_t* objectives_total, uint32_t* revision);
+    /* READ + UI. Look up a spell icon (A_SpellIcons index, Spell.SpellIcon) as an ImGui texture and UV rect for
+     * ImGui::Image during OnUpdateImGui. Set out->size = sizeof(*out) first; returns 1 when found, 0 otherwise
+     * (headless, unknown icon, or missing READ/UI). Added in ABI 5 after task_rows: test HAILSTONE_HOST_HAS first. */
+    int (*spell_icon)(void* host, uint32_t icon, HailstoneNameplateImage* out);
 } PluginHostApi;
 /* What use_ability and ability_state take: the kinds of ability the Ability Book lists. The values are stable. */
 enum HS_AbilityKinds {

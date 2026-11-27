@@ -13,6 +13,8 @@
 
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gamepad.h>
+#include <SDL3/SDL_keyboard.h>
+#include <SDL3/SDL_mouse.h>
 #include <imgui.h>
 #include <imgui_internal.h> // FindWindowByName and the focused window, for the gamepad's focus requests
 #include <imgui_impl_sdl3.h>
@@ -211,6 +213,16 @@ struct ImGuiLayer::RemoteState {
         void* mapped = nullptr;
     };
 
+    struct PendingEvents {
+        std::vector<RemoteMouseButtonEvent> mouse_buttons;
+        std::vector<RemoteKeyEvent> keys;
+        std::vector<std::uint32_t> chars;
+        float wheel_x = 0.0f;
+        float wheel_y = 0.0f;
+        bool saw_mouse_pos = false;
+        bool saw_focus = false;
+    };
+
     render::VkContext& vk;
     bool enabled = false;
     bool want_capture_mouse = false;
@@ -222,6 +234,16 @@ struct ImGuiLayer::RemoteState {
     bool mouse_valid = false;
     bool focused = true;
     std::uint8_t mods = 0;
+    // Raw events captured directly from SDL / pad pointer before local ImGui's InputEventsQueue filtering and
+    // trickling. Eating local MouseButton/Key Down events leaves local io.MouseDown / key.Down false, which causes
+    // ImGuiIO::AddMouseButtonEvent(b, false) / AddKeyEvent(k, false) to drop the matching release via Dear ImGui's
+    // duplicate-event filter; capturing straight from SDL prevents dropped releases and trickle duplication.
+    PendingEvents pending;
+    std::uint8_t sdl_mouse_down_mask = 0;    // physical mouse buttons currently held (bits 0..4)
+    std::uint8_t pad_mouse_down_mask = 0;    // gamepad pointer buttons currently held (bits 0..1)
+    std::uint8_t captured_mouse_mask = 0;    // buttons pressed while remote captured mouse (latches capture during drags)
+    std::uint8_t local_owned_mouse_mask = 0; // buttons pressed while local ImGui was active
+    std::unordered_map<std::uint32_t, std::uint16_t> held_keys; // SDL_Scancode -> ImGuiKey for guaranteed key-up
     std::optional<RemoteImGuiInput> captured_input;
     std::optional<RemoteImGuiFrame> frame;
     std::vector<RemoteImGuiTexture> pending_uploads;
@@ -287,10 +309,19 @@ struct ImGuiLayer::RemoteState {
         frame.reset();
         pending_uploads.clear();
         captured_input.reset();
+        pending = {};
+        sdl_mouse_down_mask = 0;
+        pad_mouse_down_mask = 0;
+        captured_mouse_mask = 0;
+        local_owned_mouse_mask = 0;
+        held_keys.clear();
         want_capture_mouse = false;
         want_capture_keyboard = false;
         want_text_input = false;
         mouse_cursor = 0;
+        mouse_valid = false;
+        focused = true;
+        mods = 0;
         for (auto& [id, e] : textures) retire(e);
         textures.clear();
     }
@@ -448,7 +479,7 @@ ImGuiLayer::ImGuiLayer(platform::Window& window, render::VkContext& vk, const Im
     configure_keys();
 
     if (!ImGui_ImplSDL3_InitForVulkan(window_.sdl_window())) throw std::runtime_error("ImGui_ImplSDL3_InitForVulkan failed");
-    window_.set_event_listener([](const SDL_Event& ev) { ImGui_ImplSDL3_ProcessEvent(&ev); });
+    window_.set_event_listener([this](const SDL_Event& ev) { on_sdl_event(ev); });
     // The gamepad is the window's (platform::Window opens it): the backend gets it only in menu mode
     // (apply_pad_navigation), never opening pads itself.
     ImGui_ImplSDL3_SetGamepadMode(ImGui_ImplSDL3_GamepadMode_Manual, nullptr, 0);
@@ -487,12 +518,141 @@ ImGuiLayer::ImGuiLayer(platform::Window& window, render::VkContext& vk, const Im
 
 ImGuiLayer::~ImGuiLayer() {
     vk_.wait_idle();
+    window_.set_event_listener({});
     remote_.reset();
     shutdown_imgui_textures();
-    window_.set_event_listener({});
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
+}
+
+void ImGuiLayer::on_sdl_event(const SDL_Event& ev) {
+    if (!remote_ || !remote_->enabled) {
+        ImGui_ImplSDL3_ProcessEvent(&ev);
+        return;
+    }
+    constexpr std::size_t kMaxPendingEvents = 64;
+    const SDL_WindowID win_id = SDL_GetWindowID(window_.sdl_window());
+    auto is_mod_key = [](ImGuiKey key) {
+        return key == ImGuiMod_Ctrl || key == ImGuiMod_Shift || key == ImGuiMod_Alt || key == ImGuiMod_Super;
+    };
+    switch (ev.type) {
+    case SDL_EVENT_MOUSE_MOTION:
+        if (ev.motion.windowID == win_id) {
+            remote_->mouse_x = ev.motion.x;
+            remote_->mouse_y = ev.motion.y;
+            remote_->mouse_valid = true;
+            remote_->pending.saw_mouse_pos = true;
+        }
+        ImGui_ImplSDL3_ProcessEvent(&ev);
+        return;
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+        if (ev.button.windowID == win_id) {
+            int btn = -1;
+            if (ev.button.button == SDL_BUTTON_LEFT) btn = 0;
+            else if (ev.button.button == SDL_BUTTON_RIGHT) btn = 1;
+            else if (ev.button.button == SDL_BUTTON_MIDDLE) btn = 2;
+            else if (ev.button.button == SDL_BUTTON_X1) btn = 3;
+            else if (ev.button.button == SDL_BUTTON_X2) btn = 4;
+            if (btn >= 0) {
+                const bool down = ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+                const auto bit = static_cast<std::uint8_t>(1u << btn);
+                remote_->mouse_x = ev.button.x;
+                remote_->mouse_y = ev.button.y;
+                remote_->mouse_valid = true;
+                remote_->pending.saw_mouse_pos = true;
+                if (down) remote_->sdl_mouse_down_mask |= bit;
+                else remote_->sdl_mouse_down_mask &= static_cast<std::uint8_t>(~bit);
+                if (remote_->pending.mouse_buttons.size() < kMaxPendingEvents)
+                    remote_->pending.mouse_buttons.push_back({static_cast<std::uint8_t>(btn), down});
+            }
+        }
+        ImGui_ImplSDL3_ProcessEvent(&ev);
+        return;
+    case SDL_EVENT_MOUSE_WHEEL:
+        if (ev.wheel.windowID == win_id) {
+            remote_->pending.wheel_x += -ev.wheel.x;
+            remote_->pending.wheel_y += ev.wheel.y;
+        }
+        ImGui_ImplSDL3_ProcessEvent(&ev);
+        return;
+    case SDL_EVENT_KEY_DOWN:
+    case SDL_EVENT_KEY_UP: {
+        ImGuiContext* ctx = ImGui::GetCurrentContext();
+        const int prev_size = ctx ? ctx->InputEventsQueue.Size : 0;
+        ImGui_ImplSDL3_ProcessEvent(&ev);
+        if (ctx && ev.key.windowID == win_id) {
+            const auto sc = static_cast<std::uint32_t>(ev.key.scancode);
+            if (ev.type == SDL_EVENT_KEY_DOWN) {
+                for (int i = prev_size; i < ctx->InputEventsQueue.Size; ++i) {
+                    const ImGuiInputEvent& e = ctx->InputEventsQueue[i];
+                    if (e.Type != ImGuiInputEventType_Key || !e.Key.Down || is_mod_key(e.Key.Key)) continue;
+                    const auto key = static_cast<std::uint16_t>(e.Key.Key);
+                    const bool already_held = remote_->held_keys.contains(sc);
+                    remote_->held_keys[sc] = key;
+                    if (!already_held && remote_->pending.keys.size() < kMaxPendingEvents)
+                        remote_->pending.keys.push_back({key, true});
+                }
+            } else {
+                if (auto it = remote_->held_keys.find(sc); it != remote_->held_keys.end()) {
+                    if (remote_->pending.keys.size() < kMaxPendingEvents)
+                        remote_->pending.keys.push_back({it->second, false});
+                    remote_->held_keys.erase(it);
+                } else {
+                    for (int i = prev_size; i < ctx->InputEventsQueue.Size; ++i) {
+                        const ImGuiInputEvent& e = ctx->InputEventsQueue[i];
+                        if (e.Type != ImGuiInputEventType_Key || e.Key.Down || is_mod_key(e.Key.Key)) continue;
+                        if (remote_->pending.keys.size() < kMaxPendingEvents)
+                            remote_->pending.keys.push_back({static_cast<std::uint16_t>(e.Key.Key), false});
+                    }
+                }
+            }
+        }
+        return;
+    }
+    case SDL_EVENT_TEXT_INPUT: {
+        ImGuiContext* ctx = ImGui::GetCurrentContext();
+        const int prev_size = ctx ? ctx->InputEventsQueue.Size : 0;
+        ImGui_ImplSDL3_ProcessEvent(&ev);
+        if (ctx && ev.text.windowID == win_id) {
+            for (int i = prev_size; i < ctx->InputEventsQueue.Size; ++i) {
+                const ImGuiInputEvent& e = ctx->InputEventsQueue[i];
+                if (e.Type == ImGuiInputEventType_Text && remote_->pending.chars.size() < kMaxPendingEvents)
+                    remote_->pending.chars.push_back(e.Text.Char);
+            }
+        }
+        return;
+    }
+    case SDL_EVENT_WINDOW_FOCUS_GAINED:
+    case SDL_EVENT_WINDOW_FOCUS_LOST:
+        if (ev.window.windowID == win_id) {
+            const bool gained = ev.type == SDL_EVENT_WINDOW_FOCUS_GAINED;
+            remote_->focused = gained;
+            remote_->pending.saw_focus = true;
+            if (!gained) {
+                for (std::uint8_t b = 0; b < ImGuiMouseButton_COUNT; ++b) {
+                    if ((remote_->sdl_mouse_down_mask & (1u << b)) &&
+                        remote_->pending.mouse_buttons.size() < kMaxPendingEvents) {
+                        remote_->pending.mouse_buttons.push_back({b, false});
+                    }
+                }
+                remote_->sdl_mouse_down_mask = 0;
+                remote_->captured_mouse_mask = 0;
+                remote_->local_owned_mouse_mask = 0;
+                for (const auto& [sc, key] : remote_->held_keys) {
+                    if (remote_->pending.keys.size() < kMaxPendingEvents)
+                        remote_->pending.keys.push_back({key, false});
+                }
+                remote_->held_keys.clear();
+            }
+        }
+        ImGui_ImplSDL3_ProcessEvent(&ev);
+        return;
+    default:
+        ImGui_ImplSDL3_ProcessEvent(&ev);
+        return;
+    }
 }
 
 void ImGuiLayer::build_fonts() {
@@ -603,6 +763,20 @@ void ImGuiLayer::new_frame() {
     // Minimized (or not sized yet) the display is 0 x 0: ImGui would pull every window onto that empty screen, and
     // the UI ini would keep those places. The last real size stands in until the window is back.
     ImGuiIO& io = ImGui::GetIO();
+    if (reset_interaction_pending_) {
+        reset_interaction_pending_ = false;
+        // Clear any widget/window hold left over from the previous character (e.g. clicking a swap button) without
+        // wiping the fresh SDL input events already queued for this frame.
+        io.ClearInputMouse();
+        io.ClearInputKeys();
+        ImGui::ClearActiveID();
+        ImGui::ClearDragDrop();
+        GImGui->MovingWindow = nullptr;
+        GImGui->NavId = 0;
+        GImGui->NavActivateId = GImGui->NavActivateDownId = GImGui->NavActivatePressedId = GImGui->NavNextActivateId = 0;
+        GImGui->WantCaptureMouseNextFrame = GImGui->WantCaptureKeyboardNextFrame = -1;
+        io.WantCaptureMouse = io.WantCaptureKeyboard = io.WantTextInput = false;
+    }
     if (window_.minimized() || io.DisplaySize.x < 64.0f || io.DisplaySize.y < 64.0f) {
         if (last_w_ > 0.0f) io.DisplaySize = ImVec2(last_w_, last_h_);
     } else {
@@ -619,66 +793,95 @@ void ImGuiLayer::new_frame() {
         in.dt = io.DeltaTime;
         const bool local_active = GImGui->ActiveId != 0;
         const bool allow_input = visibility_.visible() && !mouse_locked_;
-        ImVector<ImGuiInputEvent>& q = GImGui->InputEventsQueue;
-        for (int i = 0; i < q.Size; ++i) {
-            const ImGuiInputEvent& e = q[i];
-            switch (e.Type) {
-            case ImGuiInputEventType_MousePos:
-                remote_->mouse_x = e.MousePos.PosX;
-                remote_->mouse_y = e.MousePos.PosY;
-                remote_->mouse_valid =
-                    e.MousePos.PosX > -FLT_MAX * 0.5f && e.MousePos.PosY > -FLT_MAX * 0.5f;
-                break;
-            case ImGuiInputEventType_MouseButton:
-                if (allow_input && (!local_active || !e.MouseButton.Down))
-                    in.mouse_buttons.push_back({static_cast<std::uint8_t>(e.MouseButton.Button), e.MouseButton.Down});
-                break;
-            case ImGuiInputEventType_MouseWheel:
+        auto pending = std::exchange(remote_->pending, {});
+        // Derive live focus and modifier state from SDL rather than ImGui's local queue so eating local presses
+        // never desyncs modifiers or leaves remote input stuck unfocused after swapping characters.
+        if (!pending.saw_focus) remote_->focused = window_.focused();
+        const SDL_Keymod sdl_mods = SDL_GetModState();
+        remote_->mods = static_cast<std::uint8_t>(
+            ((sdl_mods & SDL_KMOD_CTRL) ? 1u : 0u) | ((sdl_mods & SDL_KMOD_SHIFT) ? 2u : 0u) |
+            ((sdl_mods & SDL_KMOD_ALT) ? 4u : 0u) | ((sdl_mods & SDL_KMOD_GUI) ? 8u : 0u));
+
+        for (const auto& mb : pending.mouse_buttons) {
+            if (mb.button >= ImGuiMouseButton_COUNT) continue;
+            const auto bit = static_cast<std::uint8_t>(1u << mb.button);
+            if (mb.down) {
                 if (allow_input && !local_active) {
-                    in.wheel_x += e.MouseWheel.WheelX;
-                    in.wheel_y += e.MouseWheel.WheelY;
+                    in.mouse_buttons.push_back(mb);
+                    if (remote_->want_capture_mouse) remote_->captured_mouse_mask |= bit;
+                    remote_->local_owned_mouse_mask &= static_cast<std::uint8_t>(~bit);
+                } else {
+                    remote_->local_owned_mouse_mask |= bit;
                 }
-                break;
-            case ImGuiInputEventType_Key:
-                if (e.Key.Key == ImGuiMod_Ctrl)
-                    remote_->mods = e.Key.Down ? static_cast<std::uint8_t>(remote_->mods | 1u)
-                                               : static_cast<std::uint8_t>(remote_->mods & ~1u);
-                else if (e.Key.Key == ImGuiMod_Shift)
-                    remote_->mods = e.Key.Down ? static_cast<std::uint8_t>(remote_->mods | 2u)
-                                               : static_cast<std::uint8_t>(remote_->mods & ~2u);
-                else if (e.Key.Key == ImGuiMod_Alt)
-                    remote_->mods = e.Key.Down ? static_cast<std::uint8_t>(remote_->mods | 4u)
-                                               : static_cast<std::uint8_t>(remote_->mods & ~4u);
-                else if (e.Key.Key == ImGuiMod_Super)
-                    remote_->mods = e.Key.Down ? static_cast<std::uint8_t>(remote_->mods | 8u)
-                                               : static_cast<std::uint8_t>(remote_->mods & ~8u);
-                else if (allow_input &&
-                         (remote_->want_capture_keyboard || remote_->want_capture_mouse || !e.Key.Down))
-                    in.keys.push_back({static_cast<std::uint16_t>(e.Key.Key), e.Key.Down});
-                break;
-            case ImGuiInputEventType_Text:
-                if (allow_input && (remote_->want_capture_keyboard || remote_->want_text_input))
-                    in.chars.push_back(e.Text.Char);
-                break;
-            case ImGuiInputEventType_Focus:
-                remote_->focused = e.AppFocused.Focused;
-                break;
-            default:
-                break;
+            } else {
+                // Always forward releases (unless owned purely by a local interaction) even if allow_input just
+                // flipped false or local_active is true, so remote drags and clicks always complete cleanly.
+                remote_->captured_mouse_mask &= static_cast<std::uint8_t>(~bit);
+                const bool was_local = (remote_->local_owned_mouse_mask & bit) != 0;
+                remote_->local_owned_mouse_mask &= static_cast<std::uint8_t>(~bit);
+                if (!was_local) in.mouse_buttons.push_back(mb);
             }
         }
+        if (allow_input && !local_active) {
+            in.wheel_x = pending.wheel_x;
+            in.wheel_y = pending.wheel_y;
+        }
+        for (const auto& ke : pending.keys) {
+            if (!ke.down) {
+                in.keys.push_back(ke);
+            } else if (allow_input && (remote_->want_capture_keyboard || remote_->want_capture_mouse)) {
+                in.keys.push_back(ke);
+            }
+        }
+        if (allow_input && (remote_->want_capture_keyboard || remote_->want_text_input)) {
+            in.chars = std::move(pending.chars);
+        }
+
+        const auto& win_in = window_.input();
+        if (!pending.saw_mouse_pos) {
+            // Immediately after swapping characters the cursor may not have moved yet; seed from ImGui's or SDL's
+            // current window-space mouse position so hovering and clicking remote plugin/Lua windows works at once.
+            if (io.MousePos.x > -FLT_MAX * 0.5f && io.MousePos.y > -FLT_MAX * 0.5f) {
+                remote_->mouse_x = io.MousePos.x;
+                remote_->mouse_y = io.MousePos.y;
+                remote_->mouse_valid = true;
+            } else if (remote_->focused) {
+                remote_->mouse_x = win_in.mouse_x;
+                remote_->mouse_y = win_in.mouse_y;
+                remote_->mouse_valid = true;
+            }
+        }
+        // Cross-check held buttons against live Window/SDL state so even an OS-swallowed mouse-up (e.g. capture
+        // loss outside the window) clears held state and reconciles the headless context on the next frame.
+        float live_mx = 0.0f, live_my = 0.0f;
+        const SDL_MouseButtonFlags live_sdl = SDL_GetMouseState(&live_mx, &live_my);
+        const std::uint8_t live_physical = static_cast<std::uint8_t>(
+            (win_in.left_button ? 1u : 0u) | (win_in.right_button ? 2u : 0u) |
+            ((live_sdl & SDL_BUTTON_MMASK) ? 4u : 0u) | ((live_sdl & SDL_BUTTON_X1MASK) ? 8u : 0u) |
+            ((live_sdl & SDL_BUTTON_X2MASK) ? 16u : 0u));
+        remote_->sdl_mouse_down_mask &= live_physical;
+        const std::uint8_t held_any =
+            static_cast<std::uint8_t>(remote_->sdl_mouse_down_mask | remote_->pad_mouse_down_mask);
+        remote_->captured_mouse_mask &= held_any;
+        remote_->local_owned_mouse_mask &= held_any;
+        if (!allow_input) remote_->captured_mouse_mask = 0;
+
         in.mouse_x = remote_->mouse_x;
         in.mouse_y = remote_->mouse_y;
         in.mouse_valid = allow_input && remote_->mouse_valid;
         in.focused = allow_input && remote_->focused;
         in.mods = allow_input ? remote_->mods : 0u;
+        in.mouse_down_mask = allow_input ? static_cast<std::uint8_t>(held_any & ~remote_->local_owned_mouse_mask) : 0u;
+        in.has_mouse_down_mask = true;
         remote_->captured_input = std::move(in);
 
         // Remote plugin windows draw over local Hailstone UI: prevent clicks/scrolls/keys meant for remote windows
         // from falling through to local windows behind them, while still allowing releases so nothing stays held.
-        const bool eat_mouse = allow_input && remote_->want_capture_mouse && !local_active;
+        const bool remote_owns_mouse = remote_->want_capture_mouse || remote_->captured_mouse_mask != 0;
+        const bool eat_mouse = allow_input && remote_owns_mouse && !local_active;
         const bool eat_kbd = allow_input && remote_->want_capture_keyboard;
         if (eat_mouse || eat_kbd) {
+            ImVector<ImGuiInputEvent>& q = GImGui->InputEventsQueue;
             for (int i = 0; i < q.Size;) {
                 const ImGuiInputEvent& e = q[i];
                 const bool drop_mouse =
@@ -760,16 +963,43 @@ void ImGuiLayer::feed_pad_pointer() {
     if (fast.active && !p.active) {
         io.AddMouseSourceEvent(ImGuiMouseSource_Mouse);
         io.AddMousePosEvent(fast.x, fast.y);
+        if (remote_ && remote_->enabled) {
+            remote_->mouse_x = fast.x;
+            remote_->mouse_y = fast.y;
+            remote_->mouse_valid = true;
+            remote_->pending.saw_mouse_pos = true;
+        }
     }
     if (p.active) {
         // After the backend's frame: its own place for the mouse (the system's) comes first and this one wins.
         io.AddMouseSourceEvent(ImGuiMouseSource_Mouse);
         io.AddMousePosEvent(p.x, p.y);
         if (p.wheel != 0.0f) io.AddMouseWheelEvent(0.0f, p.wheel);
+        if (remote_ && remote_->enabled) {
+            remote_->mouse_x = p.x;
+            remote_->mouse_y = p.y;
+            remote_->mouse_valid = true;
+            remote_->pending.saw_mouse_pos = true;
+            remote_->pending.wheel_y += p.wheel;
+        }
     }
     const bool left = p.active && p.left, right = p.active && p.right;
-    if (left != pointer_left_) io.AddMouseButtonEvent(ImGuiMouseButton_Left, left);
-    if (right != pointer_right_) io.AddMouseButtonEvent(ImGuiMouseButton_Right, right);
+    if (left != pointer_left_) {
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, left);
+        if (remote_ && remote_->enabled) {
+            if (left) remote_->pad_mouse_down_mask |= 1u;
+            else remote_->pad_mouse_down_mask &= static_cast<std::uint8_t>(~1u);
+            remote_->pending.mouse_buttons.push_back({0u, left});
+        }
+    }
+    if (right != pointer_right_) {
+        io.AddMouseButtonEvent(ImGuiMouseButton_Right, right);
+        if (remote_ && remote_->enabled) {
+            if (right) remote_->pad_mouse_down_mask |= 2u;
+            else remote_->pad_mouse_down_mask &= static_cast<std::uint8_t>(~2u);
+            remote_->pending.mouse_buttons.push_back({1u, right});
+        }
+    }
     pointer_left_ = left;
     pointer_right_ = right;
 }
@@ -846,7 +1076,8 @@ std::string ImGuiLayer::debug_state() const {
 void ImGuiLayer::render(const render::FrameInfo& frame) {
     vk_.begin_overlay(frame);
     if (!frame_open_) return;
-    if (visible() && remote_ && remote_->enabled && remote_->want_capture_mouse &&
+    if (visible() && remote_ && remote_->enabled &&
+        (remote_->want_capture_mouse || remote_->captured_mouse_mask != 0) &&
         remote_->mouse_cursor >= 0 && remote_->mouse_cursor < ImGuiMouseCursor_COUNT) {
         ImGui::SetMouseCursor(static_cast<ImGuiMouseCursor>(remote_->mouse_cursor));
     }
@@ -866,6 +1097,8 @@ void ImGuiLayer::set_remote_enabled(bool enabled) {
     remote_->enabled = enabled;
     remote_->clear_session();
 }
+
+void ImGuiLayer::reset_interaction_on_next_frame() { reset_interaction_pending_ = true; }
 
 void ImGuiLayer::push_remote_texture(RemoteImGuiTexture tex) {
     if (!remote_ || !remote_->enabled) return;
@@ -911,7 +1144,9 @@ void ImGuiLayer::set_visible(bool visible) {
     }
 }
 bool ImGuiLayer::wants_mouse() const {
-    return visibility_.wants_mouse() || (visible() && remote_ && remote_->enabled && remote_->want_capture_mouse);
+    return visibility_.wants_mouse() ||
+           (visible() && remote_ && remote_->enabled &&
+            (remote_->want_capture_mouse || remote_->captured_mouse_mask != 0));
 }
 bool ImGuiLayer::wants_keyboard() const {
     return visibility_.wants_keyboard(keyboard_request_) ||

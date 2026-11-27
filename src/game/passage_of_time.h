@@ -40,6 +40,12 @@ struct TickPools {
     std::int64_t hp = 0, max_hp = 0;
     std::int32_t mana = 0, endurance = 0;
     bool dead = false; // the spawn's +0x125
+    // Deliberate difference from RoF2 (set by the live connection): when true, ProcessAffects still counts down
+    // buffs, removes expired ones and breaks mesmerize on a DoT tick, but leaves pools.hp to the server's
+    // OP_HPUpdate instead of locally subtracting unmitigated DoT damage (which can drop a full-HP character
+    // out-of-phase after a server heal or mitigation and leave them stuck below 100% when the server stops
+    // sending OP_HPUpdate at full HP).
+    bool skip_buff_hp_loss = false;
 };
 
 struct DrunkennessTick {

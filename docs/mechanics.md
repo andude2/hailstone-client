@@ -2212,7 +2212,11 @@ The periodic update drives the timed mechanics. It and UseSkill send uninitialis
    - each buff's slots apply their per-tick effects: HP, mana, endurance, the mount summon, the fading lines 0x30c2
      / 0x30c3, the cast interrupt chance;
    - HP is CalcTickHPChange (caster distance, bard modifier, an inverted buff negated, a player caster's PvP loss
-     75% / 70%), summed, then ModifyCurHP;
+     75% / 70%), summed, then ModifyCurHP; **deliberate difference** on a live connection (`GameConnection::passage_of_time`,
+     `TickPools::skip_buff_hp_loss`): negative buff HP sums still break mesmerize, but do not subtract raw unmitigated
+     `spells_us.txt` DoT damage from `pstatus_.hp` locally because the server's `OP_HPUpdate` carries the real mitigated
+     tick and an out-of-phase local subtraction after a heal would otherwise stick below 100% once the server stops
+     sending `OP_HPUpdate` at full HP;
    - mana is SPA 15 / 0x1a1, not for classes 1, 7, 8, 9, 16; endurance is SPA 189;
    - a draining beneficial buff the pool cannot pay is removed (OP_Buff);
    - a tick's HP loss breaks the first mesmerize (SPA 31) buff (OP_Buff) and ends the stun.
@@ -2715,7 +2719,8 @@ reports or tests the player's current HP reads `net::GameConnection::own_hp`:
 - UseSkill's Cur_HP check, the fall damage knock-out floor, CastSpell's Max_HP and the hit sound's HP.
 
 The bare packet value goes below 1 while a geared player still stands, so none of these read it. The regeneration
-ticks and the stored HP keep the packet's value.
+ticks and the stored HP keep the packet's value. When `OP_MobHealth` reports 100% for the local living player while
+`pstatus_.hp` is below `pstatus_.max_hp`, `pstatus_.hp` reconciles to `pstatus_.max_hp`.
 
 ## Guild banners
 

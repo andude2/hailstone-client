@@ -76,6 +76,11 @@ struct AutomationEnv {
     std::function<std::string(const game::SpellData&)> spell_description;
     std::function<std::optional<bool>(std::uint32_t spawn)> can_see;
     std::function<std::optional<bool>(const std::array<float, 3>&, const std::array<float, 3>&)> line_of_sight;
+    bool headless = false; // true in hailstone_headless (${Hailstone.Headless})
+    std::function<bool()> viewer_connected; // true while a GUI drive viewer is attached (${Hailstone.ViewerConnected})
+    // A_SpellIcons texture lookup for plugin OnUpdateImGui (PluginHostApi::spell_icon); empty headless.
+    std::function<bool(std::uint32_t icon, std::uint64_t& texture, float& u0, float& v0, float& u1, float& v1)>
+        spell_icon;
 };
 
 class Automation {

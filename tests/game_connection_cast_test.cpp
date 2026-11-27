@@ -298,3 +298,82 @@ TEST_CASE("SetBodyType without CharacterPropertySets.txt keeps the set ID as the
     CHECK(world.spawns.at(target).body_type == 9100);
     CHECK(world.spawns.at(target).has_property(9100));
 }
+
+TEST_CASE("Stale non-bard casts clear past ETA and own InterruptCast clears casting immediately") {
+    constexpr std::uint32_t kNuke = 6810;
+    constexpr std::uint32_t kSong = 3373;
+    auto table = std::make_shared<game::SpellTable>();
+    REQUIRE(table->parse(spell_line({{0, std::to_string(kNuke)}, {1, "Test Nuke"}, {9, "100"}, {13, "1500"},
+                                     {20, "-10"}, {83, "0"}, {86, "0"}, {98, "5"}, {105, "1"}}) +
+                         "\n" +
+                         spell_line({{0, std::to_string(kSong)}, {1, "Test Song"}, {13, "3000"}, {17, "3"},
+                                     {83, "1"}, {98, "6"}, {111, "1"}})) == 2);
+
+    SUBCASE("stale non-bard cast clears after grace window and unlocks gem") {
+        mq_test::World w("stale_cast_watchdog");
+        auto& conn = *w.conn;
+        conn.set_spell_table_for_test(table);
+        auto& sp = A::spells(conn);
+        sp.gems[0].spell = kNuke;
+        sp.gems[0].ready = 0xffffffffu;
+        sp.recovery_ready = 0xffffffffu;
+        sp.pending = 1;
+        sp.casting.spell = kNuke;
+        sp.casting.slot = 0;
+        sp.casting.cast_time = 1500;
+        sp.casting.eta_ms = 10000;
+
+        A::update_spells_at(conn, 14000);
+        CHECK(sp.casting.casting());
+        CHECK(sp.casting.spell == kNuke);
+        CHECK(sp.pending == 1);
+
+        A::update_spells_at(conn, 14001);
+        CHECK_FALSE(sp.casting.casting());
+        CHECK(sp.pending == 0);
+        CHECK(sp.gems[0].ready < 0xffffffffu);
+        CHECK(sp.recovery_ready < 0xffffffffu);
+    }
+
+    SUBCASE("own InterruptCast clears casting immediately without OP_ManaChange") {
+        mq_test::World w("own_interrupt_cast");
+        auto& conn = *w.conn;
+        conn.set_spell_table_for_test(table);
+        auto& sp = A::spells(conn);
+        sp.gems[1].spell = kNuke;
+        sp.gems[1].ready = 0xffffffffu;
+        sp.recovery_ready = 0xffffffffu;
+        sp.pending = 1;
+        sp.casting.spell = kNuke;
+        sp.casting.slot = 1;
+        sp.casting.cast_time = 1500;
+        sp.casting.eta_ms = 10000;
+
+        InterruptCast ic;
+        ic.spawn_id = A::world(conn).player_id;
+        ic.message_id = 439;
+        A::handle_zone(conn, encode(ic));
+
+        CHECK_FALSE(sp.casting.casting());
+        CHECK(sp.pending == 0);
+        CHECK(sp.gems[1].ready < 0xffffffffu);
+        CHECK(sp.recovery_ready < 0xffffffffu);
+    }
+
+    SUBCASE("bard song playing past ETA is not cleared by the stale-cast watchdog") {
+        mq_test::World w("bard_song_watchdog");
+        auto& conn = *w.conn;
+        conn.set_spell_table_for_test(table);
+        A::profile(conn)->class_ = 8; // Bard
+        auto& sp = A::spells(conn);
+        sp.gems[0].spell = kSong;
+        sp.casting.spell = kSong;
+        sp.casting.slot = 0;
+        sp.casting.cast_time = 3000;
+        sp.casting.eta_ms = 10000;
+
+        A::update_spells_at(conn, 20000);
+        CHECK(sp.casting.casting());
+        CHECK(sp.casting.spell == kSong);
+    }
+}

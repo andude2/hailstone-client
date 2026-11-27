@@ -379,6 +379,15 @@ local function boxSetCard(view, s, bh)
       API.pregame.LoginDo("loginBox")
     end
     P.Tip(BOX_LOGIN_TIP)
+    if view.headlessAvailable then
+      ui.Dummy(0, 2 * s)
+      ui.BeginDisabled(not view.boxReady)
+      if ui.Button(string.format("Log in box set headless (%d)", view.boxCount), -1, bh) then
+        API.pregame.LoginDo("loginBoxHeadless")
+      end
+      ui.EndDisabled()
+      P.Tip("Logs the selected (or first) account into this window and launches the rest headless with /crew control.")
+    end
   end
   ui.EndDisabled()
   ui.Dummy(0, 2 * s)
@@ -438,6 +447,16 @@ local function quickCard(view, s, bh)
   ui.Dummy(0, 2 * s)
   local q = view.characters[view.quick]
   if P.Primary(q and ("Play " .. q.name) or "Play", -1, bh, q ~= nil and not view.busy) then API.pregame.LoginDo("play") end
+  if view.hasCrewIni then
+    ui.Dummy(0, 2 * s)
+    ui.BeginDisabled(q == nil or view.busy)
+    if ui.Button(q and ("Play " .. q.name .. " + crew.ini") or "Play + crew.ini", -1, bh) then
+      API.pregame.LoginDo("loginWithCrew")
+    end
+    ui.EndDisabled()
+    P.Tip("Enter directly as " .. (q and q.name or "the selected character") .. " and launch the headless crew from:\n" ..
+      (view.crewIni or "crew.ini"))
+  end
   if q and not q.passwordSaved then
     ui.PushTextWrapPos(0)
     P.Faint(string.format("%s has no saved password: type it in Password, then Play.", q.account))
@@ -916,6 +935,23 @@ local function loginCard(view, s, bh)
   ui.Dummy(0, 6 * s)
   if P.Primary("Log in", -1, bh * 1.2, view.ready) then submit = true end
   if submit and view.ready then API.pregame.LoginDo("login") end
+  if view.hasCrewIni then
+    ui.Dummy(0, 2 * s)
+    local q = view.characters[view.quick]
+    local crewOnlyW = ui.CalcTextSize("Crew only") + 18 * s
+    local gap = 6 * s
+    local mainW = math.max(80 * s, ui.GetContentRegionAvail() - crewOnlyW - gap)
+    local canCrewLogin = view.ready or (q ~= nil and view.host ~= "")
+    ui.BeginDisabled(not canCrewLogin)
+    local crewLabel = q and ("Log in " .. q.name .. " + crew.ini") or "Log in + crew.ini"
+    if ui.Button(crewLabel, mainW, bh) then API.pregame.LoginDo("loginWithCrew") end
+    ui.EndDisabled()
+    P.Tip("Enter directly as " .. (q and q.name or "this account") .. " in this window and launch the headless crew from:\n" ..
+      (view.crewIni or "crew.ini"))
+    ui.SameLine(0, gap)
+    if ui.Button("Crew only", crewOnlyW, bh) then API.pregame.LoginDo("launchCrew") end
+    P.Tip("Launch the headless crew from:\n" .. (view.crewIni or "crew.ini"))
+  end
   if view.sessionTicketAvailable and not view.busy then
     if ui.Button("Sign in with session", -1, bh) then API.pregame.LoginDo("resume_token") end
   end

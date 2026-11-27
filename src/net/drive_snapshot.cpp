@@ -82,11 +82,15 @@ JournalPolicy journal_policy(Op op) {
     case Op::TimeOfDay:
     case Op::Weather:
     case Op::ExpUpdate:
+    case Op::AAExpUpdate:
+    case Op::RespondAA:
     case Op::LevelAppearance:
     case Op::PlayerProfile:
     case Op::CharInventory:
     case Op::XTargetResponse:
     case Op::TargetCommand:
+    case Op::TargetHoTT:
+    case Op::PetHoTT:
         return JournalPolicy::Latest;
     default:
         return JournalPolicy::KeepAll;
@@ -397,6 +401,18 @@ bool drive_forward_allowed(const AppPacket& packet, bool world) {
     case Op::CastSpell:
     case Op::ChannelMessage:
     case Op::SpawnAppearance:
+    case Op::LootRequest:
+    case Op::LootItem:
+    case Op::EndLootRequest:
+    case Op::TradeRequest:
+    case Op::TradeRequestAck:
+    case Op::TradeBusy:
+    case Op::TradeAcceptClick:
+    case Op::CancelTrade:
+    case Op::ShopRequest:
+    case Op::ShopPlayerBuy:
+    case Op::ShopPlayerSell:
+    case Op::ShopEnd:
         return false;
     default:
         return true;

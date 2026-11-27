@@ -10,6 +10,7 @@
 #include "app/lua_ui.h"
 #include "app/lua_ui_values.h"
 #include "app/stats_ui.h"
+#include "core/byte_io.h"
 #include "game/mechanics/character.h"
 #include "game/mechanics/tables.h"
 #include "mock_server/harness.h"
@@ -110,4 +111,19 @@ TEST_CASE("Own HP: the windows add the items' HP that EQEmu's HP update leaves o
     app::share_own_hp_items(conn, nullptr);
     CHECK(conn.own_hp().cur == 100);
     CHECK(conn.own_hp().max == 200);
+
+    // OP_MobHealth at 100% for the local player reconciles a stale local prediction below max_hp back to max_hp;
+    // percentages below 100 leave exact pstatus_.hp untouched.
+    auto mob_health = [](std::uint16_t id, std::uint8_t pct) {
+        ByteWriter w;
+        w.le<std::uint16_t>(id);
+        w.le<std::uint8_t>(pct);
+        return net::AppPacket(net::to_wire(net::Op::MobHealth), w.take());
+    };
+    const auto me = static_cast<std::uint16_t>(conn.world().player_id);
+    conn.receive_zone_packet_for_test(mob_health(me, 80));
+    CHECK(conn.player_status().hp == 100);
+    conn.receive_zone_packet_for_test(mob_health(me, 100));
+    CHECK(conn.player_status().hp == 200);
+    CHECK(conn.own_hp().cur == 200);
 }

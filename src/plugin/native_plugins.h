@@ -46,6 +46,9 @@ struct NativeEnv {
     std::function<void(const std::string& line)> run;                        // a command line (through the hooks)
     std::function<void(Stream stream, const net::AppPacket& p)> send;        // a packet to the server
     std::function<void*()> imgui_context;
+    // ABI 5: spell icon (A_SpellIcons index) -> live ImGui texture id and UV rect for OnUpdateImGui; empty headless.
+    std::function<bool(std::uint32_t icon, std::uint64_t& texture, float& u0, float& v0, float& u1, float& v1)>
+        spell_icon;
     // ABI 2: the chain a plugin's server extension joins (game/server_ext_chain.h; each connection asks it), and the
     // connection its setters change (class masks, the pet list). Either may be null.
     game::ExtensionChain* extensions = nullptr;

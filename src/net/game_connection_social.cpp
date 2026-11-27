@@ -22,6 +22,7 @@
 #include "game/mechanics/attack_rules.h"
 #include "game/mechanics/character.h"
 #include "game/slash_commands.h"
+#include "game/window_notify.h"
 #include "game/zone_names.h"
 #include "net/chat_server.h"
 #include "net/group_packets.h"
@@ -154,6 +155,87 @@ std::string GameConnection::confirmation_requester() const {
     return {};
 }
 
+void GameConnection::notify_fallback(std::string_view args) {
+    const game::WindowNotify n = game::parse_window_notify(args);
+    if (!n.error.empty()) {
+        ui_message(n.error);
+        return;
+    }
+    // Only a left click has a connection call behind it; a right click, a list row and a tab
+    // page act on the window's own state, which a client without the window does not have.
+    if (!iequals(n.notification, "leftmouseup") || state_ != ConnectionState::InZone) return;
+    using A = game::NotifyAction;
+    switch (game::notify_action(n.window, n.child)) {
+    case A::TradeAccept:
+        // A script accepting for the player (Sentinel's AutoAccept) is held to its window's
+        // checks, and to one more the window cannot make: the outgoing side stays empty, so
+        // /notify can receive a trade but never give one away.
+        if (trade_ && trade_->open && !trade_->with_npc && trade_->their_ready && !trade_->my_ready &&
+            (n.expected.empty() || iequals(trade_->partner_name, n.expected))) {
+            const bool coins = std::any_of(trade_->my_coins.begin(), trade_->my_coins.end(),
+                                           [](auto amount) { return amount != 0; });
+            const bool items = std::any_of(inventory_.items().begin(), inventory_.items().end(),
+                                           [](const auto& entry) { return entry.first.first == kInvTrade; });
+            if (!coins && !items) trade_accept();
+            else ui_message("Trade acceptance refused: the outgoing side is not empty.");
+        } else ui_message("Trade acceptance refused: no ready player trade.");
+        break;
+    case A::TradeCancel:
+        if (trade_ && trade_->open) trade_cancel();
+        break;
+    case A::LootAll:
+        if (loot_) loot_all();
+        break;
+    case A::LootDone:
+        if (loot_) end_loot();
+        break;
+    case A::ConfirmYes:
+        // Only the questions another player asks (an invite, a translocate), only the button
+        // the window shows, and only from the expected requester when one is named: a Yes to
+        // anything else (a deletion, a purchase) is the player's click to make in the window.
+        if (confirmation_ && iequals(n.child, confirmation_->ok_only ? "OK_Button" : "Yes_Button")) {
+            const auto id = confirmation_->id;
+            if ((id == kConfirmTranslocate || id == kConfirmSharedTask || id == kConfirmFellowshipInvite ||
+                 id == kConfirmDzInvite) &&
+                (n.expected.empty() || iequals(confirmation_requester(), n.expected)))
+                answer_confirmation(true);
+        }
+        break;
+    case A::ConfirmNo:
+        if (confirmation_ && !confirmation_->ok_only &&
+            (n.expected.empty() || iequals(confirmation_requester(), n.expected)))
+            answer_confirmation(false);
+        break;
+    case A::LargeDialogOk:
+        if (large_dialog_ && !large_dialog_->buttons) answer_large_dialog(0);
+        break;
+    case A::LargeDialogYes:
+        if (large_dialog_ && large_dialog_->buttons) answer_large_dialog(1);
+        break;
+    case A::LargeDialogNo:
+        if (large_dialog_ && large_dialog_->buttons) answer_large_dialog(2);
+        break;
+    case A::TaskDecline:
+        if (tasks_.offers) decline_tasks();
+        break;
+    case A::BankAuto:
+        if (bank_) auto_bank();
+        break;
+    case A::BankDone:
+        if (bank_) close_bank();
+        break;
+    case A::TributeToggle:
+        tribute_toggle(!tribute_.settings.active);
+        break;
+    case A::GuildTributeToggle:
+        guild_tribute_toggle(!guild_tribute_.active.enabled);
+        break;
+    case A::None:
+        log::info("/notify: {} {}: needs the UI", n.window, n.child);
+        break;
+    }
+}
+
 void GameConnection::say(const std::string& text) { send_command(text); }
 
 void GameConnection::send_command(const std::string& typed) {
@@ -162,7 +244,8 @@ void GameConnection::send_command(const std::string& typed) {
     if (options_.hooks && options_.hooks->command(line)) return;
     // /crew is the graphical client's command (the crew window and the chat relay's /crew relay); a headless
     // connection has no such command, so a relay line meant for the GUI is not an unknown command here.
-    if (line.rfind("/crew", 0) == 0) return;
+    // Match the command word only — /crewtrade is a built-in item command below.
+    if (line == "/crew" || line.rfind("/crew ", 0) == 0) return;
     if (drive_control_ && !line.empty()) {
         // Keep local GUI-only window commands on the graphical client; forward all gameplay/chat/plugin commands
         // to the headless authority so it executes them natively with its own UCS session and plugins.
@@ -203,34 +286,13 @@ void GameConnection::send_command(const std::string& typed) {
         while (!rest.empty() && rest.front() == ' ') rest.remove_prefix(1);
         if (group_command(word, std::string(rest)) || item_command(word, std::string(rest))) return;
         if (word == "/notify") {
-            const auto window = game::next_cmd_arg(rest);
-            const auto child = game::next_cmd_arg(rest);
-            const auto event = game::next_cmd_arg(rest);
-            const auto expected = game::next_cmd_arg(rest);
-            if (iequals(event, "leftmouseup") && state_ == ConnectionState::InZone) {
-                if (iequals(window, "TradeWnd") && iequals(child, "TRDW_Trade_Button")) {
-                    if (trade_ && trade_->open && !trade_->with_npc && trade_->their_ready && !trade_->my_ready &&
-                        (expected.empty() || iequals(trade_->partner_name, expected))) {
-                        const bool coins = std::any_of(trade_->my_coins.begin(), trade_->my_coins.end(),
-                                                       [](auto amount) { return amount != 0; });
-                        const bool items = std::any_of(inventory_.items().begin(), inventory_.items().end(),
-                            [](const auto& entry) { return entry.first.first == kInvTrade; });
-                        if (!coins && !items) trade_accept();
-                        else ui_message("Trade acceptance refused: the outgoing side is not empty.");
-                    } else ui_message("Trade acceptance refused: no ready player trade.");
-                    return;
-                }
-                if (iequals(window, "ConfirmationDialogBox") && confirmation_ &&
-                    iequals(child, confirmation_->ok_only ? "OK_Button" : "Yes_Button")) {
-                    const auto id = confirmation_->id;
-                    if ((id == kConfirmTranslocate || id == kConfirmSharedTask ||
-                         id == kConfirmFellowshipInvite || id == kConfirmDzInvite) &&
-                        (expected.empty() || iequals(confirmation_requester(), expected))) {
-                        answer_confirmation(true);
-                        return;
-                    }
-                }
-            }
+            // With a UI, the stock window takes it as the player's click would, its own
+            // checks and all (ClientApp's Hailstone_notify). It answers false when nothing
+            // took it (no UI, or no such child), and the connection's fallback below then
+            // does what a headless character can (game/window_notify.h).
+            if (client_commands_ && client_commands_("Hailstone_notify", std::string(rest))) return;
+            notify_fallback(rest);
+            return;
         }
         // Hailstone's own windows (the client's handlers, by a name not in the original's table).
         if (word == "/abilitybook" && client_commands_ && client_commands_("Hailstone_abilitybook", std::string(rest)))

@@ -115,6 +115,8 @@ public:
     // True once a viewer has connected and its initial snapshot has not been supplied yet.
     bool needs_snapshot() const;
     bool viewer_connected() const;
+    // Incremented on each accepted viewer connection so fast detach+reattach cycles still trigger a fresh reset.
+    std::uint64_t viewer_generation() const;
     void set_snapshot(net::DriveSnapshot snapshot);
     // Push a fresh snapshot to an already-connected viewer (e.g. after the headless character zones).
     void publish_snapshot(net::DriveSnapshot snapshot);

@@ -1,6 +1,7 @@
 #include "app/drive_observe.h"
 
 #include "core/byte_io.h"
+#include "core/log.h"
 
 #include <algorithm>
 #include <atomic>
@@ -130,7 +131,7 @@ std::optional<net::DriveAction> decode_drive_action(std::span<const std::byte> b
         action.inventory_revision = r.le<std::uint64_t>();
         action.dialog = r.le<std::uint64_t>();
         action.item_serial = r.fixed_string(17);
-        if (action.kind > net::DriveActionKind::Loot) return std::nullopt;
+        if (action.kind > net::DriveActionKind::AASetPercent) return std::nullopt;
         if (action.kind == net::DriveActionKind::Command) action.text = get_string(r, kMaxCommandLen);
         if (!r.empty()) return std::nullopt;
         return action;
@@ -270,6 +271,18 @@ std::vector<std::byte> encode_drive_state(const DriveLocalState& state) {
             w.le(q->max);
             w.le(q->start);
         }
+        w.le(ui.loot_corpse_id);
+        w.le(static_cast<std::uint8_t>(ui.trade.has_value() ? 1 : 0));
+        if (const auto& t = ui.trade) {
+            w.le(t->partner_id);
+            put_string(w, t->partner_name.size() > 128 ? std::string_view(t->partner_name).substr(0, 128)
+                                                       : std::string_view(t->partner_name));
+            const std::uint8_t tflags = static_cast<std::uint8_t>(
+                (t->with_npc ? 1u : 0u) | (t->my_ready ? 2u : 0u) | (t->their_ready ? 4u : 0u));
+            w.le(tflags);
+            for (std::uint32_t c : t->my_coins) w.le(c);
+            for (std::uint32_t c : t->their_coins) w.le(c);
+        }
     }
     if (has_tail) {
         w.le(static_cast<std::uint8_t>(state.has_status ? 1 : 0));
@@ -348,6 +361,19 @@ std::optional<DriveLocalState> decode_drive_state(std::span<const std::byte> bod
                 q.start = r.le<std::uint32_t>();
                 ui.quantity = q;
             }
+            if (!r.empty()) ui.loot_corpse_id = r.le<std::uint32_t>();
+            if (!r.empty() && r.le<std::uint8_t>() != 0) {
+                net::DriveTradeState t;
+                t.partner_id = r.le<std::uint32_t>();
+                t.partner_name = get_string(r, 128);
+                const auto tflags = r.le<std::uint8_t>();
+                t.with_npc = (tflags & 1u) != 0;
+                t.my_ready = (tflags & 2u) != 0;
+                t.their_ready = (tflags & 4u) != 0;
+                for (auto& c : t.my_coins) c = r.le<std::uint32_t>();
+                for (auto& c : t.their_coins) c = r.le<std::uint32_t>();
+                ui.trade = std::move(t);
+            }
             state.ui = std::move(ui);
         }
         if (!r.empty()) {
@@ -405,7 +431,10 @@ std::vector<std::byte> encode_drive_imgui_input(const ui::RemoteImGuiInput& inpu
     w.f32(input.wheel_x);
     w.f32(input.wheel_y);
     w.le(input.mods);
-    w.le(static_cast<std::uint8_t>((input.mouse_valid ? 1u : 0u) | (input.focused ? 2u : 0u)));
+    const std::uint8_t flags = static_cast<std::uint8_t>(
+        (input.mouse_valid ? 1u : 0u) | (input.focused ? 2u : 0u) |
+        (input.has_mouse_down_mask ? (0x80u | ((input.mouse_down_mask & 0x1fu) << 2u)) : 0u));
+    w.le(flags);
     const std::size_t nb = std::min(input.mouse_buttons.size(), kMaxRemoteMouseEvents);
     w.le(static_cast<std::uint16_t>(nb));
     for (std::size_t i = 0; i < nb; ++i) {
@@ -444,6 +473,8 @@ std::optional<ui::RemoteImGuiInput> decode_drive_imgui_input(std::span<const std
         const auto flags = r.le<std::uint8_t>();
         out.mouse_valid = (flags & 1u) != 0;
         out.focused = (flags & 2u) != 0;
+        out.has_mouse_down_mask = (flags & 0x80u) != 0;
+        out.mouse_down_mask = out.has_mouse_down_mask ? static_cast<std::uint8_t>((flags >> 2u) & 0x1fu) : 0u;
         const auto nb = r.le<std::uint16_t>();
         if (nb > kMaxRemoteMouseEvents) return std::nullopt;
         out.mouse_buttons.reserve(nb);
@@ -614,7 +645,7 @@ std::optional<ui::RemoteImGuiTexture> decode_drive_imgui_texture(std::span<const
             if (size != 0) return std::nullopt;
         } else {
             if (out.tex_w == 0 || out.tex_h == 0 || out.tex_w > kMaxRemoteTextureDim ||
-                out.tex_h > kMaxRemoteTextureDim)
+                out.tex_h > kMaxRemoteTextureDim || out.w == 0 || out.h == 0)
                 return std::nullopt;
             if (static_cast<std::uint32_t>(out.x) + out.w > out.tex_w ||
                 static_cast<std::uint32_t>(out.y) + out.h > out.tex_h)
@@ -656,6 +687,7 @@ struct DriveObserveServer::Impl {
     std::atomic<bool> stop{false};
     std::atomic<bool> snapshot_requested{false};
     std::atomic<bool> viewer_active{false};
+    std::atomic<std::uint64_t> viewer_gen{0};
     std::mutex mutex;
     std::condition_variable wake;
     std::optional<net::DriveSnapshot> snapshot;
@@ -698,6 +730,8 @@ struct DriveObserveServer::Impl {
                     in->wheel_x = 0.0f;
                     in->wheel_y = 0.0f;
                     in->mods = 0;
+                    in->mouse_down_mask = 0;
+                    in->has_mouse_down_mask = true;
                     in->mouse_buttons.clear();
                     in->keys.clear();
                     in->chars.clear();
@@ -718,6 +752,8 @@ struct DriveObserveServer::Impl {
                     dst.mouse_valid = in->mouse_valid;
                     dst.focused = in->focused;
                     dst.mods = in->mods;
+                    dst.mouse_down_mask = in->mouse_down_mask;
+                    dst.has_mouse_down_mask = in->has_mouse_down_mask;
                     dst.wheel_x += in->wheel_x;
                     dst.wheel_y += in->wheel_y;
                     for (const auto& e : in->mouse_buttons)
@@ -760,22 +796,49 @@ struct DriveObserveServer::Impl {
             wake.notify_all();
 
             std::optional<net::DriveSnapshot> initial;
+            bool aborted_before_snapshot = false;
+            const auto snapshot_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
             {
                 std::unique_lock lock(mutex);
-                wake.wait(lock, [this] { return stop.load() || snapshot.has_value(); });
+                while (!stop.load() && !snapshot.has_value()) {
+                    if (client->closed() || std::chrono::steady_clock::now() >= snapshot_deadline) {
+                        aborted_before_snapshot = true;
+                        break;
+                    }
+                    wake.wait_for(lock, std::chrono::milliseconds(50),
+                                  [this] { return stop.load() || snapshot.has_value(); });
+                }
                 if (stop.load()) return;
-                initial = std::move(snapshot);
-                snapshot.reset();
-                snapshot_requested.store(false);
+                if (aborted_before_snapshot) {
+                    snapshot_requested.store(false);
+                    client_active = false;
+                    viewer_active.store(false);
+                } else {
+                    initial = std::move(snapshot);
+                    snapshot.reset();
+                    snapshot_requested.store(false);
+                }
+            }
+            if (aborted_before_snapshot) {
+                log::warn("headless: drive viewer aborted before snapshot ({})",
+                          client->closed() ? (client->error().empty() ? "peer closed" : client->error())
+                                           : "snapshot timed out");
+                client->close();
+                continue;
             }
             if (!send_snapshot_frames(*client, net::encode_drive_snapshot(*initial))) {
+                log::warn("headless: drive snapshot send failed ({})",
+                          client->error().empty() ? "transport failed" : client->error());
+                client->close();
                 std::lock_guard lock(mutex);
                 client_active = false;
                 viewer_active.store(false);
                 continue;
             }
+            viewer_gen.fetch_add(1, std::memory_order_relaxed);
             viewer_active.store(true);
 
+            std::string disconnect_reason;
             while (!stop.load() && !client->closed()) {
                 while (auto input = client->receive_message(0)) {
                     handle_input(std::span<const std::byte>(input->data(), input->size()));
@@ -783,7 +846,10 @@ struct DriveObserveServer::Impl {
                 std::optional<std::pair<DriveObserveMessage, std::vector<std::byte>>> message;
                 {
                     std::unique_lock lock(mutex);
-                    if (queue_overflow) break;
+                    if (queue_overflow) {
+                        disconnect_reason = "observe queue overflow (" + std::to_string(queued_bytes) + " bytes queued)";
+                        break;
+                    }
                     if (!queue.empty()) {
                         message = std::move(queue.front());
                         queue.pop_front();
@@ -792,7 +858,16 @@ struct DriveObserveServer::Impl {
                         wake.wait_for(lock, std::chrono::milliseconds(interactive ? 5 : 20));
                     }
                 }
-                if (message && !send(*client, message->first, message->second)) break;
+                if (message && !send(*client, message->first, message->second)) {
+                    disconnect_reason = "send failed (kind " +
+                                        std::to_string(static_cast<unsigned>(message->first)) + ", " +
+                                        std::to_string(message->second.size()) + " bytes: " +
+                                        (client->error().empty() ? "transport error" : client->error()) + ")";
+                    break;
+                }
+            }
+            if (!stop.load() && !disconnect_reason.empty()) {
+                log::warn("headless: closing drive viewer pipe: {}", disconnect_reason);
             }
             client->close();
             viewer_active.store(false);
@@ -881,6 +956,10 @@ const platform::LocalPipeSession& DriveObserveServer::session() const { return i
 bool DriveObserveServer::needs_snapshot() const { return impl_->snapshot_requested.load(); }
 
 bool DriveObserveServer::viewer_connected() const { return impl_->viewer_active.load(); }
+
+std::uint64_t DriveObserveServer::viewer_generation() const {
+    return impl_->viewer_gen.load(std::memory_order_relaxed);
+}
 
 void DriveObserveServer::set_snapshot(net::DriveSnapshot snapshot) {
     {

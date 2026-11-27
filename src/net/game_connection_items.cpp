@@ -325,46 +325,68 @@ void GameConnection::handle_item(Op op, const AppPacket& p) {
         break;
     case Op::MoneyOnCorpse:
         // Handle_OP_MoneyOnCorpse @0x6be950 (only while a corpse is being looted).
-        if (auto m = decode_money_on_corpse(p); m && loot_) {
-            switch (m->response) {
-            case 6: // every item has been sent: a Loot All asked for before this runs now
-                loot_->complete = true;
-                if (loot_all_deferred_) {
-                    loot_all_deferred_ = false;
-                    loot_all_now();
+        if (auto m = decode_money_on_corpse(p)) {
+            if (!loot_ && (drive_control_ || drive_ui_.has_value())) {
+                const bool refusal = m->response == 0 || m->response == 2 || m->response == 4 ||
+                                     m->response == 5 || m->response == 7;
+                if (refusal) {
+                    drive_loot_corpse_id_ = 0;
+                } else if (m->response != 6) {
+                    // On a control/observe mirror, headless owns OP_LootRequest (initiated by GUI right-click, /loot,
+                    // or a plugin). Open the mirror's loot session when the server's opening OP_MoneyOnCorpse arrives
+                    // so subsequent kItemPacketLoot and OP_MoneyOnCorpse(6) packets populate the GUI loot window.
+                    loot_ = LootSession{};
+                    const std::uint32_t cid =
+                        (drive_ui_ && drive_ui_->loot_corpse_id) ? drive_ui_->loot_corpse_id
+                                                                 : (drive_loot_corpse_id_ ? drive_loot_corpse_id_
+                                                                                          : world_.target_id);
+                    loot_->corpse_id = cid;
+                    if (auto it = world_.spawns.find(cid); it != world_.spawns.end())
+                        loot_->corpse_name = game::display_name(it->second.name);
+                    drive_loot_corpse_id_ = 0;
                 }
-                break;
-            case 1:
-            case 3: {
-                loot_->open = true;
-                loot_->money = {m->platinum, m->gold, m->silver, m->copper};
-                coins_.platinum += m->platinum;
-                coins_.gold += m->gold;
-                coins_.silver += m->silver;
-                coins_.copper += m->copper;
-                if (static_cast<std::int64_t>(static_cast<std::int32_t>(m->platinum)) + static_cast<std::int32_t>(m->gold) +
-                        static_cast<std::int32_t>(m->silver) + static_cast<std::int32_t>(m->copper) > 0) {
-                    SoundCue cue;
-                    cue.kind = SoundCue::Kind::Wave;
-                    cue.spell = 0x8a;
-                    sound_cues_.push_back(cue);
-                    // With /autosplit on (the profile's +0x46c) "You receive %1 as your split.", else
-                    // "You receive %1 from the corpse." (colour 0x11d).
-                    system(autosplit_ ? 12071 : 12072,
-                           {game::coin_amounts_text(m->platinum, m->gold, m->silver, m->copper)}, 0x11d);
-                }
-                loot_->complete = false;
-                loot_->items.clear();
-                // unk_SetStandState(0x69): the player kneels to loot.
-                set_stand_state(kStandLooting);
-                break;
             }
-            case 0: loot_failed(12073); break; // Someone is already looting that corpse.
-            case 2: loot_failed(12070); break; // You may not loot this corpse at this time.
-            case 4: loot_failed(5154); break;  // You cannot loot while a hostile creature is aware of your presence.
-            case 5: loot_failed(12390); break; // You are too far away to loot that corpse.
-            case 7: loot_failed(0); break;     // closes without a word
-            default: loot_->open = true; break; // the window shows
+            if (loot_) {
+                switch (m->response) {
+                case 6: // every item has been sent: a Loot All asked for before this runs now
+                    loot_->complete = true;
+                    if (loot_all_deferred_) {
+                        loot_all_deferred_ = false;
+                        loot_all_now();
+                    }
+                    break;
+                case 1:
+                case 3: {
+                    loot_->open = true;
+                    loot_->money = {m->platinum, m->gold, m->silver, m->copper};
+                    coins_.platinum += m->platinum;
+                    coins_.gold += m->gold;
+                    coins_.silver += m->silver;
+                    coins_.copper += m->copper;
+                    if (static_cast<std::int64_t>(static_cast<std::int32_t>(m->platinum)) + static_cast<std::int32_t>(m->gold) +
+                            static_cast<std::int32_t>(m->silver) + static_cast<std::int32_t>(m->copper) > 0) {
+                        SoundCue cue;
+                        cue.kind = SoundCue::Kind::Wave;
+                        cue.spell = 0x8a;
+                        sound_cues_.push_back(cue);
+                        // With /autosplit on (the profile's +0x46c) "You receive %1 as your split.", else
+                        // "You receive %1 from the corpse." (colour 0x11d).
+                        system(autosplit_ ? 12071 : 12072,
+                               {game::coin_amounts_text(m->platinum, m->gold, m->silver, m->copper)}, 0x11d);
+                    }
+                    loot_->complete = false;
+                    loot_->items.clear();
+                    // unk_SetStandState(0x69): the player kneels to loot.
+                    set_stand_state(kStandLooting);
+                    break;
+                }
+                case 0: loot_failed(12073); break; // Someone is already looting that corpse.
+                case 2: loot_failed(12070); break; // You may not loot this corpse at this time.
+                case 4: loot_failed(5154); break;  // You cannot loot while a hostile creature is aware of your presence.
+                case 5: loot_failed(12390); break; // You are too far away to loot that corpse.
+                case 7: loot_failed(0); break;     // closes without a word
+                default: loot_->open = true; break; // the window shows
+                }
             }
         }
         break;
@@ -851,6 +873,7 @@ bool GameConnection::auto_inventory(bool* equipped) {
     // the first empty worn slot taking it with the same class check; else the first free general slot, else the
     // first bag with room (PcZoneClient_AutoInventoryOrDropItem).
     if (equipped) *equipped = false;
+    if (relay_drive_action(DriveAction{.kind = DriveActionKind::AutoInventory})) return drive_input_ != nullptr;
     if (state_ != ConnectionState::InZone) return false;
     const Item* held = inventory_.cursor();
     if (!held) return false;
@@ -913,6 +936,7 @@ bool GameConnection::stow_cursor_in_packs() {
 }
 
 void GameConnection::drop_on_doll() {
+    if (relay_drive_action(DriveAction{.kind = DriveActionKind::DropOnDoll})) return;
     if (state_ != ConnectionState::InZone) return;
     if (inventory_.cursor()) {
         // CInventoryWnd::HandleLButtonUp @0x692ec0: the item-moved wave when the cursor ends up empty.
@@ -1132,7 +1156,10 @@ bool GameConnection::can_loot(std::uint32_t corpse_id) const {
 }
 
 void GameConnection::loot(std::uint32_t corpse_id) {
-    if (relay_control_action(DriveAction{.kind = DriveActionKind::Loot, .argument = corpse_id})) return;
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::Loot, .argument = corpse_id})) {
+        drive_loot_corpse_id_ = corpse_id;
+        return;
+    }
     // CEverQuest::LootCorpse @0x536720 (__do_loot, a right click on a corpse): a corpse (type above 1), not while
     // dead, an item request is pending or another corpse is open; beyond its AvatarHeight * 1.6 + 14 (PlayerDistance
     // with z scale 1.2) "You are too far away to loot that corpse." (colour 0xd); else OP_LootRequest.
@@ -1170,6 +1197,7 @@ void GameConnection::loot_failed(std::uint32_t eqstr) {
     // Handle_OP_MoneyOnCorpse's refusals: the line (0x111), and the corpse is let go without showing the window.
     if (eqstr) system(eqstr, {}, 0x111);
     loot_.reset();
+    drive_loot_corpse_id_ = 0;
     loot_all_queue_.clear();
     loot_all_active_ = false;
 }
@@ -1181,6 +1209,7 @@ void GameConnection::reset_loot_session() {
     // (100), the window hides. The target is cleared without telling the server (pinstTarget = 0).
     if (loot_) world_.target_id = 0;
     loot_.reset();
+    drive_loot_corpse_id_ = 0;
     loot_all_queue_.clear();
     loot_all_active_ = false;
     loot_all_deferred_ = false;
@@ -1406,6 +1435,7 @@ void GameConnection::send_loot_item(std::int16_t corpse_slot, bool auto_loot, st
 }
 
 void GameConnection::loot_all() {
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::LootAll})) return;
     // CLootWnd::WndNotification @0x6be180, Loot All: at once from the player's own corpse or without LootAllConfirm,
     // else "Loot all, are you sure?" (11018, 20 s) first.
     if (!loot_ || !loot_->open) return;

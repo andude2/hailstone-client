@@ -6,7 +6,24 @@
 #include <SDL3/SDL_properties.h>
 #include <SDL3/SDL_timer.h>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace hailstone::platform {
+namespace {
+
+#if defined(_WIN32)
+bool has_valid_std_error() {
+    const HANDLE h = ::GetStdHandle(STD_ERROR_HANDLE);
+    return h && h != INVALID_HANDLE_VALUE && ::GetFileType(h) != FILE_TYPE_UNKNOWN;
+}
+#endif
+
+} // namespace
 
 HelperProcess::~HelperProcess() {
     stop(true);
@@ -28,7 +45,12 @@ bool HelperProcess::start(const std::vector<std::string>& args, std::string& err
     SDL_SetPointerProperty(props, SDL_PROP_PROCESS_CREATE_ARGS_POINTER, argv.data());
     SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDIN_NUMBER, SDL_PROCESS_STDIO_APP);
     SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDOUT_NUMBER, SDL_PROCESS_STDIO_APP);
+#if defined(_WIN32)
+    SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDERR_NUMBER,
+                          has_valid_std_error() ? SDL_PROCESS_STDIO_INHERITED : SDL_PROCESS_STDIO_NULL);
+#else
     SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDERR_NUMBER, SDL_PROCESS_STDIO_INHERITED);
+#endif
     process_ = SDL_CreateProcessWithProperties(props);
     SDL_DestroyProperties(props);
     if (!process_) {

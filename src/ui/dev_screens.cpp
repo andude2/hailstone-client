@@ -1107,6 +1107,26 @@ LoginAction login_screen(LoginView& view) {
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                 ImGui::SetTooltip("The box set's accounts: this window logs in the first, and a new window starts "
                                   "for each of the others. Each enters its character.");
+            if (view.headless_available) {
+                ImGui::SameLine();
+                ImGui::BeginDisabled(!box_ready(view));
+                if (ImGui::Button(std::format("Log in box headless ({})", boxed).c_str()))
+                    action = LoginAction::LoginBoxHeadless;
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("Log in the selected/first account here and launch the rest headless.");
+            }
+        }
+        if (view.headless_available && !view.crew_ini.empty()) {
+            const bool can_crew_login =
+                ready || (!view.host.empty() && view.quick_selected >= 0 &&
+                          view.quick_selected < static_cast<int>(quick_characters(view).size()));
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!can_crew_login);
+            if (ImGui::Button("Log in + crew.ini")) action = LoginAction::LoginWithCrew;
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button("Launch crew.ini")) action = LoginAction::LaunchCrew;
         }
         ImGui::SameLine();
         ImGui::BeginDisabled(view.host.empty());

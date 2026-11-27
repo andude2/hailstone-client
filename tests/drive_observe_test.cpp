@@ -190,8 +190,47 @@ TEST_CASE("drive observe: control actions, move, forward filter, chat, and exten
     CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::ClientUpdate), {}), false));
     CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::MoveItem), {}), false));
     CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::Camp), {}), false));
+    CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::LootRequest), {}), false));
+    CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::LootItem), {}), false));
+    CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::EndLootRequest), {}), false));
+    CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::TradeRequest), {}), false));
+    CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::TradeRequestAck), {}), false));
+    CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::TradeBusy), {}), false));
+    CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::TradeAcceptClick), {}), false));
+    CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::CancelTrade), {}), false));
+    CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::ShopRequest), {}), false));
+    CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::ShopPlayerBuy), {}), false));
+    CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::ShopPlayerSell), {}), false));
+    CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::ShopEnd), {}), false));
     CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::SendLoginInfo), {}), true));
     CHECK(drive_forward_allowed(AppPacket(to_wire(Op::AAAction), {}), false));
+
+    DriveAction loot_all;
+    loot_all.kind = DriveActionKind::LootAll;
+    loot_all.zone_generation = 2;
+    auto loot_all_out = app::decode_drive_action(app::encode_drive_action(loot_all));
+    REQUIRE(loot_all_out);
+    CHECK(loot_all_out->kind == DriveActionKind::LootAll);
+    CHECK(loot_all_out->zone_generation == 2);
+
+    for (DriveActionKind kind :
+         {DriveActionKind::AutoInventory, DriveActionKind::DropOnDoll, DriveActionKind::AutoBank,
+          DriveActionKind::AATrain, DriveActionKind::AATrainButton, DriveActionKind::AAActivate,
+          DriveActionKind::AASetPercent}) {
+        DriveAction act;
+        act.kind = kind;
+        act.argument = 502;
+        act.socket = 1;
+        act.zone_generation = 5;
+        act.inventory_revision = 11;
+        auto out = app::decode_drive_action(app::encode_drive_action(act));
+        REQUIRE(out);
+        CHECK(out->kind == kind);
+        CHECK(out->argument == 502);
+        CHECK(out->socket == 1);
+        CHECK(out->zone_generation == 5);
+        CHECK(out->inventory_revision == 11);
+    }
 
     app::DriveForwardedPacket fwd{AppPacket(to_wire(Op::AAAction), {std::byte{1}, std::byte{2}}), true, false};
     auto fwd_out = app::decode_drive_forward(app::encode_drive_forward(fwd));
@@ -213,6 +252,20 @@ TEST_CASE("drive observe: control actions, move, forward filter, chat, and exten
     app::DriveLocalState state;
     state.position = glm::vec3(1.0f, 2.0f, 3.0f);
     state.target = 77;
+    state.ui = DriveUiState{
+        .zone_generation = 4,
+        .inventory_revision = 9,
+        .loot_corpse_id = 4001,
+        .trade = DriveTradeState{
+            .partner_id = 101,
+            .partner_name = "Quest Giver",
+            .with_npc = true,
+            .my_ready = true,
+            .their_ready = false,
+            .my_coins = {1, 2, 3, 4},
+            .their_coins = {5, 6, 7, 8},
+        },
+    };
     state.has_status = true;
     state.stand_state = kStandStanding;
     state.auto_attack = true;
@@ -224,6 +277,16 @@ TEST_CASE("drive observe: control actions, move, forward filter, chat, and exten
     state.xtarget_slots.push_back({1, 1, 55, "a_rat00"});
     auto state_out = app::decode_drive_state(app::encode_drive_state(state));
     REQUIRE(state_out);
+    REQUIRE(state_out->ui);
+    CHECK(state_out->ui->loot_corpse_id == 4001u);
+    REQUIRE(state_out->ui->trade);
+    CHECK(state_out->ui->trade->partner_id == 101u);
+    CHECK(state_out->ui->trade->partner_name == "Quest Giver");
+    CHECK(state_out->ui->trade->with_npc);
+    CHECK(state_out->ui->trade->my_ready);
+    CHECK_FALSE(state_out->ui->trade->their_ready);
+    CHECK(state_out->ui->trade->my_coins == std::array<std::uint32_t, 4>{1, 2, 3, 4});
+    CHECK(state_out->ui->trade->their_coins == std::array<std::uint32_t, 4>{5, 6, 7, 8});
     CHECK(state_out->has_status);
     CHECK(state_out->auto_attack);
     CHECK(state_out->hp == 900);
@@ -247,6 +310,8 @@ TEST_CASE("drive observe: remote imgui input, frame, texture, and crew command r
     in.wheel_x = 0.0f;
     in.wheel_y = -2.0f;
     in.mods = 3u;
+    in.mouse_down_mask = 0x05u;
+    in.has_mouse_down_mask = true;
     in.mouse_valid = true;
     in.focused = true;
     in.mouse_buttons.push_back({0, true});
@@ -261,6 +326,8 @@ TEST_CASE("drive observe: remote imgui input, frame, texture, and crew command r
     CHECK(in_out->mouse_x == doctest::Approx(420.5f));
     CHECK(in_out->wheel_y == doctest::Approx(-2.0f));
     CHECK(in_out->mods == 3u);
+    CHECK(in_out->has_mouse_down_mask);
+    CHECK(in_out->mouse_down_mask == 0x05u);
     CHECK(in_out->mouse_valid);
     CHECK(in_out->focused);
     REQUIRE(in_out->mouse_buttons.size() == 2);
@@ -328,10 +395,14 @@ TEST_CASE("drive observe: remote imgui input, frame, texture, and crew command r
     CHECK_FALSE(tex_out->destroy);
     CHECK(tex_out->rgba.size() == 32u);
 
-    // Reject out-of-bounds texture rect and non-empty destroy payload.
+    // Reject out-of-bounds texture rect, empty update rect, and non-empty destroy payload.
     ui::RemoteImGuiTexture bad = tex;
     bad.x = 15;
     CHECK_FALSE(app::decode_drive_imgui_texture(app::encode_drive_imgui_texture(bad)));
+    ui::RemoteImGuiTexture empty_rect = tex;
+    empty_rect.h = 0;
+    empty_rect.rgba.clear();
+    CHECK_FALSE(app::decode_drive_imgui_texture(app::encode_drive_imgui_texture(empty_rect)));
     ui::RemoteImGuiTexture destroy_tex;
     destroy_tex.id = 7u;
     destroy_tex.destroy = true;
@@ -347,4 +418,145 @@ TEST_CASE("drive observe: remote imgui input, frame, texture, and crew command r
     REQUIRE(crew_out);
     CHECK(*crew_out == "release");
     CHECK_FALSE(app::decode_drive_crew_command(std::span(crew_bytes).first(1)));
+}
+
+TEST_CASE("drive observe: viewer closing before snapshot does not wedge later viewers") {
+    app::DriveObserveServer observe(platform::make_local_pipe_session(), true, true);
+
+    // First viewer connects and disconnects before any snapshot is supplied (e.g. headless zoning or stalled).
+    {
+        auto abandoned = platform::LocalPipeConnection::connect(observe.session(), 5000);
+        const auto wait_end = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!observe.needs_snapshot() && std::chrono::steady_clock::now() < wait_end)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        REQUIRE(observe.needs_snapshot());
+        abandoned->close();
+    }
+
+    // The server must notice the closed viewer, drop the pending snapshot request, and accept a new viewer.
+    const auto clear_end = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (observe.needs_snapshot() && std::chrono::steady_clock::now() < clear_end)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    CHECK_FALSE(observe.needs_snapshot());
+
+    auto second = platform::LocalPipeConnection::connect(observe.session(), 5000);
+    const auto second_end = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!observe.needs_snapshot() && std::chrono::steady_clock::now() < second_end)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    REQUIRE(observe.needs_snapshot());
+
+    DriveSnapshot snap;
+    snap.character = "Ashenra";
+    observe.set_snapshot(snap);
+
+    auto received = read_snapshot(*second);
+    REQUIRE(received);
+    CHECK(received->character == "Ashenra");
+    second->close();
+}
+
+TEST_CASE("local pipe: concurrent send, receive and close terminate cleanly") {
+    platform::LocalPipeServer server(platform::make_local_pipe_session());
+    std::unique_ptr<platform::LocalPipeConnection> accepted;
+    std::thread accept_thread([&] { accepted = server.accept(5000); });
+    auto client = platform::LocalPipeConnection::connect(server.session(), 5000);
+    accept_thread.join();
+    REQUIRE(accepted);
+
+    const std::vector<std::byte> payload(4096, std::byte{0x5a});
+    std::thread writer([&] {
+        for (int i = 0; i < 200; ++i) {
+            if (!accepted->send_message(payload, 100)) break;
+        }
+    });
+    for (int i = 0; i < 10; ++i) (void)client->receive_message(100);
+    client->close();
+    writer.join();
+    accepted->close();
+    CHECK(client->closed());
+    CHECK(accepted->closed());
+}
+
+TEST_CASE("remote imgui: texture band sizing never truncates to zero on narrow glyph rects") {
+    CHECK(ui::remote_texture_band_rows(0, 13) == 0);
+    CHECK(ui::remote_texture_band_rows(4, 0) == 0);
+    // Narrow widths (1, 2, 4, 8, 16) divide 4 MiB into exact multiples of 65536 rows; band sizing must stay >= 1.
+    for (std::uint16_t rw : {std::uint16_t{1}, std::uint16_t{2}, std::uint16_t{3}, std::uint16_t{4},
+                             std::uint16_t{8}, std::uint16_t{15}, std::uint16_t{16}, std::uint16_t{17},
+                             std::uint16_t{64}, std::uint16_t{1024}, std::uint16_t{4096}}) {
+        for (std::uint16_t rh : {std::uint16_t{1}, std::uint16_t{13}, std::uint16_t{256}, std::uint16_t{4096},
+                                 std::uint16_t{65535}}) {
+            const std::size_t band = ui::remote_texture_band_rows(rw, rh);
+            REQUIRE(band >= 1u);
+            REQUIRE(band <= rh);
+            std::size_t covered = 0;
+            std::size_t bands = 0;
+            for (std::size_t y_off = 0; y_off < rh; y_off += band) {
+                const std::size_t bh = std::min<std::size_t>(band, rh - y_off);
+                CHECK(bh >= 1u);
+                CHECK(static_cast<std::size_t>(rw) * bh * 4u <= (std::size_t{4} << 20));
+                covered += bh;
+                ++bands;
+            }
+            CHECK(covered == rh);
+            CHECK(bands >= 1u);
+        }
+    }
+    CHECK(ui::remote_texture_band_rows(4, 13) == 13);
+    CHECK(ui::remote_texture_band_rows(4096, 4096) == 256);
+}
+
+TEST_CASE("drive observe: coalesced remote imgui input preserves edges and latest mouse_down_mask") {
+    app::DriveObserveServer observe(platform::make_local_pipe_session(), true, true);
+    auto client = platform::LocalPipeConnection::connect(observe.session(), 5000);
+    const auto wait_end = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!observe.needs_snapshot() && std::chrono::steady_clock::now() < wait_end)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    REQUIRE(observe.needs_snapshot());
+
+    net::DriveSnapshot snap;
+    snap.character = "Ashenra";
+    observe.set_snapshot(snap);
+    REQUIRE(read_snapshot(*client));
+
+    ui::RemoteImGuiInput down;
+    down.display_w = 1920.0f;
+    down.display_h = 1080.0f;
+    down.mouse_x = 120.0f;
+    down.mouse_y = 240.0f;
+    down.mouse_valid = true;
+    down.focused = true;
+    down.mouse_down_mask = 1u;
+    down.has_mouse_down_mask = true;
+    down.mouse_buttons.push_back({0, true});
+
+    ui::RemoteImGuiInput up = down;
+    up.mouse_x = 125.0f;
+    up.mouse_y = 245.0f;
+    up.mouse_down_mask = 0u;
+    up.mouse_buttons = {{0, false}};
+
+    REQUIRE(client->send_message(app::encode_drive_imgui_input(down), 500));
+    REQUIRE(client->send_message(app::encode_drive_imgui_input(up), 500));
+
+    std::vector<ui::RemoteMouseButtonEvent> seen_buttons;
+    ui::RemoteImGuiInput latest{};
+    const auto drain_end = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (seen_buttons.size() < 2 && std::chrono::steady_clock::now() < drain_end) {
+        if (auto got = observe.take_imgui_input()) {
+            latest = *got;
+            seen_buttons.insert(seen_buttons.end(), got->mouse_buttons.begin(), got->mouse_buttons.end());
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+    REQUIRE(seen_buttons.size() == 2);
+    CHECK(seen_buttons[0].button == 0);
+    CHECK(seen_buttons[0].down);
+    CHECK(seen_buttons[1].button == 0);
+    CHECK_FALSE(seen_buttons[1].down);
+    CHECK(latest.has_mouse_down_mask);
+    CHECK(latest.mouse_down_mask == 0u);
+    CHECK(latest.mouse_x == doctest::Approx(125.0f));
+    client->close();
 }

@@ -382,3 +382,62 @@ TEST_CASE("cursor attachment: coin on the cursor is reported with its type and c
     lua_close(L);
     ImGui::DestroyContext(ctx);
 }
+
+TEST_CASE("Alt + left click on an inventory or bag slot inspects the item without moving it") {
+    ImGuiContext* ctx = ImGui::CreateContext();
+    MockConfig config = MockConfig::standard();
+    net::Item bag = item(5001, "Backpack", 23, "0000000000000040", true);
+    bag.contents.push_back({0, item(5002, "Bag Gem", 0, "0000000000000041")});
+    config.characters[0].inventory.push_back(bag);
+    config.characters[0].inventory.push_back(item(5019, "Sword", 25, "0000000000000042"));
+    Rig rig(std::move(config));
+    auto& conn = rig.conn;
+    REQUIRE(rig.to_zone());
+
+    app::UiHost host;
+    host.in_game = host.ui_ready = true;
+    host.conn = &conn;
+    std::vector<std::uint32_t> inspected;
+    host.inspect_item = [&](const net::Item& it) { inspected.push_back(it.id); };
+    app::UiApi api(host);
+    lua_State* L = luaL_newstate();
+    luaL_openlibs(L);
+    lua_newtable(L);
+    api.register_functions(L);
+    lua_setglobal(L, "hs");
+
+    for (int t = 0; t < 4; ++t)
+        if (conn.cursor_coins()[static_cast<std::size_t>(3 - t)]) conn.inventory_money_button(t, -1, nullptr);
+    REQUIRE(conn.cursor_coins() == std::array<std::uint32_t, 4>{});
+
+    // Alt + left click on an occupied inventory slot inspects it without picking it up.
+    ImGui::GetIO().KeyAlt = true;
+    CHECK(run(L, "return hs.ClickSlot(25, nil, 'left')") == "true");
+    CHECK(conn.inventory().cursor() == nullptr);
+    REQUIRE(inspected.size() == 1);
+    CHECK(inspected[0] == 5019u);
+
+    // Open the bag in slot 23 and Alt + left click an occupied slot inside it.
+    ImGui::GetIO().KeyAlt = false;
+    CHECK(run(L, "return hs.ClickSlot(23, nil, 'rightup')") == "true");
+    REQUIRE(api.shown("Bag1"));
+    ImGui::GetIO().KeyAlt = true;
+    CHECK(run(L, "return hs.BagSlotClick('Bag1', 0, 'left')") == "true");
+    CHECK(conn.inventory().cursor() == nullptr);
+    REQUIRE(inspected.size() == 2);
+    CHECK(inspected[1] == 5002u);
+
+    // Holding an item and Alt + left clicking an empty slot does not drop it.
+    ImGui::GetIO().KeyAlt = false;
+    CHECK(run(L, "return hs.ClickSlot(25, nil, 'left')") == "true");
+    REQUIRE(conn.inventory().cursor() != nullptr);
+    ImGui::GetIO().KeyAlt = true;
+    CHECK(run(L, "return hs.ClickSlot(26, nil, 'left')") == "true");
+    CHECK(run(L, "return hs.BagSlotClick('Bag1', 1, 'left')") == "true");
+    CHECK(conn.inventory().cursor() != nullptr);
+    CHECK(inspected.size() == 2);
+    ImGui::GetIO().KeyAlt = false;
+
+    lua_close(L);
+    ImGui::DestroyContext(ctx);
+}

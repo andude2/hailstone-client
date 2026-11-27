@@ -16,6 +16,7 @@
 struct ImFont;
 struct ImFontAtlas;
 struct ImFontConfig;
+union SDL_Event;
 
 namespace hailstone::platform { class Window; }
 namespace hailstone::render { class VkContext; struct FrameInfo; }
@@ -111,6 +112,9 @@ public:
 
     // Remote ImGui overlay streamed from an attached headless character (docs/headless.md).
     void set_remote_enabled(bool enabled);
+    // Clears transient ImGui interaction state (active widget, drag/drop, moving window) at the start of the next
+    // frame without dropping fresh SDL events — used when swapping the active character in this window.
+    void reset_interaction_on_next_frame();
     void push_remote_texture(RemoteImGuiTexture tex);
     void set_remote_frame(RemoteImGuiFrame frame);
     // Records staging uploads for pending remote font atlas textures; call before begin_scene/begin_overlay.
@@ -121,6 +125,7 @@ public:
 private:
     struct RemoteState;
     std::unique_ptr<RemoteState> remote_;
+    void on_sdl_event(const SDL_Event& ev);
     void apply_pad_navigation();
     void feed_pad_pointer();
     platform::Window& window_;
@@ -138,6 +143,7 @@ private:
     bool plate_bold_ = false;
     bool fonts_dirty_ = false;
     bool frame_open_ = false;
+    bool reset_interaction_pending_ = false;
     detail::ImGuiVisibility visibility_;
     int keyboard_request_ = -1; // the last frame's SetNextFrameWantCaptureKeyboard (-1: none), read before NewFrame
     bool pad_nav_ = false;

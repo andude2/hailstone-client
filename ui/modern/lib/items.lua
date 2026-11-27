@@ -136,7 +136,7 @@ function items.Tooltip(item, where, compare)
   if item.stackable then ui.TextDisabled(string.format("Stack %d / %d", item.count, item.stackSize)) end
   if item.bagSlots and item.bagSlots > 0 then ui.TextDisabled(item.bagSlots .. " slot container") end
   if p then comparisonBody(compare, p, index) end
-  ui.TextDisabled("Hold right-click for details")
+  ui.TextDisabled("Alt+click or hold right-click for details")
   ui.EndTooltip()
 end
 
@@ -177,7 +177,9 @@ function items.Slot(id, x, y, size, s, item, placeholder, where, onClick, opts)
   local key, hovered = ui.GetItemID(), ui.IsItemHovered()
   T.HoverFx(x, y, x + size, y + size, s, 6)
   if ui.IsItemClicked(ui.Mouse.Left) then
-    if opts.held then
+    if ui.GetIO().alt then
+      if item then onClick("rightheld") end
+    elseif opts.held then
       leftPress = { key = key, start = ui.GetTime(), seen = ui.GetTime(), tried = false, made = false }
     else
       onClick("left")

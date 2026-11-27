@@ -128,7 +128,10 @@ struct LocalPipeConnection::Impl {
     TcpSocket socket;
     std::thread reader;
     std::atomic<bool> stop{false};
-    std::mutex write_mutex, state_mutex, queue_mutex;
+    // Lock order when multiple mutexes are taken: write_mutex -> state_mutex (released) -> socket_mutex.
+    // socket_mutex guards the non-blocking TcpSocket calls so reader_loop, send(), fail() and close() never
+    // race on TcpSocket state or double-close the native socket handle (which on Windows can close a reused handle).
+    std::mutex write_mutex, state_mutex, queue_mutex, socket_mutex;
     std::condition_variable queue_cv;
     std::deque<std::vector<std::byte>> queue;
     std::size_t queued_bytes = 0;
@@ -136,6 +139,27 @@ struct LocalPipeConnection::Impl {
     std::string error;
 
     void start_reader() { reader = std::thread([this] { reader_loop(); }); }
+
+    void close_socket() noexcept {
+        std::lock_guard sock_lock(socket_mutex);
+        socket.close();
+    }
+
+    bool send_all_locked(std::span<const std::byte> data, Clock::time_point deadline) {
+        std::size_t sent = 0;
+        while (sent < data.size()) {
+            if (Clock::now() >= deadline) return false;
+            std::optional<std::size_t> n;
+            {
+                std::lock_guard sock_lock(socket_mutex);
+                n = socket.send(data.subspan(sent));
+            }
+            if (!n) return false;
+            if (*n) sent += *n;
+            else std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return true;
+    }
 
     void fail(std::string why) {
         {
@@ -145,14 +169,18 @@ struct LocalPipeConnection::Impl {
             error = std::move(why);
         }
         queue_cv.notify_all();
-        socket.close();
+        close_socket();
     }
 
     void reader_loop() noexcept {
         std::vector<std::byte> buffer;
         std::array<std::byte, 65536> chunk{};
         while (!stop.load(std::memory_order_relaxed)) {
-            const auto n = socket.recv(chunk);
+            std::optional<std::size_t> n;
+            {
+                std::lock_guard sock_lock(socket_mutex);
+                n = socket.recv(chunk);
+            }
             if (!n) {
                 fail("the local pipe peer closed");
                 return;
@@ -188,12 +216,15 @@ struct LocalPipeConnection::Impl {
 
     void shutdown_write() noexcept {
         std::lock_guard write_lock(write_mutex);
-        if (!closed.load()) socket.shutdown_write();
+        if (!closed.load()) {
+            std::lock_guard sock_lock(socket_mutex);
+            socket.shutdown_write();
+        }
     }
 
     void close() noexcept {
         if (stop.exchange(true)) return;
-        socket.close();
+        close_socket();
         if (reader.joinable() && reader.get_id() != std::this_thread::get_id()) reader.join();
         closed.store(true);
         queue_cv.notify_all();
@@ -212,8 +243,8 @@ struct LocalPipeConnection::Impl {
         length.le(static_cast<std::uint32_t>(body.size()));
         const auto& length_bytes = length.data();
         const auto deadline = Clock::now() + std::chrono::milliseconds(std::max(1, timeout_ms));
-        if (!send_all(socket, std::span<const std::byte>(length_bytes.data(), length_bytes.size()), deadline) ||
-            (!body.empty() && !send_all(socket, body, deadline))) {
+        if (!send_all_locked(std::span<const std::byte>(length_bytes.data(), length_bytes.size()), deadline) ||
+            (!body.empty() && !send_all_locked(body, deadline))) {
             fail("the local pipe peer or transport failed");
             return false;
         }

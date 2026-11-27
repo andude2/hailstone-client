@@ -558,3 +558,62 @@ TEST_CASE("The live unconscious status feeds bleeding regen and recovery waits f
     CHECK(c.player_status().owner_status == 0);
     CHECK(c.player_status().stand_state == net::kStandStanding);
 }
+
+TEST_CASE("Buff tick: skip_buff_hp_loss still breaks mesmerize and keeps full HP from drifting on DoT ticks") {
+    // Direct tick with skip_buff_hp_loss: DoT breaks mesmerize without subtracting raw unmitigated damage.
+    {
+        Fixture f;
+        f.spell(10, {{0, -18000000}}); // high-tier DoT
+        f.spell(20, {{0x1f, 1}});      // mesmerize
+        f.buff(0, 10, 3);
+        f.buff(3, 20, 5);
+        f.pools.hp = f.pools.max_hp = 48334082;
+        f.pools.skip_buff_hp_loss = true;
+        REQUIRE(f.tick(7001));
+        CHECK(f.pools.hp == 48334082);
+        CHECK(f.state.buffs[0].tics == 2);
+        CHECK(f.state.buffs[3].empty());
+        REQUIRE(f.host.removed.size() == 1);
+        CHECK(f.host.removed[0] == std::pair<int, bool>{3, true});
+    }
+
+    // Live connection: an active DoT does not locally drop a full-HP character below 100% between server updates.
+    {
+        test::Rig rig;
+        auto& conn = rig.conn;
+        {
+            std::filesystem::create_directories(rig.dir.path() / "Resources");
+            std::ofstream base(rig.dir.path() / "Resources" / "BaseData.txt");
+            for (int level = 1; level <= 100; ++level) base << level << "^1^400^0^300^3^6^0.9^0^1.25\n";
+        }
+        rig.game.rescan();
+        REQUIRE(rig.to_zone());
+        net::PlayerProfile pp = *conn.profile();
+        pp.class_ = 1;
+        pp.level = 60;
+        conn.set_profile_for_test(pp);
+        auto table = std::make_shared<SpellTable>();
+        REQUIRE(table->parse(mq_test::spell_line(
+                    {{0, "41926"}, {1, "Curse of the Blight"}, {16, "5"}, {17, "3"}, {20, "-18000000"}, {86, "0"}})) ==
+                1);
+        conn.set_spell_table_for_test(table);
+        const std::uint32_t me = conn.world().player_id;
+        REQUIRE(me != 0);
+        conn.receive_zone_packet_for_test(net::encode(net::HpUpdate{static_cast<std::int16_t>(me), 48334082, 48334082}));
+        net::BuffPacket bp;
+        bp.entity_id = me;
+        bp.slot = 0;
+        bp.buff.effect_type = 2;
+        bp.buff.level = 85;
+        bp.buff.spell_id = 41926;
+        bp.buff.duration = 3;
+        bp.buff.caster_id = 999;
+        conn.receive_zone_packet_for_test(net::encode(bp));
+        REQUIRE(conn.spell_state().buffs[0].spell == 41926);
+        const std::int64_t now = net::GameConnection::now_ms() + 7000;
+        conn.passage_of_time_for_test(now);
+        CHECK(conn.player_status().hp == 48334082);
+        CHECK(conn.own_hp().cur == 48334082);
+        CHECK(conn.spell_state().buffs[0].tics == 2);
+    }
+}

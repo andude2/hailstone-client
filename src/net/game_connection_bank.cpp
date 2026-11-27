@@ -316,10 +316,12 @@ int GameConnection::merge_stacks(const ItemSlot& from, const ItemSlot& to) {
         inventory_.take(from);
         return 0;
     }
+    inventory_.bump_revision();
     return 1;
 }
 
 void GameConnection::auto_bank() {
+    if (relay_control_action(DriveAction{.kind = DriveActionKind::AutoBank})) return;
     if (!bank_ || state_ != ConnectionState::InZone) return;
     auto_bank_cursor(true);
 }

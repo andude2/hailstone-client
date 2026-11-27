@@ -36,7 +36,7 @@ using V = Value;
 using net::GameConnection;
 
 struct Types {
-    const Type *spawn, *character, *cls, *race, *heading, *spell, *buff, *timestamp, *item, *zone, *group, *member,
+    const Type *spawn, *pet, *character, *cls, *race, *heading, *spell, *buff, *timestamp, *item, *zone, *group, *member,
         *everquest, *macroquest, *hailstone, *window, *plugin, *time, *gametime, *navigation, *stick, *aura, *debuff,
         *moveto, *bandolier, *bandolier_item, *advpath;
 };
@@ -60,6 +60,18 @@ const game::Spawn* spawn_of(const Context& c, std::int64_t id) {
 const game::Spawn* self_spawn(const Context& c, const Value& v) { return spawn_of(c, v.i); }
 
 V spawn_value(const game::Spawn* s) { return s ? V::object(g.spawn, s->id) : V::nil(); }
+
+V pet_value(const game::Spawn* s) { return s ? V::object(g.pet, s->id) : V::nil(); }
+
+const game::Spawn* my_pet(const Context& c) {
+    if (!c.conn) return nullptr;
+    if (c.conn->pets().focused) return spawn_of(c, c.conn->pets().focused);
+    const std::uint32_t self = c.conn->world().player_id;
+    if (!self) return nullptr;
+    for (const auto& [id, o] : c.conn->world().spawns)
+        if (o.pet_owner_id == self && !o.is_corpse) return &o;
+    return nullptr;
+}
 
 bool is_me(const Context& c, const game::Spawn& s) { return c.conn && s.id == c.conn->world().player_id; }
 
@@ -609,9 +621,17 @@ void register_spawn() {
         return spawn_value(spawn_of(c, s.pet_owner_id));
     });
     spawn_member("Pet", [](const Context& c, const game::Spawn& s, std::string_view) -> V {
-        if (is_me(c, s) && c.conn->pets().focused) return spawn_value(spawn_of(c, c.conn->pets().focused));
+        if (is_me(c, s)) return pet_value(my_pet(c));
         for (const auto& [id, o] : c.conn->world().spawns)
             if (o.pet_owner_id == s.id && !o.is_corpse) return spawn_value(&o);
+        return V::nil();
+    });
+    spawn_member("TargetOfTarget", [](const Context& c, const game::Spawn& s, std::string_view) -> V {
+        if (!c.conn || s.id == 0) return V::nil();
+        if (s.id == c.conn->target() && c.conn->target_of_target())
+            return spawn_value(spawn_of(c, c.conn->target_of_target()));
+        if (s.id == c.conn->pets().focused && c.conn->pets().pet_target)
+            return spawn_value(spawn_of(c, c.conn->pets().pet_target));
         return V::nil();
     });
     spawn_member("ConColor", [](const Context& c, const game::Spawn& s, std::string_view) {
@@ -647,6 +667,114 @@ void register_spawn() {
         for (const auto& x : c.conn->xtargets().slots)
             if (x.spawn_id == s.id) return V::boolean(true);
         return V::boolean(false);
+    });
+}
+
+// MQ2PetType: the player's own pet (Pet, Me.Pet). Inherits spawn and adds the state the server sends only for the
+// player's focused pet (OP_PetHoTT, OP_PetCommandState, OP_PetBuffWindow).
+void register_pet() {
+    Type& t = const_cast<Type&>(*g.pet);
+    t.parent = g.spawn;
+    t.to_value = [](const Context& c, const Value& v) {
+        const game::Spawn* s = self_spawn(c, v);
+        return s ? V::string(game::display_name(s->name)) : V::nil();
+    };
+    auto pet_member = [](const char* name, auto fn) {
+        add(g.pet, name, [fn](const Context& c, const Value& v, std::string_view index) -> V {
+            const game::Spawn* s = self_spawn(c, v);
+            return s && c.conn ? fn(c, *s, index) : V::nil();
+        });
+    };
+    auto is_focused = [](const Context& c, const game::Spawn& s) {
+        const std::uint32_t focused = c.conn->pets().focused;
+        return focused == 0 || focused == s.id;
+    };
+    pet_member("Target", [is_focused](const Context& c, const game::Spawn& s, std::string_view) -> V {
+        if (!is_focused(c, s) || !c.conn->pets().pet_target) return V::nil();
+        return spawn_value(spawn_of(c, c.conn->pets().pet_target));
+    });
+    pet_member("Combat", [is_focused](const Context& c, const game::Spawn& s, std::string_view) {
+        if (!is_focused(c, s) || !c.conn->pets().pet_target) return V::boolean(false);
+        const game::Spawn* target = spawn_of(c, c.conn->pets().pet_target);
+        return V::boolean(target && !target->is_corpse);
+    });
+    // OP_PetCommandState toggle indices (EQEmu PET_BUTTON_*, game/pet_buttons.h):
+    // 0 sit, 1 stop, 2 regroup, 3 follow, 4 guard, 5 taunt, 6 hold, 7 ghold, 8 focus, 9 spellhold.
+    auto toggle = [&](const char* name, std::size_t idx) {
+        pet_member(name, [idx](const Context& c, const game::Spawn&, std::string_view) {
+            return V::boolean(c.conn->pet_toggles()[idx]);
+        });
+    };
+    toggle("Stop", 1);
+    toggle("Regroup", 2);
+    toggle("Follow", 3);
+    toggle("Guard", 4);
+    toggle("Taunt", 5);
+    toggle("Hold", 6);
+    toggle("GHold", 7);
+    toggle("Focus", 8);
+    toggle("SpellHold", 9);
+    pet_member("Stance", [](const Context& c, const game::Spawn&, std::string_view) {
+        const auto& tog = c.conn->pet_toggles();
+        if (tog[3]) return V::string("FOLLOW");
+        if (tog[4]) return V::string("GUARD");
+        return V::string("NONE");
+    });
+
+    auto find_pet_buff = [](const Context& c, std::string_view index)
+        -> const std::pair<std::uint32_t, game::BuffSlot>* {
+        const auto& buffs = c.conn->pet_buffs();
+        std::int64_t n = 0;
+        if (parse_int(index, n)) {
+            if (n < 1) return nullptr;
+            const auto slot = static_cast<std::uint32_t>(n - 1);
+            for (const auto& entry : buffs)
+                if (entry.first == slot && !entry.second.empty()) return &entry;
+            return nullptr;
+        }
+        const bool exact = !index.empty() && index.front() == '=';
+        const std::string_view name = exact ? index.substr(1) : index;
+        if (name.empty()) return nullptr;
+        for (const auto& entry : buffs) {
+            if (entry.second.empty()) continue;
+            if (const game::SpellData* d = spell_data(c, entry.second.spell); d && iequals(d->name, name))
+                return &entry;
+        }
+        if (!exact) {
+            for (const auto& entry : buffs) {
+                if (entry.second.empty()) continue;
+                if (const game::SpellData* d = spell_data(c, entry.second.spell); d && icontains(d->name, name))
+                    return &entry;
+            }
+        }
+        return nullptr;
+    };
+    auto pet_buff_count = [](const Context& c) {
+        std::int64_t count = 0;
+        for (const auto& [slot, b] : c.conn->pet_buffs()) count += !b.empty();
+        return count;
+    };
+    pet_member("BuffsPopulated", [](const Context&, const game::Spawn&, std::string_view) {
+        return V::boolean(true);
+    });
+    pet_member("BuffCount", [pet_buff_count](const Context& c, const game::Spawn&, std::string_view) {
+        return V::integer(pet_buff_count(c));
+    });
+    // MQ2PetType: Buff[n] gives the spell in 1-based slot n; Buff[name] gives its 1-based slot number (int).
+    pet_member("Buff", [find_pet_buff, pet_buff_count](const Context& c, const game::Spawn&,
+                                                       std::string_view index) -> V {
+        if (index.empty()) return V::integer(pet_buff_count(c));
+        const auto* entry = find_pet_buff(c, index);
+        if (!entry) return V::nil();
+        std::int64_t n = 0;
+        if (parse_int(index, n)) return spell_value(c, entry->second.spell);
+        return V::integer(static_cast<std::int64_t>(entry->first) + 1);
+    });
+    pet_member("BuffDuration", [find_pet_buff](const Context& c, const game::Spawn&, std::string_view index) -> V {
+        const auto* entry = find_pet_buff(c, index);
+        if (!entry) return V::nil();
+        const std::int64_t ms = buff_ms_left(c, entry->second);
+        return ms < 0 ? V::nil() : V::object(g.timestamp, ms);
     });
 }
 
@@ -837,6 +965,12 @@ void register_character() {
         const auto& cast = c.spell_state().casting;
         return cast.casting() ? spell_value(ctx, cast.spell) : V::nil();
     });
+    me_member("CastTimeLeft", [](const Context&, const GameConnection& c, std::string_view) {
+        const auto& cast = c.spell_state().casting;
+        if (!cast.casting() || cast.eta_ms == 0) return V::integer(0);
+        const std::int64_t left = cast.eta_ms - GameConnection::now_ms();
+        return V::integer(left > 0 ? left : 0);
+    });
     me_member("Combat", [](const Context&, const GameConnection& c, std::string_view) { return V::boolean(c.auto_attack()); });
     me_member("CombatState", [](const Context&, const GameConnection& c, std::string_view) {
         if (c.in_combat()) return V::string("COMBAT");
@@ -903,11 +1037,12 @@ void register_character() {
         (void)ctx;
         return V::integer(game::free_inventory_slots(c.inventory()));
     });
-    me_member("Pet", [](const Context& ctx, const GameConnection& c, std::string_view) -> V {
-        if (c.pets().focused) return spawn_value(spawn_of(ctx, c.pets().focused));
-        for (const auto& [id, o] : c.world().spawns)
-            if (o.pet_owner_id == c.world().player_id && !o.is_corpse) return spawn_value(&o);
-        return V::nil();
+    me_member("Pet", [](const Context& ctx, const GameConnection&, std::string_view) -> V {
+        return pet_value(my_pet(ctx));
+    });
+    me_member("TargetOfTarget", [](const Context& ctx, const GameConnection& c, std::string_view) -> V {
+        if (!c.target() || !c.target_of_target()) return V::nil();
+        return spawn_value(spawn_of(ctx, c.target_of_target()));
     });
 }
 
@@ -1293,6 +1428,10 @@ void register_misc_types() {
         add(t, "BuildDate", [](const Context&, const Value&, std::string_view) { return V::integer(build_date()); });
         add(t, "Version", [](const Context&, const Value&, std::string_view) { return V::string(release_version()); });
     }
+    add(g.hailstone, "Headless", [](const Context& c, const Value&, std::string_view) { return V::boolean(c.headless); });
+    add(g.hailstone, "ViewerConnected", [](const Context& c, const Value&, std::string_view) {
+        return V::boolean(c.viewer_connected && c.viewer_connected());
+    });
 
     // Debuff (MQ2Debuffs' TLO, which E3 reads): i 0 the player, 1 the pet (debuff_counters). Its text is Count.
     Type& deb = const_cast<Type&>(*g.debuff);
@@ -1323,9 +1462,17 @@ void register_misc_types() {
     };
     add(g.window, "Open", [](const Context& c, const Value& v, std::string_view) {
         if (c.conn) {
+            // The windows a headless /notify can act on (game/window_notify.h) answer from the
+            // connection's state, so a script checking Open before it notifies (Sentinel's
+            // AutoAccept does) sees them without a UI; the rest ask the UI as ever.
             if (iequals(v.s, "CastingWindow")) return V::boolean(c.conn->spell_state().casting.casting());
             if (iequals(v.s, "TradeWnd")) return V::boolean(c.conn->trade() && c.conn->trade()->open);
             if (iequals(v.s, "ConfirmationDialogBox")) return V::boolean(c.conn->confirmation().has_value());
+            if (iequals(v.s, "LootWnd"))
+                return V::boolean(c.conn->loot_session() && c.conn->loot_session()->open);
+            if (iequals(v.s, "LargeDialogWindow")) return V::boolean(c.conn->large_dialog().has_value());
+            if (iequals(v.s, "TaskSelectWnd")) return V::boolean(c.conn->tasks().offers.has_value());
+            if (iequals(v.s, "BankWnd") || iequals(v.s, "BigBankWnd")) return V::boolean(c.conn->bank().has_value());
         }
         return V::boolean(c.window_open && c.window_open(v.s));
     });
@@ -1923,6 +2070,7 @@ static void register_math(Registry& r) {
 
 void register_game_tlos(Registry& r) {
     g.spawn = &r.type("spawn");
+    g.pet = &r.type("pet");
     g.character = &r.type("character");
     g.cls = &r.type("class");
     g.race = &r.type("race");
@@ -1950,6 +2098,7 @@ void register_game_tlos(Registry& r) {
     g.advpath = &r.type("advpath");
     g.debuff = &r.type("debuff");
     register_spawn();
+    register_pet();
     register_character();
     register_abilities();
     register_small_types();
@@ -2101,13 +2250,7 @@ void register_game_tlos(Registry& r) {
             if (iequals(a[0], a[i])) return V::integer(static_cast<std::int64_t>(i));
         return V::integer(0);
     });
-    r.add_tlo("Pet", [](const Context& c, std::string_view) -> V {
-        if (!c.conn) return V::nil();
-        if (c.conn->pets().focused) return spawn_value(spawn_of(c, c.conn->pets().focused));
-        for (const auto& [id, o] : c.conn->world().spawns)
-            if (o.pet_owner_id == c.conn->world().player_id && !o.is_corpse) return spawn_value(&o);
-        return V::nil();
-    });
+    r.add_tlo("Pet", [](const Context& c, std::string_view) -> V { return pet_value(my_pet(c)); });
     // Debuff: the player's counters; Debuff[pet] the pet's, NULL without a pet (as the Pet TLO finds it). Other
     // indexes are NULL.
     r.add_tlo("Debuff", [](const Context& c, std::string_view index) -> V {

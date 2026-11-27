@@ -461,6 +461,7 @@ add_library(hailstone_engine STATIC
   src/game/zone_lines.cpp
   src/game/zone_exits.cpp
   src/game/world_state.cpp
+  src/game/window_notify.cpp
   src/game/useful_npcs.cpp
   src/game/path_trail.cpp
   src/game/boats.cpp
@@ -1297,6 +1298,7 @@ if(HAILSTONE_BUILD_TESTS)
     tests/map_files_test.cpp
     tests/player_path_test.cpp
     tests/atlas_test.cpp
+    tests/window_notify_test.cpp
     tests/zone_routes_test.cpp
     tests/zone_atlas_api_test.cpp
     tests/zone_exits_test.cpp

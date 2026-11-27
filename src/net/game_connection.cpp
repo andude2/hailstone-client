@@ -1,5 +1,6 @@
 #include "net/game_connection.h"
 
+#include "net/aa_packets.h"
 #include "net/notice_packets.h"
 #include "net/player_packets.h"
 #include "net/settings_packets.h"
@@ -10,7 +11,9 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <ctime>
 #include <iterator>
+#include <limits>
 #include <random>
 #include <utility>
 
@@ -296,6 +299,57 @@ DriveSnapshot GameConnection::capture_local_state() const {
 DriveSnapshot GameConnection::capture_snapshot() const {
     DriveSnapshot snapshot = capture_local_state();
     snapshot.packets = compact_journal_packets(snapshot_journal_);
+    // OP_SendAATable is only requested once per login (when alt_adv_.table is empty), so after a zone change the
+    // zone journal holds no AA table packets. Emit the authoritative live AltAdvState here instead so a viewer
+    // attaching in any zone sees the full AA table, owned ranks, points, exp percentage, and active reuse timers.
+    std::erase_if(snapshot.packets, [](const AppPacket& p) {
+        switch (from_wire(p.opcode)) {
+        case Op::SendAATable:
+        case Op::RespondAA:
+        case Op::AAExpUpdate:
+        case Op::ClearAA:
+        case Op::AAAction:
+            return true;
+        default:
+            return false;
+        }
+    });
+    for (const auto& [id, ability] : alt_adv_.table) snapshot.packets.push_back(encode_send_aa_table(ability));
+    if (!alt_adv_.owned.empty() || alt_adv_.spent != 0) {
+        RespondAA r;
+        r.spent = alt_adv_.spent;
+        r.assigned = alt_adv_.assigned;
+        r.owned = alt_adv_.owned;
+        snapshot.packets.push_back(encode(r));
+    }
+    if (!alt_adv_.table.empty() || alt_adv_.points != 0 || alt_adv_.exp != 0 || alt_adv_.percent != 0) {
+        AAExpUpdate u;
+        u.exp = alt_adv_.exp;
+        u.points = alt_adv_.points;
+        u.percent = alt_adv_.percent;
+        snapshot.packets.push_back(encode(u));
+    }
+    if (alt_adv_.timers_seen) {
+        const std::int64_t now = static_cast<std::int64_t>(std::time(nullptr));
+        for (std::size_t i = 0; i < alt_adv_.timers.size(); ++i) {
+            const std::int64_t started = alt_adv_.timers[i];
+            if (started <= 0) continue;
+            AATimer t{};
+            t.timer = static_cast<std::uint32_t>(i);
+            if (now >= started) {
+                const std::int64_t elapsed = now - started;
+                if (elapsed > static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max())) continue;
+                t.begin = 0;
+                t.server_now = static_cast<std::uint32_t>(elapsed);
+            } else {
+                const std::int64_t ahead = started - now;
+                if (ahead > static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max())) continue;
+                t.begin = static_cast<std::uint32_t>(ahead);
+                t.server_now = 0;
+            }
+            snapshot.packets.push_back(encode(t));
+        }
+    }
     std::size_t bytes = 0;
     for (const auto& packet : snapshot.packets) bytes += packet.data.size() + 4;
     snapshot.truncated =
@@ -333,6 +387,7 @@ void GameConnection::apply_snapshot(const DriveSnapshot& snapshot) {
     spells_.casting = {};
     spells_.pending = 0;
     loot_.reset();
+    drive_loot_corpse_id_ = 0;
     trade_.reset();
     merchant_.reset();
     quantity_.reset();
@@ -479,6 +534,36 @@ void GameConnection::apply_local_state(const DriveSnapshot& local, bool skip_mot
     if (local.inventory_packet.opcode != 0) handle_zone(local.inventory_packet);
     if (!local.ui) return;
     drive_ui_ = local.ui;
+    if (local.ui->loot_corpse_id != 0) {
+        if (loot_ && loot_->corpse_id == 0) {
+            loot_->corpse_id = local.ui->loot_corpse_id;
+            if (auto it = world_.spawns.find(loot_->corpse_id); it != world_.spawns.end())
+                loot_->corpse_name = game::display_name(it->second.name);
+        }
+    } else if (loot_ && loot_->open) {
+        reset_loot_session();
+    }
+    if (const auto& t = local.ui->trade) {
+        if (!trade_ || trade_->partner_id != t->partner_id) {
+            trade_ = TradeSession{};
+            trade_->partner_id = t->partner_id;
+        }
+        trade_->requested = false;
+        trade_->open = true;
+        trade_->with_npc = t->with_npc;
+        if (!t->partner_name.empty()) {
+            trade_->partner_name = t->partner_name;
+        } else if (trade_->partner_name.empty()) {
+            if (auto it = world_.spawns.find(t->partner_id); it != world_.spawns.end())
+                trade_->partner_name = game::display_name(it->second.name);
+        }
+        trade_->my_ready = t->my_ready;
+        trade_->their_ready = t->their_ready;
+        trade_->my_coins = t->my_coins;
+        trade_->their_coins = t->their_coins;
+    } else if (trade_ && trade_->open) {
+        close_trade(false);
+    }
     quantity_ = local.ui->quantity;
     if (const auto& question = local.ui->question) {
         Confirmation c;
@@ -503,6 +588,18 @@ DriveUiState GameConnection::capture_drive_ui() const {
         ui.question = DriveQuestion{c.drive_id, c.id, c.text, c.plain_text, c.ok_only};
     }
     if (quantity_ && quantity_->op == QuantityOp::Inventory) ui.quantity = quantity_;
+    ui.loot_corpse_id = loot_ ? loot_->corpse_id : 0u;
+    if (trade_ && trade_->open) {
+        DriveTradeState t;
+        t.partner_id = trade_->partner_id;
+        t.partner_name = trade_->partner_name;
+        t.with_npc = trade_->with_npc;
+        t.my_ready = trade_->my_ready;
+        t.their_ready = trade_->their_ready;
+        t.my_coins = trade_->my_coins;
+        t.their_coins = trade_->their_coins;
+        ui.trade = std::move(t);
+    }
     return ui;
 }
 
@@ -520,7 +617,8 @@ bool GameConnection::relay_drive_action(DriveAction action) {
 }
 
 bool GameConnection::relay_control_action(DriveAction action) {
-    if (!drive_control_ || !drive_input_ || applying_snapshot_ || applying_local_state_) return false;
+    if (!drive_control_ || !drive_input_ || applying_snapshot_ || applying_local_state_ || handling_zone_packet_)
+        return false;
     action.zone_generation = drive_ui_ ? drive_ui_->zone_generation : xtargets_.zone;
     action.inventory_revision = drive_ui_ ? drive_ui_->inventory_revision : inventory_.revision();
     drive_input_(action);
@@ -630,6 +728,30 @@ bool GameConnection::apply_drive_action(const DriveAction& action, bool full_con
         case DriveActionKind::Loot:
             loot(action.argument);
             return true;
+        case DriveActionKind::LootAll:
+            loot_all();
+            return true;
+        case DriveActionKind::AutoInventory:
+            (void)auto_inventory();
+            return true;
+        case DriveActionKind::DropOnDoll:
+            drop_on_doll();
+            return true;
+        case DriveActionKind::AutoBank:
+            auto_bank();
+            return true;
+        case DriveActionKind::AATrain:
+            (void)aa_train(action.argument, action.socket != 0);
+            return true;
+        case DriveActionKind::AATrainButton:
+            aa_train_button(action.argument, action.socket != 0);
+            return true;
+        case DriveActionKind::AAActivate:
+            (void)aa_activate(action.argument);
+            return true;
+        case DriveActionKind::AASetPercent:
+            set_aa_percent(action.argument);
+            return true;
         case DriveActionKind::TradeAccept:
             trade_accept();
             return true;
@@ -664,6 +786,12 @@ bool GameConnection::apply_drive_action(const DriveAction& action, bool full_con
             click_slot(slot, (action.argument & 1) != 0, (action.argument & 2) != 0);
             return true;
         }
+    } else if (!quantity_ &&
+               (action.kind == DriveActionKind::AutoInventory || action.kind == DriveActionKind::DropOnDoll)) {
+        if (!inventory_.cursor()) return false;
+        if (action.kind == DriveActionKind::DropOnDoll) drop_on_doll();
+        else (void)auto_inventory();
+        return true;
     }
     if (slot.type != kInvPossessions || slot.slot < 0 || slot.slot > kSlotCursor ||
         slot.sub < -1 || slot.aug != -1) return false;
@@ -1001,8 +1129,13 @@ void GameConnection::raise_hook_events() {
         switch (state_) {
         case ConnectionState::WorldConnecting:
         case ConnectionState::WorldAuth: game_state = plugin::kGameStatePreCharSelect; break;
-        case ConnectionState::CharacterSelect:
-        case ConnectionState::EnteringWorld: game_state = plugin::kGameStateCharSelect; break;
+        case ConnectionState::CharacterSelect: game_state = plugin::kGameStateCharSelect; break;
+        case ConnectionState::EnteringWorld:
+            // Zoning hands off through world (Zoning -> EnteringWorld -> ZoneConnecting -> ZoneEntering -> InZone);
+            // keep GAMESTATE_INGAME across a zone transfer instead of flashing GAMESTATE_CHARSELECT to plugins.
+            game_state = hook_game_state_ == plugin::kGameStateInGame ? plugin::kGameStateInGame
+                                                                      : plugin::kGameStateCharSelect;
+            break;
         case ConnectionState::Creating: game_state = plugin::kGameStateCharCreate; break;
         case ConnectionState::InZone:
         case ConnectionState::Camping: game_state = plugin::kGameStateInGame; break;
@@ -1750,6 +1883,12 @@ std::optional<TimeOfDay> GameConnection::current_time_of_day() const {
 }
 
 void GameConnection::handle_zone(const AppPacket& p) {
+    struct ZonePacketGuard {
+        bool& flag;
+        bool prev;
+        explicit ZonePacketGuard(bool& f) : flag(f), prev(f) { flag = true; }
+        ~ZonePacketGuard() { flag = prev; }
+    } zone_packet_guard{handling_zone_packet_};
     if (options_.snapshot_journal && !applying_snapshot_ && !snapshot_truncated_) {
         snapshot_journal_.push_back(p);
         snapshot_bytes_ += p.data.size() + 4; // the opcode and a length, near enough for the bound
@@ -2109,6 +2248,7 @@ void GameConnection::handle_zone(const AppPacket& p) {
             group_.mana_percent.erase(*id);
             group_.endurance_percent.erase(*id);
             forget_pet_spawn(*id);
+            if (pets_.pet_target == *id) pets_.pet_target = 0;
             // msgEQRmPlayer @0x4b8380: the target leaving stops auto attack and clears the target (no OP_TargetMouse).
             // Hailstone, as after a death: attack_until_xtarget_clear keeps attacking while the extended target list
             // has more, and auto_target_xtarget may pick another attacker.
@@ -2116,6 +2256,7 @@ void GameConnection::handle_zone(const AppPacket& p) {
                 if (attack_until_xtarget_clear_ && auto_attack_ && xtarget_holds_spawn(*id)) attack_held_for_xtarget_ = true;
                 else set_auto_attack(false);
                 world_.target_id = 0;
+                target_of_target_ = 0;
                 auto_target_xtarget_due_ = true;
             }
             forget_auto_target_attacker(*id);
@@ -3154,6 +3295,7 @@ void GameConnection::disconnect() {
 void GameConnection::set_target(std::uint32_t spawn_id) {
     if (spawn_id == world_.target_id) return;
     world_.target_id = spawn_id;
+    target_of_target_ = 0;
     // CTargetWnd::OnProcessFrame on a new target: the selected group member is its slot (-1 when it is no member
     // or there is no group).
     if (spawn_id) {
@@ -3437,7 +3579,15 @@ void GameConnection::handle_combat(Op op, const AppPacket& p) {
     switch (op) {
     case Op::MobHealth:
         if (auto h = decode_mob_health(p))
-            if (auto* s = spawn(h->spawn_id)) { s->hp_percent = h->percent; s->hp_known = h->percent <= 100; }
+            if (auto* s = spawn(h->spawn_id)) {
+                s->hp_percent = h->percent;
+                s->hp_known = h->percent <= 100;
+                // EQEmu truncates (cur_hp * 100 / max_hp) for OP_MobHealth, so 100 means full HP on the server.
+                // Reconcile pstatus_.hp if a local prediction left it below max_hp while the server reports 100%.
+                if (h->spawn_id == me && h->percent == 100 && !pstatus_.dead && pstatus_.max_hp > 0 &&
+                    pstatus_.hp < pstatus_.max_hp)
+                    pstatus_.hp = pstatus_.max_hp;
+            }
         break;
     case Op::HPUpdate:
         if (auto h = decode_hp_update(p)) {
@@ -3661,7 +3811,10 @@ void GameConnection::handle_combat(Op op, const AppPacket& p) {
         break;
     case Op::TargetCommand:
         // The server accepted a target (or targets our pet for us).
-        if (auto t = decode_target(p)) world_.target_id = *t;
+        if (auto t = decode_target(p)) {
+            if (*t != world_.target_id) target_of_target_ = 0;
+            world_.target_id = *t;
+        }
         break;
     case Op::ZonePlayerToBind:
         handle_zone_to_bind(p); // net/game_connection_death.cpp

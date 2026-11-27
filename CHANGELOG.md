@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fixed `${Me.PctHPs}` getting stuck below 100% while the server reports 100% (`${Spawn[...].PctHPs}` == 100) after DoT combat: the 6-second client buff tick no longer subtracts raw unmitigated `spells_us.txt` DoT damage from `pstatus_.hp` on live connections (leaving DoT HP changes to the server's `OP_HPUpdate` while still breaking mesmerize and ticking buffs), and `OP_MobHealth` at 100% for the player now reconciles any stale local HP prediction back to `max_hp`.
+- Fixed plugin `SetGameState` flashing `GAMESTATE_CHARSELECT` / `GAMESTATE_LOGGINGIN` mid-zone when a zone transfer hands off through world (`Zoning` -> `EnteringWorld`); `hook_game_state_` now stays `GAMESTATE_INGAME` across zoning as intended.
+- New `pet` TLO type for `${Pet}` and `${Me.Pet}` (inheriting `spawn`), exposing `.Combat`, `.Target`, `.Stance`, pet toggle states (`.Hold`, `.GHold`, `.Taunt`, `.Follow`, `.Guard`, `.Focus`, `.SpellHold`, `.Stop`, `.Regroup`), and pet buff queries (`.Buff[...]`, `.BuffDuration[...]`, `.BuffCount`, `.BuffsPopulated`) from `OP_PetHoTT`, `OP_PetCommandState` and `OP_PetBuffWindow`.
+
 - Armour dye shows on Luclin models wearing hero's forge armour that the new-armour filter hides (`ActorNewArmorFilter` in `eqclient.ini`): the body under a hidden piece was left untinted, most visibly the pants, which have no armour piece of their own, so dyed legs showed white whatever colour was saved. A hidden or untagged piece now leaves the slot's own armour tinted, as the original draws it. A body variant with no Luclin texture of its own (a male Half Elf's plate shins) also resolves through the classic definition of its name instead of showing as a bare band above the boots
 
 - Crew **Control**: the graphical client can take full interactive control of a headless character — movement, chat, inventory, combat, casting, NPCs, bank, trade, merchant, loot, and UI windows — while the headless remains the live connection and keeps all plugins and scripts (Sentinel/ACNet) running continuously. Switching characters, releasing, or closing the GUI never tears down or rebuilds the headless connection, and zone changes automatically stream a fresh zone snapshot to the GUI.
@@ -21,6 +25,7 @@
 - Headless Lua scripts can read active quest progress and task revisions without opening a journal window.
 
 - Sentinel can detect resurrection offers at bind. Items report click effects and reuse timers supplied by inserted augments.
+- `/notify` (MacroQuest's window notification) now works in both clients: with a window it clicks the named child (clicks, list rows and tab pages) as the player would; headless, trade, loot, confirmation, large-dialog, task-decline, bank and tribute buttons run their connection call while their window shows, and those windows report `${Window[...].Open}` from the connection. Scripts such as Sentinel's AutoAccept need no changes.
 
 - Crew View keeps plugins attached to the parked graphical character, preserving their data and peer heartbeats across a switch.
 

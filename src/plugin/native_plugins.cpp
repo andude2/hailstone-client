@@ -1085,6 +1085,17 @@ int h_nameplate_spell_icon(void* h, std::uint32_t icon, HailstoneNameplateImage*
     return frame ? frame->spell_icon(icon, out) : 0;
 }
 
+int h_spell_icon(void* h, std::uint32_t icon, HailstoneNameplateImage* out) {
+    auto& l = Loaded::of(h);
+    if (!l.can(kCapRead) || !l.can(kCapUi)) return 0;
+    if (!out || out->size < sizeof(*out) || icon > 65535 || !l.host->env.spell_icon) return 0;
+    std::uint64_t tex = 0;
+    float u0 = 0.0f, v0 = 0.0f, u1 = 0.0f, v1 = 0.0f;
+    if (!l.host->env.spell_icon(icon, tex, u0, v0, u1, v1) || !tex) return 0;
+    *out = {sizeof(*out), tex, u0, v0, u1, v1};
+    return 1;
+}
+
 void h_set_active(void* h, int active) {
     Loaded& l = Loaded::of(h);
     if (may_extend(l, "set_active")) {
@@ -4001,6 +4012,7 @@ bool NativePlugins::load_file(std::string_view name_in, std::string* why, Asker 
     p.table.inventory_rows = main_only_or<h_inventory_rows, -1>;
     p.table.inventory_rows_v2 = main_only_or<h_inventory_rows_v2, -1>;
     p.table.task_rows = main_only_or<h_task_rows, -1>;
+    p.table.spell_icon = main_only<h_spell_icon>;
     Hooks& hooks = *m.env.hooks;
     Loaded* lp = &p;
     // Each callback runs with the plugin's capabilities and counts as the plugin being busy (no unloading under it).

@@ -21,6 +21,7 @@
 
 #include <cctype>
 #include <cstdint>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -146,6 +147,13 @@ struct CrewFile {
     std::string error; // empty: parsed
 };
 CrewFile parse_crew_file(std::string_view text);
+std::string format_crew_file(const CrewFile& crew);
+std::filesystem::path crew_drive_dir(const CrewFile& crew, const std::filesystem::path& data_dir);
+void clear_stale_drive_files(const std::filesystem::path& drive_dir);
+// Prepares a character's headless ImGui layout file (`ini`): creates its parent folder, migrates any legacy root
+// `legacy_ini` if `ini` does not exist yet, or otherwise seeds `ini` once from the GUI's `gui_ini`.
+void seed_headless_imgui_ini(const std::filesystem::path& ini, const std::filesystem::path& gui_ini,
+                             const std::filesystem::path& legacy_ini = {});
 
 // Which saved server --server names: an exact id or name (any case), then
 // a part of the name or id only one profile carries. Nullopt: none, or

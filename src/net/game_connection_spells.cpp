@@ -176,6 +176,22 @@ void GameConnection::update_spells() {
 
 void GameConnection::update_spells_at(std::int64_t now) {
     if (pstatus_.dead && spells_.casting.casting()) spells_.casting = {};
+    // Hailstone: if the server drops/refuses a cast without sending OP_ManaChange (or OP_BeginCast arrives after
+    // OP_ManaChange), a non-bard cast must not wedge spells_.casting forever. Bard songs stay in spells_.casting
+    // while playing (OP_ManaChange keep_casting), so they are excluded.
+    constexpr std::int64_t kStaleCastGraceMs = 4000;
+    if (spells_.casting.casting() && spells_.casting.eta_ms > 0 && now > spells_.casting.eta_ms + kStaleCastGraceMs) {
+        const game::SpellData* s = spell_table_ ? spell_table_->get(spells_.casting.spell) : nullptr;
+        if (!(s && bard_song(*s))) {
+            log::warn("cast: clearing stale cast {} ({} ms past eta)", spells_.casting.spell,
+                      now - spells_.casting.eta_ms);
+            const int gem = spells_.casting.slot;
+            if (gem >= 0 && gem < game::kSpellGems) spells_.gems[static_cast<std::size_t>(gem)].ready = eq_time();
+            spells_.recovery_ready = eq_time();
+            spells_.pending = std::max(0, spells_.pending - 1);
+            spells_.casting = {};
+        }
+    }
     // DoPassageOfTime's 1 s endurance upkeep and 6 s buff and regen tick (game_connection_ticks.cpp).
     passage_of_time(now);
     // Memorizing: CSpellBookWnd::GetSpellMemTicksLeft runs when the book's memorise gauge (EQType 9) is drawn,
@@ -1124,8 +1140,13 @@ void GameConnection::handle_spell(Op op, const AppPacket& p) {
         break;
     case Op::InterruptCast:
         if (auto ic = decode_interrupt_cast(p)) {
-            // Message only; the OP_ManaChange that comes with it ends the cast.
             spells_.others.erase(ic->spawn_id);
+            if (ic->spawn_id == me && spells_.casting.casting()) {
+                const int gem = spells_.casting.slot;
+                if (gem >= 0 && gem < game::kSpellGems) spells_.gems[static_cast<std::size_t>(gem)].ready = eq_time();
+                spells_.recovery_ready = eq_time();
+                stop_spell_cast(game::kNoSpell);
+            }
             chat(ChatEvent::Kind::Spell, strings_.format(ic->message_id, ic->args), 0, 289); // spell failures
         }
         break;

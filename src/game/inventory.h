@@ -44,6 +44,7 @@ public:
     const std::map<Key, net::Item>& items() const { return items_; }
     // Counts every change, for UI caches.
     std::uint64_t revision() const { return revision_; }
+    void bump_revision() { ++revision_; }
     // Counts every put, take, swap, load or clear that touches the cursor slot (the item there or a bag's contents),
     // so a note about the item on the cursor (GameConnection's cursor origin) can tell it still describes that item.
     // A stack count changed through at() is the same item and does not count.

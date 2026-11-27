@@ -227,6 +227,11 @@ function L.Solve(W, H, s, frames)
     end
     return y
   end
+  fw, fh = size("CastingWindow")
+  if fw then
+    local x = cx - fw / 2
+    choose("CastingWindow", fw, fh, { { x, unitTop - g - fh }, { x, above(x, x + fw) - fh } })
+  end
   fw, fh = size("BreathWindow")
   if fw then
     local x = cx - fw / 2

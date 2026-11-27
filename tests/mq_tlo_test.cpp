@@ -161,8 +161,12 @@ TEST_CASE("TLO: Sentinel reads aura updates and distinguishes learned skills, di
     spells.linked_ready[1] = static_cast<std::uint32_t>(std::time(nullptr)) + 60;
     CHECK(std::stoll(f.p("${Me.GemTimer[Minor Healing]}")) > 0);
     CHECK(f.p("${Window[CastingWindow].Open}") == "FALSE");
+    CHECK(f.p("${Me.CastTimeLeft}") == "0");
     spells.casting.spell = 200;
+    spells.casting.eta_ms = net::GameConnection::now_ms() + 1500;
     CHECK(f.p("${Window[CastingWindow].Open} ${Me.Casting.ID}") == "TRUE 200");
+    CHECK(std::stoll(f.p("${Me.CastTimeLeft}")) > 0);
+    spells.casting = {};
 
     CHECK(f.p("${Me.PctAggro} ${Target.PctAggro}") == "NULL NULL");
     c.receive_zone_packet_for_test(net::encode(net::AggroTargetInfo{0, 10}));

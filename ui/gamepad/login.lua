@@ -499,6 +499,21 @@ local function mainPage(v, x0, y, x1, w)
     if P.button(F, "##resume_token", "Sign in with session", w, rh) then API.pregame.LoginDo("resume_token") end
     y = y + gap + rh
   end
+  if v.hasCrewIni then
+    local q = v.characters[v.quick]
+    local cw = px(230)
+    local canCrewLogin = v.ready or (q ~= nil and v.host ~= "")
+    local crewLabel = q and ("Log in " .. q.name .. " + crew.ini") or "Log in + crew.ini"
+    P.at(x0, y + gap)
+    if P.button(F, "##logincrew", crewLabel, w - cw - gap, rh, { disabled = busy or not canCrewLogin }) then
+      API.pregame.LoginDo("loginWithCrew")
+    end
+    ui.SameLine(0, gap)
+    if P.button(F, "##crewonly", "Crew only", cw, rh, { disabled = busy }) then
+      API.pregame.LoginDo("launchCrew")
+    end
+    y = y + gap + rh
+  end
   if v.update then y = updateRow(v, x0, y + px(14), x1, w) end
   y = suggestionRows(v, x0, y, x1, w)
   return y
@@ -625,6 +640,14 @@ local function morePage(v, x0, y, x1, w)
         API.pregame.LoginDo("loginBox")
       end
       y = y + px(72) + gap
+      if v.headlessAvailable then
+        P.at(x0, y)
+        if P.button(F, "##loginboxhl", "Log in box set headless (" .. v.boxCount .. ")", w, px(72),
+              { disabled = busy or not v.boxReady }) then
+          API.pregame.LoginDo("loginBoxHeadless")
+        end
+        y = y + px(72) + gap
+      end
     end
     y = y + px(12)
   end

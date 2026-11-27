@@ -216,6 +216,9 @@ void UiDemo::draw(const DemoFrameInput& in) {
             login_.status = {"Demo: the game files are not changed here.", false};
             break;
         case ui::LoginAction::LoginBox:
+        case ui::LoginAction::LoginBoxHeadless:
+        case ui::LoginAction::LoginWithCrew:
+        case ui::LoginAction::LaunchCrew:
         case ui::LoginAction::AccountsChanged:
         case ui::LoginAction::ForgetAccount:
         case ui::LoginAction::PlayCharacter:

@@ -425,6 +425,9 @@ void emit_login(Out& o, const ui::LoginView& v) {
     o.str("assetsDir", ui::selected_assets_dir(v).string());
     o.integer("boxCount", static_cast<lua_Integer>(ui::box_accounts(v).size()));
     o.boolean("boxReady", ui::box_ready(v));
+    o.boolean("headlessAvailable", v.headless_available);
+    o.boolean("hasCrewIni", v.headless_available && !v.crew_ini.empty());
+    o.str("crewIni", v.crew_ini.string());
 }
 
 // view = hs.LoginScreen([revision])   -- nil unless the client shows its login screen; reading it draws the screen
@@ -537,6 +540,9 @@ SavedAccount* account_named(ui::LoginView& v, std::string_view username) {
 //   "gameFolder", i    play with game folder i of gameFolders; "browse": the folder picker
 //   "openAssets"       open the picked server's own files folder
 //   "loginBox"         log in the box set (each other account in a window of its own)
+//   "loginBoxHeadless" log the selected/first box account into this window and launch the rest headless
+//   "loginWithCrew" [, i]  launch crew.ini headless and enter the selected (or row i) character in this window
+//   "launchCrew"       launch crew.ini headless without logging this window in
 //   "forget", name     forget a saved account and its saved password (ask first)
 //   "box", name, on    tick an account in or out of the box set
 //   "world", name, w   the world the account's box login plays ("" the last played)
@@ -712,6 +718,20 @@ int LoginDo(lua_State* L) {
         if (ok) action = A::Delete;
     } else if (what == "account") {
         ui::pick_account(v, luaL_checkstring(L, 2));
+        // Keep the selected quick character aligned with the picked account when it has saved characters.
+        const auto quick = ui::quick_characters(v);
+        int match = -1;
+        const SavedAccount* picked_acc = account_named(v, v.username);
+        for (int i = 0; i < static_cast<int>(quick.size()); ++i) {
+            if (quick[static_cast<std::size_t>(i)].username != v.username) continue;
+            if (match < 0) match = i;
+            if (picked_acc && quick[static_cast<std::size_t>(i)].character.name == picked_acc->character &&
+                (picked_acc->world.empty() || quick[static_cast<std::size_t>(i)].character.world == picked_acc->world)) {
+                match = i;
+                break;
+            }
+        }
+        if (match >= 0) v.quick_selected = match;
     } else if (what == "play") {
         if (!lua_isnoneornil(L, 2)) luaL_checkinteger(L, 2); // (before `quick` is made)
         const auto quick = ui::quick_characters(v);
@@ -734,6 +754,20 @@ int LoginDo(lua_State* L) {
     } else if (what == "loginBox") {
         ok = picked && ui::box_ready(v);
         if (ok) action = A::LoginBox;
+    } else if (what == "loginBoxHeadless") {
+        ok = picked && v.headless_available && ui::box_ready(v);
+        if (ok) action = A::LoginBoxHeadless;
+    } else if (what == "loginWithCrew") {
+        if (!lua_isnoneornil(L, 2)) luaL_checkinteger(L, 2);
+        const auto quick = ui::quick_characters(v);
+        if (!lua_isnoneornil(L, 2)) v.quick_selected = index_arg(L, 2, quick.size());
+        const bool can_quick =
+            !v.host.empty() && v.quick_selected >= 0 && v.quick_selected < static_cast<int>(quick.size());
+        ok = v.headless_available && !v.crew_ini.empty() && (login_ready(v) || can_quick);
+        if (ok) action = A::LoginWithCrew;
+    } else if (what == "launchCrew") {
+        ok = v.headless_available && !v.crew_ini.empty();
+        if (ok) action = A::LaunchCrew;
     } else if (what == "forget") {
         ok = account_named(v, luaL_checkstring(L, 2)) != nullptr;
         if (ok) {

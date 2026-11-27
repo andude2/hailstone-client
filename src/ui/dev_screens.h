@@ -213,6 +213,9 @@ struct LoginView {
     // page, which OpenProject opens.
     std::vector<std::string> release_notes;
     std::string project_page;
+    // Headless launcher: hailstone_headless binary found beside hailstone, and an optional crew.ini in data/install dir.
+    bool headless_available = false;
+    std::filesystem::path crew_ini;
 };
 
 // Save, Delete (asked again first) and OpenAssets are for the picked server; picking another and New are done
@@ -233,6 +236,7 @@ struct LoginView {
 // installed tool addons.choice. ResumeToken asks the app to consume its returned ticket for this endpoint.
 enum class LoginAction {
     None, Submit, Quit, Save, Delete, OpenAssets, SelectProfile, UseGameFolder, BrowseGameFolder, LoginBox,
+    LoginBoxHeadless, LoginWithCrew, LaunchCrew,
     AccountsChanged, ForgetAccount, PlayCharacter, MusicChanged,
     UpdateDownload, UpdateRestart, UpdateSkip, UpdateNotes, OpenProject,
     AddonInspect, AddonInstall, AddonCancel, AddonUpdate, AddonRemove, AddonAuto, AddonFolder, AddonPage, AddonCheck,

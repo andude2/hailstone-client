@@ -70,6 +70,7 @@ hailstone/
                              chat_history.txt (the chat windows' last lines, each its last 1000, put back at the
                              next entry into the world);
                              hailstone.ini, the client's settings for this character ("A character's settings" below);
+                             imgui-headless.ini, Dear ImGui plugin window positions when this character runs headless;
                              kept_items.txt (the items marked Keep in the Advanced Inventory window, one
                              "<item id> <name>" a line; game/kept_items.h);
                              bank.dat (the bank and shared bank as last seen, which the Advanced Inventory lists

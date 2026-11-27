@@ -1349,7 +1349,7 @@ local DIALOG = {
 local CREW_PLACES = { { "all", "Everything" }, { "worn", "Equipped" }, { "carried", "Carried" }, { "bags", "In bags" } }
 local CREW_FLAGS = { { "noTrade", "No Trade only" }, { "lore", "Lore" }, { "magic", "Magic" },
   { "stackable", "Stackable" }, { "temporary", "Temporary" }, { "collectible", "Collectible" } }
-local CREW_SORTS = { "Name", "Owner", "Place", "Level", "Quantity", "Value", "Tribute", "Weight" }
+local CREW_SORTS = { "Name", "Owner", "Place", "Quantity" }
 local CREW_SORT_OK = {}
 for _, m in ipairs(CREW_SORTS) do CREW_SORT_OK[m] = true end
 local crewCfg = { flags = {} }
@@ -1462,18 +1462,22 @@ local function crewShown(rows)
   return out, counts, detailed
 end
 
+local CREW_ACT_W = 86 -- inline "Give to me" button width
 local crewSel = nil -- the selected crew row (highlighted; its menu is the way to act on it)
 local crewMenuRow = nil -- the crew row whose right-click menu opens this frame
-local function crewRowDraw(r, px, py, cw, s, th, col)
+local function crewRowDraw(r, px, py, cw, s, th, col, myName)
   local rh = ROW_H * s
   local it = r.item
   local isz = rh - 8 * s
   local ix, iy = px + 8 * s, py + 3 * s
-  if T.Hit("##crewrow" .. r.owner .. "." .. r.slot .. "." .. r.sub, px, py, px + cw, py + rh - 2 * s) then
+  local clicked = T.Hit("##crewrow" .. r.owner .. "." .. r.slot .. "." .. r.sub, px, py, px + cw, py + rh - 2 * s)
+  local hov = ui.IsItemHovered()
+  local mx = ui.GetMousePos()
+  local onRow = mx < col.act0 - 4 * s
+  if clicked and onRow then
     crewSel = crewSel == r and nil or r
   end
-  local hov = ui.IsItemHovered()
-  if hov and ui.IsMouseClicked(ui.Mouse.Right) then
+  if hov and onRow and ui.IsMouseClicked(ui.Mouse.Right) then
     crewSel, crewMenuRow = r, r
     T.TakeRightClick() -- the item's menu, not the window's
   end
@@ -1489,7 +1493,7 @@ local function crewRowDraw(r, px, py, cw, s, th, col)
   if it.stackable and (it.count or 1) > 1 then
     T.Text(ix + isz - 3 * s, iy + isz - 15 * s, tostring(it.count), C.text, T.font.tiny, "right")
   end
-  if hov then items.Tooltip(it, r.owner .. " - " .. r.placeText) end
+  if hov and onRow then items.Tooltip(it, r.owner .. " - " .. r.placeText) end
   local nx = ix + isz + 10 * s
   local nameW = col.owner - nx - 10 * s
   T.Text(nx, py + 4 * s, T.Fit(it.name or "", nameW, T.font.small), it.magic and C.magic or C.text, T.font.small)
@@ -1499,24 +1503,33 @@ local function crewRowDraw(r, px, py, cw, s, th, col)
   local cy = py + (rh - 2 * s - th) / 2
   T.Text(col.owner, cy, T.Fit(r.owner, col.place - col.owner - 8 * s, T.font.small),
     r.local_ and C.accent or C.text, T.font.small)
-  T.Text(col.place, cy, T.Fit(r.placeText, col.level - col.place - 30 * s, T.font.small), C.muted, T.font.small)
-  if r.level > 0 then T.Text(col.level, cy, tostring(r.level), C.muted, T.font.small, "right") end
+  T.Text(col.place, cy, T.Fit(r.placeText, col.qty - 44 * s - col.place - 8 * s, T.font.small), C.muted, T.font.small)
   T.Text(col.qty, cy, T.Thousands(r.count), C.text, T.font.small, "right")
-  local mv, coin = money(r.value)
-  if mv ~= "" then T.Text(col.value, cy, mv, C[coin] or C.gold, T.font.small, "right") end
-  if r.tribute > 0 then T.Text(col.tribute, cy, T.Thousands(r.tribute), C.muted, T.font.small, "right") end
-  T.Text(col.weight, cy, weightText(r.weight), C.faint, T.font.small, "right")
+  if not it.noTrade then
+    local bh = 22 * s
+    local by = py + (rh - 2 * s - bh) / 2
+    local bid = "##crewgive" .. r.owner .. "." .. r.slot .. "." .. r.sub
+    if not r.local_ then
+      if T.Button(bid, col.act0, by, col.act1, by + bh, s, "Give to me",
+          { primary = true, tooltip = "Ask " .. r.owner .. " to walk to " .. myName .. " and trade this to you" }) then
+        askTrade(r.owner, r.slot, r.sub, it, myName)
+      end
+    else
+      if T.Button(bid, col.act0, by, col.act1, by + bh, s, "Trade...",
+          { tooltip = "Choose a connected character to trade this to" }) then
+        crewSel, crewMenuRow = r, r
+      end
+    end
+  end
 end
 
 local function crewColumns(px, cw, s)
   local c = {}
-  c.weight = px + cw - 12 * s
-  c.tribute = c.weight - 54 * s
-  c.value = c.tribute - 70 * s
-  c.qty = c.value - 84 * s
-  c.level = c.qty - 48 * s
+  c.act1 = px + cw - 8 * s
+  c.act0 = c.act1 - CREW_ACT_W * s
+  c.qty = c.act0 - 14 * s
   local nameX = px + 8 * s + (ROW_H - 8) * s + 10 * s
-  local rest = c.level - nameX
+  local rest = c.qty - 44 * s - nameX
   c.owner = nameX + rest * 0.52
   c.place = nameX + rest * 0.74
   return c
@@ -1565,7 +1578,7 @@ local function crewGrid(rows, x, y, w, h, s)
   ui.EndChild()
 end
 
-local function crewList(rows, x, y, w, h, s)
+local function crewList(rows, x, y, w, h, s, myName)
   local wx, wy = ui.GetWindowPos()
   ui.SetCursorPos(x - wx, y - wy)
   ui.BeginChild("##crewitems", w, h, false)
@@ -1578,7 +1591,7 @@ local function crewList(rows, x, y, w, h, s)
   local col = crewColumns(px0, cw, s)
   local yy, rh = py0, ROW_H * s
   for _, r in ipairs(rows) do
-    if yy + rh >= top and yy <= bottom then crewRowDraw(r, px0, yy, cw, s, th, col) end
+    if yy + rh >= top and yy <= bottom then crewRowDraw(r, px0, yy, cw, s, th, col, myName) end
     yy = yy + rh
   end
   ui.SetCursorScreenPos(px0, yy)
@@ -1612,11 +1625,8 @@ local function crewHeader(x, y, w, s)
   head(x + 8 * s + (ROW_H - 4) * s, "ITEM", nil, "Name")
   head(col.owner, "OWNER", nil, "Owner")
   head(col.place, "WHERE", nil, "Place")
-  head(col.level, "LVL", "right", "Level")
   head(col.qty, "QTY", "right", "Quantity")
-  head(col.value, "VALUE", "right", "Value")
-  head(col.tribute, "TRIBUTE", "right", "Tribute")
-  head(col.weight, "WEIGHT", "right", "Weight")
+  T.Text((col.act0 + col.act1) / 2, y, "TRADE", C.faint, T.font.tiny, "center")
 end
 
 local function crewToolbar(x, y, w, s, shown, total)
@@ -1756,7 +1766,7 @@ local function crewBody(x, y, w, h, s, peers)
     crewGrid(rows, lx, by, lw, bodyH, s)
   else
     crewHeader(lx, by, lw - 14 * s, s)
-    crewList(rows, lx, by + 18 * s, lw, bodyH - 18 * s, s)
+    crewList(rows, lx, by + 18 * s, lw, bodyH - 18 * s, s, myName)
   end
   if crewMenuRow then
     crewMenuSaved, crewMenuRow = crewMenuRow, nil
@@ -1776,10 +1786,15 @@ local function crewBody(x, y, w, h, s, peers)
       if peer.snapshot then ready = ready + 1 end
     end
   end
-  local label = string.format("%d of %d items  \xC2\xB7  %d of %d peer inventories available  \xC2\xB7  read-only",
-    #rows, #all, ready, totalPeers)
-  if not detailed and #all > 0 then label = label .. "  \xC2\xB7  basic snapshot (no kind, value or flags)" end
-  T.Text(x, fy + 15 * s, label, C.muted, T.font.small)
+  local activeNote = tools.Note()
+  if activeNote then
+    T.Text(x, fy + 15 * s, T.Fit(activeNote, w * 0.65, T.font.small), C.accent, T.font.small)
+  else
+    local label = string.format("%d of %d items  \xC2\xB7  %d of %d peer inventories available",
+      #rows, #all, ready, totalPeers)
+    if not detailed and #all > 0 then label = label .. "  \xC2\xB7  basic snapshot (no kind, value or flags)" end
+    T.Text(x, fy + 15 * s, label, C.muted, T.font.small)
+  end
   if crewSel then
     T.Text(x + w, fy + 15 * s, (crewSel.item.name or "") .. " - " .. crewSel.owner, C.text, T.font.small, "right")
   end

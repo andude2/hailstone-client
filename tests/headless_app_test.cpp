@@ -3,6 +3,7 @@
 #include <doctest/doctest.h>
 
 #include "app/headless_app.h"
+#include "core/character_files.h"
 #include "core/game_dir.h"
 #include "core/log.h"
 #include "net/game_connection.h"
@@ -206,4 +207,91 @@ TEST_CASE("headless: an --exec line without its slash is still a command, not a 
     REQUIRE(first.size() == 2);
     CHECK(first[0] == "/say ready");
     CHECK(first[1] == "/mono load Sentinel");
+}
+
+TEST_CASE("headless: format_crew_file round-trips and clear_stale_drive_files removes only drive-*.txt") {
+    app::CrewFile crew;
+    crew.data_dir = "C:/Hailstone";
+    crew.game_dir = "C:/EQ";
+    crew.stagger = 3;
+    crew.autoload = "HSMono, ACNet";
+    crew.chat_log = false;
+    crew.observe = true;
+    crew.interact = true;
+    crew.control = true;
+    crew.drive_dir = "run";
+    crew.members.push_back(app::CrewMember{
+        .label = "Okhealz", .server = "eqemulator", .account = "acc1", .character = "Okhealz", .world = "EZ"});
+    crew.members.push_back(app::CrewMember{
+        .label = "Okhealz", .server = "eqemulator", .account = "acc2", .character = "Tankguy"});
+
+    const std::string formatted = app::format_crew_file(crew);
+    const app::CrewFile parsed = app::parse_crew_file(formatted);
+    CHECK(parsed.error.empty());
+    CHECK(parsed.data_dir == "C:/Hailstone");
+    CHECK(parsed.game_dir == "C:/EQ");
+    CHECK(parsed.stagger == 3);
+    CHECK(parsed.autoload == "HSMono, ACNet");
+    CHECK(parsed.observe);
+    CHECK(parsed.interact);
+    CHECK(parsed.control);
+    CHECK(parsed.drive_dir == "run");
+    REQUIRE(parsed.members.size() == 2);
+    CHECK(parsed.members[0].label == "Okhealz");
+    CHECK(parsed.members[0].world == "EZ");
+    CHECK(parsed.members[1].label == "Okhealz-2"); // duplicate label deduplicated
+    CHECK(parsed.members[1].account == "acc2");
+
+    const auto resolved = app::crew_drive_dir(parsed, std::filesystem::path("C:/Hailstone"));
+    CHECK(resolved == std::filesystem::path("C:/Hailstone") / "run");
+
+    test::ScratchDir scratch("headless_stale_drive");
+    const auto run_dir = scratch.path() / "run";
+    std::filesystem::create_directories(run_dir);
+    std::ofstream(run_dir / "drive-Okhealz.txt") << "stale\n";
+    std::ofstream(run_dir / "keep.txt") << "keep\n";
+    app::clear_stale_drive_files(run_dir);
+    CHECK_FALSE(std::filesystem::exists(run_dir / "drive-Okhealz.txt"));
+    CHECK(std::filesystem::exists(run_dir / "keep.txt"));
+}
+
+TEST_CASE("headless: seed_headless_imgui_ini migrates legacy file, seeds from GUI once, and keeps existing") {
+    test::ScratchDir scratch("headless_imgui_ini_seed");
+    const auto gui_ini = scratch.path() / "hailstone-windows.ini";
+    const auto char_files = character_files("eqemulator", "EZ", "Wikain", scratch.path() / "servers");
+    const auto char_ini = char_files.headless_imgui_ini();
+    CHECK(is_kept_character_file("imgui-headless.ini"));
+    std::ofstream(gui_ini) << "[Window][SentinelHeartbeatBars]\nPos=2216,28\nSize=340,1274\n";
+
+    // Without a legacy root file, seed from the GUI's hailstone-windows.ini inside the character's folder.
+    app::seed_headless_imgui_ini(char_ini, gui_ini, scratch.path() / "imgui-headless-Wikain.ini");
+    REQUIRE(std::filesystem::is_regular_file(char_ini));
+    {
+        std::ifstream in(char_ini);
+        std::string content((std::istreambuf_iterator<char>(in)), {});
+        CHECK(content.find("Pos=2216,28") != std::string::npos);
+    }
+
+    // Subsequent runs keep the character's own headless layout instead of overwriting it from the GUI ini.
+    std::ofstream(char_ini, std::ios::trunc) << "[Window][SentinelHeartbeatBars]\nPos=1900,40\nSize=340,900\n";
+    app::seed_headless_imgui_ini(char_ini, gui_ini);
+    {
+        std::ifstream in(char_ini);
+        std::string content((std::istreambuf_iterator<char>(in)), {});
+        CHECK(content.find("Pos=1900,40") != std::string::npos);
+        CHECK(content.find("Pos=2216,28") == std::string::npos);
+    }
+
+    // A legacy root imgui-headless-<char>.ini is migrated into the character folder and removed from the root.
+    const auto legacy_ini = scratch.path() / "imgui-headless-Ashenra.ini";
+    const auto migrated_ini = character_files("eqemulator", "EZ", "Ashenra", scratch.path() / "servers").headless_imgui_ini();
+    std::ofstream(legacy_ini) << "[Window][SentinelHeartbeatBars]\nPos=2205,347\nSize=340,859\n";
+    app::seed_headless_imgui_ini(migrated_ini, gui_ini, legacy_ini);
+    CHECK_FALSE(std::filesystem::exists(legacy_ini));
+    REQUIRE(std::filesystem::is_regular_file(migrated_ini));
+    {
+        std::ifstream in(migrated_ini);
+        std::string content((std::istreambuf_iterator<char>(in)), {});
+        CHECK(content.find("Pos=2205,347") != std::string::npos);
+    }
 }
