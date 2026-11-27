@@ -1,12 +1,14 @@
 // /notify and MQ's window methods (MQ's WindowNotify and SendWndClick2): what a script, a plugin or the player
 // presses, run from the client's state with or without a UI. ClientApp::notify_command and window_act call these.
 
+#include <algorithm>
 #include <format>
 #include <string>
 #include <string_view>
 
 #include "app/lua_ui.h"
 #include "app/lua_ui_windows.h"
+#include "core/ascii_case.h"
 #include "core/log.h"
 #include "game/window_notify.h"
 #include "net/game_connection.h"
@@ -31,7 +33,25 @@ bool run_notify_command(UiHost& host, UiApi* api, std::string_view args) {
     if (n.notification == "leftmouseup")
         if (const A action = game::notify_action(n.window, n.child); action != A::None) {
             switch (action) {
-            case A::TradeAccept: if (c.trade() && c.trade()->open) c.trade_accept(); break;
+            case A::TradeAccept:
+                if (!n.expected.empty()) {
+                    // A guarded click (Sentinel's AutoAccept): requires a ready player trade with that partner and
+                    // an empty outgoing side so /notify can receive a trade without giving anything away.
+                    if (c.trade() && c.trade()->open && !c.trade()->with_npc && c.trade()->their_ready &&
+                        !c.trade()->my_ready && game::iequals(c.trade()->partner_name, n.expected)) {
+                        const bool coins = std::any_of(c.trade()->my_coins.begin(), c.trade()->my_coins.end(),
+                                                       [](auto amount) { return amount != 0; });
+                        const bool items = std::any_of(c.inventory().items().begin(), c.inventory().items().end(),
+                                                       [](const auto& entry) { return entry.first.first == net::kInvTrade; });
+                        if (!coins && !items) c.trade_accept();
+                        else c.ui_message("Trade acceptance refused: the outgoing side is not empty.");
+                    } else {
+                        c.ui_message("Trade acceptance refused: no ready player trade.");
+                    }
+                } else if (c.trade() && c.trade()->open) {
+                    c.trade_accept();
+                }
+                break;
             case A::TradeCancel: if (c.trade() && c.trade()->open) c.trade_cancel(); break;
             case A::LootAll: if (c.loot_session() && c.loot_session()->open) c.loot_all(); break;
             case A::LootDone: if (c.loot_session() && c.loot_session()->open) c.end_loot(); break;
@@ -40,9 +60,19 @@ bool run_notify_command(UiHost& host, UiApi* api, std::string_view args) {
             // calls: only the player answers it (the player's own typed /notify has no caller name).
             case A::ConfirmYes:
                 if (refuse_code_destroy_yes(host, !plugin::caller_name().empty())) return false;
+                if (!n.expected.empty() && !game::iequals(c.confirmation_requester(), n.expected)) break;
                 answer_confirmation_question(host, true);
                 break;
-            case A::ConfirmNo: answer_confirmation_question(host, false); break;
+            case A::ConfirmOk:
+                if (refuse_code_destroy_yes(host, !plugin::caller_name().empty())) return false;
+                if (!n.expected.empty() && !game::iequals(c.confirmation_requester(), n.expected)) break;
+                answer_confirmation_question(host, c.confirmation() && c.confirmation()->ok_only);
+                break;
+            case A::ConfirmNo:
+                if (!n.expected.empty() && !game::iequals(c.confirmation_requester(), n.expected)) break;
+                answer_confirmation_question(host, false);
+                break;
+            case A::LargeDialogOk: if (c.large_dialog() && !c.large_dialog()->buttons) c.answer_large_dialog(0); break;
             case A::LargeDialogYes: if (c.large_dialog()) c.answer_large_dialog(1); break;
             case A::LargeDialogNo: if (c.large_dialog()) c.answer_large_dialog(2); break;
             case A::TaskAccept: c.accept_selected_task(); break;
@@ -50,6 +80,7 @@ bool run_notify_command(UiHost& host, UiApi* api, std::string_view args) {
             case A::BankAuto: if (c.bank()) c.auto_bank(); break;
             case A::BankDone: if (c.bank()) c.close_bank(); break;
             case A::TributeToggle: c.tribute_toggle(!c.tribute().settings.active); break;
+            case A::GuildTributeToggle: c.guild_tribute_toggle(!c.guild_tribute().active.enabled); break;
             case A::RespawnSelect: c.choose_selected_respawn(); break;
             case A::RaidLock:
             case A::RaidUnlock: {
