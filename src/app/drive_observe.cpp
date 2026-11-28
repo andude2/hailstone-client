@@ -154,6 +154,7 @@ std::vector<std::byte> encode_drive_move(const net::DriveMove& move) {
     w.le(static_cast<std::uint8_t>((move.moving ? 1u : 0u) | (move.active ? 2u : 0u)));
     w.le(move.stand_state);
     w.le(move.standing_on);
+    w.le(move.zone_generation);
     return w.take();
 }
 
@@ -175,6 +176,7 @@ std::optional<net::DriveMove> decode_drive_move(std::span<const std::byte> body)
         move.active = (flags & 2u) != 0;
         move.stand_state = r.le<std::uint8_t>();
         move.standing_on = r.le<std::uint32_t>();
+        if (!r.empty()) move.zone_generation = r.le<std::uint32_t>();
         if (!r.empty()) return std::nullopt;
         return move;
     } catch (...) {
@@ -926,6 +928,10 @@ struct DriveObserveServer::Impl {
         queue = std::move(kept);
         queued_bytes = kept_bytes;
         queue_overflow = false;
+        // Pre-zone movement, actions and forwarded packets belong to the departed zone.
+        actions.clear();
+        latest_move.reset();
+        forwarded.clear();
         if (encoded.size() <= kObserveSnapshotChunk) {
             queued_bytes += encoded.size();
             queue.emplace_back(DriveObserveMessage::Snapshot, encoded);
@@ -1018,6 +1024,13 @@ std::vector<DriveForwardedPacket> DriveObserveServer::take_forwarded() {
 std::optional<ui::RemoteImGuiInput> DriveObserveServer::take_imgui_input() {
     std::lock_guard lock(impl_->mutex);
     return std::exchange(impl_->pending_imgui_input, std::nullopt);
+}
+
+void DriveObserveServer::clear_pending_input() {
+    std::lock_guard lock(impl_->mutex);
+    impl_->actions.clear();
+    impl_->latest_move.reset();
+    impl_->forwarded.clear();
 }
 
 void DriveObserveServer::stop() {

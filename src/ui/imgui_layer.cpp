@@ -248,6 +248,8 @@ struct ImGuiLayer::RemoteState {
     std::optional<RemoteImGuiFrame> frame;
     std::vector<RemoteImGuiTexture> pending_uploads;
     std::unordered_map<std::uint32_t, TexEntry> textures;
+    std::function<void*(std::uint32_t)> external_texture_resolver;
+    std::unordered_map<std::uint32_t, void*> resolved_external_textures;
     std::vector<std::pair<std::uint64_t, TexEntry>> retired;
     std::vector<Staging> staging;
     std::vector<std::unique_ptr<ImDrawList>> built_lists;
@@ -324,10 +326,24 @@ struct ImGuiLayer::RemoteState {
         mods = 0;
         for (auto& [id, e] : textures) retire(e);
         textures.clear();
+        resolved_external_textures.clear();
     }
 
     void record_uploads(const render::FrameInfo& f) {
         collect();
+        // Resolve synthetic remote texture IDs (e.g. A_SpellIcons sheets) before any render pass begins,
+        // since UiTextures may submit a one-shot upload batch on first sheet access.
+        resolved_external_textures.clear();
+        if (enabled && frame && external_texture_resolver) {
+            for (const RemoteDrawList& dl : frame->lists) {
+                for (const RemoteDrawCmd& sc : dl.cmds) {
+                    if (decode_remote_spell_sheet_tex_id(sc.tex_id) <= 0) continue;
+                    if (resolved_external_textures.contains(sc.tex_id)) continue;
+                    if (void* tex = external_texture_resolver(sc.tex_id))
+                        resolved_external_textures.emplace(sc.tex_id, tex);
+                }
+            }
+        }
         if (pending_uploads.empty()) return;
         auto uploads = std::exchange(pending_uploads, {});
 
@@ -360,6 +376,7 @@ struct ImGuiLayer::RemoteState {
         std::vector<Op> ops;
         ops.reserve(uploads.size());
         for (const auto& u : uploads) {
+            if ((u.id & kRemoteSpellSheetTexBase) != 0u) continue;
             if (u.destroy) {
                 if (auto it = textures.find(u.id); it != textures.end()) {
                     retire(it->second);
@@ -432,11 +449,18 @@ struct ImGuiLayer::RemoteState {
                 if (sc.elem_count == 0) continue;
                 if (static_cast<std::size_t>(sc.idx_offset) + sc.elem_count > src.indices.size()) continue;
                 if (sc.vtx_offset > src.vertices.size()) continue;
-                auto it = textures.find(sc.tex_id);
-                if (it == textures.end() || !it->second.ready || !it->second.set) continue;
+                ImTextureID tex_id = ImTextureID_Invalid;
+                if (auto it = textures.find(sc.tex_id); it != textures.end() && it->second.ready && it->second.set) {
+                    tex_id = reinterpret_cast<ImTextureID>(it->second.set);
+                } else if (auto ext = resolved_external_textures.find(sc.tex_id);
+                           ext != resolved_external_textures.end() && ext->second && ui::texture_id_live(ext->second)) {
+                    tex_id = reinterpret_cast<ImTextureID>(ext->second);
+                } else {
+                    continue;
+                }
                 ImDrawCmd cmd{};
                 cmd.ClipRect = ImVec4(sc.clip_x, sc.clip_y, sc.clip_z, sc.clip_w);
-                cmd.TexRef = ImTextureRef(reinterpret_cast<ImTextureID>(it->second.set));
+                cmd.TexRef = ImTextureRef(tex_id);
                 cmd.VtxOffset = sc.vtx_offset;
                 cmd.IdxOffset = sc.idx_offset;
                 cmd.ElemCount = sc.elem_count;
@@ -1112,6 +1136,10 @@ void ImGuiLayer::set_remote_frame(RemoteImGuiFrame frame) {
     remote_->want_text_input = frame.want_text_input;
     remote_->mouse_cursor = frame.mouse_cursor;
     remote_->frame = std::move(frame);
+}
+
+void ImGuiLayer::set_remote_texture_resolver(std::function<void*(std::uint32_t)> resolver) {
+    if (remote_) remote_->external_texture_resolver = std::move(resolver);
 }
 
 void ImGuiLayer::record_remote_uploads(const render::FrameInfo& frame) {

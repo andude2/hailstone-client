@@ -536,6 +536,7 @@ void GameConnection::apply_snapshot(const DriveSnapshot& snapshot) {
 }
 
 void GameConnection::start_observe(std::unique_ptr<Session> zone_session, std::unique_ptr<Session> world_session) {
+    observing_ = true;
     zone_session_ = std::move(zone_session);
     if (world_session) {
         world_session_ = std::move(world_session);
@@ -3026,16 +3027,29 @@ void GameConnection::handle_zone(const AppPacket& p) {
             break;
         }
         if (auto r = decode_request_client_zone_change(p)) {
+            const std::uint32_t target_zone = static_cast<std::uint32_t>(r->zone_id) |
+                                              (static_cast<std::uint32_t>(r->instance_id) << 16);
+            // A drive viewer mirrors the headless's live zone stream: the headless owns cross-zone / cross-instance
+            // moves and pushes a fresh snapshot on arrival. Answering here would forward a duplicate OP_ZoneChange
+            // that the server treats as unsolicited (SendZoneCancel). Same-zone moves (summon, #goto) still run.
+            if (observing_ && target_zone != current_zone_dword()) break;
+            // Sentinel coordinates (>= 999999) mean "keep the player's position". Resolve them from the connection's
+            // own spawn position before handing off to DoTeleportB, because at a zone-in the app's movement body is
+            // placed only after this update's packet drain and would otherwise supply the previous zone's coordinates.
+            const game::Spawn* me = world_.player();
+            const glm::vec3 cur_world = motion_known_ ? position_ : (me ? me->position : glm::vec3(0.0f));
+            const float world_x = r->y >= 999999.0f ? cur_world.x : r->y; // world x is the server's y
+            const float world_y = r->x >= 999999.0f ? cur_world.y : r->x;
+            const float world_z = r->z >= 999999.0f ? cur_world.z : r->z;
             // CEverQuest::HandleWorldMessage @0x4d13cd: DoTeleportB(zone dword, +8, +0xc, z, heading, "", type,
             // +4, ...) when the zone's .s3d or .eqg exists (the zone is loaded here): a request for the zone the
             // player is in (#goto, a summon) moves the player without zoning; another zone goes on to MoveToZone.
             if (teleport_handler_) {
                 game::TeleportBArgs a;
-                a.zone = static_cast<std::int32_t>(static_cast<std::uint32_t>(r->zone_id) |
-                                                   (static_cast<std::uint32_t>(r->instance_id) << 16));
-                a.x = r->y; // world x is the server's y
-                a.y = r->x;
-                a.z = r->z;
+                a.zone = static_cast<std::int32_t>(target_zone);
+                a.x = world_x;
+                a.y = world_y;
+                a.z = world_z;
                 a.heading = r->heading;
                 a.reason = static_cast<std::int32_t>(r->type);
                 a.arg8 = static_cast<std::int32_t>(r->unknown004);
@@ -3043,13 +3057,14 @@ void GameConnection::handle_zone(const AppPacket& p) {
                 teleport_handler_(a);
                 break;
             }
+            const glm::vec3 cur_server = game::world_to_server(cur_world);
             ZoneChange z;
             z.char_name = character_;
             z.zone_id = r->zone_id;
             z.instance_id = r->instance_id;
-            z.x = r->x;
-            z.y = r->y;
-            z.z = r->z;
+            z.x = r->x >= 999999.0f ? cur_server.x : r->x;
+            z.y = r->y >= 999999.0f ? cur_server.y : r->y;
+            z.z = r->z >= 999999.0f ? cur_server.z : r->z;
             z.zone_reason = r->type;
             start_zone_change(z);
         }
@@ -3071,7 +3086,7 @@ void GameConnection::handle_zone(const AppPacket& p) {
                 // MoveToZone @0x541710: OP_DeleteSpawn with our id, then WaitForWorldDisconnect until the zone drops
                 // the link (EQEmu's Handle_OP_DeleteSpawn does); then back in through world (zoning = 1).
                 chat(ChatEvent::Kind::System, "Zoning...");
-                send_zone(encode_delete_own_spawn(world_.player_id));
+                if (!observing_) send_zone(encode_delete_own_spawn(world_.player_id));
                 // A camp under way ends here, silently: the next zone's EnterZone runs ResetClientStateForZone(1)
                 // @0x5319f0, which clears the camp's time (0xddf8a0) and its kind (0xdd2664). Nothing reads them
                 // while zoning (a link death then is not in game).
@@ -3085,8 +3100,13 @@ void GameConnection::handle_zone(const AppPacket& p) {
                 reset_achievements();
                 reset_rewards();
                 status_ = "Leaving the zone";
-                zone_exit_ = ZoneExit::Zoning;
-                zone_exit_deadline_ = Clock::now() + kZoneDropWait;
+                // A drive viewer does not own the UDP zone/world links: stay in Zoning (loading screen) until the
+                // headless completes the transition and pushes a fresh zone snapshot, rather than timing out the
+                // mirror session and trying to reconnect to world.
+                if (!observing_) {
+                    zone_exit_ = ZoneExit::Zoning;
+                    zone_exit_deadline_ = Clock::now() + kZoneDropWait;
+                }
             } else if (z->success < 0) {
                 chat(ChatEvent::Kind::System, "You can't go there right now.");
             }

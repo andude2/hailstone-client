@@ -19,7 +19,7 @@ packages and pinned sources.
 Run this sequence on Linux with GCC or Clang in your environment.
 
 ```sh
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DHAILSTONE_BUILD_TESTS=ON
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHAILSTONE_BUILD_TESTS=ON
 cmake --build build
 ctest --test-dir build -j 8 --output-on-failure --no-tests=error
 ```
@@ -29,10 +29,15 @@ environment loaded. Confirm that `cl.exe` is available and that CMake selected
 MSVC for this build.
 
 ```powershell
-cmake -S . -B build-msvc -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DHAILSTONE_BUILD_TESTS=ON
+cmake -S . -B build-msvc -G Ninja -DCMAKE_BUILD_TYPE=Release -DHAILSTONE_BUILD_TESTS=ON
 cmake --build build-msvc
 ctest --test-dir build-msvc -j 8 --output-on-failure --no-tests=error
 ```
+
+For multi-config Visual Studio build directories (such as `build-headless`),
+always build, test and release with `--config Release` (not `RelWithDebInfo`),
+for example `cmake --build build-headless --config Release` and
+`ctest --test-dir build-headless -C Release -j 8 --output-on-failure --no-tests=error`.
 
 Stop at the first failed step and inspect its output. The dev client is
 `build/hailstone/hailstone` or `build-msvc\hailstone\hailstone.exe` in these

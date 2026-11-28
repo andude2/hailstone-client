@@ -872,6 +872,22 @@ int l_imgui_exists(lua_State* L) {
     return 1;
 }
 
+int l_texture_animation(lua_State* L) {
+    const char* name = luaL_checkstring(L, 1);
+    const int cell = static_cast<int>(luaL_optinteger(L, 2, -1));
+    const auto& fn = Script::of(L).host->env.texture_animation;
+    if (!fn) return 0;
+    std::optional<TextureCell> c;
+    plugin::cxx_guard(L, [&] { c = fn(name, cell); });
+    if (!c || !c->id) return 0;
+    lua_pushlightuserdata(L, c->id);
+    lua_pushnumber(L, c->u0);
+    lua_pushnumber(L, c->v0);
+    lua_pushnumber(L, c->u1);
+    lua_pushnumber(L, c->v1);
+    return 5;
+}
+
 int l_get_all_spawns(lua_State* L) {
     need(L, plugin::kCapRead, "mq.getAllSpawns");
     const Context& ctx = ctx_of(L);
@@ -1405,6 +1421,7 @@ function ImGui.Text(fmt, ...) ui.Text(fmt_text(fmt, ...)) end
 function ImGui.TextWrapped(fmt, ...) ui.TextWrapped(fmt_text(fmt, ...)) end
 function ImGui.TextDisabled(fmt, ...) ui.TextDisabled(fmt_text(fmt, ...)) end
 function ImGui.BulletText(fmt, ...) ui.BulletText(fmt_text(fmt, ...)) end
+function ImGui.SetTooltip(fmt, ...) ui.SetTooltip(fmt_text(fmt, ...)) end
 function ImGui.TextColored(a, b, c, d, e, ...)
     if type(a) == 'table' then
         ui.TextColored(a.x or a[1], a.y or a[2], a.z or a[3], a.w or a[4], fmt_text(b, c, d, e, ...))
@@ -1430,14 +1447,242 @@ function ImGui.SetNextWindowPos(x, y, cond)
     if type(x) == 'table' then return ui.SetNextWindowPos(x.x or x[1], x.y or x[2], y) end
     return ui.SetNextWindowPos(x, y, cond)
 end
+function ImGui.BeginChild(id, w, h, border, flags)
+    if type(w) == 'table' then return ui.BeginChild(id, w.x or w[1] or 0, w.y or w[2] or 0, h, border) end
+    return ui.BeginChild(id, w or 0, h or 0, border, flags)
+end
+function ImGui.Selectable(label, selected, flags, w, h)
+    if type(w) == 'table' then return ui.Selectable(label, selected, flags or 0, w.x or w[1] or 0, w.y or w[2] or 0) end
+    return ui.Selectable(label, selected, flags or 0, w or 0, h or 0)
+end
+function ImGui.Dummy(w, h)
+    if type(w) == 'table' then return ui.Dummy(w.x or w[1] or 0, w.y or w[2] or 0) end
+    return ui.Dummy(w or 0, h or 0)
+end
+function ImGui.InvisibleButton(id, w, h, flags)
+    if type(w) == 'table' then return ui.InvisibleButton(id, w.x or w[1] or 1, w.y or w[2] or 1, h or 0) end
+    return ui.InvisibleButton(id, w or 1, h or 1, flags or 0)
+end
+function ImGui.BeginTable(id, cols, flags, w, h)
+    if type(w) == 'table' then return ui.BeginTable(id, cols, flags or 0, w.x or w[1] or 0, w.y or w[2] or 0) end
+    return ui.BeginTable(id, cols, flags or 0, w or 0, h or 0)
+end
+local function col_u32_to_rgba(c)
+    local u = math.floor(tonumber(c) or 0) & 0xFFFFFFFF
+    local sa = ui.GetStyleAlpha()
+    local inv = (sa and sa > 0) and (1.0 / sa) or 1.0
+    local a = math.min(1.0, (((u >> 24) & 0xFF) / 255.0) * inv)
+    return (u & 0xFF) / 255.0, ((u >> 8) & 0xFF) / 255.0, ((u >> 16) & 0xFF) / 255.0, a
+end
+local function unpack_color(a, b, c, d)
+    if type(a) == 'table' then
+        return a.x or a[1] or 1, a.y or a[2] or 1, a.z or a[3] or 1, a.w or a[4] or 1
+    end
+    if b == nil and type(a) == 'number' then
+        return col_u32_to_rgba(a)
+    end
+    return a or 1, b or 1, c or 1, d == nil and 1 or d
+end
+function ImGui.PushStyleColor(idx, a, b, c, d)
+    if type(a) == 'table' then
+        return ui.PushStyleColor(idx, a.x or a[1] or 1, a.y or a[2] or 1, a.z or a[3] or 1, a.w or a[4] or 1)
+    elseif b == nil and type(a) == 'number' then
+        local r, g, bl, al = col_u32_to_rgba(a)
+        return ui.PushStyleColor(idx, r, g, bl, al)
+    end
+    return ui.PushStyleColor(idx, a, b, c, d)
+end
+function ImGui.PushStyleVar(idx, x, y)
+    if type(x) == 'table' then return ui.PushStyleVar(idx, x.x or x[1] or 0, x.y or x[2] or 0) end
+    return ui.PushStyleVar(idx, x, y)
+end
+function ImGui.SetCursorPos(x, y)
+    if type(x) == 'table' then return ui.SetCursorPos(x.x or x[1] or 0, x.y or x[2] or 0) end
+    return ui.SetCursorPos(x, y)
+end
+function ImGui.SetCursorScreenPos(x, y)
+    if type(x) == 'table' then return ui.SetCursorScreenPos(x.x or x[1] or 0, x.y or x[2] or 0) end
+    return ui.SetCursorScreenPos(x, y)
+end
+function ImGui.GetCursorPosX() local x = ui.GetCursorPos(); return x end
+function ImGui.GetCursorPosY() local _, y = ui.GetCursorPos(); return y end
+function ImGui.SetCursorPosX(x) local _, y = ui.GetCursorPos(); ui.SetCursorPos(x, y) end
+function ImGui.SetCursorPosY(y) local x = ui.GetCursorPos(); ui.SetCursorPos(x, y) end
+function ImGui.GetCursorPosVec() local x, y = ui.GetCursorPos(); return ImVec2(x, y) end
+function ImGui.GetCursorScreenPosVec() local x, y = ui.GetCursorScreenPos(); return ImVec2(x, y) end
+function ImGui.GetContentRegionAvailVec() local x, y = ui.GetContentRegionAvail(); return ImVec2(x, y) end
+function ImGui.GetWindowSizeVec() local x, y = ui.GetWindowSize(); return ImVec2(x, y) end
+function ImGui.GetWindowPosVec() local x, y = ui.GetWindowPos(); return ImVec2(x, y) end
+function ImGui.CalcTextSizeVec(text) local x, y = ui.CalcTextSize(text); return ImVec2(x, y) end
+function ImGui.GetItemRectMin() local x0, y0 = ui.GetItemRect(); return x0, y0 end
+function ImGui.GetItemRectMax() local _, _, x1, y1 = ui.GetItemRect(); return x1, y1 end
+function ImGui.GetColorU32(a, b, c, d)
+    if type(a) == 'table' then
+        return ui.GetColorU32(a.x or a[1] or 1, a.y or a[2] or 1, a.z or a[3] or 1, a.w or a[4] or 1)
+    end
+    if c ~= nil then
+        return ui.GetColorU32(a, b, c, d == nil and 1 or d)
+    end
+    return ui.GetColorU32(a, b)
+end
+function ImGui.TableSetBgColor(target, col, colIdx)
+    if type(col) == 'table' then col = ImGui.GetColorU32(col) end
+    return ui.TableSetBgColor(target, col, colIdx)
+end
+function ImGui.InputText(label, text, a, b, c)
+    if b ~= nil or type(c) == 'table' then
+        return ui.InputText(label, text or '', a, b, c)
+    end
+    return ui.InputText(label, text or '', 1024, a or 0)
+end
+function ImGui.InputTextWithHint(label, hint, text, a, b)
+    if b ~= nil then
+        return ui.InputTextWithHint(label, hint, text or '', a, b)
+    end
+    return ui.InputTextWithHint(label, hint, text or '', 1024, a or 0)
+end
+function ImGui.TableGetSortSpecs()
+    local col, asc = ui.TableGetSortSpecs()
+    if col == nil then return nil end
+    local dir = asc and ui.SortDirection.Ascending or ui.SortDirection.Descending
+    local spec = {ColumnIndex = col, ColumnUserID = 0, SortOrder = 0, SortDirection = dir}
+    return {
+        SpecsDirty = true,
+        SpecsCount = 1,
+        Specs = function(_, i)
+            if i == 1 or i == 0 then return spec end
+            return nil
+        end,
+    }
+end
+function ImGui.GetMainViewport()
+    local x, y, w, h, wx, wy, ww, wh = ui.GetMainViewport()
+    if x == nil then return nil end
+    return {Pos = ImVec2(x, y), Size = ImVec2(w, h), WorkPos = ImVec2(wx, wy), WorkSize = ImVec2(ww, wh)}
+end
+local draw_list_mt = {
+    AddRect = function(_, p1, p2, col, rounding, _, thickness)
+        local r, g, b, a = unpack_color(col)
+        ui.DrawRect(p1.x or p1[1] or 0, p1.y or p1[2] or 0, p2.x or p2[1] or 0, p2.y or p2[2] or 0,
+                    r, g, b, a, rounding or 0, thickness or 1)
+    end,
+    AddRectFilled = function(_, p1, p2, col, rounding)
+        local r, g, b, a = unpack_color(col)
+        ui.DrawRectFilled(p1.x or p1[1] or 0, p1.y or p1[2] or 0, p2.x or p2[1] or 0, p2.y or p2[2] or 0,
+                          r, g, b, a, rounding or 0)
+    end,
+    AddLine = function(_, p1, p2, col, thickness)
+        local r, g, b, a = unpack_color(col)
+        ui.DrawLine(p1.x or p1[1] or 0, p1.y or p1[2] or 0, p2.x or p2[1] or 0, p2.y or p2[2] or 0,
+                    r, g, b, a, thickness or 1)
+    end,
+    AddCircle = function(_, center, radius, col, _, thickness)
+        local r, g, b, a = unpack_color(col)
+        ui.DrawCircle(center.x or center[1] or 0, center.y or center[2] or 0, radius or 1,
+                      r, g, b, a, thickness or 1)
+    end,
+    AddCircleFilled = function(_, center, radius, col)
+        local r, g, b, a = unpack_color(col)
+        ui.DrawCircleFilled(center.x or center[1] or 0, center.y or center[2] or 0, radius or 1, r, g, b, a)
+    end,
+    AddText = function(_, a1, a2, a3, a4, a5)
+        if type(a1) == 'table' then
+            local r, g, b, al = unpack_color(a2)
+            ui.DrawText(a1.x or a1[1] or 0, a1.y or a1[2] or 0, r, g, b, al, tostring(a3 or ''))
+        else
+            local p = a3 or {}
+            local r, g, b, al = unpack_color(a4)
+            ui.DrawText(p.x or p[1] or 0, p.y or p[2] or 0, r, g, b, al, tostring(a5 or ''), a2)
+        end
+    end,
+}
+draw_list_mt.__index = draw_list_mt
+local draw_list_singleton = setmetatable({}, draw_list_mt)
+function ImGui.GetWindowDrawList() return draw_list_singleton end
+function mq.FindTextureAnimation(name)
+    if type(name) ~= 'string' or name == '' then return nil end
+    return {
+        _name = name,
+        _cell = -1,
+        SetTextureCell = function(self, idx)
+            self._cell = idx ~= nil and math.floor(tonumber(idx) or -1) or -1
+        end,
+        GetTextureCell = function(self) return self._cell end,
+    }
+end
+function ImGui.DrawTextureAnimation(anim, w, h)
+    if type(w) == 'table' then h = w.y or w[2]; w = w.x or w[1] end
+    w = w or 40
+    h = h or 40
+    if type(anim) ~= 'table' or not anim._name then
+        ui.Dummy(w, h)
+        return
+    end
+    local tex, u0, v0, u1, v1 = mq._texture_animation(anim._name, anim._cell)
+    if tex then
+        ui.Image(tex, w, h, u0, v0, u1, v1)
+    else
+        ui.Dummy(w, h)
+    end
+end
 function ImVec2(x, y) return {x = x or 0, y = y or 0} end
 function ImVec4(x, y, z, w) return {x = x or 0, y = y or 0, z = z or 0, w = w or 0} end
+function IM_COL32(r, g, b, a)
+    r = math.floor(tonumber(r) or 0) & 0xFF
+    g = math.floor(tonumber(g) or 0) & 0xFF
+    b = math.floor(tonumber(b) or 0) & 0xFF
+    a = math.floor(a == nil and 255 or (tonumber(a) or 0)) & 0xFF
+    return (a << 24) | (b << 16) | (g << 8) | r
+end
+bit32 = {
+    band = function(...)
+        local n = select('#', ...)
+        local r = 0xFFFFFFFF
+        for i = 1, n do r = r & (math.floor(tonumber((select(i, ...))) or 0) & 0xFFFFFFFF) end
+        return r
+    end,
+    bor = function(...)
+        local n = select('#', ...)
+        local r = 0
+        for i = 1, n do r = r | (math.floor(tonumber((select(i, ...))) or 0) & 0xFFFFFFFF) end
+        return r
+    end,
+    bxor = function(...)
+        local n = select('#', ...)
+        local r = 0
+        for i = 1, n do r = r ~ (math.floor(tonumber((select(i, ...))) or 0) & 0xFFFFFFFF) end
+        return r
+    end,
+    bnot = function(x) return (~(math.floor(tonumber(x) or 0))) & 0xFFFFFFFF end,
+    lshift = function(x, disp)
+        local u = math.floor(tonumber(x) or 0) & 0xFFFFFFFF
+        local d = math.floor(tonumber(disp) or 0)
+        if d >= 32 or d <= -32 then return 0 end
+        if d < 0 then return (u >> (-d)) & 0xFFFFFFFF end
+        return (u << d) & 0xFFFFFFFF
+    end,
+    rshift = function(x, disp)
+        local u = math.floor(tonumber(x) or 0) & 0xFFFFFFFF
+        local d = math.floor(tonumber(disp) or 0)
+        if d >= 32 or d <= -32 then return 0 end
+        if d < 0 then return (u << (-d)) & 0xFFFFFFFF end
+        return (u >> d) & 0xFFFFFFFF
+    end,
+    btest = function(...) return bit32.band(...) ~= 0 end,
+}
 ImGuiWindowFlags = ui.WindowFlags
+ImGuiChildFlags = ui.ChildFlags
 ImGuiCond = ui.Cond
 ImGuiCol = ui.Col
 ImGuiStyleVar = ui.StyleVar
 ImGuiTableFlags = ui.TableFlags
 ImGuiTableColumnFlags = ui.TableColumnFlags
+ImGuiTableRowFlags = ui.TableRowFlags
+ImGuiTableBgTarget = ui.TableBgTarget
+ImGuiSortDirection = ui.SortDirection
+ImGuiTreeNodeFlags = ui.TreeNodeFlags
+ImGuiTabBarFlags = ui.TabBarFlags
+ImGuiTabItemFlags = ui.TabItemFlags
 ImGuiInputTextFlags = ui.InputTextFlags
 ImGuiComboFlags = ui.ComboFlags
 ImGuiSelectableFlags = ui.SelectableFlags
@@ -1612,7 +1857,8 @@ bool ScriptHost::Impl::open_state(Script& sc, std::string& why) {
              {"_cmd", l_cmd}, {"gettime", l_gettime}, {"_delay_ms", l_delay_ms}, {"parse", l_parse},
              {"exit", l_exit}, {"event", l_event}, {"unevent", l_unevent}, {"flushevents", l_flushevents},
              {"_next_event", l_next_event}, {"bind", l_bind}, {"unbind", l_unbind},
-             {"getAllSpawns", l_get_all_spawns}, {"_write_config", l_write_config}, {"_dry", l_dry}}) {
+             {"getAllSpawns", l_get_all_spawns}, {"_write_config", l_write_config}, {"_dry", l_dry},
+             {"_texture_animation", l_texture_animation}}) {
         lua_pushcfunction(L, fn);
         lua_setfield(L, -2, n);
     }

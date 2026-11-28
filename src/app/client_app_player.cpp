@@ -1186,7 +1186,8 @@ void ClientApp::update_player(float dt) {
         step_pitch_ = pitch_ - step_from_pitch;
     };
     if (drive_client_) {
-        if (viewing_control_) {
+        if (viewing_control_ && conn_->state() == net::ConnectionState::InZone && player_ready_ &&
+            !conn_->zone_change_pending()) {
             const bool manual_move =
                 player_moved || player_autorun_pressed || movement_.moving_keys() ||
                 (movement_.controller().autorun() & 1) || mouse_look_.both_buttons ||
@@ -1209,6 +1210,7 @@ void ClientApp::update_player(float dt) {
                     m.stand_state = conn_->player_status().stand_state;
                     m.standing_on = conn_->standing_on();
                     m.active = true;
+                    m.zone_generation = conn_->zone_generation();
                     drive_client_->send_move(m);
                     drive_human_sent_active_ = true;
                 }
@@ -1220,6 +1222,7 @@ void ClientApp::update_player(float dt) {
                     stop.stand_state = conn_->player_status().stand_state;
                     stop.standing_on = conn_->standing_on();
                     stop.active = false;
+                    stop.zone_generation = conn_->zone_generation();
                     drive_client_->send_move(stop);
                     drive_human_sent_active_ = false;
                 }

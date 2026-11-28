@@ -244,12 +244,20 @@ void end_begun(lua_State *L, bool child) {
 		ImGui::End();
 }
 int End(lua_State *L) { end_begun(L, false); return 0; }
-// visible = ui.BeginChild(id [, w, h [, border [, flags]]]) ... ui.EndChild()   (EndChild whatever it returned).
+// visible = ui.BeginChild(id [, w, h [, borderOrChildFlags [, flags]]]) ... ui.EndChild()   (EndChild whatever it returned).
 // Refused, as Begin is, in a window of the consent question for code that is not the pack's.
 int BeginChild(lua_State *L) {
 	const char *id = S(L, 1);
 	const ImVec2 size(F(L, 2), F(L, 3));
-	const ImGuiChildFlags childFlags = B(L, 4) ? ImGuiChildFlags_Borders : 0;
+	constexpr ImGuiChildFlags kAllowedChildFlags = ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding |
+		ImGuiChildFlags_ResizeX | ImGuiChildFlags_ResizeY | ImGuiChildFlags_AutoResizeX | ImGuiChildFlags_AutoResizeY |
+		ImGuiChildFlags_AlwaysAutoResize | ImGuiChildFlags_FrameStyle;
+	ImGuiChildFlags childFlags = ImGuiChildFlags_None;
+	if (lua_type(L, 4) == LUA_TNUMBER) {
+		childFlags = static_cast<ImGuiChildFlags>(I(L, 4)) & kAllowedChildFlags;
+	} else if (B(L, 4)) {
+		childFlags = ImGuiChildFlags_Borders;
+	}
 	const int flags = WindowFlags(L, 5);
 	if (refused_to(L, GImGui->CurrentWindow)) {
 		refuse_begin(true);
@@ -280,6 +288,15 @@ int SetWindowFontScale(lua_State *L) { SetWindowFontScaleCompat(F(L, 1, 1)); ret
 
 // --- text ---
 int Text(lua_State *L) { ImGui::TextUnformatted(S(L, 1)); return 0; }
+int TextUnformatted(lua_State *L) {
+	size_t len = 0;
+	const char *s = luaL_checklstring(L, 1, &len);
+	ImGui::TextUnformatted(s, s + len);
+	return 0;
+}
+int GetFontSize(lua_State *L) { lua_pushnumber(L, ImGui::GetFontSize()); return 1; }
+int GetTextLineHeight(lua_State *L) { lua_pushnumber(L, ImGui::GetTextLineHeight()); return 1; }
+int GetTextLineHeightWithSpacing(lua_State *L) { lua_pushnumber(L, ImGui::GetTextLineHeightWithSpacing()); return 1; }
 int TextColored(lua_State *L) { ImGui::TextColored(Color(L, 1), "%s", S(L, 5)); return 0; }
 int TextDisabled(lua_State *L) { ImGui::TextDisabled("%s", S(L, 1)); return 0; }
 int TextWrapped(lua_State *L) { ImGui::TextWrapped("%s", S(L, 1)); return 0; }
@@ -696,6 +713,19 @@ int InputTextWithHint(lua_State *L) {
 	lua_pushboolean(L, changed);
 	return 2;
 }
+// value, changed = ui.InputInt(label, value [, step [, stepFast [, flags]]])
+int InputInt(lua_State *L) {
+	const char *label = S(L, 1);
+	int v = I(L, 2);
+	const int step = I(L, 3, 1);
+	const int stepFast = I(L, 4, 100);
+	const ImGuiInputTextFlags flags = I(L, 5, 0) & (ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll |
+		ImGuiInputTextFlags_ReadOnly);
+	const bool changed = ImGui::InputInt(label, &v, step, stepFast, flags);
+	lua_pushinteger(L, v);
+	lua_pushboolean(L, changed);
+	return 2;
+}
 // open = ui.BeginCombo(label, preview [, flags]) ... ui.EndCombo()
 int BeginCombo(lua_State *L) { return Ret(L, RememberPopup(ImGui::BeginCombo(S(L, 1), S(L, 2), I(L, 3, 0)), PopupKind::Combo)); }
 // The popup BeginPopup, BeginCombo or BeginMenu began is the current window: what EndPopup, EndCombo and EndMenu
@@ -724,6 +754,13 @@ int ProgressBar(lua_State *L) {
 }
 int CollapsingHeader(lua_State *L) { return Ret(L, ImGui::CollapsingHeader(S(L, 1), I(L, 2))); }
 int TreeNode(lua_State *L) { return Ret(L, ImGui::TreeNode(S(L, 1))); }
+int TreeNodeEx(lua_State *L) { return Ret(L, ImGui::TreeNodeEx(S(L, 1), I(L, 2, 0))); }
+int SetNextItemOpen(lua_State *L) {
+	int cond = I(L, 2, ImGuiCond_Always);
+	if (cond <= 0 || (cond & (cond - 1)) != 0 || cond > ImGuiCond_Appearing) cond = ImGuiCond_Always;
+	ImGui::SetNextItemOpen(B(L, 1), cond);
+	return 0;
+}
 int TreePop(lua_State *) {
 	if (ImGui::GetCurrentWindow()->DC.TreeDepth > (FloorWindow() ? g_floors.back().stacks.SizeOfTreeStack : 0)) {
 		ImGui::TreePop();
@@ -822,6 +859,57 @@ int GetWindowSize(lua_State *L) {
 	lua_pushnumber(L, v.y);
 	return 2;
 }
+int GetWindowWidth(lua_State *L) { lua_pushnumber(L, ImGui::GetWindowWidth()); return 1; }
+int GetWindowHeight(lua_State *L) { lua_pushnumber(L, ImGui::GetWindowHeight()); return 1; }
+int GetWindowContentRegionWidth(lua_State *L) {
+	const ImGuiWindow *w = ImGui::GetCurrentWindowRead();
+	lua_pushnumber(L, w ? w->ContentRegionRect.GetWidth() : 0.0f);
+	return 1;
+}
+int GetContentRegionMax(lua_State *L) {
+	const ImGuiWindow *w = ImGui::GetCurrentWindowRead();
+	const ImVec2 v = w ? ImVec2(w->ContentRegionRect.Max.x - w->Pos.x, w->ContentRegionRect.Max.y - w->Pos.y) : ImVec2(0, 0);
+	lua_pushnumber(L, v.x);
+	lua_pushnumber(L, v.y);
+	return 2;
+}
+int GetMainViewport(lua_State *L) {
+	const ImGuiViewport *vp = ImGui::GetMainViewport();
+	if (!vp) return 0;
+	lua_pushnumber(L, vp->Pos.x);
+	lua_pushnumber(L, vp->Pos.y);
+	lua_pushnumber(L, vp->Size.x);
+	lua_pushnumber(L, vp->Size.y);
+	lua_pushnumber(L, vp->WorkPos.x);
+	lua_pushnumber(L, vp->WorkPos.y);
+	lua_pushnumber(L, vp->WorkSize.x);
+	lua_pushnumber(L, vp->WorkSize.y);
+	return 8;
+}
+int GetColorU32(lua_State *L) {
+	ImU32 col = 0;
+	if (lua_gettop(L) >= 4) {
+		col = ImGui::GetColorU32(Color(L, 1));
+	} else {
+		const int idx = I(L, 1);
+		if (idx >= 0 && idx < ImGuiCol_COUNT) col = ImGui::GetColorU32(idx, F(L, 2, 1.0f));
+	}
+	lua_pushinteger(L, static_cast<lua_Integer>(col));
+	return 1;
+}
+int Columns(lua_State *L) {
+	const int count = std::clamp(I(L, 1, 1), 1, 64);
+	const char *id = lua_isnoneornil(L, 2) ? nullptr : S(L, 2);
+	const bool border = B(L, 3, true);
+	ImGui::Columns(count, id, border);
+	return 0;
+}
+int NextColumn(lua_State *) { ImGui::NextColumn(); return 0; }
+int SetColumnWidth(lua_State *L) {
+	const int col = I(L, 1);
+	if (col >= 0) ImGui::SetColumnWidth(col, F(L, 2));
+	return 0;
+}
 // x, y, w, h = ui.FindWindowRect(name)   -- a window's place and size now, nothing for one never drawn. Called
 // before the window's Begin it gives where ImGui's own title bar drag put it this frame (lib/snap.lua snaps that).
 int FindWindowRect(lua_State *L) {
@@ -892,13 +980,29 @@ int EndTable(lua_State *) {
 // The calls below refuse what ImGui would dereference or only assert on: TableNextRow (and so the header row) with
 // no current table reads through a null table, and a column or freeze set up after the first row asserts.
 bool TableLayoutOpen() { return GImGui->CurrentTable && !GImGui->CurrentTable->IsLayoutLocked; }
-int TableNextRow(lua_State *) {
+int TableNextRow(lua_State *L) {
 	if (GImGui->CurrentTable) {
-		ImGui::TableNextRow();
+		ImGui::TableNextRow(I(L, 1, 0), F(L, 2, 0.0f));
 	}
 	return 0;
 }
 int TableNextColumn(lua_State *L) { return Ret(L, GImGui->CurrentTable && ImGui::TableNextColumn()); }
+int TableSetColumnIndex(lua_State *L) {
+	if (!GImGui->CurrentTable) return Ret(L, false);
+	const int col = I(L, 1);
+	if (col < 0 || col >= GImGui->CurrentTable->ColumnsCount) return Ret(L, false);
+	return Ret(L, ImGui::TableSetColumnIndex(col));
+}
+int TableSetBgColor(lua_State *L) {
+	if (!GImGui->CurrentTable) return 0;
+	const int target = I(L, 1);
+	if (target < ImGuiTableBgTarget_RowBg0 || target > ImGuiTableBgTarget_CellBg) return 0;
+	const auto col = static_cast<ImU32>(luaL_checkinteger(L, 2));
+	const int colIdx = I(L, 3, -1);
+	if (colIdx >= GImGui->CurrentTable->ColumnsCount) return 0;
+	ImGui::TableSetBgColor(target, col, colIdx < -1 ? -1 : colIdx);
+	return 0;
+}
 // BeginDisabled(disabled) / EndDisabled(): greys out and blocks the items between; ends without a begin this frame
 // are ignored (ImGui asserts on them).
 int g_disabledFrame = -1, g_disabledDepth = 0;
@@ -1133,6 +1237,8 @@ int GetIO(lua_State *L) {
 		lua_pushnumber(L, io.DisplaySize.x); lua_setfield(L, real, "width");
 		lua_pushnumber(L, io.DisplaySize.y); lua_setfield(L, real, "height");
 		lua_pushnumber(L, io.Framerate); lua_setfield(L, real, "fps");
+		lua_pushnumber(L, io.Framerate); lua_setfield(L, real, "Framerate");
+		lua_pushnumber(L, io.DeltaTime); lua_setfield(L, real, "DeltaTime");
 		lua_pushboolean(L, io.KeyCtrl); lua_setfield(L, real, "ctrl");
 		lua_pushboolean(L, io.KeyShift); lua_setfield(L, real, "shift");
 		lua_pushboolean(L, io.KeyAlt); lua_setfield(L, real, "alt");
@@ -1554,13 +1660,14 @@ std::vector<LayoutProfileRect> snapshot_pack_window_rects(int width, int height)
 bool ContextOnly(std::string_view name) {
 	// These operations use context state, not a live window or its draw list. They remain
 	// valid between frames; scoped stack changes and current-window queries do not.
-	for (const char* allowed : {"GetIO", "GetTime", "GetFrameCount", "GetStyleAlpha", "GetMousePos",
+	for (const char* allowed : {"GetIO", "GetTime", "GetFrameCount", "GetStyleAlpha", "GetMousePos", "GetMainViewport",
+		"GetColorU32",
 		"IsMouseDoubleClicked", "IsMouseClicked", "IsMouseReleased", "IsMouseDown", "IsMouseDragging",
 		"IsKeyDown", "IsKeyPressed", "GetItemID", "GetItemRect", "IsItemActive", "IsItemDisabled",
 		"IsItemFocused", "IsItemDeactivatedAfterEdit", "IsWindowAppearing", "FindWindowRect", "SetWindowFocus",
 		"SetNextWindowSize", "SetNextWindowSizeConstraints", "SetNextWindowPos", "SetNextWindowBgAlpha",
 		"SetNextWindowCollapsed", "SetNextWindowFocus",
-		"SetNextItemWidth", "SetNextItemAllowOverlap", "CaptureKeyboard", "SetNavCursorVisible",
+		"SetNextItemWidth", "SetNextItemAllowOverlap", "SetNextItemOpen", "CaptureKeyboard", "SetNavCursorVisible",
 		"SetClipboardText", "GetClipboardText"})
 		if (name == allowed) return true;
 	return false;
@@ -1572,25 +1679,26 @@ void register_ui_api(lua_State *L) {
 		{"SetNextWindowSize", SetNextWindowSize}, {"SetNextWindowPos", SetNextWindowPos},
 		{"SetNextWindowSizeConstraints", SetNextWindowSizeConstraints},
 		{"SetNextWindowBgAlpha", SetNextWindowBgAlpha}, {"SetNextWindowCollapsed", SetNextWindowCollapsed}, {"IsWindowCollapsed", IsWindowCollapsed}, {"SetWindowFontScale", SetWindowFontScale},
-		{"Text", Text}, {"TextColored", TextColored}, {"TextDisabled", TextDisabled}, {"TextWrapped", TextWrapped},
+		{"Text", Text}, {"TextUnformatted", TextUnformatted}, {"TextColored", TextColored}, {"TextDisabled", TextDisabled}, {"TextWrapped", TextWrapped},
+		{"GetFontSize", GetFontSize}, {"GetTextLineHeight", GetTextLineHeight}, {"GetTextLineHeightWithSpacing", GetTextLineHeightWithSpacing},
 		{"SeparatorText", SeparatorText}, {"LabelText", LabelText}, {"BulletText", BulletText},
 		{"CalcTextSize", CalcTextSize},
 		{"Button", Button}, {"SmallButton", SmallButton}, {"InvisibleButton", InvisibleButton}, {"EdgeButton", EdgeButton},
 		{"Selectable", Selectable}, {"Checkbox", Checkbox}, {"SliderFloat", SliderFloat}, {"SliderInt", SliderInt},
 		{"ColorButton", ColorButton}, {"ColorPicker3", ColorPicker3}, {"ColorEdit3", ColorEdit3},
-		{"InputText", InputText}, {"InputTextWithHint", InputTextWithHint}, {"InputTextMultiline", InputTextMultiline}, {"CodeEditor", CodeEditor}, {"SetClipboardText", SetClipboardText}, {"GetClipboardText", GetClipboardText}, {"SetKeyboardFocusHere", SetKeyboardFocusHere}, {"SetNavCursorVisible", SetNavCursorVisible}, {"BeginCombo", BeginCombo}, {"EndCombo", EndCombo},
+		{"InputText", InputText}, {"InputTextWithHint", InputTextWithHint}, {"InputTextMultiline", InputTextMultiline}, {"InputInt", InputInt}, {"CodeEditor", CodeEditor}, {"SetClipboardText", SetClipboardText}, {"GetClipboardText", GetClipboardText}, {"SetKeyboardFocusHere", SetKeyboardFocusHere}, {"SetNavCursorVisible", SetNavCursorVisible}, {"BeginCombo", BeginCombo}, {"EndCombo", EndCombo},
 		{"SetItemDefaultFocus", SetItemDefaultFocus}, {"IsItemDeactivatedAfterEdit", IsItemDeactivatedAfterEdit}, {"ProgressBar", ProgressBar}, {"CollapsingHeader", CollapsingHeader},
-		{"TreeNode", TreeNode}, {"TreePop", TreePop},
+		{"TreeNode", TreeNode}, {"TreeNodeEx", TreeNodeEx}, {"SetNextItemOpen", SetNextItemOpen}, {"TreePop", TreePop},
 		{"Image", Image}, {"ImageButton", ImageButton},
 		{"SameLine", SameLine}, {"PushTextWrapPos", PushTextWrapPos}, {"PopTextWrapPos", PopTextWrapPos}, {"NewLine", NewLine}, {"Separator", Separator}, {"Spacing", Spacing},
 		{"Dummy", Dummy}, {"Indent", Indent}, {"Unindent", Unindent}, {"BeginGroup", BeginGroup},
 		{"EndGroup", EndGroup}, {"PushID", PushID}, {"PopID", PopID}, {"SetNextItemWidth", SetNextItemWidth},
-		{"GetContentRegionAvail", GetContentRegionAvail}, {"GetCursorPos", GetCursorPos}, {"SetCursorPos", SetCursorPos}, {"SetCursorScreenPos", SetCursorScreenPos}, {"GetScrollY", GetScrollY}, {"SetScrollY", SetScrollY}, {"GetScrollMaxY", GetScrollMaxY}, {"GetMousePos", GetMousePos}, {"GetWindowPos", GetWindowPos}, {"Foreground", Foreground},
+		{"GetContentRegionAvail", GetContentRegionAvail}, {"GetContentRegionMax", GetContentRegionMax}, {"GetWindowContentRegionWidth", GetWindowContentRegionWidth}, {"GetWindowWidth", GetWindowWidth}, {"GetWindowHeight", GetWindowHeight}, {"GetMainViewport", GetMainViewport}, {"GetColorU32", GetColorU32}, {"Columns", Columns}, {"NextColumn", NextColumn}, {"SetColumnWidth", SetColumnWidth}, {"GetCursorPos", GetCursorPos}, {"SetCursorPos", SetCursorPos}, {"SetCursorScreenPos", SetCursorScreenPos}, {"GetScrollY", GetScrollY}, {"SetScrollY", SetScrollY}, {"GetScrollMaxY", GetScrollMaxY}, {"GetMousePos", GetMousePos}, {"GetWindowPos", GetWindowPos}, {"Foreground", Foreground},
 		{"GetWindowSize", GetWindowSize}, {"FindWindowRect", FindWindowRect}, {"PushClipRect", PushClipRect}, {"PopClipRect", PopClipRect},
 		{"SetScrollHereY", SetScrollHereY}, {"IsWindowFocused", IsWindowFocused},
 		{"IsWindowAppearing", IsWindowAppearing}, {"SetWindowFocus", SetWindowFocus}, {"IsItemFocused", IsItemFocused},
 		{"BeginTable", BeginTable}, {"EndTable", EndTable}, {"TableNextRow", TableNextRow},
-		{"TableNextColumn", TableNextColumn}, {"TableGetHoveredColumn", TableGetHoveredColumn}, {"BeginDisabled", BeginDisabled}, {"EndDisabled", EndDisabled}, {"TableSetupColumn", TableSetupColumn}, {"TableHeadersRow", TableHeadersRow}, {"TableHeadersRowClicked", TableHeadersRowClicked},
+		{"TableNextColumn", TableNextColumn}, {"TableSetColumnIndex", TableSetColumnIndex}, {"TableSetBgColor", TableSetBgColor}, {"TableGetHoveredColumn", TableGetHoveredColumn}, {"BeginDisabled", BeginDisabled}, {"EndDisabled", EndDisabled}, {"TableSetupColumn", TableSetupColumn}, {"TableHeadersRow", TableHeadersRow}, {"TableHeadersRowClicked", TableHeadersRowClicked},
 		{"TableSetupScrollFreeze", TableSetupScrollFreeze}, {"TableGetSortSpecs", TableGetSortSpecs},
 		{"BeginTabBar", BeginTabBar}, {"EndTabBar", EndTabBar}, {"BeginTabItem", BeginTabItem}, {"EndTabItem", EndTabItem},
 		{"BeginTooltip", BeginTooltip}, {"EndTooltip", EndTooltip}, {"SetTooltip", SetTooltip},
@@ -1615,7 +1723,8 @@ void register_ui_api(lua_State *L) {
 	for (const luaL_Reg* entry = fns; entry->name; ++entry) {
 		const std::string_view name(entry->name);
 		if (name == "ChatFontSize" || name == "ColorButton" || name == "ColorEdit3" || name == "ColorPicker3") continue;
-		const int requirement = name == "CalcTextSize" ? 1 : ContextOnly(name) ? 0 : 2;
+		const int requirement = (name == "CalcTextSize" || name == "GetFontSize" || name == "GetTextLineHeight" ||
+		                         name == "GetTextLineHeightWithSpacing") ? 1 : ContextOnly(name) ? 0 : 2;
 		lua_pushcfunction(L, entry->func);
 		lua_pushstring(L, entry->name);
 		lua_pushinteger(L, requirement);
@@ -1644,15 +1753,44 @@ void register_ui_api(lua_State *L) {
 		{"NoNavInputs", ImGuiWindowFlags_NoNavInputs}, {"NoNavFocus", ImGuiWindowFlags_NoNavFocus},
 		{"UnsavedDocument", ImGuiWindowFlags_UnsavedDocument}, {"NoNav", ImGuiWindowFlags_NoNav},
 		{"NoFocusOnAppearing", ImGuiWindowFlags_NoFocusOnAppearing}, {"NoDecoration", ImGuiWindowFlags_NoDecoration},
-		{"NoInputs", ImGuiWindowFlags_NoInputs}, {"NoBringToFrontOnFocus", ImGuiWindowFlags_NoBringToFrontOnFocus}});
+		{"NoInputs", ImGuiWindowFlags_NoInputs}, {"NoBringToFrontOnFocus", ImGuiWindowFlags_NoBringToFrontOnFocus},
+		{"NoDocking", 0}});
+	SetInts(L, "ChildFlags", {{"None", ImGuiChildFlags_None}, {"Border", ImGuiChildFlags_Borders},
+		{"Borders", ImGuiChildFlags_Borders}, {"AlwaysUseWindowPadding", ImGuiChildFlags_AlwaysUseWindowPadding},
+		{"ResizeX", ImGuiChildFlags_ResizeX}, {"ResizeY", ImGuiChildFlags_ResizeY},
+		{"AutoResizeX", ImGuiChildFlags_AutoResizeX}, {"AutoResizeY", ImGuiChildFlags_AutoResizeY},
+		{"AlwaysAutoResize", ImGuiChildFlags_AlwaysAutoResize}, {"FrameStyle", ImGuiChildFlags_FrameStyle}});
 	SetInts(L, "Cond", {{"Always", ImGuiCond_Always}, {"Once", ImGuiCond_Once}, {"FirstUseEver", ImGuiCond_FirstUseEver},
 		{"Appearing", ImGuiCond_Appearing}});
 	SetInts(L, "TableFlags", {{"None", ImGuiTableFlags_None}, {"Borders", ImGuiTableFlags_Borders},
+		{"BordersOuter", ImGuiTableFlags_BordersOuter}, {"BordersInner", ImGuiTableFlags_BordersInner},
+		{"BordersH", ImGuiTableFlags_BordersH}, {"BordersV", ImGuiTableFlags_BordersV},
+		{"BordersOuterH", ImGuiTableFlags_BordersOuterH}, {"BordersOuterV", ImGuiTableFlags_BordersOuterV},
 		{"RowBg", ImGuiTableFlags_RowBg}, {"Resizable", ImGuiTableFlags_Resizable}, {"SizingFixedFit", ImGuiTableFlags_SizingFixedFit},
-		{"ScrollY", ImGuiTableFlags_ScrollY}, {"PadOuterX", ImGuiTableFlags_PadOuterX},
-		{"Sortable", ImGuiTableFlags_Sortable}, {"BordersInnerV", ImGuiTableFlags_BordersInnerV},
-		{"BordersInnerH", ImGuiTableFlags_BordersInnerH}, {"SizingStretchProp", ImGuiTableFlags_SizingStretchProp},
+		{"SizingFixedSame", ImGuiTableFlags_SizingFixedSame}, {"SizingStretchSame", ImGuiTableFlags_SizingStretchSame},
+		{"ScrollX", ImGuiTableFlags_ScrollX}, {"ScrollY", ImGuiTableFlags_ScrollY},
+		{"PadOuterX", ImGuiTableFlags_PadOuterX}, {"NoPadOuterX", ImGuiTableFlags_NoPadOuterX},
+		{"NoPadInnerX", ImGuiTableFlags_NoPadInnerX}, {"NoHostExtendX", ImGuiTableFlags_NoHostExtendX},
+		{"NoHostExtendY", ImGuiTableFlags_NoHostExtendY}, {"NoKeepColumnsVisible", ImGuiTableFlags_NoKeepColumnsVisible},
+		{"PreciseWidths", ImGuiTableFlags_PreciseWidths}, {"NoClip", ImGuiTableFlags_NoClip},
+		{"ContextMenuInBody", ImGuiTableFlags_ContextMenuInBody}, {"NoSavedSettings", ImGuiTableFlags_NoSavedSettings},
+		{"Sortable", ImGuiTableFlags_Sortable}, {"SortMulti", ImGuiTableFlags_SortMulti}, {"SortTristate", ImGuiTableFlags_SortTristate},
+		{"BordersInnerV", ImGuiTableFlags_BordersInnerV}, {"BordersInnerH", ImGuiTableFlags_BordersInnerH},
+		{"SizingStretchProp", ImGuiTableFlags_SizingStretchProp},
 		{"Hideable", ImGuiTableFlags_Hideable}, {"Reorderable", ImGuiTableFlags_Reorderable}});
+	SetInts(L, "TableRowFlags", {{"None", ImGuiTableRowFlags_None}, {"Headers", ImGuiTableRowFlags_Headers}});
+	SetInts(L, "TableBgTarget", {{"None", ImGuiTableBgTarget_None}, {"RowBg0", ImGuiTableBgTarget_RowBg0},
+		{"RowBg1", ImGuiTableBgTarget_RowBg1}, {"CellBg", ImGuiTableBgTarget_CellBg}});
+	SetInts(L, "SortDirection", {{"None", ImGuiSortDirection_None}, {"Ascending", ImGuiSortDirection_Ascending},
+		{"Descending", ImGuiSortDirection_Descending}});
+	SetInts(L, "TreeNodeFlags", {{"None", ImGuiTreeNodeFlags_None}, {"Selected", ImGuiTreeNodeFlags_Selected},
+		{"Framed", ImGuiTreeNodeFlags_Framed}, {"AllowOverlap", ImGuiTreeNodeFlags_AllowOverlap},
+		{"NoTreePushOnOpen", ImGuiTreeNodeFlags_NoTreePushOnOpen}, {"NoAutoOpenOnLog", ImGuiTreeNodeFlags_NoAutoOpenOnLog},
+		{"DefaultOpen", ImGuiTreeNodeFlags_DefaultOpen}, {"OpenOnDoubleClick", ImGuiTreeNodeFlags_OpenOnDoubleClick},
+		{"OpenOnArrow", ImGuiTreeNodeFlags_OpenOnArrow}, {"Leaf", ImGuiTreeNodeFlags_Leaf},
+		{"Bullet", ImGuiTreeNodeFlags_Bullet}, {"FramePadding", ImGuiTreeNodeFlags_FramePadding},
+		{"SpanAvailWidth", ImGuiTreeNodeFlags_SpanAvailWidth}, {"SpanFullWidth", ImGuiTreeNodeFlags_SpanFullWidth},
+		{"SpanAllColumns", ImGuiTreeNodeFlags_SpanAllColumns}, {"CollapsingHeader", ImGuiTreeNodeFlags_CollapsingHeader}});
 	SetInts(L, "Col", {{"Text", ImGuiCol_Text}, {"TextDisabled", ImGuiCol_TextDisabled}, {"WindowBg", ImGuiCol_WindowBg},
 		{"ChildBg", ImGuiCol_ChildBg}, {"Border", ImGuiCol_Border}, {"FrameBg", ImGuiCol_FrameBg}, {"FrameBgHovered", ImGuiCol_FrameBgHovered},
 		{"FrameBgActive", ImGuiCol_FrameBgActive}, {"PopupBg", ImGuiCol_PopupBg}, {"Button", ImGuiCol_Button},
@@ -1690,7 +1828,13 @@ void register_ui_api(lua_State *L) {
 		{"SeparatorTextBorderSize", ImGuiStyleVar_SeparatorTextBorderSize}});
 	SetInts(L, "TableColumnFlags", {{"None", ImGuiTableColumnFlags_None}, {"WidthFixed", ImGuiTableColumnFlags_WidthFixed},
 		{"WidthStretch", ImGuiTableColumnFlags_WidthStretch}, {"NoSort", ImGuiTableColumnFlags_NoSort},
-		{"DefaultSort", ImGuiTableColumnFlags_DefaultSort}, {"PreferSortDescending", ImGuiTableColumnFlags_PreferSortDescending}});
+		{"DefaultSort", ImGuiTableColumnFlags_DefaultSort}, {"DefaultHide", ImGuiTableColumnFlags_DefaultHide},
+		{"NoHide", ImGuiTableColumnFlags_NoHide}, {"NoResize", ImGuiTableColumnFlags_NoResize},
+		{"NoReorder", ImGuiTableColumnFlags_NoReorder}, {"NoClip", ImGuiTableColumnFlags_NoClip},
+		{"NoHeaderLabel", ImGuiTableColumnFlags_NoHeaderLabel}, {"NoHeaderWidth", ImGuiTableColumnFlags_NoHeaderWidth},
+		{"PreferSortAscending", ImGuiTableColumnFlags_PreferSortAscending},
+		{"PreferSortDescending", ImGuiTableColumnFlags_PreferSortDescending},
+		{"IndentEnable", ImGuiTableColumnFlags_IndentEnable}, {"IndentDisable", ImGuiTableColumnFlags_IndentDisable}});
 	SetInts(L, "InputTextFlags", {{"None", 0}, {"EnterReturnsTrue", ImGuiInputTextFlags_EnterReturnsTrue},
 		{"AutoSelectAll", ImGuiInputTextFlags_AutoSelectAll}, {"Password", ImGuiInputTextFlags_Password},
 		{"CharsDecimal", ImGuiInputTextFlags_CharsDecimal}, {"ReadOnly", ImGuiInputTextFlags_ReadOnly}});
@@ -1730,8 +1874,8 @@ void register_ui_api(lua_State *L) {
 	}
 	lua_pop(L, 1);
 	SetInts(L, "TabItemFlags", {{"None", 0}, {"UnsavedDocument", ImGuiTabItemFlags_UnsavedDocument}, {"SetSelected", ImGuiTabItemFlags_SetSelected}, {"NoTooltip", ImGuiTabItemFlags_NoTooltip}});
-	SetInts(L, "TabBarFlags", {{"None", 0}, {"FittingPolicyScroll", ImGuiTabBarFlags_FittingPolicyScroll}, {"NoTooltip", ImGuiTabBarFlags_NoTooltip}});
-	SetInts(L, "HoveredFlags", {{"None", 0}, {"DelayShort", ImGuiHoveredFlags_DelayShort}, {"Stationary", ImGuiHoveredFlags_Stationary}, {"ChildWindows", ImGuiHoveredFlags_ChildWindows}, {"AllowWhenBlockedByActiveItem", ImGuiHoveredFlags_AllowWhenBlockedByActiveItem},
+	SetInts(L, "TabBarFlags", {{"None", 0}, {"Reorderable", ImGuiTabBarFlags_Reorderable}, {"AutoSelectNewTabs", ImGuiTabBarFlags_AutoSelectNewTabs}, {"TabListPopupButton", ImGuiTabBarFlags_TabListPopupButton}, {"NoCloseWithMiddleMouseButton", ImGuiTabBarFlags_NoCloseWithMiddleMouseButton}, {"NoTabListScrollingButtons", ImGuiTabBarFlags_NoTabListScrollingButtons}, {"FittingPolicyScroll", ImGuiTabBarFlags_FittingPolicyScroll}, {"NoTooltip", ImGuiTabBarFlags_NoTooltip}});
+	SetInts(L, "HoveredFlags", {{"None", 0}, {"ChildWindows", ImGuiHoveredFlags_ChildWindows}, {"RootWindow", ImGuiHoveredFlags_RootWindow}, {"AnyWindow", ImGuiHoveredFlags_AnyWindow}, {"RootAndChildWindows", ImGuiHoveredFlags_RootAndChildWindows}, {"DelayNone", ImGuiHoveredFlags_DelayNone}, {"DelayShort", ImGuiHoveredFlags_DelayShort}, {"DelayNormal", ImGuiHoveredFlags_DelayNormal}, {"Stationary", ImGuiHoveredFlags_Stationary}, {"AllowWhenBlockedByActiveItem", ImGuiHoveredFlags_AllowWhenBlockedByActiveItem},
 		{"AllowWhenDisabled", ImGuiHoveredFlags_AllowWhenDisabled}});
 	lua_setglobal(L, "ui");
 }

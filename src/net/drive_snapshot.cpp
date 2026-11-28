@@ -381,6 +381,7 @@ bool drive_forward_allowed(const AppPacket& packet, bool world) {
     case Op::ZoneEntry:
     case Op::ReqClientSpawn:
     case Op::ClientReady:
+    case Op::ZoneChange:
     case Op::Camp:
     case Op::Logout:
     case Op::DeleteSpawn:

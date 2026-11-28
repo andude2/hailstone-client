@@ -130,6 +130,8 @@ public:
     std::optional<net::DriveMove> take_move();
     std::vector<DriveForwardedPacket> take_forwarded();
     std::optional<ui::RemoteImGuiInput> take_imgui_input();
+    // Discard buffered GUI movement, semantic actions and forwarded packets across a zone boundary.
+    void clear_pending_input();
     void stop();
 
 private:

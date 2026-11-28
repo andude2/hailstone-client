@@ -54,11 +54,29 @@ struct RemoteDrawCmd {
     float clip_y = 0.0f;
     float clip_z = 0.0f;
     float clip_w = 0.0f;
-    std::uint32_t tex_id = 0; // remote ImTextureData::UniqueID
+    std::uint32_t tex_id = 0; // remote ImTextureData::UniqueID, or kRemoteSpellSheetTexBase | sheet (1..7)
     std::uint32_t vtx_offset = 0;
     std::uint32_t idx_offset = 0;
     std::uint32_t elem_count = 0;
 };
+
+// High-bit sentinel range in RemoteDrawCmd::tex_id for stock A_SpellIcons sheets (spells01.tga..spells07.tga).
+// Headless processes return (kRemoteSpellSheetTexBase | sheet) from PluginHostApi::spell_icon so plugins draw
+// spell/buff icons with zero texture pixel streaming; the attached GUI resolves the sheet via its local UiTextures.
+inline constexpr std::uint32_t kRemoteSpellSheetTexBase = 0x80000000u;
+inline constexpr std::uint32_t kRemoteSpellSheetMax = 7u;
+
+inline constexpr std::uint32_t encode_remote_spell_sheet_tex_id(int sheet) {
+    return (sheet >= 1 && sheet <= static_cast<int>(kRemoteSpellSheetMax))
+               ? (kRemoteSpellSheetTexBase | static_cast<std::uint32_t>(sheet))
+               : 0u;
+}
+
+inline constexpr int decode_remote_spell_sheet_tex_id(std::uint32_t tex_id) {
+    if ((tex_id & kRemoteSpellSheetTexBase) == 0u) return 0;
+    const std::uint32_t sheet = tex_id & ~kRemoteSpellSheetTexBase;
+    return (sheet >= 1u && sheet <= kRemoteSpellSheetMax) ? static_cast<int>(sheet) : 0;
+}
 
 struct RemoteDrawList {
     std::vector<RemoteDrawVert> vertices;

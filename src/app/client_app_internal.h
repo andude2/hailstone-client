@@ -389,6 +389,13 @@ public:
         refresh_game_folders();
         ui_textures_ = std::make_unique<ui::UiTextures>(vk_, game_);
         ui_textures_->set_all_art(pack && pack->game_art);
+        ui_.set_remote_texture_resolver([this](std::uint32_t tex_id) -> void* {
+            const int sheet = ui::decode_remote_spell_sheet_tex_id(tex_id);
+            if (sheet <= 0 || !ui_textures_) return nullptr;
+            const auto* t = ui_textures_->file(std::format("spells{:02}.tga", sheet));
+            if (!t || !t->id || !ui::texture_id_live(t->id)) return nullptr;
+            return t->id;
+        });
         log_memory("startup: Lua and UI textures");
         ui_host_.textures = ui_textures_.get();
         ui_host_.interface_list = [this] { return ui_packs_; };
@@ -547,6 +554,31 @@ public:
             const auto cell = ui_textures_->spell_icon(static_cast<std::int32_t>(icon));
             if (!cell || !ui::texture_id_live(cell->id)) return false;
             tex = reinterpret_cast<std::uintptr_t>(cell->id);
+            u0 = cell->u0;
+            v0 = cell->v0;
+            u1 = cell->u1;
+            v1 = cell->v1;
+            return true;
+        };
+        aenv.texture_animation = [this](std::string_view name, int cell_idx, void*& tex,
+                                        float& u0, float& v0, float& u1, float& v1) {
+            if (!ui_textures_) return false;
+            std::optional<ui::UiTextures::Cell> cell;
+            if (cell_idx >= 0) {
+                if (mq::iequals(name, "A_DragItem"))
+                    cell = ui_textures_->item_icon(static_cast<std::uint32_t>(cell_idx + 500));
+                else if (mq::iequals(name, "A_SpellIcons"))
+                    cell = ui_textures_->spell_icon(cell_idx);
+                else if (mq::iequals(name, "A_SpellGems"))
+                    cell = ui_textures_->gem_icon(cell_idx);
+                else
+                    cell = ui_textures_->grid_cell(name, cell_idx);
+            } else {
+                if (const auto img = ui_textures_->animation_image(name)) cell = img->cell;
+                else cell = ui_textures_->animation(name);
+            }
+            if (!cell || !ui::texture_id_live(cell->id)) return false;
+            tex = cell->id;
             u0 = cell->u0;
             v0 = cell->v0;
             u1 = cell->u1;

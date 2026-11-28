@@ -38,7 +38,7 @@ tools/checks.sh
 
 step "build ($build_dir, $jobs jobs)"
 if [ ! -f "$build_dir/CMakeCache.txt" ]; then
-  cmake -S . -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+  cmake -S . -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE=Release
 fi
 cmake --build "$build_dir" -j "$jobs"
 

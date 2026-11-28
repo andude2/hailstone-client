@@ -117,6 +117,7 @@ struct DriveClient::Impl {
             } else if (kind == DriveObserveMessage::Snapshot) {
                 if (auto snap = net::decode_drive_snapshot(body)) {
                     packets.clear();
+                    local.reset();
                     resnapshot = std::move(*snap);
                     break;
                 }
@@ -128,6 +129,7 @@ struct DriveClient::Impl {
                 }
                 if (snap) {
                     packets.clear();
+                    local.reset();
                     resnapshot = std::move(*snap);
                     break;
                 }

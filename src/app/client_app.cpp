@@ -135,18 +135,22 @@ int ClientApp::run() {
             if (auto resnap = drive_client_->take_resnapshot()) {
                 apply_drive_resnapshot(*resnap);
             } else if (auto local = drive_client_->take_local_state()) {
-                const bool human_driving = viewing_control_ && Clock::now() < drive_human_until_;
-                conn_->apply_local_state(*local, human_driving);
-                if (!human_driving && player_ready_ && conn_->world().player()) {
-                    feet_ = local->position - glm::vec3(0, 0, floor_offset_);
-                    yaw_ = game::heading_to_yaw(local->heading);
-                    movement_.place(feet_);
-                    step_move_ = glm::vec3(0.0f);
-                    step_turn_ = 0.0f;
-                    if (actor_renderer_) {
-                        actor_renderer_->set_player_motion(
-                            {true, local->velocity, local->moving ? 0.7f : 0.0f, 0, 0, 0.0f, conn_->auto_attack(),
-                             camera_type_ == game::kCameraFirstPerson, 0});
+                const bool same_zone = conn_->in_zone() &&
+                                       (!local->has_xtargets || local->xtarget_zone == conn_->zone_generation());
+                if (same_zone) {
+                    const bool human_driving = viewing_control_ && Clock::now() < drive_human_until_;
+                    conn_->apply_local_state(*local, human_driving);
+                    if (!human_driving && player_ready_ && conn_->world().player()) {
+                        feet_ = local->position - glm::vec3(0, 0, floor_offset_);
+                        yaw_ = game::heading_to_yaw(local->heading);
+                        movement_.place(feet_);
+                        step_move_ = glm::vec3(0.0f);
+                        step_turn_ = 0.0f;
+                        if (actor_renderer_) {
+                            actor_renderer_->set_player_motion(
+                                {true, local->velocity, local->moving ? 0.7f : 0.0f, 0, 0, 0.0f, conn_->auto_attack(),
+                                 camera_type_ == game::kCameraFirstPerson, 0});
+                        }
                     }
                 }
             }
@@ -1603,13 +1607,14 @@ bool ClientApp::switch_to_crew(const std::filesystem::path& file, bool interact,
         if (!reuse_scene) unload_zone();
     } else {
         // Hand human movement back cleanly before detaching the prior crew pipe.
-        if (viewing_control_ && drive_client_ && drive_human_sent_active_ && conn_) {
+        if (viewing_control_ && drive_client_ && drive_human_sent_active_ && conn_ && conn_->in_zone()) {
             net::DriveMove stop{};
             stop.position = feet_ + glm::vec3(0, 0, floor_offset_);
             stop.heading = game::yaw_to_heading(yaw_);
             stop.stand_state = conn_->player_status().stand_state;
             stop.standing_on = conn_->standing_on();
             stop.active = false;
+            stop.zone_generation = conn_->zone_generation();
             drive_client_->send_move(stop);
         }
         drive_human_until_ = {};
@@ -1682,13 +1687,14 @@ bool ClientApp::switch_to_crew(const std::filesystem::path& file, bool interact,
 
 void ClientApp::release_observe() {
     if (!viewing_observe_ && !viewing_control_) return;
-    if (viewing_control_ && drive_client_ && drive_human_sent_active_ && conn_) {
+    if (viewing_control_ && drive_client_ && drive_human_sent_active_ && conn_ && conn_->in_zone()) {
         net::DriveMove stop{};
         stop.position = feet_ + glm::vec3(0, 0, floor_offset_);
         stop.heading = game::yaw_to_heading(yaw_);
         stop.stand_state = conn_->player_status().stand_state;
         stop.standing_on = conn_->standing_on();
         stop.active = false;
+        stop.zone_generation = conn_->zone_generation();
         drive_client_->send_move(stop);
     }
     drive_human_until_ = {};
@@ -1888,13 +1894,14 @@ bool ClientApp::start_drive() {
 
 void ClientApp::release_drive_lease() {
     ui_.set_remote_enabled(false);
-    if (viewing_control_ && drive_client_ && drive_human_sent_active_ && conn_) {
+    if (viewing_control_ && drive_client_ && drive_human_sent_active_ && conn_ && conn_->in_zone()) {
         net::DriveMove stop{};
         stop.position = feet_ + glm::vec3(0, 0, floor_offset_);
         stop.heading = game::yaw_to_heading(yaw_);
         stop.stand_state = conn_->player_status().stand_state;
         stop.standing_on = conn_->standing_on();
         stop.active = false;
+        stop.zone_generation = conn_->zone_generation();
         drive_client_->send_move(stop);
     }
     drive_human_until_ = {};

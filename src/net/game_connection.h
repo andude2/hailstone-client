@@ -536,6 +536,9 @@ public:
     // does not echo. In Control mode, semantic actions cross via `drive_input_` and filtered server-authoritative
     // packets may forward through the mirror sessions.
     void start_observe(std::unique_ptr<Session> zone_session, std::unique_ptr<Session> world_session = nullptr);
+    bool observing() const { return observing_; }
+    // Monotonic per-zone-in generation (incremented on every OP_ZoneServerInfo, including same-zone instance hops).
+    std::uint32_t zone_generation() const { return xtargets_.zone; }
     void apply_local_state(const DriveSnapshot& local, bool skip_motion = false);
     // D3 (docs/research/drive-headless.md): a control lease. release_sessions leaves this connection without its
     // sessions (update() then does nothing) and hands them to the caller. adopt_sessions installs sessions that
@@ -4337,6 +4340,7 @@ private:
     bool relay_drive_action(DriveAction action);
     bool relay_control_action(DriveAction action);
     std::function<void(const DriveAction&)> drive_input_;
+    bool observing_ = false;
     bool drive_control_ = false;
     bool applying_local_state_ = false;
     bool handling_zone_packet_ = false;

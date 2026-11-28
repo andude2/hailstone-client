@@ -2211,6 +2211,136 @@ void register_e3_members() {
         const int slot = slot_by_name(index);
         return V::boolean(slot >= 0 && slot < 32 && (it.equip_slots & (1u << slot)));
     });
+    im("WornSlots", [](const Context&, const Value&, const net::Item& it, std::string_view) {
+        std::int64_t n = 0;
+        for (int bit = 0; bit < 23; ++bit)
+            if (it.equip_slots & (1u << bit)) ++n;
+        return V::integer(n);
+    });
+    im("Count", [](const Context&, const Value&, const net::Item& it, std::string_view) {
+        return V::integer(it.stack_count);
+    });
+    im("ItemClass", [](const Context&, const Value&, const net::Item& it, std::string_view) {
+        return V::integer(it.item_class);
+    });
+    im("AugType", [](const Context&, const Value&, const net::Item& it, std::string_view) {
+        return V::integer(it.aug_type);
+    });
+    im("Attuneable", [](const Context&, const Value&, const net::Item& it, std::string_view) {
+        return V::boolean(it.attuneable != 0);
+    });
+    im("Collectible", [](const Context&, const Value&, const net::Item& it, std::string_view) {
+        return V::boolean(it.collectible());
+    });
+    im("Tribute", [](const Context&, const Value&, const net::Item& it, std::string_view) {
+        return V::integer(it.favor);
+    });
+    im("RequiredLevel", [](const Context&, const Value&, const net::Item& it, std::string_view) {
+        return V::integer(it.req_level);
+    });
+    im("RecommendedLevel", [](const Context&, const Value&, const net::Item& it, std::string_view) {
+        return V::integer(it.rec_level);
+    });
+    im("Focus", [](const Context& c, const Value&, const net::Item& it, std::string_view) -> V {
+        const auto& e = it.effects[net::kEffectFocus];
+        return e.present() ? spell_value(c, static_cast<std::uint32_t>(e.effect)) : V::nil();
+    });
+    im("AC", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.ac); });
+    im("HP", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.hp); });
+    im("Mana", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.mana); });
+    im("Endurance", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.endurance); });
+    im("Damage", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.damage); });
+    im("Delay", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.delay); });
+    im("Range", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.range); });
+    im("Haste", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.haste); });
+    im("STR", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.astr); });
+    im("STA", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.asta); });
+    im("AGI", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.aagi); });
+    im("DEX", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.adex); });
+    im("WIS", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.awis); });
+    im("INT", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.aint); });
+    im("CHA", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.acha); });
+    im("HeroicSTR", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.heroic_str); });
+    im("HeroicSTA", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.heroic_sta); });
+    im("HeroicAGI", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.heroic_agi); });
+    im("HeroicDEX", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.heroic_dex); });
+    im("HeroicWIS", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.heroic_wis); });
+    im("HeroicINT", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.heroic_int); });
+    im("HeroicCHA", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.heroic_cha); });
+    im("svCold", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.cr); });
+    im("svFire", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.fr); });
+    im("svMagic", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.mr); });
+    im("svDisease", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.dr); });
+    im("svPoison", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.pr); });
+    im("svCorruption", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.sv_corruption); });
+    im("HeroicSvCold", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.heroic_cr); });
+    im("HeroicSvFire", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.heroic_fr); });
+    im("HeroicSvMagic", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.heroic_mr); });
+    im("HeroicSvDisease", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.heroic_dr); });
+    im("HeroicSvPoison", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.heroic_pr); });
+    im("HeroicSvCorruption", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.heroic_sv_corrup); });
+    im("Attack", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.attack); });
+    im("Accuracy", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.accuracy); });
+    im("Avoidance", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.avoidance); });
+    im("Shielding", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.shielding); });
+    im("SpellShield", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.spell_shield); });
+    im("DoTShielding", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.dot_shield); });
+    im("StunResist", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.stun_resist); });
+    im("StrikeThrough", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.strike_through); });
+    im("CombatEffects", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.combat_effects); });
+    im("DamShield", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.damage_shield); });
+    im("DamageShieldMitigation", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.ds_mitigation); });
+    im("HealAmount", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.heal_amt); });
+    im("SpellDamage", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.spell_dmg); });
+    im("Clairvoyance", [](const Context&, const Value&, const net::Item& it, std::string_view) { return V::integer(it.clairvoyance); });
+    im("Classes", [](const Context&, const Value&, const net::Item& it, std::string_view) {
+        std::int64_t n = 0;
+        for (int bit = 0; bit < 16; ++bit)
+            if (it.classes & (1u << bit)) ++n;
+        return V::integer(n);
+    });
+    im("Class", [](const Context&, const Value&, const net::Item& it, std::string_view index) -> V {
+        std::int64_t n = 0;
+        if (parse_int(index, n)) {
+            if (n < 1) return V::nil();
+            for (int bit = 0; bit < 16; ++bit)
+                if ((it.classes & (1u << bit)) && --n == 0)
+                    return V::object(g.cls, static_cast<std::int64_t>(bit + 1));
+            return V::nil();
+        }
+        for (int bit = 0; bit < 16; ++bit) {
+            if (!(it.classes & (1u << bit))) continue;
+            const auto cid = static_cast<std::uint32_t>(bit + 1);
+            if (iequals(game::class_name(cid), index) || iequals(game::class_short_name(cid), index))
+                return V::object(g.cls, static_cast<std::int64_t>(cid));
+        }
+        return V::nil();
+    });
+    im("Races", [](const Context&, const Value&, const net::Item& it, std::string_view) {
+        std::int64_t n = 0;
+        for (int bit = 0; bit < 16; ++bit)
+            if (it.races & (1u << bit)) ++n;
+        return V::integer(n);
+    });
+    im("Race", [](const Context&, const Value&, const net::Item& it, std::string_view index) -> V {
+        static constexpr std::array<std::uint32_t, 16> kRaceIds = {
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 128, 130, 330, 522};
+        std::int64_t n = 0;
+        if (parse_int(index, n)) {
+            if (n < 1) return V::nil();
+            for (int bit = 0; bit < 16; ++bit)
+                if ((it.races & (1u << bit)) && --n == 0)
+                    return V::object(g.race, static_cast<std::int64_t>(kRaceIds[static_cast<std::size_t>(bit)]));
+            return V::nil();
+        }
+        for (int bit = 0; bit < 16; ++bit) {
+            if (!(it.races & (1u << bit))) continue;
+            const std::uint32_t rid = kRaceIds[static_cast<std::size_t>(bit)];
+            if (iequals(game::race_name(rid), index))
+                return V::object(g.race, static_cast<std::int64_t>(rid));
+        }
+        return V::nil();
+    });
     im("ItemLink", [](const Context& c, const Value&, const net::Item& it, std::string_view index) {
         std::string link = game::make_item_link(it, c.conn->server_ext().wide_item_links(*c.conn));
         // Without CLICKABLE, the link's text without the \x12 tags around it (MQ's GetItemLink).

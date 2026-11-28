@@ -52,6 +52,19 @@ hailstone_headless --crew crew.ini
 - One process runs one character. Run several for a crew, as with the
   graphical client's box sets.
 
+## Building and releasing
+
+Build and release the headless worktree in `Release` configuration (not
+`RelWithDebInfo`):
+
+```powershell
+cmake --build build-headless --config Release --target hailstone hailstone_headless hailstone_tests --parallel
+ctest --test-dir build-headless -C Release -j 8 --output-on-failure --no-tests=error
+```
+
+For single-config generators (Ninja/Makefiles), configure with
+`-DCMAKE_BUILD_TYPE=Release`.
+
 ## Assets
 
 A zone's files are loaded only as a collision mesh (`game::CollisionMesh`:
@@ -236,13 +249,16 @@ the headless character's live `GameConnection`:
   CPU-only Dear ImGui context (layout stored per character in `imgui-headless-<character>.ini`) and runs
   `automation.imgui(false)` only while a graphical viewer is attached. The GUI hides the parked character's plugin
   windows, forwards mouse/keyboard/text input to the headless (read-only in plain Observe), uploads on-demand RGBA32
-  font atlas updates, and composites the headless character's live plugin windows (such as Sentinel's mini-UI and peer
-  table) directly over the scene. `/crew` commands triggered by plugins on the headless (including clicking another
+  font atlas updates, resolves `PluginHostApi::spell_icon` draw commands locally against the GUI's `UiTextures` spell
+  sheets without streaming sheet pixels, and composites the headless character's live plugin windows (such as Sentinel's
+  mini-UI, buff/song icons, and peer table) directly over the scene. `/crew` commands triggered by plugins on the headless (including clicking another
   member or the parked character in Sentinel's peer table) are forwarded back to the GUI.
 - **Fearless switching and zone changes:** switching away, releasing, closing, or even crashing the GUI window simply
   closes the local pipe — the headless keeps playing without dropping a single tick or losing state. If the headless
   character zones while controlled, it pushes a fresh zone snapshot over the same pipe so the GUI loads the new zone
-  automatically.
+  automatically. The viewer's connection does not answer a server zone-change request itself (the headless owns
+  zoning, and a second answer would reach the server as an unsolicited zone change); a same-zone move is still
+  shown locally.
 
 The snapshot is a **state**, not the whole session. The journal is reset at each zone connection, repeated updates
 collapse to the latest per entity/slot (position and HP per spawn, appearance per spawn and type, buffs per entity and

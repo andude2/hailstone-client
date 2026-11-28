@@ -1640,3 +1640,91 @@ TEST_CASE("TLO: Me.TargetOfTarget and Instance, EverQuest.Foreground and Ping, M
     merc.state = game::kMercSuspended;
     CHECK(f.p("${Mercenary.State}") == "SUSPENDED");
 }
+
+TEST_CASE("TLO: Item stats, heroics, resists, mod2s, focus, classes and races") {
+    Fixture f;
+    using A = net::GameConnectionTestAccess;
+    auto& inv = A::inventory(*f.world.conn);
+    net::Item blade;
+    blade.name = "Sword of Unit Testing";
+    blade.id = 7777;
+    blade.item_class = 0;
+    blade.equip_slots = (1u << 13) | (1u << 14);
+    blade.aug_type = 0x80;
+    blade.attuneable = 1;
+    blade.unknown34_37[3] = 0x100; // collectible()
+    blade.favor = 2500;
+    blade.req_level = 65;
+    blade.rec_level = 70;
+    blade.ac = 45;
+    blade.hp = 350;
+    blade.mana = 200;
+    blade.endurance = 150;
+    blade.damage = 42;
+    blade.delay = 24;
+    blade.range = 10;
+    blade.haste = 36;
+    blade.astr = 15;
+    blade.asta = 14;
+    blade.aagi = 13;
+    blade.adex = 12;
+    blade.awis = 11;
+    blade.aint = 10;
+    blade.acha = 9;
+    blade.heroic_str = 5;
+    blade.heroic_sta = 4;
+    blade.heroic_agi = 3;
+    blade.heroic_dex = 2;
+    blade.heroic_wis = 1;
+    blade.heroic_int = 6;
+    blade.heroic_cha = 7;
+    blade.cr = 20;
+    blade.fr = 21;
+    blade.mr = 22;
+    blade.pr = 23;
+    blade.dr = 24;
+    blade.sv_corruption = 25;
+    blade.heroic_cr = 1;
+    blade.heroic_fr = 2;
+    blade.heroic_mr = 3;
+    blade.heroic_pr = 4;
+    blade.heroic_dr = 5;
+    blade.heroic_sv_corrup = 6;
+    blade.attack = 30;
+    blade.accuracy = 15;
+    blade.avoidance = 12;
+    blade.shielding = 3;
+    blade.spell_shield = 4;
+    blade.dot_shield = 5;
+    blade.stun_resist = 6;
+    blade.strike_through = 7;
+    blade.combat_effects = 8;
+    blade.damage_shield = 9;
+    blade.ds_mitigation = 10;
+    blade.heal_amt = 11;
+    blade.spell_dmg = 12;
+    blade.clairvoyance = 13;
+    blade.effects[net::kEffectFocus].effect = 200; // Minor Healing in test fixture
+    blade.classes = (1u << 0) | (1u << 8);         // Warrior, Rogue
+    blade.races = (1u << 0) | (1u << 1);           // Human, Barbarian
+    inv.put(net::ItemSlot::possessions(net::kSlotPrimary), blade);
+
+    CHECK(f.p("${FindItem[=Sword of Unit Testing].WornSlots}") == "2");
+    CHECK(f.p("${FindItem[=Sword of Unit Testing].ItemClass} ${FindItem[=Sword of Unit Testing].AugType}") == "0 128");
+    CHECK(f.p("${FindItem[=Sword of Unit Testing].Attuneable} ${FindItem[=Sword of Unit Testing].Collectible} ${FindItem[=Sword of Unit Testing].Tribute}") == "TRUE TRUE 2500");
+    CHECK(f.p("${FindItem[=Sword of Unit Testing].RequiredLevel} ${FindItem[=Sword of Unit Testing].RecommendedLevel}") == "65 70");
+    CHECK(f.p("${FindItem[=Sword of Unit Testing].Focus} ${FindItem[=Sword of Unit Testing].Focus.ID}") == "Minor Healing 200");
+    CHECK(f.p("${FindItem[=Sword of Unit Testing].AC} ${FindItem[=Sword of Unit Testing].HP} ${FindItem[=Sword of Unit Testing].Mana} ${FindItem[=Sword of Unit Testing].Endurance}") == "45 350 200 150");
+    CHECK(f.p("${FindItem[=Sword of Unit Testing].Damage} ${FindItem[=Sword of Unit Testing].Delay} ${FindItem[=Sword of Unit Testing].Range} ${FindItem[=Sword of Unit Testing].Haste}") == "42 24 10 36");
+    CHECK(f.p("${FindItem[=Sword of Unit Testing].STR} ${FindItem[=Sword of Unit Testing].STA} ${FindItem[=Sword of Unit Testing].AGI} ${FindItem[=Sword of Unit Testing].DEX} ${FindItem[=Sword of Unit Testing].WIS} ${FindItem[=Sword of Unit Testing].INT} ${FindItem[=Sword of Unit Testing].CHA}") == "15 14 13 12 11 10 9");
+    CHECK(f.p("${FindItem[=Sword of Unit Testing].HeroicSTR} ${FindItem[=Sword of Unit Testing].HeroicSTA} ${FindItem[=Sword of Unit Testing].HeroicAGI} ${FindItem[=Sword of Unit Testing].HeroicDEX} ${FindItem[=Sword of Unit Testing].HeroicWIS} ${FindItem[=Sword of Unit Testing].HeroicINT} ${FindItem[=Sword of Unit Testing].HeroicCHA}") == "5 4 3 2 1 6 7");
+    CHECK(f.p("${FindItem[=Sword of Unit Testing].svCold} ${FindItem[=Sword of Unit Testing].svFire} ${FindItem[=Sword of Unit Testing].svMagic} ${FindItem[=Sword of Unit Testing].svPoison} ${FindItem[=Sword of Unit Testing].svDisease} ${FindItem[=Sword of Unit Testing].svCorruption}") == "20 21 22 23 24 25");
+    CHECK(f.p("${FindItem[=Sword of Unit Testing].HeroicSvCold} ${FindItem[=Sword of Unit Testing].HeroicSvFire} ${FindItem[=Sword of Unit Testing].HeroicSvMagic} ${FindItem[=Sword of Unit Testing].HeroicSvPoison} ${FindItem[=Sword of Unit Testing].HeroicSvDisease} ${FindItem[=Sword of Unit Testing].HeroicSvCorruption}") == "1 2 3 4 5 6");
+    CHECK(f.p("${FindItem[=Sword of Unit Testing].Attack} ${FindItem[=Sword of Unit Testing].Accuracy} ${FindItem[=Sword of Unit Testing].Avoidance} ${FindItem[=Sword of Unit Testing].Shielding} ${FindItem[=Sword of Unit Testing].SpellShield} ${FindItem[=Sword of Unit Testing].DoTShielding}") == "30 15 12 3 4 5");
+    CHECK(f.p("${FindItem[=Sword of Unit Testing].StunResist} ${FindItem[=Sword of Unit Testing].StrikeThrough} ${FindItem[=Sword of Unit Testing].CombatEffects} ${FindItem[=Sword of Unit Testing].DamShield} ${FindItem[=Sword of Unit Testing].DamageShieldMitigation}") == "6 7 8 9 10");
+    CHECK(f.p("${FindItem[=Sword of Unit Testing].HealAmount} ${FindItem[=Sword of Unit Testing].SpellDamage} ${FindItem[=Sword of Unit Testing].Clairvoyance}") == "11 12 13");
+    CHECK(f.p("${FindItem[=Sword of Unit Testing].Classes} ${FindItem[=Sword of Unit Testing].Class[1]} ${FindItem[=Sword of Unit Testing].Class[2]} ${FindItem[=Sword of Unit Testing].Class[3]}") == "2 Warrior Rogue NULL");
+    CHECK(f.p("${FindItem[=Sword of Unit Testing].Races} ${FindItem[=Sword of Unit Testing].Race[1]} ${FindItem[=Sword of Unit Testing].Race[2]} ${FindItem[=Sword of Unit Testing].Race[3]}") == "2 Human Barbarian NULL");
+    CHECK(f.p("${FindItem[=Sword of Unit Testing].Class[WAR]} ${FindItem[=Sword of Unit Testing].Class[Wizard]}") == "Warrior NULL");
+    CHECK(f.p("${FindItem[=Sword of Unit Testing].Race[HUM]} ${FindItem[=Sword of Unit Testing].Race[Gnome]}") == "Human NULL");
+}

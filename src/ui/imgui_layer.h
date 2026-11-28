@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -117,6 +118,9 @@ public:
     void reset_interaction_on_next_frame();
     void push_remote_texture(RemoteImGuiTexture tex);
     void set_remote_frame(RemoteImGuiFrame frame);
+    // Resolves a local ImTextureID (VkDescriptorSet) for a synthetic remote texture id (e.g. A_SpellIcons sheets).
+    // Invoked in record_remote_uploads() before any render pass so the backing texture can upload safely.
+    void set_remote_texture_resolver(std::function<void*(std::uint32_t)> resolver);
     // Records staging uploads for pending remote font atlas textures; call before begin_scene/begin_overlay.
     void record_remote_uploads(const render::FrameInfo& frame);
     std::optional<RemoteImGuiInput> take_remote_input();

@@ -1435,6 +1435,9 @@ void ClientApp::update_connection() {
         break;
     case S::InZone:
     case S::Camping:
+        // Load any pending zone geometry (e.g. from apply_drive_resnapshot / observe_drive / start_drive) BEFORE
+        // enter_zone() so game::place_in_world() sees the new zone's regions instead of running with zone_ unset.
+        if (auto z = conn_->take_zone_to_load()) load_zone(*z);
         if (!player_ready_) {
             enter_zone();
             if (player_ready_) begin_zone_settle();

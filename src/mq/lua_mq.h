@@ -49,6 +49,12 @@ struct ManagedScript {
     bool enabled = false, verified = false;
 };
 
+// Named UI animation or icon-grid texture cell for mq.FindTextureAnimation / ImGui.DrawTextureAnimation.
+struct TextureCell {
+    void* id = nullptr; // ImTextureID (validated via ui::texture_id_live)
+    float u0 = 0.0f, v0 = 0.0f, u1 = 1.0f, v1 = 1.0f;
+};
+
 struct ScriptEnv {
     plugin::Hooks* hooks = nullptr;
     const plugin::Policy* policy = nullptr;
@@ -86,6 +92,10 @@ struct ScriptEnv {
     std::function<std::vector<std::pair<game::AutoskillRule, std::string>>()> autoskill_list;
     // Uses a skill, discipline or AA as its hot button does (hailstone.use_ability); null: none.
     std::function<bool(AbilityKind, std::string_view name)> use_ability;
+    // Named UI animation or icon-grid cell (mq.FindTextureAnimation / ImGui.DrawTextureAnimation).
+    // cell < 0 returns the animation's first frame (e.g. A_RecessedBox); cell >= 0 returns that grid cell
+    // (e.g. A_DragItem cell = icon - 500). Empty in headless mode.
+    std::function<std::optional<TextureCell>(std::string_view name, int cell)> texture_animation;
     // How long a script may run without a chance to yield before it is stopped, in real time; 0: kRunawayMs (5 s).
     // Only tests set it, so a runaway is stopped in milliseconds.
     std::int64_t runaway_ms = 0;

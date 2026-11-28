@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <thread>
 
@@ -26,7 +27,9 @@
 #include "core/config.h"
 #include "app/navigator.h"
 #include "app/player_movement.h"
+#include "app/spawn_interaction.h"
 #include "app/zone_move_world.h"
+#include "assets/texture.h"
 #include "assets/zone.h"
 #include "core/character_files.h"
 #include "core/game_dir.h"
@@ -37,12 +40,14 @@
 #include "core/wipe.h"
 #include "game/collision.h"
 #include "game/coords.h"
+#include "game/item_notify.h"
 #include "game/mechanics/character.h"
 #include "game/mechanics/collision_movement.h"
 #include "game/mechanics/sheet_builder.h"
 #include "game/mechanics/tables.h"
 #include "game/mounts.h"
 #include "game/position_tracker.h"
+#include "game/spawn_heights.h"
 #include "game/zone_lines.h"
 #include "game/zoning.h"
 #include "nav/zone_nav.h"
@@ -54,6 +59,7 @@
 #include "platform/private_file.h"
 #include "ui/imgui_layer.h"
 #include "ui/remote_imgui.h"
+#include "ui/spell_windows.h"
 
 namespace hailstone::app {
 namespace {
@@ -991,6 +997,43 @@ int run_headless(HeadlessOptions options) {
     env.face = [](double, bool) { stub_once("face"); };
     env.keypress = [](std::string_view, int) { stub_once("keypress"); return false; };
     env.raise_window = [] { log::info("headless: /foreground ignored (no window)"); };
+    struct HeadlessSpellSheetSize {
+        bool probed = false;
+        int width = 0;
+        int height = 0;
+    };
+    std::array<HeadlessSpellSheetSize, ui::kRemoteSpellSheetMax + 1> spell_sheet_sizes{};
+    // Return a synthetic sheet texture ID (resolved by the attached GUI via its local UiTextures) and the exact
+    // cell UVs from the game folder's A_SpellIcons sheet so plugins can render buff/song icons over remote ImGui
+    // without streaming TGA pixel bytes over the drive pipe.
+    env.spell_icon = [&game, &spell_sheet_sizes](std::uint32_t icon, std::uint64_t& tex, float& u0, float& v0,
+                                                 float& u1, float& v1) {
+        const auto cell = ui::spell_icon_cell(static_cast<std::int32_t>(icon));
+        if (!cell) return false;
+        const std::uint32_t encoded = ui::encode_remote_spell_sheet_tex_id(cell->sheet);
+        if (encoded == 0u) return false;
+        auto& sheet = spell_sheet_sizes[static_cast<std::size_t>(cell->sheet)];
+        if (!sheet.probed) {
+            sheet.probed = true;
+            const std::string path = std::format("uifiles/default/spells{:02}.tga", cell->sheet);
+            if (auto data = game.read(path)) {
+                std::string error;
+                if (auto image = assets::decode_texture(*data, {}, &error)) {
+                    sheet.width = static_cast<int>(image->width);
+                    sheet.height = static_cast<int>(image->height);
+                } else {
+                    log::warn("headless spell icons: {}: {}", path, error);
+                }
+            }
+        }
+        if (sheet.width <= 0 || sheet.height <= 0) return false;
+        tex = encoded;
+        u0 = static_cast<float>(cell->x) / static_cast<float>(sheet.width);
+        v0 = static_cast<float>(cell->y) / static_cast<float>(sheet.height);
+        u1 = static_cast<float>(cell->x + 40) / static_cast<float>(sheet.width);
+        v1 = static_cast<float>(cell->y + 40) / static_cast<float>(sheet.height);
+        return true;
+    };
     env.line_of_sight = [&collision](const std::array<float, 3>& a, const std::array<float, 3>& b) -> std::optional<bool> {
         if (!collision) return std::nullopt;
         return collision->line_of_sight(glm::vec3(a[0], a[1], a[2]), glm::vec3(b[0], b[1], b[2]));
@@ -1072,8 +1115,108 @@ int run_headless(HeadlessOptions options) {
     env.headless = true;
     env.viewer_connected = [&observe] { return observe && observe->viewer_connected(); };
     Automation automation(env);
+    std::optional<net::SlotClickKeys> forced_keys;
+    auto run_with_keys = [&conn, &ability_host, &forced_keys](std::string_view line, net::SlotClickKeys keys) {
+        while (!line.empty() && line.front() == ' ') line.remove_prefix(1);
+        if (!conn || line.empty()) return;
+        const auto before = forced_keys;
+        const auto mods_before = ability_host.forced_mods;
+        forced_keys = keys;
+        ability_host.forced_mods = std::array<bool, 2>{keys.shift, keys.ctrl};
+        conn->send_command(std::string(line));
+        forced_keys = before;
+        ability_host.forced_mods = mods_before;
+    };
     automation.hooks().add_command(plugin::Hooks::kClient, "/notify", [&ability_host](std::string_view args) {
         run_notify_command(ability_host, nullptr, args);
+    }, plugin::kCapActions);
+    automation.hooks().add_command(plugin::Hooks::kClient, "/nomodkey", [&run_with_keys](std::string_view args) {
+        run_with_keys(args, {});
+    });
+    automation.hooks().add_command(plugin::Hooks::kClient, "/shiftkey", [&run_with_keys](std::string_view args) {
+        run_with_keys(args, {true, false, false});
+    });
+    automation.hooks().add_command(plugin::Hooks::kClient, "/ctrlkey", [&run_with_keys](std::string_view args) {
+        run_with_keys(args, {false, true, false});
+    });
+    automation.hooks().add_command(plugin::Hooks::kClient, "/itemnotify", [&conn, &forced_keys](std::string_view args) {
+        if (!conn) return;
+        const game::ItemNotify n = game::parse_item_notify(args);
+        if (!n.error.empty()) {
+            conn->ui_message(n.error);
+            return;
+        }
+        const auto& inv = conn->inventory();
+        std::optional<net::ItemSlot> slot = n.slot;
+        if (!slot) {
+            auto match = [&](const net::Item& it) {
+                return n.item_id ? it.id == n.item_id : mq::iequals(it.name, n.item_name);
+            };
+            for (const auto& [key, it] : inv.items()) {
+                if (key.first != net::kInvPossessions) continue;
+                if (match(it)) {
+                    slot = net::ItemSlot::possessions(key.second);
+                    break;
+                }
+                for (const auto& b : it.contents)
+                    if (match(b.item)) {
+                        slot = net::ItemSlot::possessions(key.second, static_cast<std::int16_t>(b.index));
+                        break;
+                    }
+                if (slot) break;
+            }
+            if (!slot) {
+                conn->ui_message(n.item_id ? std::format("Item '#{}' not found.", n.item_id)
+                                           : std::format("Item '{}' not found.", n.item_name));
+                return;
+            }
+        }
+        if (slot->sub >= 0) {
+            const net::Item* bag = inv.at(slot->parent());
+            if (!bag || !bag->is_bag()) {
+                conn->ui_message(std::format("There was no container in slot {}", slot->slot));
+                return;
+            }
+            if (slot->sub >= bag->bag_slots) {
+                conn->ui_message(std::format("{} is not a valid slot for this container.", slot->sub));
+                return;
+            }
+        }
+        const net::SlotClickKeys keys = forced_keys.value_or(net::SlotClickKeys{});
+        switch (n.notification) {
+        case game::ItemNotification::LeftMouseUp: conn->click_slot(*slot, keys.shift, keys.ctrl); break;
+        case game::ItemNotification::RightMouseUp: conn->right_click_item(*slot, keys); break;
+        case game::ItemNotification::RightMouseHeld: break;
+        }
+    }, plugin::kCapActions);
+    automation.hooks().add_command(plugin::Hooks::kClient, "/click", [&conn](std::string_view args) {
+        if (!conn) return;
+        std::string button, where;
+        {
+            std::string_view rest = args;
+            auto next = [&rest] {
+                while (!rest.empty() && rest.front() == ' ') rest.remove_prefix(1);
+                const std::size_t end = std::min(rest.find(' '), rest.size());
+                std::string w(rest.substr(0, end));
+                rest.remove_prefix(end);
+                for (char& c : w) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                return w;
+            };
+            button = next();
+            where = next();
+        }
+        if ((button != "left" && button != "right") || where != "target") {
+            conn->ui_message("[MQ] /click: only /click left target and /click right target are supported.");
+            return;
+        }
+        const std::uint32_t id = conn->world().target_id;
+        if (!id || !conn->world().spawns.contains(id)) return;
+        if (button == "left") {
+            if (conn->inventory().cursor() || conn->held_coin()) conn->give_to(id);
+            else conn->set_target(id);
+        } else {
+            app::right_click_spawn(*conn, id, false);
+        }
     }, plugin::kCapActions);
 
     if (options.drive_observe || options.drive_control) {
@@ -1098,14 +1241,18 @@ int run_headless(HeadlessOptions options) {
                   options.drive_control ? "control" : "observe", observe->session().endpoint);
     }
 
+    std::uint32_t tap_zone_gen = 0;
     net::ConnectionOptions copts;
     copts.hooks = &automation.hooks();
     copts.diagnostic_chat_log = options.chat_log;
     copts.plugins = automation.extensions();
     if (observe) {
         copts.snapshot_journal = true;
-        copts.zone_packet_tap = [server = observe.get()](const net::AppPacket& p) {
-            server->publish_zone_packet(p);
+        // Forward live zone packets only while in the zone generation already published to the viewer. This lets
+        // OP_ZoneChange (arriving while still InZone on the old generation) move the GUI onto its Zoning loading
+        // screen, while suppressing the next zone's raw ZoneEntering burst until publish_snapshot() runs on arrival.
+        copts.zone_packet_tap = [server = observe.get(), &conn, &tap_zone_gen](const net::AppPacket& p) {
+            if (conn && conn->in_zone() && conn->zone_generation() == tap_zone_gen) server->publish_zone_packet(p);
         };
     }
     if (!saved_profile_id.empty()) {
@@ -1237,6 +1384,7 @@ int run_headless(HeadlessOptions options) {
     bool send_full_imgui_atlas = false;
     std::uint64_t last_inventory_revision = ~std::uint64_t{0};
     std::uint64_t last_xtarget_hash = ~std::uint64_t{0};
+    std::uint32_t zone_gen_seen = 0;
     std::string zone_seen;
     net::ConnectionState last = net::ConnectionState::Idle;
     int result = 1;
@@ -1264,6 +1412,103 @@ int run_headless(HeadlessOptions options) {
             conn->set_game_steps(std::move(at));
         }
         conn->update();
+        if (!conn->in_zone()) {
+            if (movement_ready) {
+                movement_ready = false;
+                human_drive_until = {};
+                zone_line.reset();
+                if (navigator.status().active) navigator.stop("Zoning");
+            }
+            if (observe) observe->clear_pending_input();
+        }
+        if (auto z = conn->take_zone_to_load()) {
+            // Reset movement placement on every zone-in, including same-zone instance hops where *z == loaded_zone.
+            movement_ready = false;
+            human_drive_until = {};
+            zone_line.reset();
+            if (*z != loaded_zone) {
+                navigator.zone_unloaded();
+                zone.reset();
+                collision.reset();
+                if (options.load_collision) {
+                    try {
+                        zone = assets::load_zone(game, *z);
+                        collision = game::CollisionMesh::build(*zone);
+                        conn->reground();
+                        navigator.zone_loaded(*collision, &zone->regions,
+                                              platform::cache_dir() / "navmesh" /
+                                                  (server_label.empty() ? std::string("default")
+                                                                        : profile_id_for_world(server_label)) /
+                                                  nav::ZoneNav::cache_name(*z));
+                        log::info("headless: collision for {} loaded (no scene)", *z);
+                    } catch (const std::exception& e) {
+                        log::warn("headless: zone {} collision unavailable: {}; continuing without it", *z, e.what());
+                        zone.reset();
+                        collision.reset();
+                    }
+                }
+                loaded_zone = *z;
+            } else {
+                if (navigator.status().active) navigator.stop("Zoning");
+                if (collision) conn->reground();
+            }
+        }
+        // Place the movement body (matching ClientApp::enter_zone's in-world check) and publish any zone-change
+        // re-snapshot BEFORE consuming GUI movement or publishing local state, so neither side ever mixes
+        // old-zone coordinates into the new zone.
+        if (conn->state() == net::ConnectionState::InZone) {
+            if (const game::Spawn* me = conn->world().player(); me && !movement_ready) {
+                conn->set_running(true); // a background character travels at a run (the GUI's run/walk toggle)
+                glm::vec3 position = me->position;
+                if (zone && !zone->regions.empty()) {
+                    std::array<float, 3> safe{position.x, position.y, position.z};
+                    if (const auto& nz = conn->zone_info()) {
+                        glm::vec3 sp = game::server_to_world({nz->safe_x, nz->safe_y, nz->safe_z});
+                        safe = {sp.x, sp.y, sp.z};
+                    }
+                    auto placed = game::place_in_world({position.x, position.y, position.z}, safe,
+                                                       [&](const std::array<float, 3>& p) {
+                                                           return zone->regions.in_world(glm::vec3(p[0], p[1], p[2]));
+                                                       });
+                    if (placed[2] != position.z || placed[0] != position.x) {
+                        log::info("headless zone-in: ({:.2f} {:.2f} {:.2f}) is outside the world; placed at ({:.2f} {:.2f} {:.2f})",
+                                  position.x, position.y, position.z, placed[0], placed[1], placed[2]);
+                        position = glm::vec3(placed[0], placed[1], placed[2]);
+                        conn->set_player_motion(position, me->heading, glm::vec3(0.0f), false);
+                    }
+                }
+                floor_offset = me->heights.avatar_height;
+                feet = position - glm::vec3(0, 0, floor_offset);
+                yaw = game::heading_to_yaw(me->heading);
+                pitch = 0.0f;
+                movement.reset(feet, yaw);
+                movement_ready = true;
+                zone_line.reset();
+                if (zone) (void)zone_line.update(feet, zone->regions);
+            }
+            const std::uint32_t zgen = conn->zone_generation();
+            if (zgen != 0 && zone_gen_seen != zgen) {
+                zone_gen_seen = zgen;
+                zone_seen = conn->world().zone_short_name;
+                in_zone_at = Clock::now();
+                // Headless has no ExtendedTargetWindow; match the stock client's AutoAddHaters=true default so
+                // xtargets stay populated and a GUI control lease adopts true instead of a stale false.
+                conn->set_xtarget_auto_haters(true);
+                log::info("headless: in {} as {}", zone_seen, options.character);
+                for (const auto& line : headless_zone_commands(options, first_zone)) {
+                    log::info("headless: exec: {}", line);
+                    conn->send_command(line);
+                }
+                if (!first_zone && observe && observe->viewer_connected()) {
+                    observe->clear_pending_input();
+                    last_inventory_revision = conn->inventory().revision();
+                    last_xtarget_hash = ~std::uint64_t{0};
+                    observe->publish_snapshot(conn->capture_snapshot());
+                }
+                tap_zone_gen = zgen;
+                first_zone = false;
+            }
+        }
         bool force_state_push = false;
         if (observe) {
             const bool connected = observe->viewer_connected();
@@ -1285,7 +1530,9 @@ int run_headless(HeadlessOptions options) {
             // Apply the latest human movement pose BEFORE semantic actions so reach checks (looting a corpse,
             // opening a door/merchant/bank) see the player's current position right as they arrive.
             if (options.drive_control) {
-                if (auto move = observe->take_move(); move && conn->in_zone() && movement_ready) {
+                if (auto move = observe->take_move();
+                    move && conn->in_zone() && !conn->zone_change_pending() && movement_ready &&
+                    (move->zone_generation == 0 || move->zone_generation == conn->zone_generation())) {
                     const auto now_move = Clock::now();
                     if (move->active) {
                         if (navigator.status().active) navigator.stop("Player took movement control");
@@ -1318,7 +1565,7 @@ int run_headless(HeadlessOptions options) {
                 }
             }
         }
-        if (observe && conn->in_zone()) {
+        if (observe && conn->in_zone() && zone_gen_seen == conn->zone_generation() && movement_ready) {
             if (!drive_file_written && !drive_file_failed) {
                 const std::string character_name = !options.character.empty() ? options.character : conn->character_name();
                 const std::string text = "endpoint=" + observe->session().endpoint + "\n" +
@@ -1401,32 +1648,6 @@ int run_headless(HeadlessOptions options) {
                 observe->publish_state(state);
             }
         }
-        if (auto z = conn->take_zone_to_load()) {
-            if (*z != loaded_zone) {
-                navigator.zone_unloaded();
-                movement_ready = false;
-                zone.reset();
-                collision.reset();
-                if (options.load_collision) {
-                    try {
-                        zone = assets::load_zone(game, *z);
-                        collision = game::CollisionMesh::build(*zone);
-                        conn->reground();
-                        navigator.zone_loaded(*collision, &zone->regions,
-                                              platform::cache_dir() / "navmesh" /
-                                                  (server_label.empty() ? std::string("default")
-                                                                        : profile_id_for_world(server_label)) /
-                                                  nav::ZoneNav::cache_name(*z));
-                        log::info("headless: collision for {} loaded (no scene)", *z);
-                    } catch (const std::exception& e) {
-                        log::warn("headless: zone {} collision unavailable: {}; continuing without it", *z, e.what());
-                        zone.reset();
-                        collision.reset();
-                    }
-                }
-                loaded_zone = *z;
-            }
-        }
         ability_host.conn = conn.get();
         ability_host.in_game = conn->state() == net::ConnectionState::InZone;
         ability_host.character = nullptr;
@@ -1504,41 +1725,12 @@ int run_headless(HeadlessOptions options) {
             entered = true;
         }
         if (last == net::ConnectionState::InZone) {
-            if (zone_seen != conn->world().zone_short_name) {
-                zone_seen = conn->world().zone_short_name;
-                in_zone_at = Clock::now();
-                // Headless has no ExtendedTargetWindow; match the stock client's AutoAddHaters=true default so
-                // xtargets stay populated and a GUI control lease adopts true instead of a stale false.
-                conn->set_xtarget_auto_haters(true);
-                log::info("headless: in {} as {}", zone_seen, options.character);
-                for (const auto& line : headless_zone_commands(options, first_zone)) {
-                    log::info("headless: exec: {}", line);
-                    conn->send_command(line);
-                }
-                if (!first_zone && observe && observe->viewer_connected()) {
-                    last_inventory_revision = conn->inventory().revision();
-                    last_xtarget_hash = ~std::uint64_t{0};
-                    observe->publish_snapshot(conn->capture_snapshot());
-                }
-                first_zone = false;
-            }
             if (!steps.empty() && collision)
                 conn->smooth(static_cast<float>(steps.size()) / core::StepClock::kRate,
                              [&collision](const glm::vec3& p) { return collision->floor_below(p, 0.5f); });
             // The movement body (app/player_movement.h), placed at the zone-in
             // and driven per game step by Navigator's steering, as the
             // graphical client drives it: /nav, /moveto and /stick walk here.
-            if (const game::Spawn* me = conn->world().player(); me && !movement_ready) {
-                conn->set_running(true); // a background character travels at a run (the GUI's run/walk toggle)
-                floor_offset = me->heights.avatar_height;
-                feet = me->position - glm::vec3(0, 0, floor_offset);
-                yaw = game::heading_to_yaw(me->heading);
-                pitch = 0.0f;
-                movement.reset(feet, yaw);
-                movement_ready = true;
-                zone_line.reset();
-                if (zone) (void)zone_line.update(feet, zone->regions);
-            }
             if (movement_ready && Clock::now() >= human_drive_until) {
                 for (const auto& st : steps) {
                     const game::Spawn* me = conn->world().player();
@@ -1663,7 +1855,10 @@ int run_headless(HeadlessOptions options) {
     if (stop_requested) log::info("headless: stop requested; shutting down");
     if (headless_imgui) headless_imgui->flush_ini();
     automation.shutdown();
-    if (conn) conn->disconnect();
+    if (conn) {
+        conn->disconnect();
+        conn.reset();
+    }
     return stop_requested ? 0 : result;
 }
 

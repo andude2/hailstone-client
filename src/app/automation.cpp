@@ -244,6 +244,14 @@ Automation::Automation(AutomationEnv env) : impl_(std::make_unique<Impl>()) {
     };
     se.autoskill_list = m.env.autoskill_list;
     se.use_ability = m.env.use_ability;
+    if (m.env.texture_animation) {
+        se.texture_animation = [fn = m.env.texture_animation](std::string_view name, int cell)
+            -> std::optional<mq::TextureCell> {
+            mq::TextureCell out;
+            if (!fn(name, cell, out.id, out.u0, out.v0, out.u1, out.v1) || !out.id) return std::nullopt;
+            return out;
+        };
+    }
     se.max_camera_distance = m.env.max_camera_distance;
     se.set_max_camera_distance = m.env.set_max_camera_distance;
     se.send = [&m](plugin::Stream s, const net::AppPacket& p) {

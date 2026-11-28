@@ -87,9 +87,13 @@ struct AutomationEnv {
     std::function<std::optional<bool>(const std::array<float, 3>&, const std::array<float, 3>&)> line_of_sight;
     bool headless = false; // true in hailstone_headless (${Hailstone.Headless})
     std::function<bool()> viewer_connected; // true while a GUI drive viewer is attached (${Hailstone.ViewerConnected})
-    // A_SpellIcons texture lookup for plugin OnUpdateImGui (PluginHostApi::spell_icon); empty headless.
+    // A_SpellIcons texture lookup for plugin OnUpdateImGui (PluginHostApi::spell_icon); in hailstone_headless returns
+    // a synthetic sheet ID (ui::encode_remote_spell_sheet_tex_id) resolved by the attached GUI's UiTextures.
     std::function<bool(std::uint32_t icon, std::uint64_t& texture, float& u0, float& v0, float& u1, float& v1)>
         spell_icon;
+    // Named UI animation or icon-grid cell for Lua scripts (mq.FindTextureAnimation / ImGui.DrawTextureAnimation).
+    std::function<bool(std::string_view name, int cell, void*& texture, float& u0, float& v0, float& u1, float& v1)>
+        texture_animation;
 };
 
 class Automation {

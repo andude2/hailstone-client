@@ -1442,7 +1442,9 @@ mistythicket, oldbloodfield and 22 others); the void and pit teleporters and box
 - Do-teleport-B:
   - refused while frozen (0x66) or link-dead;
   - reason 0 sends the position first;
-  - coordinates below 999999 and a heading below 513 are taken;
+  - coordinates below 999999 and a heading below 513 are taken; a server zone-change request's sentinel values
+    are first resolved by the connection from the spawn record's position, since at a zone-in the app's movement
+    body is placed only after the packet drain and would otherwise answer with the previous zone's position;
   - another zone (unless GameState 1): z + 1 for races 8, 11, 12, then MoveToZone(zone, save 0, reason, x, y, z,
     (int)heading, arg8, 2 for reasons 15/17/19 else -1, arg9);
   - the same zone: a local move. The floor comes from the player floor height at (x, y, z + 1) unless exactly

@@ -15,6 +15,7 @@
 #include "core/byte_io.h"
 #include "mock_server/harness.h"
 #include "net/game_connection.h"
+#include "net/packet_io.h"
 #include "platform/local_pipe.h"
 
 using namespace hailstone;
@@ -177,6 +178,7 @@ TEST_CASE("drive observe: control actions, move, forward filter, chat, and exten
     move.stand_state = kStandStanding;
     move.standing_on = 42;
     move.active = true;
+    move.zone_generation = 7;
     auto move_bytes = app::encode_drive_move(move);
     auto move_out = app::decode_drive_move(move_bytes);
     REQUIRE(move_out);
@@ -185,9 +187,11 @@ TEST_CASE("drive observe: control actions, move, forward filter, chat, and exten
     CHECK(move_out->moving);
     CHECK(move_out->active);
     CHECK(move_out->standing_on == 42);
+    CHECK(move_out->zone_generation == 7);
 
     // Filtered packet forwarding: session/position/inventory opcodes are blocked; AA/task/etc. are allowed.
     CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::ClientUpdate), {}), false));
+    CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::ZoneChange), {}), false));
     CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::MoveItem), {}), false));
     CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::Camp), {}), false));
     CHECK_FALSE(drive_forward_allowed(AppPacket(to_wire(Op::LootRequest), {}), false));
@@ -506,6 +510,43 @@ TEST_CASE("remote imgui: texture band sizing never truncates to zero on narrow g
     CHECK(ui::remote_texture_band_rows(4096, 4096) == 256);
 }
 
+TEST_CASE("remote imgui: spell icon sheet tex_ids encode, decode and survive frame wire round-trip") {
+    CHECK(ui::encode_remote_spell_sheet_tex_id(0) == 0u);
+    CHECK(ui::encode_remote_spell_sheet_tex_id(-1) == 0u);
+    CHECK(ui::encode_remote_spell_sheet_tex_id(8) == 0u);
+    CHECK(ui::decode_remote_spell_sheet_tex_id(0u) == 0);
+    CHECK(ui::decode_remote_spell_sheet_tex_id(1u) == 0);
+    CHECK(ui::decode_remote_spell_sheet_tex_id(7u) == 0);
+    CHECK(ui::decode_remote_spell_sheet_tex_id(ui::kRemoteSpellSheetTexBase) == 0);
+    CHECK(ui::decode_remote_spell_sheet_tex_id(ui::kRemoteSpellSheetTexBase | 8u) == 0);
+
+    ui::RemoteImGuiFrame frame;
+    frame.display_w = 1280.0f;
+    frame.display_h = 720.0f;
+    ui::RemoteDrawList dl;
+    dl.vertices.push_back({0.0f, 0.0f, 0.0f, 0.0f, 0xffffffffu});
+    dl.vertices.push_back({40.0f, 0.0f, 40.0f / 256.0f, 0.0f, 0xffffffffu});
+    dl.vertices.push_back({40.0f, 40.0f, 40.0f / 256.0f, 40.0f / 256.0f, 0xffffffffu});
+    dl.indices = {0, 1, 2};
+    for (int sheet = 1; sheet <= static_cast<int>(ui::kRemoteSpellSheetMax); ++sheet) {
+        const std::uint32_t encoded = ui::encode_remote_spell_sheet_tex_id(sheet);
+        CHECK((encoded & ui::kRemoteSpellSheetTexBase) != 0u);
+        CHECK(ui::decode_remote_spell_sheet_tex_id(encoded) == sheet);
+        dl.cmds.push_back({0.0f, 0.0f, 100.0f, 100.0f, encoded, 0u, 0u, 3u});
+    }
+    frame.lists.push_back(std::move(dl));
+
+    const auto wire = app::encode_drive_imgui_frame(frame);
+    const auto decoded = app::decode_drive_imgui_frame(wire);
+    REQUIRE(decoded);
+    REQUIRE(decoded->lists.size() == 1u);
+    REQUIRE(decoded->lists[0].cmds.size() == ui::kRemoteSpellSheetMax);
+    for (std::size_t i = 0; i < ui::kRemoteSpellSheetMax; ++i) {
+        const int expected = static_cast<int>(i) + 1;
+        CHECK(ui::decode_remote_spell_sheet_tex_id(decoded->lists[0].cmds[i].tex_id) == expected);
+    }
+}
+
 TEST_CASE("drive observe: coalesced remote imgui input preserves edges and latest mouse_down_mask") {
     app::DriveObserveServer observe(platform::make_local_pipe_session(), true, true);
     auto client = platform::LocalPipeConnection::connect(observe.session(), 5000);
@@ -559,4 +600,165 @@ TEST_CASE("drive observe: coalesced remote imgui input preserves edges and lates
     CHECK(latest.mouse_down_mask == 0u);
     CHECK(latest.mouse_x == doctest::Approx(125.0f));
     client->close();
+}
+
+TEST_CASE("zone change request: sentinel coordinates resolve to the connection's spawn position, not the app body's") {
+    // A server instance hop that arrives with the zone-in carries 999999 coordinates ("keep the player's").
+    // DoTeleportB keeps the app movement body's position then, but at a zone-in the body is placed only after
+    // this update's packet drain (the GUI's enter_zone, the headless placement), so it still holds the previous
+    // zone's position. The connection resolves the sentinel from its own spawn position before the app sees it.
+    MockEqServer server;
+    EmptyGameDir dir;
+    GameDir game(dir.path());
+    GameConnection conn(game, quick_options());
+    std::optional<game::TeleportBArgs> got;
+    conn.set_teleport_handler([&got](const game::TeleportBArgs& a) { got = a; });
+    auto step = [&] {
+        conn.update();
+        server.poll();
+    };
+    conn.start(server.ticket());
+    REQUIRE(pump(step, [&] { return conn.state() == ConnectionState::CharacterSelect; }));
+    conn.enter_world("Gennro");
+    REQUIRE(pump(step, [&] { return conn.state() == ConnectionState::InZone; }));
+    REQUIRE(pump(step, [&] { return conn.player_status().max_hp != 0; }));
+    const game::Spawn* me = conn.world().player();
+    REQUIRE(me);
+    const glm::vec3 at = me->position;
+
+    server.request_zone_change(1, 999999.0f, 999999.0f, 999999.0f);
+    REQUIRE(pump(step, [&] { return got.has_value(); }));
+    CHECK(got->zone == 1);
+    CHECK(got->x == doctest::Approx(at.x));
+    CHECK(got->y == doctest::Approx(at.y));
+    CHECK(got->z == doctest::Approx(at.z));
+
+    // Explicit coordinates pass through untouched (the mock's x, y are the server's; the args are the world's).
+    got.reset();
+    server.request_zone_change(1, 20.0f, 10.0f, 3.0f);
+    REQUIRE(pump(step, [&] { return got.has_value(); }));
+    CHECK(got->x == doctest::Approx(10.0f));
+    CHECK(got->y == doctest::Approx(20.0f));
+    CHECK(got->z == doctest::Approx(3.0f));
+}
+
+TEST_CASE("zone change request: a drive viewer does not answer a zoning request the headless owns") {
+    // The headless answers OP_RequestClientZoneChange on its own connection and the re-snapshot rebuilds the
+    // view. A viewer answering too forwards a second OP_ZoneChange for the same move. A same-zone move (a
+    // summon) is still handed to the viewer's app, which only moves its own body.
+    MockEqServer server;
+    EmptyGameDir dir;
+    GameDir game(dir.path());
+    net::ConnectionOptions recording = quick_options();
+    recording.snapshot_journal = true;
+    GameConnection source(game, std::move(recording));
+    auto step = [&] {
+        source.update();
+        server.poll();
+    };
+    source.start(server.ticket());
+    REQUIRE(pump(step, [&] { return source.state() == ConnectionState::CharacterSelect; }));
+    source.enter_world("Gennro");
+    REQUIRE(pump(step, [&] { return source.state() == ConnectionState::InZone; }));
+    REQUIRE(pump(step, [&] { return source.player_status().max_hp != 0; }));
+
+    GameConnection viewer(game, quick_options());
+    std::optional<game::TeleportBArgs> got;
+    viewer.set_teleport_handler([&got](const game::TeleportBArgs& a) { got = a; });
+    viewer.start_observe(nullptr);
+    viewer.apply_snapshot(source.capture_snapshot());
+    REQUIRE(viewer.world().player());
+    CHECK(viewer.zone_id() == 2);
+
+    auto request = [](std::uint16_t zone) {
+        ByteWriter w;
+        w.le<std::uint16_t>(zone);
+        w.le<std::uint16_t>(0);
+        w.le<std::uint32_t>(0xffffffffu);
+        w.f32(10.0f);
+        w.f32(20.0f);
+        w.f32(3.0f);
+        w.f32(0.0f);
+        w.le<std::uint32_t>(0x0b);
+        w.zeros(144);
+        w.le<std::uint32_t>(0);
+        return net::make_packet(Op::RequestClientZoneChange, std::move(w));
+    };
+    viewer.receive_zone_packet_for_test(request(1));
+    CHECK_FALSE(got.has_value());
+    viewer.receive_zone_packet_for_test(request(2));
+    REQUIRE(got.has_value());
+    CHECK(got->zone == 2);
+}
+
+TEST_CASE("drive observe: viewer OP_ZoneChange enters Zoning without sending DeleteSpawn and resnapshot drops stale move") {
+    MockEqServer server;
+    EmptyGameDir dir;
+    GameDir game(dir.path());
+    net::ConnectionOptions recording = quick_options();
+    recording.snapshot_journal = true;
+    GameConnection source(game, std::move(recording));
+    auto step = [&] {
+        source.update();
+        server.poll();
+    };
+    source.start(server.ticket());
+    REQUIRE(pump(step, [&] { return source.state() == ConnectionState::CharacterSelect; }));
+    source.enter_world("Gennro");
+    REQUIRE(pump(step, [&] { return source.state() == ConnectionState::InZone; }));
+    REQUIRE(pump(step, [&] { return source.player_status().max_hp != 0; }));
+
+    // A recording mirror session verifies that receiving OP_ZoneChange(success=1) on an observing connection
+    // moves it to ConnectionState::Zoning without sending OP_DeleteSpawn or disconnecting the mirror session.
+    struct SpySession final : public Session {
+        std::vector<AppPacket> sent;
+        bool disconnected = false;
+        void connect(const std::string&, std::uint16_t) override {}
+        void update() override {}
+        SessionState state() const override { return disconnected ? SessionState::Disconnected : SessionState::Connected; }
+        std::string error() const override { return {}; }
+        void send(const AppPacket& p, bool) override { sent.push_back(p); }
+        std::optional<AppPacket> receive() override { return std::nullopt; }
+        void disconnect() override { disconnected = true; }
+    };
+    auto spy_owner = std::make_unique<SpySession>();
+    SpySession* spy = spy_owner.get();
+    GameConnection viewer(game, quick_options());
+    viewer.start_observe(std::move(spy_owner));
+    viewer.apply_snapshot(source.capture_snapshot());
+    REQUIRE(viewer.observing());
+    REQUIRE(viewer.state() == ConnectionState::InZone);
+
+    ZoneChange zc;
+    zc.char_name = "Gennro";
+    zc.zone_id = 2;
+    zc.instance_id = 100;
+    zc.success = 1;
+    viewer.receive_zone_packet_for_test(encode(zc));
+    CHECK(viewer.state() == ConnectionState::Zoning);
+    CHECK(spy->sent.empty());
+    CHECK_FALSE(spy->disconnected);
+
+    // DriveObserveServer::publish_snapshot drops buffered pre-zone moves so old-zone coords never land in the new zone.
+    app::DriveObserveServer observe(platform::make_local_pipe_session(), true, true);
+    auto pipe = platform::LocalPipeConnection::connect(observe.session(), 5000);
+    const auto wait_end = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!observe.needs_snapshot() && std::chrono::steady_clock::now() < wait_end)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    REQUIRE(observe.needs_snapshot());
+    observe.set_snapshot(source.capture_snapshot());
+    REQUIRE(read_snapshot(*pipe));
+
+    DriveMove stale;
+    stale.position = glm::vec3(999.0f, -888.0f, 77.0f);
+    stale.active = true;
+    stale.zone_generation = 1;
+    REQUIRE(pipe->send_message(app::encode_drive_move(stale), 500));
+    const auto move_end = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    // Give the server thread a moment to receive the move before publish_snapshot clears it.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    observe.publish_snapshot(source.capture_snapshot());
+    CHECK_FALSE(observe.take_move().has_value());
+    (void)move_end;
+    pipe->close();
 }

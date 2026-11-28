@@ -75,11 +75,13 @@ Read before you change anything, in this order:
 ## Build and test
 
 ```sh
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 build/hailstone_tests                   # or, in 8 parts at once: ctest --test-dir build -j 8 --output-on-failure
 build/hailstone/hailstone          # the client; the dev tree is build/hailstone/
 ```
+
+For multi-config generators on Windows (such as the Visual Studio `build-headless` tree), always pass `--config Release` (for example `cmake --build build-headless --config Release` and `build-headless\Release\hailstone_tests.exe`). Do not build or release this branch as `RelWithDebInfo`.
 
 - Run the whole `hailstone_tests` before you call something done. Run one case with `build/hailstone_tests -tc="<name>"`.
 - **Before a merge to `main`, run `tools/premerge.sh`** in the branch's worktree, with its changes committed. It runs every CI check (`tools/checks.sh`), the build and all of `hailstone_tests`, and prints the commit it passed on. Quote that line when you report or merge.

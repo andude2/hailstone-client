@@ -61,7 +61,7 @@ macOS on Apple Silicon has test builds only, as pre-releases on the same page; e
 ```sh
 git clone https://github.com/projecthailstone/hailstone-client.git
 cd hailstone-client
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 build/hailstone/hailstone
 ```

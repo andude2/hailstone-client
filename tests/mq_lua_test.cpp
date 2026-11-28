@@ -2710,3 +2710,95 @@ TEST_CASE("MQ Lua: no script may have a Lua social's name") {
     h.pulses(1);
     CHECK_FALSE(h.printed_line("ran"));
 }
+
+TEST_CASE("MQ Lua: bit32, IM_COL32, FindTextureAnimation and extended ImGui bindings") {
+    ImGuiContext* ctx = ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+    io.DisplaySize = ImVec2(1280, 720);
+    io.DeltaTime = 1.0f / 60.0f;
+
+    Host h;
+    h.write("ext_imgui.lua", R"(
+local mq = require('mq')
+local ImGui = require('ImGui')
+assert(bit32.bor(1, 4, 8) == 13)
+assert(bit32.band(13, 5) == 5)
+assert(bit32.lshift(1, 4) == 16)
+assert(IM_COL32(255, 128, 64, 255) == 0xFF4080FF)
+assert(ImGuiChildFlags.Border > 0)
+assert(ImGuiTableBgTarget.RowBg0 > 0)
+assert(ImGuiSortDirection.Ascending > 0)
+assert(ImGuiTreeNodeFlags.SpanFullWidth > 0)
+assert(ImGuiWindowFlags.NoDocking == 0)
+
+local anim = mq.FindTextureAnimation('A_DragItem')
+assert(anim ~= nil)
+anim:SetTextureCell(42)
+assert(anim:GetTextureCell() == 42)
+
+local drew = false
+mq.imgui.init('ext_imgui_test', function()
+    local open, vis = ImGui.Begin('ExtTest', true)
+    if vis then
+        local ioTbl = ImGui.GetIO()
+        assert(ioTbl.DeltaTime > 0)
+        local vp = ImGui.GetMainViewport()
+        assert(vp and vp.Size.x == 1280 and vp.Size.y == 720)
+        ImGui.TextUnformatted('plain')
+        local txt = ImGui.InputText('##t', 'abc', ImGuiInputTextFlags.EnterReturnsTrue)
+        assert(txt == 'abc')
+        local hintTxt = ImGui.InputTextWithHint('##h', 'hint', 'xyz')
+        assert(hintTxt == 'xyz')
+        local iv = ImGui.InputInt('##i', 7)
+        assert(iv == 7)
+        ImGui.SetNextItemOpen(true)
+        if ImGui.TreeNodeEx('Node', ImGuiTreeNodeFlags.SpanFullWidth) then
+            ImGui.TreePop()
+        end
+        if ImGui.BeginChild('Child', 0, 40, ImGuiChildFlags.Border) then
+            local dl = ImGui.GetWindowDrawList()
+            local c = ImGui.GetColorU32(0.5, 0.25, 0.75, 1.0)
+            dl:AddRectFilled(ImVec2(0, 0), ImVec2(10, 10), c, 2)
+            dl:AddRect(ImVec2(0, 0), ImVec2(10, 10), c, 2, 0, 1.0)
+            dl:AddLine(ImVec2(0, 0), ImVec2(10, 10), c, 1.0)
+            dl:AddText(ImVec2(2, 2), c, 'hi')
+            ImGui.DrawTextureAnimation(anim, 20, 20)
+        end
+        ImGui.EndChild()
+        ImGui.Columns(2, 'Cols', true)
+        ImGui.SetColumnWidth(0, 100)
+        ImGui.NextColumn()
+        ImGui.Columns(1)
+        if ImGui.BeginTable('Tbl', 2, bit32.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.Sortable)) then
+            ImGui.TableSetupColumn('A', ImGuiTableColumnFlags.WidthFixed, 50)
+            ImGui.TableSetupColumn('B', ImGuiTableColumnFlags.DefaultHide, 50)
+            ImGui.TableHeadersRow()
+            local _ = ImGui.TableGetSortSpecs()
+            ImGui.TableNextRow(ImGuiTableRowFlags.None, 0)
+            ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32(0.2, 0.2, 0.2, 0.5))
+            ImGui.TableSetColumnIndex(0)
+            ImGui.Text('cell')
+            ImGui.EndTable()
+        end
+        assert(ImGui.GetFontSize() > 0)
+        assert(ImGui.GetTextLineHeight() > 0)
+        assert(ImGui.GetWindowWidth() > 0)
+        assert(ImGui.GetWindowContentRegionWidth() >= 0)
+        drew = true
+    end
+    ImGui.End()
+end)
+while not drew do mq.delay(10) end
+print('ext_imgui_ok')
+)");
+    REQUIRE(h.scripts->run("ext_imgui", {}));
+    h.pulses(1);
+    ImGui::NewFrame();
+    h.scripts->imgui();
+    ImGui::EndFrame();
+    h.pulses(1, 20);
+    CHECK(h.printed_line("ext_imgui_ok"));
+    ImGui::DestroyContext(ctx);
+}
